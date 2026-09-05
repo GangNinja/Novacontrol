@@ -53,6 +53,7 @@ class ApiSurface:
                 ApiRoute("POST", "/phone/plan", "Plan an approval-gated phone action.", authenticated=True),
                 ApiRoute("POST", "/phone/execute", "Execute an approved phone action.", authenticated=True),
                 ApiRoute("POST", "/explore", "Research a topic and return an Explore report.", authenticated=True),
+                ApiRoute("GET", "/events/stream", "Live activity channel: the application EventBus as SSE."),
                 ApiRoute("GET", "/settings", "Read local user settings.", authenticated=True),
                 ApiRoute("POST", "/settings", "Update local user settings.", authenticated=True),
                 ApiRoute("GET", "/plugins", "List plugin API records.", authenticated=True),

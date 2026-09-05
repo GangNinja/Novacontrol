@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 import shutil
 import subprocess
@@ -786,9 +786,24 @@ class DesktopAutomationController:
             f"Search for {query}", DesktopActionType.SEARCH_START_MENU, query, f"Search Start Menu for '{query}'.",
         )
 
-    async def execute_workflow(self, workflow: DesktopWorkflow) -> tuple[DesktopActionResult, ...]:
+    async def execute_workflow(
+        self,
+        workflow: DesktopWorkflow,
+        *,
+        progress: Callable[[str], Awaitable[None]] | None = None,
+    ) -> tuple[DesktopActionResult, ...]:
+        """Run each action in order, optionally announcing each one as it starts.
+
+        The optional `progress` coroutine is awaited with a human line ("Running
+        action 2/3: ...") right before the action executes — callers such as the
+        web layer use it to stream live progress while slower actions (window
+        launch + verification) are in flight.
+        """
         results = []
-        for action in workflow.actions:
+        total = len(workflow.actions)
+        for index, action in enumerate(workflow.actions, start=1):
+            if progress is not None:
+                await progress(f"Running action {index}/{total}: {action.description}")
             result = await self.execute_action(action)
             results.append(result)
             if result.status is not DesktopActionStatus.COMPLETED:

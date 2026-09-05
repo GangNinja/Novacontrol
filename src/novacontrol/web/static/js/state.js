@@ -82,8 +82,9 @@ function setStatus(text) {
 //
 // Precedence (first non-empty value wins):
 //   1. A bare string is returned as-is.
-//   2. /ask envelopes nest the payload under `payload`; unwrap when it's an object.
-//   3. Inside the payload: message -> answer -> content -> overview -> summary.
+//   2. /ask envelopes carry the handler payload under the `data` key; unwrap it
+//      when it is an object (never probe for `payload` nesting again).
+//   3. Inside the data payload: message -> answer -> content -> overview -> summary.
 //   4. Top-level fields (flat bodies, or envelope-level summaries):
 //      summary -> answer -> content -> overview -> message.
 //
@@ -92,7 +93,7 @@ function setStatus(text) {
 function extractAnswerText(value, fallback = "") {
   if (typeof value === "string") return value.trim() || fallback;
   if (!value) return fallback;
-  const payload = value.payload && typeof value.payload === "object" ? value.payload : value;
+  const payload = value.data && typeof value.data === "object" ? value.data : value;
   const fields = ["message", "answer", "content", "overview", "summary"];
   for (const field of fields) {
     const hit = payload[field];

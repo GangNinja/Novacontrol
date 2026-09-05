@@ -8,6 +8,7 @@ The Phase 12 API subsystem provides REST and WebSocket entrypoints through FastA
 - `GET /status`: API status and route metadata
 - `POST /plan`: create and optionally execute a plan
 - `POST /explore`: research a topic and return an Explore report
+- `GET /events/stream`: live activity channel — the application EventBus as SSE (`explore.progress`, `command.progress`, …); `?token=` accepted when auth is enabled
 - `GET /plugins`: plugin API placeholder
 
 ## WebSocket Routes

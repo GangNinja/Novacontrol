@@ -24,12 +24,13 @@ function renderChatResult(data) {
   // instead of replacing the whole thread with just the latest answer page.
   if (state.lastQuery) appendMessage("user", state.lastQuery);
 
-  // /ask can return a full research report (Explore intent) — the report
-  // renderer owns that shape, so delegate instead of re-deriving it here.
-  if (tryRenderResearch(stream, data)) return;
+  // /ask answers travel in one flat envelope {route, intent, summary, data}:
+  // `data` is the handler payload. A full research report (Explore intent) is
+  // that payload, and the report renderer owns its shape — unwrap once and
+  // delegate instead of probing envelope-vs-flat candidates.
+  const payload = data.data || data;
 
-  // /ask envelopes the handler payload under `payload`; flat bodies are the payload.
-  const payload = data.payload || data;
+  if (tryRenderResearch(stream, payload)) return;
 
   if ((data.route === "desktop_automation" || payload.workflow?.actions) && payload.approval) {
     renderCommand(stream, payload);

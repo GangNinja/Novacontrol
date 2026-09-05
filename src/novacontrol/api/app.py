@@ -11,7 +11,7 @@ from novacontrol.api.auth import ApiTokenAuthenticator
 from novacontrol.api.middleware import RateLimitMiddleware, RequestLoggingMiddleware, SecurityHeadersMiddleware
 from novacontrol.api.models import ApiSurface
 from novacontrol.application import NovaControlApplication
-from novacontrol.core.events import Event, EventBus
+from novacontrol.core.events import Event
 from novacontrol.explore import ExploreRequest
 from novacontrol.planning import PlanningEngine, WorkflowExecutor
 from novacontrol.release import ReleaseHardeningChecker, RuntimePackageBuilder, SystemHealthMonitor
@@ -260,63 +260,52 @@ def create_app() -> Any:
         )
         return report.to_dict()
 
-    @app.post("/explore/stream")
-    async def explore_stream(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> Any:
-        """Run Explore and stream progress events via Server-Sent Events."""
+    @app.get("/events/stream")
+    async def events_stream(
+        token: str | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> Any:
+        """Single live activity channel: relay the application EventBus as SSE.
+
+        The web UI keeps ONE EventSource open here and receives every bus event
+        (explore.progress research steps, command.progress action lines, ...)
+        while an operation is running. Browser EventSource cannot set an
+        Authorization header, so when token auth is enabled the token is accepted
+        as a query parameter (`?token=`) as well as via the header for non-browser
+        clients.
+        """
         from fastapi.responses import StreamingResponse
         import asyncio
         import json
 
-        topic = str(payload["topic"])
-        last_topic = str(payload.get("last_topic", "")) or None
-        prior_topics = tuple(payload.get("prior_topics", ())) if isinstance(payload.get("prior_topics"), list) else ()
-        if last_topic and not prior_topics:
-            prior_topics = (last_topic,)
-        progress_bus = EventBus()
-        # Temporarily attach the progress bus to the explore service
-        original_bus = nova.explore._event_bus
-        nova.explore._event_bus = progress_bus
+        result = authenticator.authenticate(authorization)
+        if not result.authenticated and token:
+            result = authenticator.authenticate(f"Bearer {token}")
+        if not result.authenticated:
+            raise HTTPException(status_code=401, detail=result.reason)
 
-        async def stream():
-            events: list[dict[str, Any]] = []
-            lock = asyncio.Lock()
+        queue: asyncio.Queue[Event] = asyncio.Queue(maxsize=256)
 
-            async def capture(event: Event) -> None:
-                async with lock:
-                    events.append({"type": event.type, "step": event.payload.get("step", ""), "detail": event.payload.get("detail", "")})
-
-            await progress_bus.subscribe("explore.progress", capture)
+        async def forward(event: Event) -> None:
             try:
-                research_task = asyncio.create_task(nova.explore.research(
-                    ExploreRequest(
-                        topic=topic,
-                        depth=str(payload.get("depth", "deep")),
-                        include_videos=bool(payload.get("include_videos", True)),
-                        max_sources=int(payload.get("max_sources", 6)),
-                        max_videos=int(payload.get("max_videos", 5)),
-                        prior_topics=prior_topics,
-                    )
-                ))
-                # Stream progress events as they arrive
-                last_index = 0
-                while not research_task.done():
-                    await asyncio.sleep(0.1)
-                    async with lock:
-                        new_events = events[last_index:]
-                        last_index = len(events)
-                    for evt in new_events:
-                        yield f"event: progress\ndata: {json.dumps(evt)}\n\n"
-                # Get the result (re-raises exceptions)
-                report = research_task.result()
-                # Stream any remaining events
-                async with lock:
-                    for evt in events[last_index:]:
-                        yield f"event: progress\ndata: {json.dumps(evt)}\n\n"
-                yield f"event: complete\ndata: {json.dumps(report.to_dict())}\n\n"
-            except Exception as exc:
-                yield f"event: error\ndata: {json.dumps({'error': str(exc)})}\n\n"
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                pass  # slow client: drop the event rather than stall the bus
+
+        async def stream() -> Any:
+            await nova.event_bus.subscribe("*", forward)
+            try:
+                while True:
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    except asyncio.TimeoutError:
+                        yield ": keep-alive\n\n"  # comment frame; ignored by EventSource
+                        continue
+                    payload = dict(event.payload)
+                    payload["event_type"] = event.type
+                    yield f"event: {event.type}\ndata: {json.dumps(payload, default=str)}\n\n"
             finally:
-                nova.explore._event_bus = original_bus
+                await nova.event_bus.unsubscribe("*", forward)
 
         return StreamingResponse(stream(), media_type="text/event-stream", headers={
             "Cache-Control": "no-cache",

@@ -33,6 +33,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn("/learn", paths)
         self.assertIn("/train", paths)
         self.assertIn("/explore", paths)
+        self.assertIn("/events/stream", paths)
         self.assertIn("/command/plan", paths)
         self.assertIn("/command/execute", paths)
         self.assertIn("/desktop/plan", paths)

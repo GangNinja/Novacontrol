@@ -23,7 +23,7 @@ from novacontrol.application_helpers import (
 from novacontrol.automation import AutomationManager
 from novacontrol.brain import BrainIntent, BrainRequest, NovaBrain
 from novacontrol.browser import BrowserAutomationController, BrowserAutomationModule, PlaywrightBrowserRunner
-from novacontrol.core.events import EventBus
+from novacontrol.core.events import Event, EventBus
 from novacontrol.core.runtime import EventDrivenRuntime
 from novacontrol.core.security import ApprovalDecision, ApprovalRequest, DenyByDefaultApprovalGateway
 from novacontrol.desktop import DesktopAutomationController, DesktopAutomationModule, LocalDesktopRunner
@@ -56,9 +56,12 @@ class ApplicationResponse:
     payload: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
-        # One flat, self-describing envelope: the router already knows route/intent
-        # and shaping computes summary, so consumers never re-derive the payload shape.
-        return {"route": self.route, "intent": self.intent, "summary": self.summary, "payload": self.payload}
+        # One flat, self-describing envelope: route/intent tell the client which
+        # page to render, summary is the answer text, and `data` is the handler
+        # payload directly. The handler payload is never nested again under a
+        # `payload` key — renderers unwrap the single `data` field or read the
+        # top-level summary, never probe for arbitrary nesting.
+        return {"route": self.route, "intent": self.intent, "summary": self.summary, "data": self.payload}
 
 
 _Handler: TypeAlias = Callable[["NovaControlApplication", BrainRequest, str], Coroutine[Any, Any, tuple[str, dict[str, Any]]]]
@@ -98,7 +101,13 @@ class NovaControlApplication:
         memory_store = SqliteMemoryStore(self.data_dir / "memory.sqlite3")
         self.memory = MemoryManager(memory_store)
         self.self_improvement = SelfImprovementEngine(Path.cwd())
-        self.explore = ExploreService(completion_provider=self.brain.completion_provider)
+        # Explore publishes its progress on the ONE app-wide bus, so a single
+        # activity channel (/events/stream) sees research steps live instead of
+        # each request swapping a private bus into the service.
+        self.explore = ExploreService(
+            completion_provider=self.brain.completion_provider,
+            event_bus=self.event_bus,
+        )
         self.planning = PlanningEngine()
         self.workflow_executor = WorkflowExecutor()
         self.agent_registry = AgentRegistry()
@@ -526,10 +535,18 @@ class NovaControlApplication:
             plan["workflow"],
             action_cls=action_cls, action_type_cls=action_type_cls, workflow_cls=workflow_cls,
         )
+
+        # Announce each action on the app bus as it starts, so the single
+        # activity channel shows live command progress while actions run.
+        async def announce(detail: str) -> None:
+            await self.event_bus.publish(
+                Event(type="command.progress", payload={"step": "executing", "detail": detail}, source="command")
+            )
+
         # Execute with auto-approval (a server-minted token was validated above)
         controller.approval_gateway = ApprovedApprovalGateway()
         try:
-            results = await controller.execute_workflow(workflow)
+            results = await controller.execute_workflow(workflow, progress=announce)
         finally:
             controller.approval_gateway = DenyByDefaultApprovalGateway()
         plan["status"] = "executed"

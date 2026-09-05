@@ -114,9 +114,15 @@ function setupActions() {
     state.lastQuery = topic;
     byId("exploreOutput").scrollIntoView({ behavior: "smooth", block: "start" });
     // Same run() lifecycle as every other action: shared loading/error/toast/button
-    // state, while the task streams live progress steps and resolves with the report.
-    run("exploreOutput", "explore", () => streamExploreResearch(topic), "exploreButton", {
-      loadingText: "Researching — progress appears below...",
+    // state. Live research steps arrive over the single /events/stream activity
+    // channel (run() shows them under the scan-line) while this POST completes
+    // with the finished report.
+    run("exploreOutput", "explore", async () => {
+      const body = { topic, include_videos: true };
+      if (state.lastExploredTopic) body.last_topic = state.lastExploredTopic;
+      return requestJson("/explore", body);
+    }, "exploreButton", {
+      loadingText: "Researching — live progress appears below...",
       successToast: "Research complete",
       onSuccess: (report) => {
         trackExploredTopic(topic);
@@ -319,4 +325,5 @@ setupActions();
 setupVoice();
 restoreActivePanel(); // must run after setupTabs binds the nav clicks
 renderChatHistory();
+connectActivitySource(); // one live activity channel for the whole page
 refreshStatus();

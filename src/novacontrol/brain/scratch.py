@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 import operator
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from typing import Any
 
@@ -309,48 +309,161 @@ _TIME_PATTERNS = re.compile(
 
 # A bare expression of digits joined by an operator symbol ("2+3*4", "2^8").
 _MATH_EXPR = re.compile(r'[\d]\s*[+\-*/^]\s*[\d]')
-# Digits joined by a spelled-out operator ("15 times 3", "2 divided by 4").
-_WORDED_MATH = re.compile(
-    r'\d+(?:\.\d+)?\s+(?:plus|minus|times|over|multiplied by|divided by)\s+\d+(?:\.\d+)?',
-    re.IGNORECASE,
-)
-# The "add 5 and 7" form.
-_ADD_FORM = re.compile(r'\badd\s+\d+(?:\.\d+)?\s+and\s+\d+(?:\.\d+)?', re.IGNORECASE)
-# Worded math functions the evaluator can compute ("square root of 256", "5 squared").
-_MATH_FUNC_WORD = (
-    r'\b(?:the\s+)?square root of\s+\d+(?:\.\d+)?'
-    r'|\bsqrt of\s+\d+(?:\.\d+)?'
-    r'|\b\d+(?:\.\d+)?\s+(?:squared|cubed)\b'
-)
-_WORDED_FUNC_MATH = re.compile(_MATH_FUNC_WORD, re.IGNORECASE)
+# The "add 5 and 7" form. Kept apart from _MATH_WORD_RULES because its answer
+# builder slices down to the two operands (trailing phrasing like "... and show
+# steps" must never reach the evaluator). Groups capture both operands.
+_ADD_FORM = re.compile(r'\badd\s+(\d+(?:\.\d+)?)\s+and\s+(\d+(?:\.\d+)?)', re.IGNORECASE)
 # Bare function calls the evaluator supports ("sqrt(144)", "log(1000)").
 _FUNC_CALL_MATH = re.compile(r'\b(?:sqrt|sin|cos|tan|log|log10|log2|abs|floor|ceil|round)\s*\(', re.IGNORECASE)
+
+# Declarative worded-arithmetic intent registry: one (phrase pattern, symbolic
+# rewrite) row per natural-language way of saying arithmetic. Routing
+# (is_arithmetic_query) and the answer builder (_math_answer) both consume this
+# table, so recognizing a worded phrase as math and translating it into an
+# evaluable expression can never diverge — changing a worded operator is a
+# one-row edit, never a parallel regex change in two places. A rewrite is a
+# plain backreference string for digit-only forms, or a callable when an
+# operand may be a spelled-out number word ("fifteen times three", "2 to the
+# power of 8") — the callable converts each captured operand to digits, so the
+# evaluator only ever sees symbols.
+
+# Cardinal/scale words recognized inside spelled-out operands.
+_NUM_WORD_VALUES: dict[str, int] = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+    "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17,
+    "eighteen": 18, "nineteen": 19, "twenty": 20, "thirty": 30, "forty": 40,
+    "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+}
+_SCALE_WORDS: dict[str, int] = {"hundred": 100, "thousand": 1_000, "million": 1_000_000}
+
+
+def _words_to_int(words: str) -> int | None:
+    """Parse a spelled-out cardinal ("one hundred and five") into an int."""
+    total = 0
+    current = 0
+    for word in re.split(r"[\s-]+", words.strip().lower()):
+        if word == "and":
+            continue
+        if word in _SCALE_WORDS:
+            scale = _SCALE_WORDS[word]
+            if scale == 100:
+                current = current * 100 if current else 100
+            else:
+                total += (current or 1) * scale
+                current = 0
+        elif word in _NUM_WORD_VALUES:
+            current += _NUM_WORD_VALUES[word]
+        else:
+            return None
+    return total + current
+
+
+def _fmt_number(value: float | int) -> str:
+    return str(int(value)) if value == int(value) else f"{value:g}"
+
+
+def _operand_value(text: str) -> float | int | None:
+    """Resolve a captured operand to a number: digits pass through, words parse."""
+    token = text.strip()
+    if re.fullmatch(r"\d+(?:\.\d+)?", token):
+        return float(token)
+    return _words_to_int(token)
+
+
+def _binary_rewrite(match: re.Match[str], op: str) -> str:
+    """Rewrite a digit-or-spelled operand pair into a symbolic expression."""
+    left, right = _operand_value(match.group(1)), _operand_value(match.group(2))
+    if left is None or right is None:
+        return match.group(0)
+    return f"{_fmt_number(left)}{op}{_fmt_number(right)}"
+
+
+def _unary_rewrite(match: re.Match[str], func: str) -> str:
+    value = _operand_value(match.group(1))
+    if value is None:
+        return match.group(0)
+    return f"{func}({_fmt_number(value)})"
+
+
+def _power_rewrite(match: re.Match[str], exp: int) -> str:
+    value = _operand_value(match.group(1))
+    if value is None:
+        return match.group(0)
+    return f"{_fmt_number(value)}**{exp}"
+
+
+# An operand: a decimal literal or one or more number words ("fifteen", "two
+# hundred and five"), never an arbitrary letter run — "how many times a year"
+# cannot match because "how"/"a" are not number words.
+_NUM_TOKEN = (
+    r"zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|"
+    r"fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|"
+    r"sixty|seventy|eighty|ninety|hundred|thousand|million"
+)
+# Greedy on purpose: a multi-word cardinal ("two hundred and five") must be
+# consumed whole; expansion stops at the first word that is not a number word,
+# so an operator keyword (or ordinary prose) always ends the operand.
+_OPERAND_SEQ = r"(?:\d+(?:\.\d+)?|" + _NUM_TOKEN + r")(?:[\s-]+(?:and[\s-]+)?(?:\d+(?:\.\d+)?|" + _NUM_TOKEN + r"))*"
+
+
+def _binary_word_rule(operator: str, op: str) -> tuple[re.Pattern[str], Callable[[re.Match[str]], str]]:
+    pattern = re.compile(
+        r"\b(" + _OPERAND_SEQ + r")\s+" + operator + r"\s+(" + _OPERAND_SEQ + r")\b",
+        re.IGNORECASE,
+    )
+    return pattern, lambda m: _binary_rewrite(m, op)
+
+
+Rewrite = str | Callable[[re.Match[str]], str]
+
+_MATH_WORD_RULES: tuple[tuple[re.Pattern[str], Rewrite], ...] = (
+    # Spelled-out binary operators -> symbols ("15 times 3", "fifteen times three").
+    _binary_word_rule("plus", "+"),
+    _binary_word_rule("minus", "-"),
+    _binary_word_rule("times", "*"),
+    _binary_word_rule("over", "/"),
+    _binary_word_rule("multiplied by", "*"),
+    _binary_word_rule("divided by", "/"),
+    # Powers: "2 to the power of 8" -> 2**8 (words work too: "two to the power of eight").
+    _binary_word_rule("to the power of", "**"),
+    # Worded math functions -> supported calls ("square root of 256", "5 squared").
+    (re.compile(r"\b(?:the\s+)?square\s+root\s+of\s+(" + _OPERAND_SEQ + r")\b", re.IGNORECASE),
+     lambda m: _unary_rewrite(m, "sqrt")),
+    (re.compile(r"\bsqrt\s+of\s+(" + _OPERAND_SEQ + r")\b", re.IGNORECASE),
+     lambda m: _unary_rewrite(m, "sqrt")),
+    (re.compile(r"\b(" + _OPERAND_SEQ + r")\s+squared\b", re.IGNORECASE),
+     lambda m: _power_rewrite(m, 2)),
+    (re.compile(r"\b(" + _OPERAND_SEQ + r")\s+cubed\b", re.IGNORECASE),
+     lambda m: _power_rewrite(m, 3)),
+)
 
 
 def is_arithmetic_query(lower: str) -> bool:
     """Symbolic or worded arithmetic the scratch evaluator can compute locally.
 
     The single routing predicate for "route math to the local brain": bare symbols
-    ("2+2"), spelled-out operators ("15 times 3", "add 5 and 7"), worded
-    functions ("square root of 256", "5 squared"), and function calls
-    ("sqrt(144)") all count.
+    ("2+2"), the "add 5 and 7" form, function calls ("sqrt(144)"), and every
+    worded phrase declared in the _MATH_WORD_RULES registry (spelled-out
+    operators like "15 times 3" and worded functions like "square root of 256"
+    or "5 squared") all count.
     """
     return bool(
         _MATH_EXPR.search(lower)
-        or _WORDED_MATH.search(lower)
         or _ADD_FORM.search(lower)
-        or _WORDED_FUNC_MATH.search(lower)
         or _FUNC_CALL_MATH.search(lower)
+        or any(pattern.search(lower) for pattern, _ in _MATH_WORD_RULES)
     )
 
 
+# Complement matcher for _classify's math branch: shapes is_arithmetic_query
+# does not already match — a bare chain of symbol/space characters ("5 +") or a
+# calculate/compute/what-is prefix over digits ("calculate 2+"). Worded
+# operators, worded functions, function calls, and the "add X and Y" form belong
+# to the registry / dedicated matchers above, never duplicated here.
 _MATH_PATTERNS = re.compile(
     r'^[\d\s+\-*/().,%^]+$|'
-    r'(calculate|compute|add|what is|what\'?s)\s+[\d\s+\-*/().%^]+|'
-    r'sqrt\s*\(|sin\s*\(|cos\s*\(|tan\s*\(|log\s*\(|'
-    r'[\d]+\s*[\+\-\*/\^]\s*[\d]+|'
-    r'\d+(?:\.\d+)?\s+(?:plus|minus|times|over|multiplied by|divided by)\s+\d+(?:\.\d+)?|'
-    r'add\s+\d+(?:\.\d+)?\s+and\s+\d+(?:\.\d+)?',
+    r'(calculate|compute|add|what is|what\'?s)\s+[\d\s+\-*/().%^]+',
     re.IGNORECASE,
 )
 
@@ -521,7 +634,7 @@ def _math_answer(text: str) -> dict[str, Any]:
     # Keep only the two operands for "add X and Y ..." so trailing phrasing
     # ("... and show steps") never reaches the evaluator.
     if add_form:
-        add_match = re.match(r'add\s+(\d+(?:\.\d+)?)\s+and\s+(\d+(?:\.\d+)?)', expr)
+        add_match = _ADD_FORM.match(expr)
         if add_match:
             expr = f"{add_match.group(1)} and {add_match.group(2)}"
     for prefix in ("calculate ", "compute ", "what is ", "what's ", "solve ", "add "):
@@ -529,18 +642,18 @@ def _math_answer(text: str) -> dict[str, Any]:
             expr = expr[len(prefix):]
     # What the user typed (minus leading question words) — shown back in the answer.
     display = re.sub(r'\bwhat is\b', '', expr).strip().rstrip('?.!,;:')
-    # Translate spelled-out operators into symbols so the evaluator can read them.
-    expr = re.sub(r'\bmultiplied by\b', '*', expr)
-    expr = re.sub(r'\bdivided by\b', '/', expr)
-    expr = re.sub(r'\btimes\b', '*', expr)
-    expr = re.sub(r'\bover\b', '/', expr)
-    expr = re.sub(r'\bplus\b', '+', expr)
-    expr = re.sub(r'\bminus\b', '-', expr)
-    # Worded functions the evaluator already supports (sqrt via _MATH_FUNCS).
-    expr = re.sub(r'\b(?:the\s+)?square root of\s+(\d+(?:\.\d+)?)', r'sqrt(\1)', expr)
-    expr = re.sub(r'\bsqrt of\s+(\d+(?:\.\d+)?)', r'sqrt(\1)', expr)
-    expr = re.sub(r'\b(\d+(?:\.\d+)?)\s+squared\b', r'\g<1>**2', expr)
-    expr = re.sub(r'\b(\d+(?:\.\d+)?)\s+cubed\b', r'\g<1>**3', expr)
+    # Apply the declarative worded-arithmetic registry (spelled-out operators ->
+    # symbols, worded functions -> calls) to a fixed point: replacing one
+    # spelled-out operator can expose a neighboring operand to a later rule
+    # ("5 squared times 2" -> "5**2 times 2" -> "5**2*2"). Same table that
+    # routing uses, so translation can never drift from recognition.
+    changed = True
+    while changed:
+        changed = False
+        for pattern, replacement in _MATH_WORD_RULES:
+            updated = pattern.sub(replacement, expr)
+            if updated != expr:
+                expr, changed = updated, True
     if add_form:
         expr = re.sub(r'\band\b', '+', expr)
     expr = re.sub(r'\bwhat is\b', '', expr).strip().rstrip('?.!,;:')

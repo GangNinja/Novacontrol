@@ -1,12 +1,15 @@
 /* ── Explore / Research Rendering ───────────────────────────── */
 
-/** Render a research report into `target`. Returns false when `data` has no report shape. */
+/** Render a research report into `target`. Returns false when `data` has no report shape.
+ *
+ * Callers pass one unwrapped body only: /ask consumers hand over `envelope.data`
+ * (the handler payload) and /explore passes the flat report, so there is no
+ * envelope-vs-flat probe to do here — a report simply is an object with report
+ * fields.
+ */
 function tryRenderResearch(target, data) {
-  // /ask envelopes reports under `payload`; /explore returns the report directly.
-  const candidates = [data.payload, data, data.report];
-  const report = candidates.find((item) => item && (item.overview || item.key_points || item.sources || item.videos));
-  if (!report) return false;
-  renderAiAnswerPage(target, report, state.lastQuery || report.topic || "Research");
+  if (!data || !(data.overview || data.key_points || data.sources || data.videos)) return false;
+  renderAiAnswerPage(target, data, state.lastQuery || data.topic || "Research");
   return true;
 }
 
@@ -268,85 +271,12 @@ function videoCard(video, index) {
   return card;
 }
 
-/* ── Live Progress (SSE /explore/stream) ───────────────────── */
+/* ── Topic tracking ────────────────────────────────────────── */
 
+// Remember the last researched topic so follow-ups ("tell me more about that")
+// and re-searches can reference it. Live progress now arrives from the single
+// activity channel (see appendLiveStep in render-utils.js), not this file.
 function trackExploredTopic(topic) {
   const isFollowup = /^(tell me more|go deeper|continue|elaborate|give me more|what else|more detail)/i.test(topic);
   if (!isFollowup || !state.lastExploredTopic) state.lastExploredTopic = topic;
-}
-
-function appendProgressStep(steps, data) {
-  const text = data.detail || data.step || "Working...";
-  const rows = steps.querySelectorAll(".progress-step");
-  if (rows.length && rows[rows.length - 1].textContent === text) return; // no repeated rows
-  steps.appendChild(el("p", "progress-step", text));
-}
-
-function parseSseBlock(block) {
-  let name = "message";
-  const dataLines = [];
-  for (const line of block.split("\n")) {
-    if (line.startsWith("event:")) name = line.slice(6).trim();
-    else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
-  }
-  if (!dataLines.length) return null;
-  try {
-    return { name, data: JSON.parse(dataLines.join("\n")) };
-  } catch (_) {
-    return { name, data: { error: dataLines.join("\n") } };
-  }
-}
-
-/**
- * Research with live progress steps. Pure "task" for run(): it appends the
- * progressive status rows under run()'s loading scan-line, and resolves with
- * the report (run() renders it, toasts, and manages the button). All failures
- * surface as thrown errors so run()'s shared error card handles them.
- */
-async function streamExploreResearch(topic) {
-  const target = byId("exploreOutput");
-  target.classList.remove("empty-state");
-  const steps = el("div", "explore-progress");
-  target.appendChild(steps);
-
-  const payload = { topic, include_videos: true };
-  if (state.lastExploredTopic) payload.last_topic = state.lastExploredTopic;
-  const response = await fetch("/explore/stream", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify(payload),
-  });
-  if (!response.ok) {
-    let detail = response.statusText;
-    try { detail = JSON.parse(await response.text()).detail || detail; } catch (_) { /* non-JSON body */ }
-    throw new Error(detail);
-  }
-  if (!response.body) throw new Error("This browser does not support streaming responses.");
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let report = null;
-  while (report === null) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let split = buffer.indexOf("\n\n");
-    while (split !== -1) {
-      const block = buffer.slice(0, split).trim();
-      buffer = buffer.slice(split + 2);
-      const event = parseSseBlock(block);
-      split = buffer.indexOf("\n\n");
-      if (!event) continue;
-      if (event.name === "progress" && event.data.step && event.data.step !== "complete") {
-        appendProgressStep(steps, event.data);
-      } else if (event.name === "complete") {
-        report = event.data;
-      } else if (event.name === "error") {
-        throw new Error(event.data.error || "Research failed.");
-      }
-    }
-  }
-  if (!report) throw new Error("Research stream ended before a report arrived.");
-  return report;
 }

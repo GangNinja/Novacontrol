@@ -49,6 +49,10 @@ async function run(targetId, type, task, buttonId, options = {}) {
   if (buttonId && byId(buttonId).classList.contains("loading")) return; // ignore rapid double-clicks
   renderLoading(targetId, options.loadingText);
   if (buttonId) setButtonLoading(buttonId, true);
+  // While this operation is in flight, live events from the single activity
+  // channel are shown under the loading scan-line (see appendLiveStep).
+  const family = activityFamily(type);
+  if (family) state.activity = { family, targetId };
   try {
     const data = await task();
     render(targetId, data, type);
@@ -58,8 +62,71 @@ async function run(targetId, type, task, buttonId, options = {}) {
     renderError(targetId, error);
     if (options.onError) options.onError(error);
   } finally {
+    if (family && state.activity && state.activity.targetId === targetId) state.activity = null;
     if (buttonId) setButtonLoading(buttonId, false);
   }
+}
+
+/* ── Live activity stream (ONE SSE channel on the app EventBus) ── */
+
+let activitySource = null;
+
+// Which progress families a run type subscribes to while loading. "ask" (Chat)
+// accepts research AND command steps, because a chat answer can be an Explore
+// report or an approved action execution.
+function activityFamily(type) {
+  if (type === "explore") return "explore";
+  if (type === "command") return "command";
+  if (type === "chat") return "ask";
+  return null;
+}
+
+function activitySourceUrl() {
+  const token = byId("tokenInput").value.trim();
+  return token ? `/events/stream?token=${encodeURIComponent(token)}` : "/events/stream";
+}
+
+// Open the single channel once per page. Native EventSource reconnects after
+// drops; the server sends comment keep-alive frames so the connection stays warm.
+function connectActivitySource() {
+  if (activitySource || typeof EventSource === "undefined") return;
+  try {
+    activitySource = new EventSource(activitySourceUrl());
+    activitySource.addEventListener("explore.progress", onActivityEvent);
+    activitySource.addEventListener("command.progress", onActivityEvent);
+  } catch (_) {
+    activitySource = null;
+  }
+}
+
+function onActivityEvent(event) {
+  const act = state.activity;
+  if (!act) return;
+  const family = String(event.type || "").split(".")[0];
+  if (!familyMatches(act.family, family)) return;
+  let data = {};
+  try { data = JSON.parse(event.data); } catch (_) { return; }
+  appendLiveStep(act.targetId, data.detail || data.step || "");
+}
+
+function familyMatches(activityFamilyName, eventFamily) {
+  if (activityFamilyName === eventFamily) return true;
+  return activityFamilyName === "ask" && (eventFamily === "explore" || eventFamily === "command");
+}
+
+// Show one live line under run()'s loading scan-line while an action runs.
+function appendLiveStep(targetId, text) {
+  if (!text) return;
+  const target = byId(targetId);
+  if (!target || !target.querySelector(".loading-indicator")) return; // run finished
+  let box = target.querySelector(".explore-progress");
+  if (!box) {
+    box = el("div", "explore-progress");
+    target.appendChild(box);
+  }
+  const rows = box.querySelectorAll(".progress-step");
+  if (rows.length && rows[rows.length - 1].textContent === text) return; // no repeats
+  box.appendChild(el("p", "progress-step", text));
 }
 
 /* ── Shared text helpers ───────────────────────────────────── */

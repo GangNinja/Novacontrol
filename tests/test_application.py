@@ -6,6 +6,7 @@ import unittest
 
 from novacontrol.application import NovaControlApplication
 from novacontrol.browser import NoopBrowserRunner
+from novacontrol.core.events import Event
 from novacontrol.desktop import NoopDesktopRunner
 from novacontrol.self_improvement import SelfImprovementEngine
 from novacontrol.settings import ApprovalMode
@@ -22,6 +23,48 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["browser_runner"], "PlaywrightBrowserRunner")
         self.assertIsInstance(status["browser_adapter_available"], bool)
         self.assertTrue(status["self_improvement_available"])
+
+    async def test_explore_publishes_on_the_app_wide_event_bus(self) -> None:
+        """Research progress must reach the single activity channel's bus.
+
+        The web UI consumes /events/stream, which relays nova.event_bus — so
+        ExploreService has to be wired onto that same bus (a private bus would
+        silently drop every research step from the live UI).
+        """
+        with TemporaryDirectory() as temp_dir:
+            app = NovaControlApplication(data_dir=temp_dir)
+            await app.start()
+            try:
+                self.assertIs(app.explore._event_bus, app.event_bus)
+            finally:
+                await app.stop()
+
+    async def test_executed_command_publishes_progress_on_the_app_bus(self) -> None:
+        """Executing an approved command announces each action on the bus."""
+        with TemporaryDirectory() as temp_dir:
+            app = NovaControlApplication(data_dir=temp_dir)
+            app.desktop.runner = NoopDesktopRunner()  # never touch the real desktop
+            seen: list[Event] = []
+
+            async def capture(event: Event) -> None:
+                seen.append(event)
+
+            await app.event_bus.subscribe("command.progress", capture)
+            await app.start()
+            try:
+                plan = app.plan_desktop_command("open notepad")
+                result = await app.execute_desktop_command(
+                    "open notepad", approval_token=plan["approval"]["token"]
+                )
+            finally:
+                await app.stop()
+
+        self.assertEqual(result["status"], "executed")
+        self.assertTrue(seen, "command.progress events must be published during execution")
+        self.assertTrue(
+            seen[-1].payload["detail"].startswith("Running action 1/1"),
+            f"unexpected progress line: {seen[-1].payload['detail']}",
+        )
 
     async def test_application_routes_self_improvement_requests(self) -> None:
         app = NovaControlApplication()

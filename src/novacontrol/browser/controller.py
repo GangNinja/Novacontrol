@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 import importlib.util
 from typing import Any, Protocol, runtime_checkable
 
@@ -288,9 +288,22 @@ class BrowserAutomationController:
             ),
         )
 
-    async def execute_workflow(self, workflow: BrowserWorkflow) -> tuple[BrowserActionResult, ...]:
+    async def execute_workflow(
+        self,
+        workflow: BrowserWorkflow,
+        *,
+        progress: Callable[[str], Awaitable[None]] | None = None,
+    ) -> tuple[BrowserActionResult, ...]:
+        """Run each action in order, optionally announcing each one as it starts.
+
+        The optional `progress` coroutine is awaited with a human line ("Running
+        action 1/2: Navigate to ...") right before the action executes.
+        """
         results = []
-        for action in workflow.actions:
+        total = len(workflow.actions)
+        for index, action in enumerate(workflow.actions, start=1):
+            if progress is not None:
+                await progress(f"Running action {index}/{total}: {action.description}")
             result = await self.execute_action(action)
             results.append(result)
             if result.status is not BrowserActionStatus.COMPLETED:

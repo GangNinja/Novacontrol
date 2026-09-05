@@ -38,6 +38,10 @@ INTENT_ROUTING: list[tuple[str, BrainIntent]] = [
     # ...but with no research verb, plan nouns still route PLAN, not EXPLORE.
     ("break down the plan", BrainIntent.PLAN),
     ("plan the project", BrainIntent.PLAN),
+    # Worded arithmetic, including spelled-out numbers and powers -> local CHAT.
+    ("what is fifteen times three", BrainIntent.CHAT),
+    ("what is 2 to the power of 8", BrainIntent.CHAT),
+    ("fifteen times three", BrainIntent.CHAT),
     # Plan
     ("create a roadmap for the project", BrainIntent.PLAN),
     ("break this down into steps", BrainIntent.PLAN),

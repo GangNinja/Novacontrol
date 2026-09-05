@@ -63,6 +63,25 @@ class EventBus:
             else:
                 self._handlers[event_type].append(handler)
 
+    async def unsubscribe(self, event_type: str, handler: EventHandler) -> None:
+        """Remove a handler previously registered via subscribe(). No-op when absent.
+
+        Needed for short-lived subscribers such as SSE channels: a dropped client
+        must not leave its forwarder invoked on every publish forever.
+        """
+        async with self._lock:
+            if event_type == "*":
+                if handler in self._wildcard_handlers:
+                    self._wildcard_handlers.remove(handler)
+                return
+            bucket = self._handlers.get(event_type)
+            if bucket is None:
+                return
+            if handler in bucket:
+                bucket.remove(handler)
+            if not bucket:
+                del self._handlers[event_type]
+
     async def publish(self, event: Event) -> None:
         """Publish an event to exact-match and wildcard subscribers."""
         if self._journal is not None:
