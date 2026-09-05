@@ -1,0 +1,100 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "novacontrol"
+version = "0.1.0"
+description = "A modular AI operating system for agents, tools, memory, automation, and plugins."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+authors = [{ name = "NovaControl Contributors" }]
+dependencies = [
+  # fastapi and starlette are pinned to the resolved versions (the no-cache
+  # header trio on / and /static/* depends on their middleware behavior; a
+  # floating upgrade could silently change header semantics).
+  "fastapi==0.141.1",
+  "starlette==1.6.0",
+  "uvicorn[standard]>=0.30",
+  "pydantic>=2.8",
+  "loguru>=0.7",
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2",
+  "pytest-asyncio>=0.23",
+  "ruff>=0.5",
+  "mypy>=1.10",
+  "coverage>=7.5",
+  "httpx>=0.27",  # required by fastapi.testclient.TestClient
+]
+database = [
+  "sqlalchemy>=2.0",
+  "alembic>=1.13",
+]
+postgres = [
+  "sqlalchemy>=2.0",
+  "alembic>=1.13",
+  "psycopg[binary]>=3.2",
+]
+redis = [
+  "redis>=5.0",
+]
+worker = [
+  "redis>=5.0",
+  "celery>=5.4",
+]
+ai = [
+  "langgraph>=0.2",
+]
+vision = [
+  "opencv-python>=4.10",
+  "easyocr>=1.7",
+]
+voice = [
+  "openai-whisper>=20231117",
+  "pyttsx3>=2.90",
+]
+browser = [
+  "playwright>=1.45",
+]
+gui = [
+  "pyside6>=6.7",
+]
+vector = [
+  "chromadb>=0.5",
+]
+git = [
+  "gitpython>=3.1",
+]
+all = [
+  "novacontrol[database,redis,worker,ai,vision,voice,browser,gui,vector,git]",
+]
+
+[project.scripts]
+novacontrol = "novacontrol.__main__:main"
+novacontrol-dashboard = "novacontrol.gui.app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/novacontrol"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+packages = ["novacontrol"]
+strict = true

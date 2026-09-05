@@ -1,0 +1,500 @@
+"""Tests for desktop automation: controller, runner, events, models."""
+
+from __future__ import annotations
+
+import ast
+import shutil
+import tempfile
+import unittest
+from pathlib import Path
+
+from novacontrol.core.events import Event, EventBus
+from novacontrol.desktop import (
+    DesktopAction,
+    DesktopActionStatus,
+    DesktopActionType,
+    DesktopAutomationController,
+    DesktopAutomationModule,
+    InMemoryAutomationAuditLog,
+    LocalDesktopRunner,
+    NoopDesktopRunner,
+)
+from conftest import AllowGateway
+
+
+class RecordingRunner:
+    def __init__(self):
+        self.actions = []
+
+    async def run(self, action):
+        self.actions.append(action)
+        return {"ran": action.type.value, "target": action.target}
+
+
+# ---------------------------------------------------------------------------
+# Table-driven controller plan methods
+# ---------------------------------------------------------------------------
+
+PLAN_METHODS: list[tuple[str, dict, str, DesktopActionType]] = [
+    ("screenshot", {"save_path": "/tmp/test.png"}, "Take screenshot", DesktopActionType.TAKE_SCREENSHOT),
+    ("system_info", {}, "System information", DesktopActionType.SYSTEM_INFO),
+    ("list_files", {"directory": "/tmp", "recursive": True}, "List files", DesktopActionType.LIST_FILES),
+    ("keyboard_shortcut", {"shortcut": "ctrl+c"}, "Keyboard shortcut", DesktopActionType.KEYBOARD_SHORTCUT),
+    ("open_application", {"application": "notepad"}, "Open notepad", DesktopActionType.OPEN_APPLICATION),
+    ("execute_script", {"command": "echo hello"}, "Execute script", DesktopActionType.EXECUTE_SCRIPT),
+]
+
+
+class DesktopControllerPlanTests(unittest.IsolatedAsyncioTestCase):
+    """Table-driven: each plan method is one subTest."""
+
+    def test_plan_methods(self) -> None:
+        controller = DesktopAutomationController()
+        for name, kwargs, expected_name, expected_type in PLAN_METHODS:
+            with self.subTest(method=name):
+                method = getattr(controller, f"plan_{name}")
+                workflow = method(**kwargs)
+                self.assertEqual(workflow.name, expected_name)
+                self.assertEqual(workflow.actions[0].type, expected_type)
+
+
+# ---------------------------------------------------------------------------
+# Approval and audit
+# ---------------------------------------------------------------------------
+
+class DesktopApprovalTests(unittest.IsolatedAsyncioTestCase):
+
+    async def test_default_controller_denies_execution(self) -> None:
+        controller = DesktopAutomationController()
+        results = await controller.execute_workflow(controller.plan_open_application("Code"))
+        self.assertEqual(results[0].status, DesktopActionStatus.DENIED)
+
+    async def test_approved_controller_runs_and_audits(self) -> None:
+        audit = InMemoryAutomationAuditLog()
+        runner = RecordingRunner()
+        controller = DesktopAutomationController(
+            approval_gateway=AllowGateway(), runner=runner, audit_log=audit,
+        )
+        results = await controller.execute_workflow(controller.plan_execute_script("echo hello"))
+        audit_entries = await audit.read()
+
+        self.assertEqual(results[0].status, DesktopActionStatus.COMPLETED)
+        self.assertEqual(runner.actions[0].target, "echo hello")
+        self.assertEqual(audit_entries[0].action_id, results[0].action_id)
+
+    async def test_local_runner_executes_script(self) -> None:
+        controller = DesktopAutomationController(
+            approval_gateway=AllowGateway(),
+            runner=LocalDesktopRunner(command_timeout_seconds=5),
+        )
+        results = await controller.execute_workflow(controller.plan_execute_script("echo phase21"))
+        self.assertEqual(results[0].status, DesktopActionStatus.COMPLETED)
+        self.assertEqual(results[0].output["adapter"], "local-desktop")
+        self.assertEqual(results[0].output["exit_code"], 0)
+        self.assertIn("phase21", results[0].output["stdout"])
+
+
+# ---------------------------------------------------------------------------
+# Command safety: exec-without-a-shell is the injection boundary
+# ---------------------------------------------------------------------------
+
+class DesktopCommandSafetyTests(unittest.IsolatedAsyncioTestCase):
+    """Shell metacharacters are inert because commands run via create_subprocess_exec
+    (never through a shell) after shlex.split turns them into literal argv tokens."""
+
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp())
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    async def _execute(self, command: str) -> dict:
+        controller = DesktopAutomationController(
+            approval_gateway=AllowGateway(),
+            runner=LocalDesktopRunner(command_timeout_seconds=10),
+        )
+        workflow = controller.plan_execute_script(command, working_directory=str(self.tmpdir))
+        results = await controller.execute_workflow(workflow)
+        self.assertEqual(results[0].status, DesktopActionStatus.COMPLETED)
+        return dict(results[0].output)
+
+    async def test_redirection_never_creates_files(self) -> None:
+        """> / >> / 2> are literal argv, so no file is ever created."""
+        marker = self.tmpdir / "marker.txt"
+        for command in ("echo safe > marker.txt", "echo safe >> marker.txt", "echo safe 2> marker.txt"):
+            with self.subTest(command=command):
+                output = await self._execute(command)
+                self.assertEqual(output["exit_code"], 0)
+                self.assertFalse(marker.exists(), f"redirection created file: {command}")
+
+    async def test_command_chaining_never_runs_second_program(self) -> None:
+        """A second program after ; / && / | must not execute without a shell."""
+        marker = self.tmpdir / "PWNED.txt"
+        second = (
+            "python -c \"import pathlib; pathlib.Path('PWNED.txt').write_text('pwned')\""
+        )
+        for separator in (" ; ", " && ", " | "):
+            with self.subTest(separator=separator.strip()):
+                output = await self._execute(f"echo safe{separator}{second}")
+                self.assertEqual(output["exit_code"], 0)
+                self.assertFalse(marker.exists(), f"second program ran via: {separator}")
+
+    async def test_legitimate_commands_with_metacharacters_still_run(self) -> None:
+        """Text that merely contains shell metacharacters is safe and must not be rejected."""
+        cases = [
+            ("echo \"price is $5 and {fine}\"", "price is $5 and {fine}"),
+            ("echo \"a | b & c > d\"", "a | b & c > d"),
+            ("python -c \"print('semi;colon ok')\"", "semi;colon ok"),
+            ("python -c \"print('brackets () [] {} ok')\"", "brackets () [] {} ok"),
+        ]
+        for command, expected in cases:
+            with self.subTest(command=command):
+                output = await self._execute(command)
+                self.assertEqual(output["exit_code"], 0, output.get("stderr"))
+                self.assertIn(expected, output["stdout"])
+
+
+# ---------------------------------------------------------------------------
+# No-shell source contract: catches a refactor reintroducing shell=True
+# ---------------------------------------------------------------------------
+
+class DesktopNoShellInvariantTests(unittest.TestCase):
+    """The behavioral tests above catch hostile payloads; this one catches the plumbing.
+
+    If a future refactor reintroduces a shell — shell=True on any subprocess launch,
+    create_subprocess_shell, or os.system/os.popen — the module no longer runs commands
+    as literal argv tokens and this source-level contract fails at the offending line.
+    """
+
+    def setUp(self) -> None:
+        from novacontrol.desktop import controller as desktop_controller
+
+        self.source = Path(desktop_controller.__file__).read_text(encoding="utf-8")
+        self.tree = ast.parse(self.source)
+
+    def test_no_shell_launch_is_reintroduced(self) -> None:
+        from conftest import shell_launch_offenders
+
+        offenders = shell_launch_offenders(self.source)
+        self.assertEqual(offenders, [], "Shell launch reintroduced in desktop/controller.py: " + "; ".join(offenders))
+
+    def test_execute_script_keeps_shlex_and_exec_form(self) -> None:
+        """The command boundary still splits into literal argv and launches exec-form.
+
+        AST-based so comments (like the invariant note that mentions shlex.split)
+        cannot mask removal of the actual call.
+        """
+        fn = next(
+            (
+                n
+                for n in ast.walk(self.tree)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "_execute_script"
+            ),
+            None,
+        )
+        self.assertIsNotNone(fn, "_execute_script must exist")
+        calls = [node for node in ast.walk(fn) if isinstance(node, ast.Call)]
+        has_shlex_split = any(
+            isinstance(call.func, ast.Attribute)
+            and call.func.attr == "split"
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "shlex"
+            for call in calls
+        )
+        has_exec_form = any(
+            (
+                isinstance(call.func, ast.Attribute) and call.func.attr == "create_subprocess_exec"
+            )
+            or (isinstance(call.func, ast.Name) and call.func.id == "create_subprocess_exec")
+            for call in calls
+        )
+        self.assertTrue(has_shlex_split, "_execute_script no longer calls shlex.split")
+        self.assertTrue(has_exec_form, "_execute_script no longer launches via create_subprocess_exec")
+
+
+# ---------------------------------------------------------------------------
+# File operations
+# ---------------------------------------------------------------------------
+
+class DesktopFileOpsTests(unittest.IsolatedAsyncioTestCase):
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    async def test_organize_files(self) -> None:
+        (self.tmpdir / "notes.txt").write_text("notes")
+        (self.tmpdir / "image.png").write_text("image")
+        action = DesktopAction(
+            type=DesktopActionType.ORGANIZE_FILES,
+            target=str(self.tmpdir),
+            description="Move text files.",
+            parameters={"extension": ".txt", "destination": "texts"},
+        )
+        output = await LocalDesktopRunner().run(action)
+        self.assertEqual(output["moved_count"], 1)
+        self.assertTrue((self.tmpdir / "texts" / "notes.txt").exists())
+        self.assertTrue((self.tmpdir / "image.png").exists())
+
+    async def test_plan_file_organization(self) -> None:
+        controller = DesktopAutomationController()
+        workflow = controller.plan_file_organization("downloads", {".pdf": "documents"})
+        self.assertEqual(workflow.actions[0].parameters["destination"], "documents")
+
+    async def test_list_files(self) -> None:
+        (self.tmpdir / "a.txt").write_text("hello")
+        (self.tmpdir / "b.txt").write_text("world")
+        (self.tmpdir / "sub").mkdir()
+        (self.tmpdir / "sub" / "c.txt").write_text("nested")
+
+        result = await LocalDesktopRunner().run(DesktopAction(
+            type=DesktopActionType.LIST_FILES, target=str(self.tmpdir), description="List",
+        ))
+        self.assertEqual(result["action"], "list_files")
+        self.assertEqual(result["count"], 3)
+
+    async def test_list_files_not_recursive(self) -> None:
+        (self.tmpdir / "a.txt").write_text("hello")
+        (self.tmpdir / "sub").mkdir()
+        (self.tmpdir / "sub" / "b.txt").write_text("nested")
+
+        result = await LocalDesktopRunner().run(DesktopAction(
+            type=DesktopActionType.LIST_FILES, target=str(self.tmpdir), description="List",
+            parameters={"recursive": False},
+        ))
+        self.assertEqual(result["count"], 2)
+
+    async def test_list_files_with_pattern(self) -> None:
+        (self.tmpdir / "a.txt").write_text("hello")
+        (self.tmpdir / "b.py").write_text("world")
+
+        result = await LocalDesktopRunner().run(DesktopAction(
+            type=DesktopActionType.LIST_FILES, target=str(self.tmpdir), description="List",
+            parameters={"pattern": "*.txt"},
+        ))
+        self.assertEqual(result["count"], 1)
+
+    async def test_read_file(self) -> None:
+        test_file = self.tmpdir / "test.txt"
+        test_file.write_text("Hello, world!")
+
+        result = await LocalDesktopRunner().run(DesktopAction(
+            type=DesktopActionType.READ_FILE, target=str(test_file), description="Read",
+        ))
+        self.assertEqual(result["action"], "read_file")
+        self.assertEqual(result["content"], "Hello, world!")
+        self.assertFalse(result["truncated"])
+
+    async def test_read_file_missing(self) -> None:
+        with self.assertRaises(FileNotFoundError):
+            await LocalDesktopRunner().run(DesktopAction(
+                type=DesktopActionType.READ_FILE,
+                target=str(self.tmpdir / "missing.txt"),
+                description="Read",
+            ))
+
+    async def test_write_file(self) -> None:
+        test_file = self.tmpdir / "output.txt"
+        await LocalDesktopRunner().run(DesktopAction(
+            type=DesktopActionType.WRITE_FILE, target=str(test_file),
+            description="Write", parameters={"content": "Test content"},
+        ))
+        self.assertEqual(test_file.read_text(), "Test content")
+
+    async def test_write_file_creates_dirs(self) -> None:
+        test_file = self.tmpdir / "deep" / "nested" / "file.txt"
+        await LocalDesktopRunner().run(DesktopAction(
+            type=DesktopActionType.WRITE_FILE, target=str(test_file),
+            description="Write", parameters={"content": "nested"},
+        ))
+        self.assertTrue(test_file.exists())
+        self.assertEqual(test_file.read_text(), "nested")
+
+
+# ---------------------------------------------------------------------------
+# System operations
+# ---------------------------------------------------------------------------
+
+class DesktopSystemOpsTests(unittest.IsolatedAsyncioTestCase):
+
+    async def test_system_info(self) -> None:
+        result = await LocalDesktopRunner().run(DesktopAction(
+            type=DesktopActionType.SYSTEM_INFO, target="system", description="Info",
+        ))
+        self.assertEqual(result["action"], "system_info")
+        self.assertIn("platform", result)
+        self.assertIn("python", result)
+
+    async def test_list_processes(self) -> None:
+        result = await LocalDesktopRunner().run(DesktopAction(
+            type=DesktopActionType.LIST_PROCESSES, target="processes", description="List",
+        ))
+        self.assertEqual(result["action"], "list_processes")
+        self.assertGreater(result["count"], 0)
+
+    async def test_noop_runner_does_not_execute(self) -> None:
+        result = await NoopDesktopRunner().run(DesktopAction(
+            type=DesktopActionType.OPEN_APPLICATION, target="notepad", description="Open",
+        ))
+        self.assertIn("would_run", result)
+        self.assertEqual(result["would_run"]["type"], "open_application")
+
+
+# ---------------------------------------------------------------------------
+# Module events
+# ---------------------------------------------------------------------------
+
+class DesktopModuleTests(unittest.IsolatedAsyncioTestCase):
+
+    async def test_module_emits_planned_and_denied_events(self) -> None:
+        bus = EventBus()
+        module = DesktopAutomationModule(DesktopAutomationController())
+        planned, denied = [], []
+
+        async def cap_planned(e: Event): planned.append(e)
+        async def cap_denied(e: Event): denied.append(e)
+
+        await bus.subscribe("desktop.workflow_planned", cap_planned)
+        await bus.subscribe("desktop.workflow_denied", cap_denied)
+        await module.start(bus)
+        await bus.publish(Event(
+            type="desktop.workflow_requested",
+            payload={"workflow_type": "open_application", "application": "Code", "execute": True},
+        ))
+        self.assertEqual(planned[0].payload["name"], "Open Code")
+        self.assertEqual(denied[0].payload["results"][0]["status"], "denied")
+
+
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+
+class DesktopModelTests(unittest.IsolatedAsyncioTestCase):
+
+    def test_action_types(self) -> None:
+        types = {
+            "close_application", "take_screenshot", "list_processes",
+            "list_files", "read_file", "write_file", "system_info", "keyboard_shortcut",
+        }
+        for t in types:
+            self.assertIsNotNone(getattr(DesktopActionType, t.upper(), None))
+
+    def test_action_to_dict(self) -> None:
+        action = DesktopAction(
+            type=DesktopActionType.SYSTEM_INFO, target="system",
+            description="Info", parameters={"key": "value"},
+        )
+        d = action.to_dict()
+        self.assertEqual(d["type"], "system_info")
+        self.assertEqual(d["parameters"]["key"], "value")
+
+    def test_workflow_to_dict(self) -> None:
+        from novacontrol.desktop import DesktopWorkflow
+        workflow = DesktopWorkflow(name="Test", actions=(
+            DesktopAction(type=DesktopActionType.READ_FILE, target="/tmp/test", description="Read"),
+        ))
+        d = workflow.to_dict()
+        self.assertEqual(d["name"], "Test")
+        self.assertEqual(len(d["actions"]), 1)
+
+
+# ---------------------------------------------------------------------------
+# Post-execution verification (JARVIS must not report success that never happened)
+# ---------------------------------------------------------------------------
+
+class ProbingRunner(LocalDesktopRunner):
+    """LocalDesktopRunner with the OS probes stubbed so tests never touch the desktop."""
+
+    def __init__(self, window_lines=None, type_verification=None):
+        super().__init__()
+        self._probe_lines = window_lines
+        self._type_verification = type_verification
+        self.launched = False
+        self.pasted = None
+
+    async def _launch_open(self, target: str) -> int:
+        self.launched = True
+        return 1234
+
+    async def _window_lines(self):
+        return self._probe_lines
+
+    async def _stage_and_paste_windows(self, text: str) -> None:
+        self.pasted = text
+
+    async def _verify_type_windows(self, text: str):
+        return self._type_verification
+
+
+class DesktopVerificationTests(unittest.IsolatedAsyncioTestCase):
+    """Open and type actions are verified before success; unverifiable probes skip."""
+
+    def test_window_stem_and_matching(self) -> None:
+        from novacontrol.desktop.controller import _window_matches, _window_stem
+        self.assertEqual(_window_stem("notepad"), "notepad")
+        self.assertEqual(_window_stem(r"C:\Windows\notepad.exe"), "notepad")
+        self.assertEqual(_window_stem("Visual Studio Code"), "visual studio code")
+        self.assertTrue(_window_matches("Notepad", "Untitled - Notepad", "notepad"))
+        self.assertTrue(_window_matches("explorer", "C:\\Users\\me\\Documents", "documents"))
+        self.assertFalse(_window_matches("explorer", "This PC", "notepad"))
+
+    async def test_open_reports_verified_when_window_appears(self) -> None:
+        runner = ProbingRunner(window_lines=["Notepad|Untitled - Notepad"])
+        output = await runner._open_application("notepad")
+        self.assertTrue(runner.launched)
+        self.assertTrue(output["verified"])
+        self.assertEqual(output["window"], "Untitled - Notepad")
+        self.assertIn("Window appeared", output["verification"])
+
+    async def test_open_fails_when_no_window_appears(self) -> None:
+        runner = ProbingRunner(window_lines=[])
+        with self.assertRaisesRegex(Exception, "no window appeared"):
+            await runner._open_application("notepad")
+
+    async def test_open_skips_when_probe_unavailable(self) -> None:
+        runner = ProbingRunner(window_lines=None)
+        output = await runner._open_application("notepad")
+        self.assertIsNone(output["verified"])
+
+    async def test_type_reports_verified_when_paste_landed(self) -> None:
+        runner = ProbingRunner(type_verification={
+            "clipboard_match": True, "focused_window": True, "window_title": "Untitled - Notepad",
+        })
+        output = await runner._type_text("hello world")
+        self.assertEqual(runner.pasted, "hello world")
+        self.assertTrue(output["verified"])
+        self.assertTrue(output["verification"]["clipboard_staged"])
+        self.assertEqual(output["verification"]["focused_window"], "Untitled - Notepad")
+
+    async def test_type_fails_when_clipboard_staging_mismatches(self) -> None:
+        runner = ProbingRunner(type_verification={
+            "clipboard_match": False, "focused_window": True, "window_title": "Untitled - Notepad",
+        })
+        with self.assertRaisesRegex(Exception, "clipboard"):
+            await runner._type_text("hello")
+
+    async def test_type_fails_when_no_window_is_focused(self) -> None:
+        runner = ProbingRunner(type_verification={
+            "clipboard_match": True, "focused_window": False, "window_title": "",
+        })
+        with self.assertRaisesRegex(Exception, "no window is focused"):
+            await runner._type_text("hello")
+
+    async def test_type_skips_when_probe_unavailable(self) -> None:
+        runner = ProbingRunner(type_verification=None)
+        output = await runner._type_text("hello")
+        self.assertIsNone(output["verified"])
+
+    async def test_controller_reports_failed_when_verification_fails(self) -> None:
+        """A launch that never shows a window must not surface as success."""
+        runner = ProbingRunner(window_lines=[])
+        controller = DesktopAutomationController(approval_gateway=AllowGateway(), runner=runner)
+        results = await controller.execute_workflow(controller.plan_open_application("notepad"))
+        self.assertEqual(results[0].status, DesktopActionStatus.FAILED)
+        self.assertIn("no window appeared", results[0].error)
+
+
+if __name__ == "__main__":
+    unittest.main()

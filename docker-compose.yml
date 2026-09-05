@@ -1,0 +1,68 @@
+# ============================================
+# NovaControl — Docker Compose
+# ============================================
+
+services:
+  # --- NovaControl API Server ---
+  novacontrol:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: novacontrol
+    ports:
+      - "8000:8000"
+    environment:
+      - NOVACONTROL_ENV=production
+      - NOVACONTROL_LOG_LEVEL=INFO
+      - NOVACONTROL_DATABASE_URL=postgresql+psycopg://novacontrol:novacontrol@postgres:5432/novacontrol
+      - NOVACONTROL_REDIS_URL=redis://redis:6379/0
+      - NOVACONTROL_REQUIRE_APPROVAL=true
+    volumes:
+      - novacontrol-data:/app/data
+      - novacontrol-logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # --- Redis ---
+  redis:
+    image: redis:7-alpine
+    container_name: novacontrol-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # --- PostgreSQL ---
+  postgres:
+    image: postgres:16-alpine
+    container_name: novacontrol-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=novacontrol
+      - POSTGRES_USER=novacontrol
+      - POSTGRES_PASSWORD=novacontrol
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U novacontrol"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  novacontrol-data:
+  novacontrol-logs:
+  redis-data:
+  postgres-data:

@@ -1,0 +1,1 @@
+"""Local web platform assets."""

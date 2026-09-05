@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" role="img" aria-label="NovaControl mark">
+  <defs>
+    <linearGradient id="g" x1="12" x2="84" y1="14" y2="82" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#146C94"/>
+      <stop offset=".55" stop-color="#2F7D57"/>
+      <stop offset="1" stop-color="#6457A6"/>
+    </linearGradient>
+  </defs>
+  <rect width="96" height="96" rx="22" fill="#F8FAFC"/>
+  <path fill="url(#g)" d="M48 11 83 31v34L48 85 13 65V31L48 11Zm0 13L25 37v22l23 13 23-13V37L48 24Z"/>
+  <circle cx="48" cy="48" r="12" fill="#17202A"/>
+  <path fill="#fff" d="M48 38a10 10 0 0 1 10 10H48V38Z"/>
+</svg>

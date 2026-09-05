@@ -1,0 +1,33 @@
+app:
+  name: NovaControl
+  environment: development
+  log_level: INFO
+
+database:
+  url: sqlite:///data/novacontrol.sqlite3
+  echo: false
+
+redis:
+  url: redis://localhost:6379/0
+
+security:
+  require_approval_for_sensitive_actions: true
+  audit_log_path: logs/audit.log
+
+modules:
+  api:
+    enabled: true
+  gui:
+    enabled: true
+  memory:
+    enabled: true
+  planning:
+    enabled: true
+  agents:
+    enabled: true
+  tools:
+    enabled: true
+  plugins:
+    enabled: true
+  scheduler:
+    enabled: true

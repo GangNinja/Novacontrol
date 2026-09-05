@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#030810">
+    <title>NovaControl</title>
+    <link rel="icon" href="/static/nova-mark.svg">
+    <link rel="stylesheet" href="/static/styles.css?v=__NC_ASSET_VERSION__">
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700;800;900&family=Rajdhani:wght@300;400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+  </head>
+  <body>
+    <a href="#mainContent" class="skip-link">Skip to main content</a>
+    <!-- Animated background -->
+    <canvas id="bgCanvas" aria-hidden="true"></canvas>
+    <div class="grid-overlay"></div>
+
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="logo-container">
+            <div class="logo-ring"></div>
+            <img src="/static/nova-mark.svg" alt="" class="logo-img">
+          </div>
+          <div>
+            <h1>NovaControl</h1>
+            <span id="statusText" class="status-glow" aria-live="polite">Initializing...</span>
+          </div>
+        </div>
+        <nav class="nav" aria-label="Workspace">
+          <button class="nav-item active" data-panel="homePanel" type="button" aria-label="Command">
+            <span class="nav-icon" aria-hidden="true">&#9670;</span>Command
+          </button>
+          <button class="nav-item" data-panel="chatPanel" type="button" aria-label="Chat">
+            <span class="nav-icon" aria-hidden="true">&#9672;</span>Chat
+          </button>
+          <button class="nav-item" data-panel="explorePanel" type="button" aria-label="Explore">
+            <span class="nav-icon" aria-hidden="true">&#9673;</span>Explore
+          </button>
+          <button class="nav-item" data-panel="buildPanel" type="button" aria-label="Build">
+            <span class="nav-icon" aria-hidden="true">&#9674;</span>Build
+          </button>
+          <button class="nav-item" data-panel="learnPanel" type="button" aria-label="Learn">
+            <span class="nav-icon" aria-hidden="true">&#9675;</span>Learn
+          </button>
+          <button class="nav-item" data-panel="systemPanel" type="button" aria-label="System">
+            <span class="nav-icon" aria-hidden="true">&#9676;</span>System
+          </button>
+          <button class="nav-item" data-panel="settingsPanel" type="button" aria-label="Settings">
+            <span class="nav-icon" aria-hidden="true">&#9677;</span>Settings
+          </button>
+          <button class="nav-item" data-panel="cliPanel" type="button" aria-label="CLI Output">
+            <span class="nav-icon" aria-hidden="true">&#9678;</span>CLI
+          </button>
+        </nav>
+        <div class="sidebar-footer">
+          <label for="tokenInput" class="sr-only">API token</label>
+          <input id="tokenInput" type="password" autocomplete="off" placeholder="API token" class="cyber-input" aria-label="API token">
+          <button id="refreshButton" type="button" class="cyber-btn small">Refresh</button>
+          <span id="uiVersion" class="ui-version" title="This page's UI build id — it changes whenever any UI file changes. If it differs after a refresh, you were looking at a stale cached page.">UI v__NC_UI_VERSION__</span>
+        </div>
+      </aside>
+
+      <main id="mainContent" class="workspace">
+        <section id="homePanel" class="panel active">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Workspace</p>
+              <h2>Command Center</h2>
+            </div>
+            <button id="homeHealthButton" type="button" class="cyber-btn">Check System</button>
+          </div>
+          <div id="metricGrid" class="metric-grid"></div>
+          <article class="command-console">
+            <h3>Jarvis Command</h3>
+            <div class="ai-composer command-composer">
+              <label for="commandInput" class="sr-only">Command</label>
+              <input id="commandInput" type="text" placeholder="What should NovaControl do? Try: open notepad, open chrome" class="cyber-input" aria-label="Command input">
+              <div class="composer-actions">
+                <button id="commandPlanButton" type="button" class="cyber-btn">Preview Action</button>
+                <button id="commandRunButton" type="button" class="cyber-btn primary">Approve And Run</button>
+              </div>
+            </div>
+            <div id="commandOutput" class="friendly-output empty-state">
+              <div class="empty-hint"><span class="empty-hint-icon">&#9654;</span> Type a command above and click Preview to see what NovaControl will do</div>
+            </div>
+          </article>
+          <div class="two-column">
+            <article class="surface">
+              <h3>Recent Result</h3>
+              <div id="homeResult" class="friendly-output empty-state">
+                <div class="empty-hint"><span class="empty-hint-icon">&#9734;</span> Results from your last action will appear here</div>
+              </div>
+            </article>
+            <article class="surface">
+              <h3>Available Capabilities</h3>              <div id="capabilityList" class="capability-list"></div>
+            </article>
+          </div>
+
+          <article class="surface">
+            <h3>Recent Activity</h3>
+            <div id="homeActivity" class="activity-list"></div>
+          </article>
+
+        </section>
+
+        <section id="chatPanel" class="panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">AI Mode</p>
+              <h2>Chat</h2>
+            </div>
+            <div class="button-row">
+              <button id="voiceButton" type="button" class="cyber-btn" aria-label="Start voice input">Voice Input</button>
+              <button id="voiceChatButton" type="button" class="cyber-btn" aria-label="Start voice chat mode">Voice Chat</button>
+              <button id="stopVoiceButton" type="button" class="cyber-btn danger" aria-label="Stop voice">Stop Voice</button>
+              <button id="speakButton" type="button" class="cyber-btn" aria-label="Read last response aloud">Read Aloud</button>
+            </div>
+          </div>
+          <div id="voiceStatus" class="voice-status" aria-live="polite">Voice ready</div>
+          <div class="welcome-card">
+            <h3>Chat With NovaControl</h3>
+            <p>Ask anything —NovaControl can help with explanations, planning, coding tasks, desktop automation, and more.</p>
+            <div class="example-chips">
+              <button class="example-chip" onclick="document.getElementById('chatInput').value='Explain quantum computing in simple terms';document.getElementById('askButton').click()">Explain quantum computing</button>
+              <button class="example-chip" onclick="document.getElementById('chatInput').value='What can you do?';document.getElementById('askButton').click()">What can you do?</button>
+              <button class="example-chip" onclick="document.getElementById('chatInput').value='Help me plan a project';document.getElementById('askButton').click()">Help me plan a project</button>
+            </div>
+          </div>
+          <div class="ai-composer">
+            <label for="chatInput" class="sr-only">Chat message</label>
+            <textarea id="chatInput" rows="2" placeholder="Type a message or ask NovaControl anything" class="cyber-input" aria-label="Chat message"></textarea>
+            <div class="composer-actions">
+              <button id="askButton" type="button" class="cyber-btn primary">Send</button>
+            </div>
+          </div>
+          <div id="chatStream" class="ai-mode-output empty-state"></div>
+        </section>
+
+        <section id="explorePanel" class="panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">AI Research</p>
+              <h2>Explore</h2>
+            </div>
+          </div>
+          <div class="welcome-card">
+            <h3>Research Any Topic</h3>
+            <p>Search the web and get a synthesized answer with sources, key findings, and follow-up questions.</p>
+            <div class="example-chips">
+              <button class="example-chip" onclick="document.getElementById('exploreInput').value='How does photosynthesis work';document.getElementById('exploreButton').click()">How does photosynthesis work</button>
+              <button class="example-chip" onclick="document.getElementById('exploreInput').value='Best programming languages for beginners';document.getElementById('exploreButton').click()">Best programming languages</button>
+              <button class="example-chip" onclick="document.getElementById('exploreInput').value='Compare React vs Vue vs Svelte';document.getElementById('exploreButton').click()">React vs Vue vs Svelte</button>
+            </div>
+          </div>
+          <div class="ai-composer top-composer">
+            <label for="exploreInput" class="sr-only">Research topic</label>
+            <input id="exploreInput" type="text" placeholder="What do you want to research?" class="cyber-input" aria-label="Research topic">
+            <div class="composer-actions">
+              <button id="exploreButton" type="button" class="cyber-btn primary">Research</button>
+            </div>
+          </div>
+          <div id="exploreOutput" class="ai-mode-output empty-state">
+            <div class="empty-hint"><span class="empty-hint-icon">&#9733;</span> Enter a topic above and click Research to begin</div>
+          </div>
+        </section>
+
+        <section id="buildPanel" class="panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Planning</p>
+              <h2>Build And Improve</h2>
+            </div>
+          </div>
+          <div class="split-tools">
+            <article class="surface">
+              <h3>Plan Work</h3>
+              <label for="planInput" class="sr-only">Planning goal</label>
+              <textarea id="planInput" rows="3" placeholder="Describe your goal —NovaControl will break it into steps" class="cyber-input" aria-label="Planning goal"></textarea>
+              <button id="planButton" type="button" class="cyber-btn">Create Plan</button>
+            </article>
+            <article class="surface">
+              <h3>Improve NovaControl</h3>
+              <label for="improveInput" class="sr-only">Improvement goal</label>
+              <textarea id="improveInput" rows="3" placeholder="What should NovaControl learn or improve?" class="cyber-input" aria-label="Improvement goal"></textarea>
+              <div class="button-row">
+                <button id="improveButton" type="button" class="cyber-btn">Inspect And Plan</button>
+                <button id="previewButton" type="button" class="cyber-btn">Run Temporary Preview</button>
+                <button id="approveButton" type="button" class="cyber-btn primary">Approve And Apply</button>
+              </div>
+            </article>
+          </div>
+          <div id="buildOutput" class="friendly-output empty-state">
+            <div class="empty-hint"><span class="empty-hint-icon">&#9881;</span> Describe a goal in either panel and click the action button</div>
+          </div>
+        </section>
+
+        <section id="learnPanel" class="panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Feedback Loop</p>
+              <h2>Learn And Train</h2>
+            </div>
+          </div>
+          <div class="split-tools">
+            <article class="surface">
+              <h3>Learning Goal</h3>
+              <label for="learnGoal" class="sr-only">Learning goal</label>
+              <textarea id="learnGoal" rows="3" placeholder="What should improve?" class="cyber-input" aria-label="Learning goal"></textarea>
+            </article>
+            <article class="surface">
+              <h3>Your Feedback</h3>
+              <label for="learnFeedback" class="sr-only">Learning feedback</label>
+              <textarea id="learnFeedback" rows="3" placeholder="Feedback for the next cycle" class="cyber-input" aria-label="Learning feedback"></textarea>
+            </article>
+          </div>
+          <div class="button-row action-row">
+            <button id="learnButton" type="button" class="cyber-btn">Run Learning Cycle</button>
+            <button id="trainButton" type="button" class="cyber-btn primary">Auto Train</button>
+          </div>
+          <div id="learnOutput" class="friendly-output empty-state">
+            <div class="empty-hint"><span class="empty-hint-icon">&#9733;</span> Run a learning cycle to help NovaControl improve from feedback</div>
+          </div>
+        </section>
+
+        <section id="systemPanel" class="panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Runtime</p>
+              <h2>System</h2>
+            </div>
+            <div class="button-row">
+              <button id="systemHealthButton" type="button" class="cyber-btn">Health</button>
+              <button id="hardenButton" type="button" class="cyber-btn">Harden</button>
+              <button id="packageButton" type="button" class="cyber-btn">Package</button>
+            </div>
+          </div>
+          <div id="systemOutput" class="friendly-output empty-state">
+            <div class="empty-hint"><span class="empty-hint-icon">&#9881;</span> Click Health to check system status, or Harden to verify readiness</div>
+          </div>
+        </section>
+
+        <section id="settingsPanel" class="panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Preferences</p>
+              <h2>Settings</h2>
+            </div>
+            <button id="saveSettingsButton" type="button" class="cyber-btn primary">Save</button>
+          </div>
+          <div class="settings-grid">
+            <label class="field">
+              <span>Approval mode</span>
+              <select id="approvalMode" class="cyber-input">
+                <option value="ask">Ask</option>
+                <option value="deny">Deny</option>
+              </select>
+            </label>
+            <label class="check-field">
+              <input id="detailedExplanations" type="checkbox" class="cyber-checkbox">
+              <span>Detailed explanations</span>
+            </label>
+            <label class="check-field">
+              <input id="includeVideos" type="checkbox" class="cyber-checkbox">
+              <span>Explore videos</span>
+            </label>
+          </div>
+          <div id="settingsOutput" class="friendly-output empty-state"></div>
+        </section>
+
+        <section id="cliPanel" class="panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Technical</p>
+              <h2>CLI Output</h2>
+            </div>
+            <button id="clearCliButton" type="button" class="cyber-btn">Clear</button>
+          </div>
+          <pre id="cliOutput" class="cli-output"></pre>
+        </section>
+      </main>
+    </div>
+    <script src="/static/js/dom.js?v=__NC_ASSET_VERSION__"></script>
+    <script src="/static/js/state.js?v=__NC_ASSET_VERSION__"></script>
+    <script src="/static/js/render-utils.js?v=__NC_ASSET_VERSION__"></script>
+    <script src="/static/js/render-explore.js?v=__NC_ASSET_VERSION__"></script>
+    <script src="/static/js/render-panels.js?v=__NC_ASSET_VERSION__"></script>
+    <script src="/static/js/voice.js?v=__NC_ASSET_VERSION__"></script>
+    <script src="/static/js/effects.js?v=__NC_ASSET_VERSION__"></script>
+    <script src="/static/app.js?v=__NC_ASSET_VERSION__"></script>
+  </body>
+</html>
