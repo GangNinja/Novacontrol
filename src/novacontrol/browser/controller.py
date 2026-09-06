@@ -13,6 +13,7 @@ from novacontrol.browser.models import (
     BrowserActionType,
     BrowserWorkflow,
 )
+from novacontrol.core.audit import AutomationAuditLog, InMemoryAutomationAuditLog
 from novacontrol.core.security import (
     ApprovalGateway,
     ApprovalRequest,
@@ -223,9 +224,11 @@ class BrowserAutomationController:
         *,
         approval_gateway: ApprovalGateway | None = None,
         runner: BrowserRunner | None = None,
+        audit_log: AutomationAuditLog | None = None,
     ) -> None:
         self.approval_gateway = approval_gateway or DenyByDefaultApprovalGateway()
         self.runner = runner or NoopBrowserRunner()
+        self.audit_log = audit_log or InMemoryAutomationAuditLog()
 
     def plan_navigation(self, url: str) -> BrowserWorkflow:
         return BrowserWorkflow(
@@ -311,6 +314,9 @@ class BrowserAutomationController:
         return tuple(results)
 
     async def execute_action(self, action: BrowserAction) -> BrowserActionResult:
+        """Execute one action, recording its outcome (denied/completed/failed)
+        on the audit log so every run leaves a timestamped trace."""
+        approval_id: str | None = None
         if _requires_approval(action.type):
             approval = await self.approval_gateway.request_approval(
                 ApprovalRequest(
@@ -321,29 +327,36 @@ class BrowserAutomationController:
                     metadata=action.to_dict(),
                 )
             )
+            approval_id = approval.request_id
             if not approval.approved:
-                return BrowserActionResult(
+                result = BrowserActionResult(
                     action_id=action.id,
                     status=BrowserActionStatus.DENIED,
                     output={},
                     error=approval.reason or "Browser automation was not approved.",
-                    approval_id=approval.request_id,
+                    approval_id=approval_id,
                 )
+                await self.audit_log.append(result)
+                return result
 
         try:
             output = await self.runner.run(action)
-            return BrowserActionResult(
+            result = BrowserActionResult(
                 action_id=action.id,
                 status=BrowserActionStatus.COMPLETED,
                 output=dict(output),
+                approval_id=approval_id,
             )
         except Exception as exc:
-            return BrowserActionResult(
+            result = BrowserActionResult(
                 action_id=action.id,
                 status=BrowserActionStatus.FAILED,
                 output={},
                 error=f"{type(exc).__name__}: {exc}",
+                approval_id=approval_id,
             )
+        await self.audit_log.append(result)
+        return result
 
     async def close(self) -> None:
         close = getattr(self.runner, "close", None)

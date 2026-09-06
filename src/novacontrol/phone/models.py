@@ -17,6 +17,9 @@ class PhoneBridgeState(StrEnum):
 
 class PhoneActionType(StrEnum):
     OPEN_APPLICATION = "open_application"
+    SEND_TEXT = "send_text"
+    CALL = "call"
+    SCREENSHOT = "screenshot"
 
 
 class PhoneActionStatus(StrEnum):

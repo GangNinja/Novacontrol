@@ -16,19 +16,44 @@ from novacontrol.application_helpers import (
     build_auto_code_changes,
     build_preview_payload,
     parse_browser_command,
-    parse_desktop_command,
+    parse_phone_command,
     resolve_phone_target,
     verify_code_changes,
 )
+from novacontrol.agentcore import (
+    ActionEngine,
+    AdaptivePlanner,
+    AgenticOrchestrator,
+    ApplicationKnowledgeGraph,
+    EvaluationLedger,
+    RecoveryEngine,
+    TaskInterpreter,
+    UiPerceptionEngine,
+    Verifier,
+)
 from novacontrol.automation import AutomationManager
-from novacontrol.brain import BrainIntent, BrainRequest, NovaBrain
+from novacontrol.brain import BrainDecision, BrainIntent, BrainRequest, NovaBrain
+from novacontrol.brain.brain import looks_like_research_question
+from novacontrol.brain.scratch import scratchable_intent
 from novacontrol.browser import BrowserAutomationController, BrowserAutomationModule, PlaywrightBrowserRunner
+from novacontrol.core.buglog import BugLog
 from novacontrol.core.events import Event, EventBus
 from novacontrol.core.runtime import EventDrivenRuntime
 from novacontrol.core.security import ApprovalDecision, ApprovalRequest, DenyByDefaultApprovalGateway
 from novacontrol.desktop import DesktopAutomationController, DesktopAutomationModule, LocalDesktopRunner
+from novacontrol.desktop.vision import VisionController
 from novacontrol.explore import ExploreModule, ExploreRequest, ExploreService
-from novacontrol.integrations import build_llm_provider_from_environment
+from novacontrol.intelligence import GlobalInputIntelligence, UnderstandResult
+from novacontrol.intelligence.intent import IntentName, RiskLevel
+from novacontrol.integrations import (
+    CLOUD_LLM_PRESETS,
+    build_cloud_provider,
+    build_llm_provider_from_environment,
+    cloud_llm_presets,
+    get_cloud_preset,
+    make_ollama_reprobe,
+)
+from novacontrol.integrations.llm import _redact_key
 from novacontrol.knowledge import KnowledgeBase
 from novacontrol.memory import MemoryManager, MemoryModule, MemoryNamespace, SqliteMemoryStore
 from novacontrol.persistence import JsonStateStore
@@ -38,7 +63,7 @@ from novacontrol.plugins import PluginMarketplaceModule
 from novacontrol.projects import ProjectManager
 from novacontrol.scheduler import InMemoryScheduler
 from novacontrol.self_improvement import CodeChange, SelfImprovementEngine
-from novacontrol.settings import SettingsManager
+from novacontrol.settings import BRAIN_MODES, SettingsManager
 from novacontrol.skills import SkillRegistry
 from novacontrol.tasks import TaskCenter, TaskRecordStatus
 from novacontrol.tools import ToolExecutor, ToolModule, ToolRegistry
@@ -94,10 +119,45 @@ class NovaControlApplication:
     def __init__(self, *, data_dir: str | Path | None = None) -> None:
         self.event_bus = EventBus(continue_on_error=True)
         self.runtime = EventDrivenRuntime(self.event_bus)
-        self.brain = NovaBrain(completion_provider=build_llm_provider_from_environment())
+        # Lazy Ollama upgrade: if boot found no LLM, each chat request probes for a
+        # freshly started Ollama (rate-limited) and hot-swaps it in — for the brain
+        # AND Explore synthesis — without a server restart. The callback resolves
+        # self.explore lazily: it fires on a chat request, long after __init__.
+        self._ollama_reprobe = make_ollama_reprobe()
+        # Read the persisted brain mode FIRST so the boot provider honors it: a
+        # user who switched to scratch must not get one LLM answer before the UI
+        # loads. The on_provider_upgrade callback resolves self.explore lazily —
+        # it fires on a chat request, long after __init__.
         self.data_dir = Path(data_dir) if data_dir is not None else self._DEFAULT_DATA_DIR
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.state_store = JsonStateStore(self.data_dir)
+        self.settings = (
+            SettingsManager.from_dict(self.state_store.read("settings"))
+            if self.state_store is not None
+            else SettingsManager()
+        )
+        boot_mode = self.settings.settings.brain_mode
+        # Persisted cloud LLM config (provider/model + the API key). The store
+        # lives in the app's data dir (gitignored runtime state, same as
+        # tasks.json) — the key NEVER leaves this machine except to the
+        # provider itself, and no API endpoint ever returns it.
+        # _cloud_llm_store: JsonStateStore namespace name; read()/write() go
+        # through self.state_store.read("cloud_llm") / .write("cloud_llm", …).
+        self._cloud_llm_store = self.state_store
+        stored_cloud = self._cloud_llm_store.read("cloud_llm") if self._cloud_llm_store is not None else {}
+        boot_cloud = build_cloud_provider(
+            str(stored_cloud.get("provider", "")),
+            str(stored_cloud.get("api_key", "")),
+            model=str(stored_cloud.get("model", "")),
+        ) if stored_cloud.get("provider") and stored_cloud.get("api_key") else None
+        self.brain = NovaBrain(
+            completion_provider=build_llm_provider_from_environment(),
+            ollama_reprobe=self._ollama_reprobe,
+            on_provider_upgrade=lambda provider: self._sync_explore_provider(),
+        )
+        if boot_cloud is not None:
+            self.brain.set_cloud_provider(boot_cloud)
+        self.brain.set_mode(boot_mode)
         memory_store = SqliteMemoryStore(self.data_dir / "memory.sqlite3")
         self.memory = MemoryManager(memory_store)
         self.self_improvement = SelfImprovementEngine(Path.cwd())
@@ -108,6 +168,9 @@ class NovaControlApplication:
             completion_provider=self.brain.completion_provider,
             event_bus=self.event_bus,
         )
+        # Scratch mode means the local brain everywhere — Chat AND Explore
+        # synthesis — while llm/auto keep whatever boot resolved.
+        self._sync_explore_provider()
         self.planning = PlanningEngine()
         self.workflow_executor = WorkflowExecutor()
         self.agent_registry = AgentRegistry()
@@ -142,11 +205,6 @@ class NovaControlApplication:
             if self.state_store is not None
             else TaskCenter()
         )
-        self.settings = (
-            SettingsManager.from_dict(self.state_store.read("settings"))
-            if self.state_store is not None
-            else SettingsManager()
-        )
         self._improvement_previews: dict[str, dict[str, Any]] = {}
         # Server-side approval tokens: token -> {"command", "plan", "expires_at"}. Minted by
         # plan_desktop_command and consumed once by execute_desktop_command. A client can never
@@ -156,6 +214,49 @@ class NovaControlApplication:
         self.desktop = DesktopAutomationController(runner=LocalDesktopRunner())
         self.phone = PhoneControlController()
         self.browser = BrowserAutomationController(runner=PlaywrightBrowserRunner())
+        # Vision-guided control + the shared bug log (data/bugs.json survives
+        # restarts; the Vision panel and /bugs endpoints read the same file).
+        self.bug_log = BugLog(self.data_dir / "bugs.json")
+        self.vision = VisionController(
+            self.desktop, bug_log=self.bug_log,
+            llm_provider=self.brain.completion_provider,
+        )
+        # THE Global Intelligence Layer — the single language brain every
+        # entry point consumes before any subsystem sees raw text. It shares
+        # the brain's LLM provider (semantic fallback only when deterministic
+        # layers cannot parse) and keeps its own rolling interaction context.
+        self.intelligence = GlobalInputIntelligence(
+            completion_provider=self.brain.completion_provider,
+        )
+
+        # ── Agentic architecture (agentcore) ─────────────────────────
+        # The orchestrator composes the controllers above; it owns task state,
+        # planning, perception, verification, recovery, application knowledge,
+        # and the evaluation ledger. Vision gets the REAL completion provider
+        # (falling back internally when no multimodal model is available).
+        self._agentic_knowledge = ApplicationKnowledgeGraph(
+            self.state_store.read("agentic_knowledge") if self.state_store is not None else None
+        )
+        self._agentic_evaluation = EvaluationLedger()
+        self._agentic_evaluation.load(self.state_store.read("agentic_evaluation") if self.state_store is not None else {})
+        self._agentic_persist()
+        self.agentic = AgenticOrchestrator(
+            perception=UiPerceptionEngine(
+                vision_processor=self._build_vision_processor(),
+                browser_runner=self.browser.runner,
+                completion_provider=self.brain.completion_provider,
+            ),
+            actions=ActionEngine(browser_runner=self.browser.runner, desktop_runner=self.desktop.runner),
+            planner=AdaptivePlanner(),
+            verifier=Verifier(),
+            recovery=RecoveryEngine(knowledge=self._agentic_knowledge),
+            knowledge=self._agentic_knowledge,
+            evaluation=self._agentic_evaluation,
+            interpreter=TaskInterpreter(completion_provider=self.brain.completion_provider),
+            research_fn=self._agentic_research,
+            persist_fn=self._agentic_persist,
+            event_bus=self.event_bus,
+        )
 
         self.runtime.register_module(MemoryModule(self.memory))
         self.runtime.register_module(PlanningModule(self.planning, self.workflow_executor))
@@ -168,6 +269,145 @@ class NovaControlApplication:
         self.runtime.register_module(BrowserAutomationModule(self.browser))
         self.runtime.register_module(VisionModule())
         self.runtime.register_module(VoiceModule())
+
+    # --- Brain mode (local scratch ↔ local LLM) ---
+
+    def _build_vision_processor(self) -> object:
+        """Multimodal vision processor backed by the live LLM provider.
+
+        The old registration `VisionModule()` silently used the deterministic
+        fallback forever; the agentic perception engine needs the real thing,
+        with graceful internal fallback when no multimodal model is present.
+        """
+        from novacontrol.vision.multimodal import MultimodalVisionProcessor
+
+        return MultimodalVisionProcessor(llm_provider=self.brain.completion_provider)
+
+    async def _agentic_research(self, question: str) -> dict[str, Any]:
+        """Research bridge: agentcore asks, the existing Explore engine answers.
+
+        Returns a flat dict (summary + sources) so agentcore stays decoupled
+        from the explore package.
+        """
+        report = await self.explore.research(
+            ExploreRequest(topic=question, depth="quick", max_sources=4, include_videos=False)
+        )
+        return {
+            "summary": report.overview or report.answer or report.detailed_explanation[:500],
+            "sources": [source.to_dict() for source in report.sources[:5]],
+        }
+
+    def _agentic_persist(self) -> None:
+        """Persist agentic knowledge and evaluation state as JSON namespaces."""
+        if self.state_store is None:
+            return
+        try:
+            self.state_store.write("agentic_knowledge", self._agentic_knowledge.to_dict())
+            self.state_store.write("agentic_evaluation", self._agentic_evaluation.snapshot())
+        except Exception:
+            pass  # persistence failures never break a running task
+
+    async def run_agentic_task(self, request: str) -> dict[str, Any]:
+        """Run the full agentic loop for a natural-language goal."""
+        state = await self.agentic.run_task(request)
+        return state.to_dict()
+
+    def agentic_metrics(self) -> dict[str, Any]:
+        return self._agentic_evaluation.to_dict()
+
+    def agentic_knowledge(self) -> dict[str, Any]:
+        return self._agentic_knowledge.to_dict()
+
+    def set_brain_mode(self, mode: str) -> dict[str, Any]:
+        """Hot-swap the chat brain between auto, llm, and scratch.
+
+        The brain is the source of truth for which provider runs; the setting is
+        mirrored here so the choice survives restarts, and Explore's synthesizer
+        follows the brain so "scratch" is local everywhere, not just in Chat.
+        """
+        if mode not in BRAIN_MODES:
+            raise ValueError(
+                f"Unknown brain mode: {mode!r}. Valid modes: {', '.join(BRAIN_MODES)}"
+            )
+        self.brain.set_mode(mode)
+        self._sync_explore_provider()
+        self.settings.update(brain_mode=mode)
+        self.persist()
+        return self.brain_status()
+
+    def _sync_explore_provider(self) -> None:
+        """Point Explore's synthesizer at the brain's live provider."""
+        self.explore.explainer.set_completion_provider(self.brain.completion_provider)
+
+    def brain_status(self) -> dict[str, Any]:
+        """What the UI's switch and AI Brain card render."""
+        return {
+            "mode": self.brain.mode,
+            "effective_mode": self.brain.effective_mode,
+            "provider": self.brain.provider_name,
+            "model": self.brain.model_name,
+            "model_configured": self.brain.model_configured,
+            "cloud": self.cloud_llm_status(),
+        }
+
+    # --- Cloud LLM (ChatGPT / Gemini / Groq / …) ---
+
+    def cloud_llm_presets(self) -> list[dict[str, str]]:
+        """Provider picker metadata for the Settings panel (no secrets)."""
+        return cloud_llm_presets()
+
+    def cloud_llm_status(self) -> dict[str, Any]:
+        """Configured cloud LLM summary. The API key is NEVER included — only
+        a redacted tail, so no endpoint can leak it."""
+        provider = self.brain.cloud_provider_name
+        if not provider:
+            return {"configured": False}
+        preset = get_cloud_preset(provider.split(":", 1)[-1])
+        return {
+            "configured": True,
+            "provider": provider.split(":", 1)[-1],
+            "label": preset["label"] if preset else provider,
+            "model": self.brain.model_name if self.brain.mode == "cloud" else "",
+            "api_key_hint": self._redacted_cloud_key(),
+        }
+
+    def _redacted_cloud_key(self) -> str:
+        stored = self._cloud_llm_store.read("cloud_llm") if self._cloud_llm_store is not None else {}
+        key = str(stored.get("api_key", ""))
+        return _redact_key(key) if key else ""
+
+    def set_cloud_llm(self, provider_id: str, api_key: str, *, model: str = "") -> dict[str, Any]:
+        """Install a cloud LLM (ChatGPT/Gemini/Groq/…) as the active brain.
+
+        The provider + key persist locally (data/cloud_llm.json, gitignored);
+        the key is only ever sent to the provider's own endpoint.
+        """
+        preset = get_cloud_preset(provider_id)
+        if preset is None:
+            raise ValueError(
+                f"Unknown cloud LLM provider: {provider_id!r}. "
+                f"Valid providers: {', '.join(row['id'] for row in CLOUD_LLM_PRESETS)}"
+            )
+        if not api_key.strip():
+            raise ValueError("An API key is required to configure a cloud LLM.")
+        provider = build_cloud_provider(provider_id, api_key, model=model)
+        assert provider is not None  # preset + non-empty key are validated above
+        if self._cloud_llm_store is not None:
+            self._cloud_llm_store.write("cloud_llm", {"provider": provider_id, "api_key": api_key.strip(), "model": model.strip()})
+        self.brain.set_cloud_provider(provider)
+        self._sync_explore_provider()
+        self.settings.update(brain_mode="cloud")
+        self.persist()
+        return self.brain_status()
+
+    def clear_cloud_llm(self) -> dict[str, Any]:
+        """Remove the stored cloud LLM config and its API key."""
+        if self._cloud_llm_store is not None:
+            self._cloud_llm_store.write("cloud_llm", {})
+        self.brain.set_cloud_provider(None)
+        self._sync_explore_provider()
+        self.persist()
+        return self.brain_status()
 
     async def start(self) -> None:
         await self.runtime.start()
@@ -187,8 +427,74 @@ class NovaControlApplication:
         self.state_store.write("tasks", self.tasks.to_dict())
         self.state_store.write("settings", self.settings.to_dict())
 
+    # -- Global Intelligence Layer --------------------------------------------
+
+    # The ONE place raw language is interpreted. Every handler below consumes
+    # the structured intent this produces — no subsystem re-parses text.
+    _GIL_ROUTES: dict[IntentName, str] = {
+        # Device / J.A.R.V.I.S surface.
+        IntentName.OPEN_APPLICATION: "desktop",
+        IntentName.CLOSE_APPLICATION: "desktop",
+        IntentName.OPEN_FOLDER: "desktop",
+        IntentName.TAKE_SCREENSHOT: "desktop",
+        IntentName.TYPE_TEXT: "desktop",
+        IntentName.PRESS_KEY: "desktop",
+        IntentName.PHONE_OPEN_APP: "phone",
+        IntentName.PHONE_SEND_TEXT: "phone",
+        IntentName.PHONE_CALL: "phone",
+        IntentName.PHONE_SCREENSHOT: "phone",
+        IntentName.PHONE_CONNECT: "phone",
+        IntentName.PHONE_STATUS: "phone",
+        IntentName.NAVIGATE: "browser",
+        IntentName.SEARCH_WEB: "browser",
+        IntentName.EXTRACT_PAGE: "browser",
+        IntentName.FILL_FORM: "browser",
+        # Knowledge / research surface.
+        IntentName.RESEARCH: "explore",
+        IntentName.ANSWER_QUESTION: "chat",
+        IntentName.SUMMARIZE: "explore",
+        IntentName.COMPARE: "explore",
+        IntentName.GENERATE_REPORT: "explore",
+        IntentName.CHAT: "chat",
+        # Planning / automation surface.
+        IntentName.PLAN_TASK: "plan",
+        IntentName.CREATE_AUTOMATION: "plan",
+        IntentName.RUN_AUTOMATION: "plan",
+        IntentName.SCHEDULE_TASK: "plan",
+        # Memory / project / improvement surface (system status stays with the
+        # brain, whose chat already reports status with full context).
+        IntentName.REMEMBER: "memory",
+        IntentName.RECALL: "memory",
+        IntentName.CREATE_PROJECT: "project",
+        IntentName.IMPROVE_SELF: "self_improvement",
+        IntentName.AGENTIC_TASK: "agent",
+    }
+
+    # Handler keys used by _GIL_ROUTES -> BrainIntent values (the legacy
+    # handler table). One adapter keeps the two vocabularies decoupled.
+    _GIL_HANDLER_KEYS: dict[str, BrainIntent] = {
+        "desktop": BrainIntent.DESKTOP_AUTOMATION,
+        "phone": BrainIntent.PHONE_CONTROL,
+        "browser": BrainIntent.BROWSER_AUTOMATION,
+        "explore": BrainIntent.EXPLORE,
+        "chat": BrainIntent.CHAT,
+        "plan": BrainIntent.PLAN,
+        "memory": BrainIntent.MEMORY,
+        "project": BrainIntent.PROJECT,
+        "self_improvement": BrainIntent.SELF_IMPROVEMENT,
+        "agent": BrainIntent.AGENT,
+    }
+
     async def handle_request(self, text: str) -> ApplicationResponse:
-        """Route a natural-language request through the available subsystems."""
+        """Route a natural-language request through the available subsystems.
+
+        The Global Intelligence Layer understands first (normalization, typo
+        tolerance, references, multi-intent decomposition) and picks the
+        capability handler; the brain still runs that handler and shapes the
+        response, so task records, conversation memory, and the response
+        envelope stay identical to the legacy flow. Only what the GIL leaves
+        unresolved reaches the legacy `brain.decide` classifier.
+        """
         await self.memory.remember(
             MemoryNamespace.CONVERSATION,
             f"request-{len((await self.memory.retrieve(MemoryNamespace.CONVERSATION, '', limit=100)))}",
@@ -197,7 +503,36 @@ class NovaControlApplication:
         request = BrainRequest(text=text, context=self.status())
         task = self.tasks.create(text, kind="ask")
         self.tasks.update(task.id, TaskRecordStatus.RUNNING, progress=0.1)
-        decision = self.brain.decide(request)
+
+        # GLOBAL INPUT INTELLIGENCE: choose the capability from meaning, not
+        # exact phrasing (normalization, typo tolerance, references,
+        # multi-intent). Fallback: the legacy brain classifier.
+        understood = await self.intelligence.understand_async(text)
+        gil_intent = understood.intent.intent if understood.strategy != "clarification" else None
+        handler_key = self._GIL_ROUTES.get(gil_intent) if gil_intent is not None else None
+        brain_intent = self._GIL_HANDLER_KEYS.get(handler_key) if handler_key is not None else None
+        if brain_intent is not None:
+            decision = BrainDecision(
+                intent=brain_intent,
+                reason=f"global-intelligence:{understood.strategy}",
+                confidence=understood.intent.confidence,
+            )
+            # A chat-classified request that is really a research question
+            # ("what is X", "compare A and B" — with no canned local answer)
+            # goes to the SAME research pipeline as the Explore tab, so Chat
+            # answers with a sourced report AND the UI receives explore.progress
+            # events: live research stages replace the static scan-line. The
+            # gate is the brain's own classifier, so both paths agree.
+            if decision.intent is BrainIntent.CHAT:
+                lower = text.strip().lower()
+                if looks_like_research_question(lower) and scratchable_intent(lower) is None:
+                    decision = BrainDecision(
+                        intent=BrainIntent.EXPLORE,
+                        reason="global-intelligence:research_question",
+                        confidence=decision.confidence,
+                    )
+        else:
+            decision = self.brain.decide(request)
 
         handler = self._HANDLERS.get(decision.intent)
         if handler:
@@ -207,7 +542,12 @@ class NovaControlApplication:
 
         response = await self.brain.shape_response(request, decision, payload)
         self.tasks.update(task.id, TaskRecordStatus.COMPLETED, progress=1.0, result=response.to_dict())
-        return ApplicationResponse(route, decision.intent.value, response.summary, response.payload)
+        # Downstream resolution ("open it", "do the same thing") needs this
+        # history; remember only when the GIL actually understood the input.
+        if gil_intent is not None:
+            self.intelligence.context.remember_intent(understood.intent.to_dict())
+            self.intelligence.context.remember_utterance(understood.intent.normalized_input)
+        return ApplicationResponse(route, decision.intent.value, response.summary, payload)
 
     # ── Intent handlers ──────────────────────────────────
 
@@ -222,7 +562,17 @@ class NovaControlApplication:
         report = await self.explore.research(
             ExploreRequest(text, include_videos=self.settings.settings.include_videos_in_explore, max_sources=4, max_videos=3)
         )
-        return "explore", report.to_dict()
+        payload = report.to_dict()
+        # Research answers join the conversation, so a follow-up in Chat has
+        # the same context as one asked straight after a chat answer.
+        self.brain.conversation.add_assistant_message(
+            str(payload.get("answer") or payload.get("overview") or ""),
+            metadata={"intent": "explore", "mode": "research"},
+        )
+        self.brain.conversation.add_turn(
+            text, str(payload.get("answer") or payload.get("overview") or ""), intent="explore"
+        )
+        return "explore", payload
 
     async def _handle_plan(self, request: BrainRequest, text: str) -> tuple[str, dict[str, Any]]:
         plan = self.planning.create_plan(text)
@@ -385,46 +735,55 @@ class NovaControlApplication:
         return cast(dict[str, Any], record["plan"])
 
     def plan_desktop_command(self, command: str) -> dict[str, Any]:
-        """Parse a JARVIS command into a workflow, mint an approval token, and return the plan."""
-        parsed_actions = parse_desktop_command(command)
-        actions_descriptions: list[str] = []
-        desktop_actions: list[Any] = []
-        for step in parsed_actions:
-            action_type = step["action"]
-            if action_type == "open":
-                wf = self.desktop.plan_open_application(step["target"])
-                desktop_actions.extend(wf.actions)
-                actions_descriptions.append(f"Open {step['target']}")
-            elif action_type == "open_folder":
-                wf = self.desktop.plan_open_folder(step["target"])
-                desktop_actions.extend(wf.actions)
-                actions_descriptions.append(f"Open folder {step['target']}")
-            elif action_type == "type":
-                wf = self.desktop.plan_type_text(step["text"])
-                desktop_actions.extend(wf.actions)
-                actions_descriptions.append(f"Type '{step['text']}'")
-            elif action_type == "search":
-                wf = self.desktop.plan_search_start_menu(step["text"])
-                desktop_actions.extend(wf.actions)
-                actions_descriptions.append(f"Search for '{step['text']}'")
-            elif action_type == "execute":
-                wf = self.desktop.plan_execute_script(step["target"])
-                desktop_actions.extend(wf.actions)
-                actions_descriptions.append(f"Execute: {step['target']}")
-        from novacontrol.desktop.models import DesktopWorkflow
-        combined = DesktopWorkflow(
-            name=command[:60],
-            actions=tuple(desktop_actions),
+        """Parse a JARVIS command into a workflow, mint an approval token, and return the plan.
+
+        The desktop controller owns parsing and per-step planning (plan_command);
+        this method only wraps the result in the plan envelope and mints the
+        approval token, so a new step kind touches desktop/controller.py only.
+
+        The NATIVE desktop parser plans the whole command first: its chain
+        parser keeps cross-clause context ("open steam and go to library and
+        launch gta v" knows 'library' and 'gta v' belong to Steam), which the
+        GIL's clause-wise split destroys. The GIL clause-merge is the fallback
+        for chains the native parser cannot span — e.g. "open notepad and
+        take a screenshot", whose clauses belong to different domains. A
+        native plan containing a fallback 'execute' step means the parser
+        gave up, so the GIL merge takes over.
+        """
+        from novacontrol.desktop.models import DesktopActionType as _DAT
+        from novacontrol.desktop.models import DesktopWorkflow as _DW
+
+        combined, actions_descriptions, first_target = self.desktop.plan_command(command)
+        native_failed = any(
+            action.type is _DAT.EXECUTE_SCRIPT for action in combined.actions
         )
-        summary_steps = " → ".join(actions_descriptions)
-        first_target = parsed_actions[0].get("target", parsed_actions[0].get("text", command)) if parsed_actions else command
+        if native_failed:
+            # GIL clause-merge fallback: plan each clause in order and merge.
+            understood = self.intelligence.understand(command)
+            clauses = (
+                [i.normalized_input for i in understood.intents]
+                if understood.strategy == "multi_intent" and understood.intents
+                else None
+            )
+            if clauses:
+                merged_actions: list[Any] = []
+                descriptions: list[str] = []
+                first_target = ""
+                for clause in clauses:
+                    clause_workflow, clause_descriptions, clause_target = self.desktop.plan_command(clause)
+                    merged_actions.extend(clause_workflow.actions)
+                    descriptions.extend(clause_descriptions)
+                    if not first_target:
+                        first_target = clause_target
+                combined = _DW(name=command[:40] or "Command", actions=tuple(merged_actions))
+                actions_descriptions = descriptions
         plan: dict[str, Any] = {
             "route": "desktop_automation",
             "status": "waiting_for_approval",
             "command": command,
             "target": first_target,
             "steps": actions_descriptions,
-            "summary": f"Planned: {summary_steps}",
+            "summary": "Planned: " + " → ".join(actions_descriptions),
             "approval": {"required": True, "approved": False, "message": "Review the actions before running them on your computer."},
             "workflow": combined.to_dict(),
         }
@@ -469,13 +828,19 @@ class NovaControlApplication:
                 browser_actions.extend(wf.actions)
                 field_note = f" ({len(fields)} field(s))" if fields else ""
                 action_descriptions.append(f"Fill form at {step['target']}{field_note}")
+            elif step["action"] == "search":
+                # The parser already resolved the query into a search-engine URL.
+                wf = self.browser.plan_navigation(step["target"])
+                browser_actions.extend(wf.actions)
+                query = step.get("query") or step["target"]
+                action_descriptions.append(f"Search the web for {query}")
         if not browser_actions:
             return {
                 "route": "browser_automation",
                 "status": "not_an_action",
                 "command": command,
                 "target": "browser",
-                "summary": "I couldn't plan a browser action from that. Try 'navigate to example.com' or 'fill the form at https://example.com/login with username=admin'.",
+                "summary": "I couldn't plan a browser action from that. Try 'navigate to example.com', 'search the web for something', or 'fill the form at https://example.com/login with username=admin'.",
                 "approval": {"required": False, "approved": False, "message": "No browser navigation or form-fill action was detected."},
                 "workflow": {"id": "", "name": "No action", "actions": []},
             }
@@ -557,16 +922,103 @@ class NovaControlApplication:
         return plan
 
     def plan_phone_command(self, command: str) -> dict[str, Any]:
-        target = resolve_phone_target(command)
-        status = self.phone.status()
-        workflow = self.phone.plan_open_application(target)
-        return {"route": "phone_control", "status": "waiting_for_approval" if status.available else "waiting_for_phone_bridge", "command": command, "target": target, "summary": f"Prepared a phone action for {target}.", "approval": {"required": True, "approved": False, "message": "Pair and review the phone action before running it."}, "bridge": status.to_dict(), "workflow": workflow.to_dict()}
+        """Plan a phone workflow for open/text/call/screenshot phrasing.
 
-    async def execute_phone_command(self, command: str) -> dict[str, Any]:
-        return self.plan_phone_command(command)
+        parse_phone_command classifies the phrasing; each kind maps to one
+        controller planner so the workflow carries the right PhoneActionType.
+        """
+        kind, argument = parse_phone_command(command)
+        if kind == "text":
+            workflow = self.phone.plan_send_text(argument)
+            summary = "Prepared a text message for your phone."
+            target = workflow.actions[0].target or "messaging"
+        elif kind == "call":
+            contact = argument.replace("call ", "", 1).replace("dial ", "", 1).strip() or "contact"
+            workflow = self.phone.plan_call(contact)
+            summary = f"Prepared a call to {contact} on your phone."
+            target = contact
+        elif kind == "screenshot":
+            workflow = self.phone.plan_screenshot()
+            summary = "Prepared a screenshot capture on your phone."
+            target = "screen"
+        else:
+            workflow = self.phone.plan_open_application(argument)
+            summary = f"Prepared a phone action for {argument}."
+            target = argument
+        status = self.phone.status()
+        plan: dict[str, Any] = {
+            "route": "phone_control",
+            "status": "waiting_for_approval" if status.available else "waiting_for_phone_bridge",
+            "command": command,
+            "target": target,
+            "summary": summary,
+            "approval": {
+                "required": True,
+                "approved": False,
+                "message": "Pair and review the phone action before running it.",
+            },
+            "bridge": status.to_dict(),
+            "workflow": workflow.to_dict(),
+        }
+        if status.available:
+            # A paired device can really be driven, so execution must be approval-gated
+            # like desktop/browser: mint a token only the server can validate.
+            plan["approval"]["token"] = self._mint_approval(command, plan)
+        return plan
+
+    async def execute_phone_command(
+        self, command: str, *, approval_token: str | None = None
+    ) -> dict[str, Any]:
+        """Run a planned phone action, guarded by a server-issued approval token.
+
+        While no bridge/device is available, phone execution is not real: return the
+        pairing plan so the UI guides the user to pair a device (nothing runs and no
+        token is required). Once a device is available, execution requires a valid,
+        unconsumed token minted by plan_phone_command for the exact command; a
+        missing, unknown, expired, or replayed token raises ValueError (HTTP 403).
+        """
+        if not self.phone.status().available:
+            return self.plan_phone_command(command)
+        if not approval_token:
+            raise ValueError(
+                "Executing a phone action requires an approval token. "
+                "Call /phone/plan first, review the preview, then execute with its token."
+            )
+        from novacontrol.phone.models import PhoneAction, PhoneActionType, PhoneWorkflow
+        return await self._execute_planned_command(
+            command, approval_token,
+            controller=self.phone,
+            action_cls=PhoneAction, action_type_cls=PhoneActionType, workflow_cls=PhoneWorkflow,
+            result_label="phone action",
+        )
+
+    _PHONE_INTENTS = frozenset({
+        IntentName.PHONE_OPEN_APP, IntentName.PHONE_SEND_TEXT, IntentName.PHONE_CALL,
+        IntentName.PHONE_SCREENSHOT, IntentName.PHONE_CONNECT, IntentName.PHONE_STATUS,
+    })
+    _BROWSER_INTENTS = frozenset({
+        IntentName.NAVIGATE, IntentName.SEARCH_WEB, IntentName.EXTRACT_PAGE, IntentName.FILL_FORM,
+    })
+    _DESKTOP_INTENTS = frozenset({
+        IntentName.OPEN_APPLICATION, IntentName.CLOSE_APPLICATION, IntentName.OPEN_FOLDER,
+        IntentName.TAKE_SCREENSHOT, IntentName.TYPE_TEXT, IntentName.PRESS_KEY,
+    })
 
     def _dispatch_device_command(self, command: str) -> dict[str, Any]:
-        """Route a device command to the appropriate plan function."""
+        """Route a device command to the appropriate plan function.
+
+        The Global Intelligence Layer decides first (normalization, typo
+        tolerance, references, multi-intent decomposition); the legacy brain
+        is the fallback for anything it leaves unresolved.
+        """
+        understood = self.intelligence.understand(command)
+        intent = understood.intent.intent if understood.strategy != "clarification" else None
+        if intent in self._PHONE_INTENTS:
+            return self.plan_phone_command(command)
+        if intent in self._BROWSER_INTENTS:
+            return self.plan_browser_command(command)
+        if intent in self._DESKTOP_INTENTS:
+            return self.plan_desktop_command(command)
         decision = self.brain.decide(BrainRequest(text=command, context=self.status()))
         if decision.intent is BrainIntent.PHONE_CONTROL:
             return self.plan_phone_command(command)
@@ -593,7 +1045,7 @@ class NovaControlApplication:
         if decision.intent is BrainIntent.BROWSER_AUTOMATION:
             return await self.execute_browser_command(command, approval_token=approval_token)
         if decision.intent is BrainIntent.PHONE_CONTROL:
-            return self.plan_phone_command(command)
+            return await self.execute_phone_command(command, approval_token=approval_token)
         return self._dispatch_device_command(command)
 
     # --- Status ---
@@ -605,6 +1057,19 @@ class NovaControlApplication:
             "skills": [skill.schema.name for skill in self.skills.list()],
             "scheduled_tasks": len(self.scheduler.tasks()),
             "tracked_tasks": len(self.tasks.list()),
+            # Trimmed views (no `result` blobs — a completed /ask embeds whole
+            # reports) so the System panel can list tasks with delete buttons
+            # without inflating every BrainRequest context.
+            "tasks": [
+                {
+                    "id": task.id,
+                    "title": task.title,
+                    "kind": task.kind,
+                    "status": task.status.value,
+                    "created_at": task.created_at.isoformat(),
+                }
+                for task in self.tasks.list()[-40:]
+            ],
             "projects": len(self.projects.list_projects()),
             "automation_workflows": len(self.automation.list_workflows()),
             "desktop_available": True,
@@ -613,7 +1078,14 @@ class NovaControlApplication:
             "browser_runner": type(self.browser.runner).__name__,
             "browser_adapter_available": PlaywrightBrowserRunner.is_available(),
             "self_improvement_available": True,
-            "brain": {"provider": self.brain.provider_name, "model_configured": self.brain.model_configured},
+            "brain": self.brain_status(),
             "phone_bridge": self.phone.status().to_dict(),
             "settings": self.settings.to_dict(),
+            # Global Intelligence Layer: interpretation health + the capability
+            # table the orchestrator plans from (self-improvement feed).
+            "intelligence": {
+                "telemetry": self.intelligence.telemetry.to_dict(),
+                "findings": self.intelligence.telemetry.improvement_findings(),
+                "capabilities": self.intelligence.capabilities.to_dict(),
+            },
         }

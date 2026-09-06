@@ -9,6 +9,9 @@ import novacontrol.brain.brain as brain_module
 from novacontrol.brain.brain import BrainIntent, BrainRequest, NovaBrain
 from novacontrol.brain.scratch import (
     ScratchReasoningEngine,
+    _ENGINE_ORDER,
+    _INTENT_ROWS,
+    _SCRATCHABLE_KIND_ORDER,
     _classify,
     _convert_temperature,
     _math_answer,
@@ -353,6 +356,79 @@ class ScratchAnswerTests(unittest.TestCase):
                 self.assertEqual(result["brain_mode"], "scratch")
                 self.assertIn("sections", result)
                 self.assertIsInstance(result["sections"], list)
+
+
+# ---------------------------------------------------------------------------
+# Registry-generated routing coverage (single source of truth)
+# ---------------------------------------------------------------------------
+
+class IntentRegistryGeneratedTests(unittest.TestCase):
+    """Routing tests generated from the scratch intent registry.
+
+    Every row in scratch._INTENT_ROWS carries example utterances and its own
+    confidence/answer; these tests walk the registry, so adding an intent,
+    answer, or trigger pins it the moment it lands — there is no parallel
+    hand-written table to keep in sync.
+    """
+
+    DECIDE_BY_KIND = {
+        "greeting": BrainIntent.CHAT,
+        "math": BrainIntent.CHAT,
+        "time": BrainIntent.CHAT,
+        "conversion": BrainIntent.CHAT,
+        "knowledge": BrainIntent.CHAT,
+        "recommendation": BrainIntent.CHAT,
+        "phone_control": BrainIntent.PHONE_CONTROL,
+        "desktop_control": BrainIntent.DESKTOP_AUTOMATION,
+        "capabilities": BrainIntent.CHAT,
+    }
+
+    def test_engine_order_covers_every_row(self) -> None:
+        self.assertEqual(tuple(row.kind for row in _INTENT_ROWS), _ENGINE_ORDER)
+
+    def test_scratchable_order_is_exactly_the_routing_safe_rows(self) -> None:
+        safe = {row.kind for row in _INTENT_ROWS if row.routing_safe}
+        self.assertEqual(safe, set(_SCRATCHABLE_KIND_ORDER))
+        self.assertEqual(len(_SCRATCHABLE_KIND_ORDER), len(safe), "duplicate kinds in order")
+
+    def test_registry_rows_are_well_formed(self) -> None:
+        for row in _INTENT_ROWS:
+            with self.subTest(kind=row.kind):
+                self.assertTrue(row.examples, "every row needs example utterances")
+                self.assertIn(row.confidence, ("high", "medium"))
+                self.assertIsNotNone(row.detect)
+                self.assertIsNotNone(row.answer)
+
+    def test_every_example_routes_to_its_own_row(self) -> None:
+        brain = NovaBrain()
+        engine = ScratchReasoningEngine()
+        covered = 0
+        for row in _INTENT_ROWS:
+            for example in row.examples:
+                covered += 1
+                with self.subTest(kind=row.kind, example=example):
+                    # Both read surfaces agree on the row.
+                    self.assertEqual(_classify(example), row.kind)
+                    expected_scratchable = row.kind if row.routing_safe else None
+                    self.assertEqual(scratchable_intent(example), expected_scratchable)
+                    # The row's own answer builder runs, with its own confidence.
+                    result = engine.answer(example, {})
+                    self.assertEqual(result["intent"], row.kind)
+                    self.assertEqual(result["confidence"], row.confidence)
+                    self.assertIn("message", result)
+                    # decide() sends it to the intended pipeline.
+                    decision = brain.decide(BrainRequest(example))
+                    self.assertEqual(decision.intent, self.DECIDE_BY_KIND[row.kind])
+        self.assertGreaterEqual(covered, len(_INTENT_ROWS) + 1, "examples should outnumber rows")
+
+    def test_engine_only_rows_never_route_as_scratchable(self) -> None:
+        engine_only = [row for row in _INTENT_ROWS if not row.routing_safe]
+        self.assertEqual(
+            [row.kind for row in engine_only],
+            ["phone_control", "desktop_control", "capabilities"],
+        )
+        for row in engine_only:
+            self.assertNotIn(row.kind, _SCRATCHABLE_KIND_ORDER)
 
 
 if __name__ == "__main__":

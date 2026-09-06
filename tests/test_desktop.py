@@ -6,8 +6,10 @@ import ast
 import shutil
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
+from conftest import AllowGateway
 from novacontrol.core.events import Event, EventBus
 from novacontrol.desktop import (
     DesktopAction,
@@ -19,7 +21,7 @@ from novacontrol.desktop import (
     LocalDesktopRunner,
     NoopDesktopRunner,
 )
-from conftest import AllowGateway
+from novacontrol.desktop.controller import parse_desktop_command
 
 
 class RecordingRunner:
@@ -81,6 +83,20 @@ class DesktopApprovalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results[0].status, DesktopActionStatus.COMPLETED)
         self.assertEqual(runner.actions[0].target, "echo hello")
         self.assertEqual(audit_entries[0].action_id, results[0].action_id)
+        self.assertEqual(audit_entries[0].status, "completed")
+        datetime.fromisoformat(audit_entries[0].recorded_at)  # timestamped trace
+
+    async def test_denied_action_is_audited_with_timestamp(self) -> None:
+        """Denials are traced too — the default gateway refuses before any run."""
+        audit = InMemoryAutomationAuditLog()
+        controller = DesktopAutomationController(runner=RecordingRunner(), audit_log=audit)
+        results = await controller.execute_workflow(controller.plan_open_application("Code"))
+        entries = await audit.read()
+
+        self.assertEqual(results[0].status, DesktopActionStatus.DENIED)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].status, "denied")
+        datetime.fromisoformat(entries[0].recorded_at)
 
     async def test_local_runner_executes_script(self) -> None:
         controller = DesktopAutomationController(
@@ -498,3 +514,164 @@ class DesktopVerificationTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# J.A.R.V.I.S desktop fixes: in-tab web search + app alias registry
+# ---------------------------------------------------------------------------
+
+class JarvisDesktopCommandTests(unittest.TestCase):
+    """\"open chrome and search for cats\" must search IN the browser tab, and
+    spoken app names (steam, mail, settings, ...) must resolve to launchable
+    targets instead of falling into `cmd /c start <name>`."""
+
+    def test_open_then_search_plans_a_web_search_in_that_browser(self) -> None:
+        from novacontrol.desktop.controller import DesktopAutomationController, parse_desktop_command
+        from novacontrol.desktop.models import DesktopActionType
+
+        controller = DesktopAutomationController(runner=RecordingRunner())
+        workflow, descriptions, _ = controller.plan_command("open chrome and search for cats")
+        kinds = [action.type for action in workflow.actions]
+        self.assertEqual(kinds, [DesktopActionType.OPEN_APPLICATION, DesktopActionType.WEB_SEARCH])
+        search_action = workflow.actions[1]
+        self.assertEqual(search_action.target, "cats")
+        self.assertEqual(search_action.parameters.get("browser"), "chrome")
+
+    def test_search_query_keeps_words_joined_by_and(self) -> None:
+        from novacontrol.desktop.controller import parse_desktop_command
+
+        steps = parse_desktop_command("open chrome and search for cats and dogs")
+        self.assertEqual(steps[-1].kind, "search")
+        self.assertEqual(steps[-1].text, "cats and dogs")
+
+    def test_multi_step_chain_splits_type_and_press(self) -> None:
+        from novacontrol.desktop.controller import parse_desktop_command
+
+        steps = parse_desktop_command("open notepad and type hello world and press enter")
+        self.assertEqual(
+            [(step.kind, step.text) for step in steps],
+            [("open", "hello world" and ""), ("type", "hello world"), ("press", "enter")],
+        )
+        # First step opens notepad, not types it.
+        self.assertEqual(steps[0].kind, "open")
+        self.assertEqual(steps[0].target, "notepad")
+
+    def test_edge_browser_search_targets_that_browser(self) -> None:
+        from novacontrol.desktop.controller import DesktopAutomationController
+        from novacontrol.desktop.models import DesktopActionType
+
+        controller = DesktopAutomationController(runner=RecordingRunner())
+        workflow, _, _ = controller.plan_command("open edge and search for trains")
+        self.assertEqual(workflow.actions[1].type, DesktopActionType.WEB_SEARCH)
+        self.assertEqual(workflow.actions[1].parameters.get("browser"), "msedge")
+
+    def test_standalone_search_is_a_web_search_not_execute_script(self) -> None:
+        from novacontrol.desktop.controller import DesktopAutomationController
+        from novacontrol.desktop.models import DesktopActionType
+
+        controller = DesktopAutomationController(runner=RecordingRunner())
+        workflow, _, _ = controller.plan_command("search for latest news on mars")
+        self.assertEqual(workflow.actions[0].type, DesktopActionType.WEB_SEARCH)
+        self.assertEqual(workflow.actions[0].target, "latest news on mars")
+
+    def test_app_aliases_resolve_to_launchable_targets(self) -> None:
+        from novacontrol.desktop.controller import LocalDesktopRunner
+
+        resolve = LocalDesktopRunner._resolve_app_target
+        self.assertEqual(resolve("steam"), "steam://open/main")
+        self.assertEqual(resolve("mail"), "mailto:")
+        self.assertEqual(resolve("settings"), "ms-settings:")
+        self.assertEqual(resolve("notepad"), "notepad.exe")
+        self.assertEqual(resolve("calculator"), "calc.exe")
+        # Unknown names and paths pass through untouched.
+        self.assertEqual(resolve("visual studio code"), "visual studio code")
+        self.assertEqual(resolve("C:/Games/SomeGame.exe"), "C:/Games/SomeGame.exe")
+
+    def test_web_search_plan_carries_query(self) -> None:
+        from novacontrol.desktop.models import DesktopAction, DesktopActionType
+        from novacontrol.desktop.controller import DesktopAutomationController
+
+        # Planner-level contract: one WEB_SEARCH action carrying the query.
+        # (The runner's URL construction shells out and is exercised live.)
+        workflow = DesktopAutomationController(runner=RecordingRunner()).plan_web_search("cats")
+        action: DesktopAction = workflow.actions[0]
+        self.assertEqual(action.type, DesktopActionType.WEB_SEARCH)
+        self.assertEqual(action.target, "cats")
+        # With no browser named, the parameter is omitted (default browser).
+        self.assertNotIn("browser", action.parameters)
+
+
+# ----------- In-app chains, vision clicks, stop, folders (JARVIS batch) --------
+
+class DesktopChainParsingTests(unittest.TestCase):
+    def test_steam_library_launch_chain(self):
+        steps = parse_desktop_command("open steam and go to library and launch gta v")
+        # A known game launches via steam://rungameid deep link (reliable);
+        # a vision click is only the FALLBACK for unknown titles.
+        self.assertEqual(
+            [(s.kind, s.target, s.text) for s in steps],
+            [("open", "steam", ""), ("navigate", "steam", "library"), ("game_launch", "gta v", "")],
+        )
+
+    def test_unknown_game_falls_back_to_vision_click(self):
+        steps = parse_desktop_command("open steam and go to library and launch totally unknown game")
+        self.assertEqual(steps[-1].kind, "click")
+        self.assertIn("play totally unknown game", steps[-1].text)
+
+    def test_stop_that_is_stop_step(self):
+        for phrase in ("stop that", "stop", "stop everything"):
+            steps = parse_desktop_command(phrase)
+            self.assertEqual(len(steps), 1, phrase)
+            self.assertEqual(steps[0].kind, "stop", phrase)
+
+    def test_chain_ending_in_stop_carries_last_app(self):
+        steps = parse_desktop_command("open notepad and type meeting notes and stop")
+        self.assertEqual(steps[-1].kind, "stop")
+        self.assertEqual(steps[-1].target, "notepad")
+
+    def test_spoken_user_folder(self):
+        steps = parse_desktop_command("open downloads")
+        self.assertEqual(steps[0].kind, "open_folder")
+        self.assertIn("Downloads", steps[0].target)
+
+    def test_standalone_click_is_vision_click(self):
+        steps = parse_desktop_command("click file")
+        self.assertEqual(steps[0].kind, "click")
+        self.assertEqual(steps[0].text, "file")
+
+    def test_search_payload_with_and_stays_one_step(self):
+        steps = parse_desktop_command("search for cats and dogs")
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0].kind, "search")
+        self.assertEqual(steps[0].text, "cats and dogs")
+
+
+class DesktopInAppPlanningTests(unittest.TestCase):
+    def setUp(self):
+        self.controller = DesktopAutomationController(runner=NoopDesktopRunner())
+
+    def test_plan_app_navigate_uses_deep_link_parameters(self):
+        workflow = self.controller.plan_app_navigate("steam", "library")
+        action = workflow.actions[0]
+        self.assertEqual(action.type.value, "app_navigate")
+        self.assertEqual(action.parameters["app"], "steam")
+        self.assertEqual(action.target, "library")
+
+    def test_plan_vision_click_carries_label(self):
+        workflow = self.controller.plan_vision_click("Library button")
+        action = workflow.actions[0]
+        self.assertEqual(action.type.value, "vision_click")
+        self.assertEqual(action.target, "Library button")
+
+    def test_plan_desktop_command_emits_navigate_and_game_launch_actions(self):
+        workflow, descriptions, _first = self.controller.plan_command(
+            "open steam and go to library and launch gta v"
+        )
+        kinds = [action.type.value for action in workflow.actions]
+        self.assertIn("app_navigate", kinds)
+        self.assertIn("game_launch", kinds)
+        self.assertTrue(any("Launch" in description for description in descriptions))
+
+    def test_plan_stop_emits_stop_app(self):
+        workflow, _descriptions, _first = self.controller.plan_command("stop that")
+        self.assertEqual(workflow.actions[0].type.value, "stop_app")

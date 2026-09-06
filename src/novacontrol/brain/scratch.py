@@ -9,8 +9,9 @@ from __future__ import annotations
 import math
 import operator
 import re
-from collections.abc import Callable, Mapping
-from datetime import datetime, timezone
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -479,148 +480,11 @@ _TEMP_PATTERN = re.compile(
 )
 
 
-def _classify(lower: str) -> str:
-    """Classify a user message into a scratch brain intent."""
-    cleaned = lower.strip(" .,!?\"'")
-
-    # Greetings
-    if cleaned in _GREETINGS:
-        return "greeting"
-
-    # Phone control
-    if any(w in lower for w in ("phone", "android", "mobile", "whatsapp", "call ", "sms")):
-        if any(w in lower for w in ("open ", "launch ", "control", "send", "call ", "text ", "message")):
-            return "phone_control"
-
-    # Desktop control
-    if any(phrase in lower for phrase in ("open ", "launch ", "close app", "control desktop", "run app")):
-        return "desktop_control"
-
-    # Capabilities
-    if any(phrase in lower for phrase in ("what can you do", "your capabilities", "who are you", "what are you")):
-        return "capabilities"
-
-    # Time / date
-    if _TIME_PATTERNS.search(lower):
-        return "time"
-
-    # Temperature conversion (check before general unit conversion)
-    if _TEMP_PATTERN.search(lower):
-        return "conversion"
-
-    # Unit conversion: "100 km in miles", "5 kg to lbs"
-    if _UNIT_PATTERN.search(lower):
-        return "conversion"
-
-    # Currency conversion: "100 usd in eur", "50 eur to gbp"
-    if re.search(r'[\d.]+\s*(?:usd|eur|gbp|inr|jpy|cad|aud|cny|krw)\s+(?:in|to|=)\s*(?:usd|eur|gbp|inr|jpy|cad|aud|cny|krw)', lower):
-        return "conversion"
-
-    # Time duration conversion: "2 hours in minutes"
-    if re.search(r'[\d.]+\s*(?:second|minute|hour|day|week|sec|min|hr|h|d|w)s?\s+(?:in|to|=)\s*(?:second|minute|hour|day|week|sec|min|hr|h|d|w)s?', lower):
-        return "conversion"
-
-    # Math
-    if is_arithmetic_query(lower) or _MATH_PATTERNS.search(lower):
-        # Exclude things that look like questions about facts, not math
-        if not any(lower.startswith(q) for q in ("what is", "who", "how many")):
-            return "math"
-        # "what is 2+2" / "what is 15 times 3" should still be math
-        if is_arithmetic_query(lower):
-            return "math"
-        if "sqrt" in lower or "sin " in lower or "cos " in lower or "log " in lower:
-            return "math"
-
-    # Knowledge lookup
-    if _is_knowledge_query(cleaned):
-        return "knowledge"
-
-    # Recommendations
-    if _is_recommendation_query(lower):
-        return "recommendation"
-
-    return "unknown"
-
-
-def _is_knowledge_query(lower: str) -> bool:
-    """Check if this looks like a factual knowledge question."""
-    prefixes = ("what is ", "what are ", "who is ", "who was ", "who invented",
-                "how many ", "how far ", "how old ", "how tall ", "how deep",
-                "how fast ", "how hot ", "how cold ")
-    if any(lower.startswith(p) for p in prefixes):
-        # Check if it's a known fact
-        for key in _KNOWLEDGE:
-            if key in lower or lower.startswith(key):
-                return True
-        # General knowledge pattern — not a math expression
-        if not re.search(r'[\d]\s*[\+\-\*/\^]', lower):
-            return True
-    # General factual patterns without question words
-    factual_patterns = ("capital of ", "invented ", "discovered ", "president of",
-                        "population of", "area of", "currency of")
-    if any(lower.startswith(p) for p in factual_patterns):
-        return True
-    return False
-
-
-def _is_recommendation_query(lower: str) -> bool:
-    """Check if this looks like a recommendation request."""
-    patterns = (
-        "recommend", "suggest", "what should i", "what can i",
-        "give me a", "give me some", "i want to", "i need a",
-        "movie", "book", "food", "eat", "watch", "read",
-    )
-    return any(p in lower for p in patterns)
-
-
-_GREETINGS = frozenset({
-    "hi", "hello", "hey", "hai",
-    "good morning", "good afternoon", "good evening",
-})
-
-
-def scratchable_intent(lower: str) -> str | None:
-    """Narrow routing classifier: which canned local answer does scratch have?
-
-    Single predicate imported by brain.py's ``decide``. Returns the scratch
-    intent name ("greeting" | "math" | "time" | "conversion" | "knowledge" |
-    "recommendation") when the request has a local answer, else ``None``.
-
-    Intentionally narrower than :func:`_classify`: broad "what is X" questions
-    only count when they hit an exact knowledge key — otherwise they deserve a
-    real web answer. Do not broaden this with ``_classify``'s catch-all
-    branches (``desktop_control`` etc.): those are engine intents, not canned
-    local answers, and letting them through would swallow Explore research.
-    """
-    cleaned = lower.strip(" .,!?\"'\t\r\n")
-    if cleaned in _GREETINGS:
-        return "greeting"
-    # Math expressions — symbolic, spelled-out operators, or worded functions
-    if is_arithmetic_query(lower):
-        return "math"
-    if any(lower.startswith(p) for p in ("calculate ", "compute ", "sqrt", "sin ", "cos ", "log")):
-        return "math"
-    # Time / date
-    if re.search(r'what time|current time|what day|what date|today|time now|date now', lower):
-        return "time"
-    # Unit conversion
-    if re.search(r'[\d.]+\s*[a-zA-Z/°]+\s+(?:in|to|into|=)\s+[a-zA-Z/°]+', lower):
-        return "conversion"
-    if re.search(r'[\d.]+\s*(?:usd|eur|gbp|inr|jpy)\s+(?:in|to)', lower):
-        return "conversion"
-    if re.search(r'[\d.]+\s*(?:second|minute|hour|day|week)s?\s+(?:in|to|=)', lower):
-        return "conversion"
-    # Exact knowledge key match
-    for key in _KNOWLEDGE:
-        if key in lower or lower.startswith(key):
-            return "knowledge"
-    # Recommendations
-    if any(w in lower for w in ("recommend", "suggest", "what should i", "what can i eat")):
-        return "recommendation"
-    # Specific movie/book/food requests
-    if any(lower.startswith(p) for p in ("movie", "book", "food", "i want to watch", "i want to read")):
-        return "recommendation"
-    return None
+# The two classifiers that used to live here (_classify, scratchable_intent) and
+# the scattered matchers they each carried (_GREETINGS, time/conversion regexes,
+# knowledge/recommendation word lists) now live in ONE intent registry defined
+# below, after the answer builders it wires up. _classify and scratchable_intent
+# are read surfaces over that registry.
 
 
 # ---------------------------------------------------------------------------
@@ -900,6 +764,307 @@ def _recommendation_answer(text: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Intent registry — single source of truth
+# ---------------------------------------------------------------------------
+# Every scratch capability is ONE row: how the engine detects the intent
+# (detect), the narrower gate decide() uses to send it to a canned local answer
+# (routing, None = same as detect), the answer builder the engine runs
+# (answer), its confidence, and example utterances the routing tests are
+# generated from. _classify and scratchable_intent are read surfaces over
+# these rows — changing one behavior is a one-row edit, never a parallel edit
+# in two functions. Examples must route through BOTH surfaces for their row
+# (a routing_safe row's example must also clear the narrow routing gate, so
+# broad-only phrases like "what is dark matter" stay out of the table — those
+# deliberate two-width edges are pinned by the static INTENTS/narrow tests).
+
+Predicate = Callable[[str, str], bool]           # (lower, cleaned) -> matched
+Answer = Callable[[str, Mapping[str, Any]], dict[str, Any]]  # (text, context) -> {message, sections}
+
+
+@dataclass(frozen=True)
+class _ScratchIntent:
+    kind: str
+    routing_safe: bool
+    detect: Predicate
+    routing: Predicate | None = None
+    answer: Answer | None = None
+    confidence: str = "medium"
+    examples: tuple[str, ...] = ()
+
+
+_GREETINGS = frozenset({
+    "hi", "hello", "hey", "hai",
+    "good morning", "good afternoon", "good evening",
+})
+
+# Time/date detection is deliberately two-width. The engine answers
+# month/year/"current date" questions (detect), but decide() only routes the
+# common forms to a local answer — "explain what year the berlin wall fell"
+# must stay research, never a local clock answer.
+_TIME_ROUTING = re.compile(
+    r'what time|current time|what day|what date|today|time now|date now',
+    re.IGNORECASE,
+)
+
+_CURRENCY_PATTERN = re.compile(
+    r'[\d.]+\s*(?:usd|eur|gbp|inr|jpy|cad|aud|cny|krw)\s+(?:in|to|=)\s*'
+    r'(?:usd|eur|gbp|inr|jpy|cad|aud|cny|krw)',
+    re.IGNORECASE,
+)
+_DURATION_PATTERN = re.compile(
+    r'[\d.]+\s*(?:second|minute|hour|day|week|sec|min|hr|h|d|w)s?\s+(?:in|to|=)\s*'
+    r'(?:second|minute|hour|day|week|sec|min|hr|h|d|w)s?',
+    re.IGNORECASE,
+)
+
+
+def _greeting_match(lower: str, cleaned: str) -> bool:
+    return cleaned in _GREETINGS
+
+
+def _phone_control_match(lower: str, cleaned: str) -> bool:
+    if _contains(lower, "phone", "android", "mobile", "sms"):
+        return any(w in lower for w in ("open ", "launch ", "control", "send", "call ", "text ", "message", "screenshot", "dial "))
+    if "whatsapp" in lower:
+        return True  # a phone-only app; no device word needed
+    # Phone-action verbs that stand alone: text/call/dial/screenshot.
+    return (
+        lower.startswith(("call ", "dial ", "text ", "sms "))
+        or _contains(lower, "send a text", "send text", "take a screenshot", "take screenshot", "screenshot my phone", "screenshot of my phone")
+    )
+
+
+def _contains(text: str, *needles: str) -> bool:
+    return any(needle in text for needle in needles)
+
+
+def _desktop_control_match(lower: str, cleaned: str) -> bool:
+    return any(p in lower for p in ("open ", "launch ", "close app", "control desktop", "run app"))
+
+
+def _capabilities_match(lower: str, cleaned: str) -> bool:
+    return any(p in lower for p in ("what can you do", "your capabilities", "who are you", "what are you"))
+
+
+def _time_detect(lower: str, cleaned: str) -> bool:
+    return bool(_TIME_PATTERNS.search(lower))
+
+
+def _time_routing(lower: str, cleaned: str) -> bool:
+    return bool(_TIME_ROUTING.search(lower))
+
+
+def _conversion_match(lower: str, cleaned: str) -> bool:
+    """Any conversion shape — temperature, unit, currency, or duration — is one
+    intent, and the answer engine's builder handles all four."""
+    return bool(
+        _TEMP_PATTERN.search(lower)
+        or _UNIT_PATTERN.search(lower)
+        or _CURRENCY_PATTERN.search(lower)
+        or _DURATION_PATTERN.search(lower)
+    )
+
+
+def _math_detect(lower: str, cleaned: str) -> bool:
+    """Engine-wide math: symbolic/worded arithmetic plus the complement shapes."""
+    if not (is_arithmetic_query(lower) or _MATH_PATTERNS.search(lower)):
+        return False
+    # "what is 2+2" is still math, but prose like "what is the capital..." is not.
+    if not any(lower.startswith(q) for q in ("what is", "who", "how many")):
+        return True
+    if is_arithmetic_query(lower):
+        return True
+    return "sqrt" in lower or "sin " in lower or "cos " in lower or "log " in lower
+
+
+def _math_routing(lower: str, cleaned: str) -> bool:
+    return is_arithmetic_query(lower) or any(
+        lower.startswith(p) for p in ("calculate ", "compute ", "sqrt", "sin ", "cos ", "log")
+    )
+
+
+def _knowledge_detect(lower: str, cleaned: str) -> bool:
+    """Broad knowledge look: prefix/factual questions route to the knowledge
+    engine, which answers an exact key and otherwise offers Explore."""
+    prefixes = ("what is ", "what are ", "who is ", "who was ", "who invented",
+                "how many ", "how far ", "how old ", "how tall ", "how deep",
+                "how fast ", "how hot ", "how cold ")
+    if any(cleaned.startswith(p) for p in prefixes):
+        for key in _KNOWLEDGE:
+            if key in cleaned or cleaned.startswith(key):
+                return True
+        # General knowledge pattern — not a math expression
+        if not re.search(r'[\d]\s*[+\-*/^]', cleaned):
+            return True
+    factual_patterns = ("capital of ", "invented ", "discovered ", "president of",
+                        "population of", "area of", "currency of")
+    return any(cleaned.startswith(p) for p in factual_patterns)
+
+
+def _knowledge_routing(lower: str, cleaned: str) -> bool:
+    """Narrow gate: only an exact knowledge key counts as a canned local answer."""
+    return any(key in lower or lower.startswith(key) for key in _KNOWLEDGE)
+
+
+def _recommendation_detect(lower: str, cleaned: str) -> bool:
+    patterns = (
+        "recommend", "suggest", "what should i", "what can i",
+        "give me a", "give me some", "i want to", "i need a",
+        "movie", "book", "food", "eat", "watch", "read",
+    )
+    return any(p in lower for p in patterns)
+
+
+def _recommendation_routing(lower: str, cleaned: str) -> bool:
+    if any(w in lower for w in ("recommend", "suggest", "what should i", "what can i eat")):
+        return True
+    return any(lower.startswith(p) for p in ("movie", "book", "food", "i want to watch", "i want to read"))
+
+
+def _capabilities_of(context: Mapping[str, Any]) -> dict[str, bool]:
+    modules = tuple(str(module) for module in context.get("modules", ()))
+    return _capabilities(modules, context)
+
+
+def _kb_answer(builder: Callable[[str], dict[str, Any]]) -> Answer:
+    """Adapt a text-only answer builder to the registry's (text, context) shape."""
+    def build(text: str, context: Mapping[str, Any]) -> dict[str, Any]:
+        return builder(text)
+    return build
+
+
+def _greeting_answer(text: str, context: Mapping[str, Any]) -> dict[str, Any]:
+    caps = _capabilities_of(context)
+    return {"message": _compose_greeting(caps), "sections": _capability_sections(caps)}
+
+
+def _phone_answer(text: str, context: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "message": "Phone control is not active yet. NovaControl needs a paired phone bridge before it can safely operate your device.",
+        "sections": [
+            {
+                "title": "Required Before Phone Control",
+                "items": [
+                    "Pair the phone through an explicit bridge such as Android Debug Bridge or a dedicated companion app.",
+                    "Show every requested action before execution.",
+                    "Require approval for sensitive actions like messages, calls, payments, files, and settings.",
+                ],
+            }
+        ],
+    }
+
+
+def _desktop_answer(text: str, context: Mapping[str, Any]) -> dict[str, Any]:
+    target = _desktop_target(text.lower())
+    return {
+        "message": f"I can prepare a desktop action for {target}, but execution must be approval-gated.",
+        "sections": [
+            {
+                "title": "Desktop Plan",
+                "items": [
+                    f"Create an action to open or control {target}.",
+                    "Show the exact action in the UI.",
+                    "Run it only after approval.",
+                ],
+            }
+        ],
+    }
+
+
+def _capabilities_answer(text: str, context: Mapping[str, Any]) -> dict[str, Any]:
+    caps = _capabilities_of(context)
+    return {
+        "message": "NovaControl is running as a local scratch-brain control app with chat, research, build, learning, voice, desktop, and browser modules.",
+        "sections": _capability_sections(caps),
+    }
+
+
+# Engine/_classify precedence: phone before desktop ("open whatsapp on my
+# phone" is phone control), time before conversion before math, knowledge before
+# recommendation — the historical engine branch order, now the row order.
+_INTENT_ROWS: tuple[_ScratchIntent, ...] = (
+    _ScratchIntent("greeting", True, _greeting_match, answer=_greeting_answer, confidence="high",
+                   examples=("hi", "good morning")),
+    _ScratchIntent("phone_control", False, _phone_control_match, answer=_phone_answer,
+                   examples=("open whatsapp on my phone", "text mom on my phone",
+                             "call john", "take a screenshot on my phone")),
+    _ScratchIntent("desktop_control", False, _desktop_control_match, answer=_desktop_answer,
+                   examples=("open notepad",)),
+    _ScratchIntent("capabilities", False, _capabilities_match, answer=_capabilities_answer,
+                   examples=("what can you do",)),
+    _ScratchIntent("time", True, _time_detect, routing=_time_routing,
+                   answer=_kb_answer(_time_answer), confidence="high",
+                   examples=("what time is it", "what day is today")),
+    _ScratchIntent("conversion", True, _conversion_match,
+                   answer=_kb_answer(_conversion_answer), confidence="high",
+                   examples=("100 km in miles", "72 F to C")),
+    _ScratchIntent("math", True, _math_detect, routing=_math_routing,
+                   answer=_kb_answer(_math_answer), confidence="high",
+                   examples=("what is 2+2", "15 times 3")),
+    _ScratchIntent("knowledge", True, _knowledge_detect, routing=_knowledge_routing,
+                   answer=_kb_answer(_knowledge_answer),
+                   examples=("what is the capital of france", "who invented the telephone")),
+    _ScratchIntent("recommendation", True, _recommendation_detect, routing=_recommendation_routing,
+                   answer=_kb_answer(_recommendation_answer),
+                   examples=("recommend a movie", "what should i eat")),
+)
+_INTENT_BY_KIND = {row.kind: row for row in _INTENT_ROWS}
+_ENGINE_ORDER = tuple(row.kind for row in _INTENT_ROWS)
+
+# decide() consults only the routing_safe rows, and checks math BEFORE
+# time/conversion — an arithmetic phrase wins over a time keyword.
+_SCRATCHABLE_KIND_ORDER = ("greeting", "math", "time", "conversion", "knowledge", "recommendation")
+
+
+def _first_match(
+    order: Sequence[str], lower: str, cleaned: str, *, routing: bool,
+) -> _ScratchIntent | None:
+    """First row in `order` that matches: detect predicates for the engine,
+    routing predicates (routing_safe rows only) for decide()."""
+    for kind in order:
+        row = _INTENT_BY_KIND[kind]
+        if routing and not row.routing_safe:
+            continue
+        predicate = row.routing if routing and row.routing is not None else row.detect
+        if predicate(lower, cleaned):
+            return row
+    return None
+
+
+def _classify(lower: str) -> str:
+    """Broad engine classification: walk the intent registry's detect predicates.
+
+    Used by the answer engine to pick which canned response branch runs. Covers
+    engine-only intents (``phone_control``/``desktop_control``/``capabilities``)
+    too — those rows are routing_safe=False, so scratchable_intent never
+    surfaces them.
+    """
+    cleaned = lower.strip(" .,!?\"'")
+    row = _first_match(_ENGINE_ORDER, lower, cleaned, routing=False)
+    return row.kind if row else "unknown"
+
+
+def scratchable_intent(lower: str) -> str | None:
+    """Narrow routing classifier: which canned local answer does scratch have?
+
+    Single predicate imported by brain.py's ``decide``. Returns the scratch
+    intent name ("greeting" | "math" | "time" | "conversion" | "knowledge" |
+    "recommendation") when the request has a local answer, else ``None``.
+
+    A read surface over the registry: walks the routing_safe rows in
+    _SCRATCHABLE_KIND_ORDER and runs each row's narrow ``routing`` predicate
+    (falling back to ``detect`` for rows with a single width, like greeting or
+    conversion). Intentionally narrower than :func:`_classify`: broad "what is
+    X" questions only count when they hit an exact knowledge key — otherwise
+    they deserve a real web answer. routing_safe=False rows are engine
+    intents, not canned local answers, and never surface here.
+    """
+    cleaned = lower.strip(" .,!?\"'\t\r\n")
+    row = _first_match(_SCRATCHABLE_KIND_ORDER, lower, cleaned, routing=True)
+    return row.kind if row else None
+
+
+# ---------------------------------------------------------------------------
 # Existing answer builders (unchanged)
 # ---------------------------------------------------------------------------
 
@@ -964,71 +1129,20 @@ class ScratchReasoningEngine:
     def answer(self, text: str, context: Mapping[str, Any]) -> dict[str, Any]:
         request = " ".join(text.strip().split())
         lower = request.lower()
+        cleaned = lower.strip(" .,!?\"'\t\r\n")
         modules = tuple(str(module) for module in context.get("modules", ()))
         capabilities = _capabilities(modules, context)
-        intent = _classify(lower)
         topic = _topic(request)
+        # Pick the winning intent exactly like _classify does, then run its row's
+        # own answer builder — classification and response live on the same row.
+        row = _first_match(_ENGINE_ORDER, lower, cleaned, routing=False)
+        intent = row.kind if row else "unknown"
 
-        if intent == "greeting":
-            message = _compose_greeting(capabilities)
-            sections = _capability_sections(capabilities)
-
-        elif intent == "phone_control":
-            message = "Phone control is not active yet. NovaControl needs a paired phone bridge before it can safely operate your device."
-            sections = [
-                {
-                    "title": "Required Before Phone Control",
-                    "items": [
-                        "Pair the phone through an explicit bridge such as Android Debug Bridge or a dedicated companion app.",
-                        "Show every requested action before execution.",
-                        "Require approval for sensitive actions like messages, calls, payments, files, and settings.",
-                    ],
-                }
-            ]
-
-        elif intent == "desktop_control":
-            target = _desktop_target(lower)
-            message = f"I can prepare a desktop action for {target}, but execution must be approval-gated."
-            sections = [
-                {
-                    "title": "Desktop Plan",
-                    "items": [
-                        f"Create an action to open or control {target}.",
-                        "Show the exact action in the UI.",
-                        "Run it only after approval.",
-                    ],
-                }
-            ]
-
-        elif intent == "capabilities":
-            message = "NovaControl is running as a local scratch-brain control app with chat, research, build, learning, voice, desktop, and browser modules."
-            sections = _capability_sections(capabilities)
-
-        elif intent == "math":
-            result = _math_answer(request)
-            message = result["message"]
-            sections = result.get("sections", [])
-
-        elif intent == "time":
-            result = _time_answer(request)
-            message = result["message"]
-            sections = result.get("sections", [])
-
-        elif intent == "conversion":
-            result = _conversion_answer(request)
-            message = result["message"]
-            sections = result.get("sections", [])
-
-        elif intent == "knowledge":
-            result = _knowledge_answer(request)
-            message = result["message"]
-            sections = result.get("sections", [])
-
-        elif intent == "recommendation":
-            result = _recommendation_answer(request)
-            message = result["message"]
-            sections = result.get("sections", [])
-
+        if row is not None and row.answer is not None:
+            built = row.answer(request, context)
+            message = built["message"]
+            sections = built.get("sections", [])
+            confidence = row.confidence
         else:
             # Unknown — fall back to generic with Explore suggestion
             if capabilities.get("research"):
@@ -1045,10 +1159,7 @@ class ScratchReasoningEngine:
                     ],
                 }
             ]
-
-        # Compute confidence
-        confidence = "high" if intent in ("greeting", "math", "time", "conversion") else \
-                     "medium" if intent != "unknown" else "low"
+            confidence = "low"
 
         return {
             "message": message,

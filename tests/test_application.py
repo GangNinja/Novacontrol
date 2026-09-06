@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import unittest
 
 from novacontrol.application import NovaControlApplication
 from novacontrol.browser import NoopBrowserRunner
@@ -101,6 +101,34 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(approved["approval"]["approved"])
         self.assertTrue(approved["apply_results"])
 
+    async def test_approve_with_stored_preview_never_re_derives(self) -> None:
+        """Approve And Apply reuses the preview id from the UI's stored state.
+
+        Approving with a stored preview id must apply that exact preview without
+        calling preview_improvement_workflow again (the registry stays the same
+        size), so a second click never regenerates different changes.
+        """
+        with TemporaryDirectory() as temp_dir:
+            app = NovaControlApplication()
+            app.self_improvement = SelfImprovementEngine(Path(temp_dir))
+            goal = "become the best AI agent available"
+
+            preview = app.preview_improvement_workflow(goal)
+            registered = len(app._improvement_previews)
+            self.assertGreaterEqual(registered, 1)
+
+            approved = await app.approve_improvement_workflow(
+                goal, preview_id=preview["preview"]["id"]
+            )
+            await app.stop()
+
+        self.assertEqual(approved["status"], "approved_and_applied")
+        self.assertEqual(approved["preview"]["id"], preview["preview"]["id"])
+        self.assertEqual(
+            len(app._improvement_previews), registered,
+            "approving with the stored preview id must not derive a second preview",
+        )
+
     async def test_application_persists_settings(self) -> None:
         with TemporaryDirectory() as temp_dir:
             app = NovaControlApplication(data_dir=Path(temp_dir))
@@ -173,6 +201,41 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.payload["target"], "notepad")
         self.assertFalse(response.payload["approval"]["approved"])
 
+    async def test_phone_planning_covers_text_call_and_screenshot_phrasing(self) -> None:
+        """plan_phone_command builds the right action type for each phrasing family."""
+        app = NovaControlApplication()
+        await app.start()
+        try:
+            cases = {
+                "text mom on my phone saying running late": ("send_text", "mom"),
+                "call john": ("call", "john"),
+                "dial 555 1234": ("call", "555 1234"),
+                "take a screenshot on my phone": ("screenshot", "screen"),
+                "open whatsapp on my phone": ("open_application", "com.whatsapp"),
+            }
+            for command, (expected_type, expected_target) in cases.items():
+                with self.subTest(command=command):
+                    plan = app.plan_phone_command(command)
+                    self.assertEqual(plan["route"], "phone_control")
+                    actions = plan["workflow"]["actions"]
+                    self.assertEqual(actions[0]["type"], expected_type)
+                    self.assertEqual(actions[0]["target"], expected_target)
+        finally:
+            await app.stop()
+
+    async def test_new_phone_phrasing_routes_through_handle_request(self) -> None:
+        """The extended phrasing classifies as phone_control end to end."""
+        app = NovaControlApplication()
+        await app.start()
+        try:
+            for command in ("text mom on my phone saying hi", "call john", "take a screenshot on my phone"):
+                with self.subTest(command=command):
+                    response = await app.handle_request(command)
+                    self.assertEqual(response.route, "phone_control")
+                    self.assertEqual(response.intent, "phone_control")
+        finally:
+            await app.stop()
+
     async def test_application_routes_phone_requests_to_bridge_preview(self) -> None:
         app = NovaControlApplication()
         await app.start()
@@ -238,13 +301,11 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         app = await self._desktop_app()
         token = app.plan_desktop_command("open calculator")["approval"]["token"]
 
-        with self.subTest(kind="unknown"):
-            with self.assertRaises(ValueError):
-                await app.execute_desktop_command("open calculator", approval_token="forged-token")
+        with self.subTest(kind="unknown"), self.assertRaises(ValueError):
+            await app.execute_desktop_command("open calculator", approval_token="forged-token")
 
-        with self.subTest(kind="wrong-command"):
-            with self.assertRaises(ValueError):
-                await app.execute_desktop_command("open notepad", approval_token=token)
+        with self.subTest(kind="wrong-command"), self.assertRaises(ValueError):
+            await app.execute_desktop_command("open notepad", approval_token=token)
 
         # A rejected attempt does not consume the token: it still works for its own command.
         executed = await app.execute_desktop_command("open calculator", approval_token=token)
@@ -322,6 +383,38 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(executed["status"], "executed")
         self.assertEqual(len(executed["execution_results"]), 2)
 
+    async def test_browser_web_search_phrasing_plans_engine_navigation(self) -> None:
+        app = await self._browser_app()
+        plan = app.plan_browser_command("search the web for quantum computing")
+
+        self.assertEqual(plan["route"], "browser_automation")
+        self.assertEqual(plan["status"], "waiting_for_approval")
+        self.assertEqual(plan["steps"], ["Search the web for quantum computing"])
+        self.assertEqual(
+            plan["target"],
+            "https://html.duckduckgo.com/html/?q=quantum+computing",
+        )
+        action = plan["workflow"]["actions"][0]
+        self.assertEqual(action["type"], "navigate")
+        self.assertEqual(action["target"], "https://html.duckduckgo.com/html/?q=quantum+computing")
+        self.assertTrue(plan["approval"]["token"])
+
+        # Google phrasing lands on the same plan shape (query → engine URL).
+        google = app.plan_browser_command("google mars rover news")
+        self.assertEqual(google["status"], "waiting_for_approval")
+        self.assertEqual(google["steps"], ["Search the web for mars rover news"])
+        self.assertEqual(
+            google["workflow"]["actions"][0]["target"],
+            "https://html.duckduckgo.com/html/?q=mars+rover+news",
+        )
+
+        # An approved search executes through the no-op runner like any navigation.
+        executed = await app.execute_browser_command(
+            "search the web for quantum computing",
+            approval_token=plan["approval"]["token"],
+        )
+        self.assertEqual(executed["status"], "executed")
+
     async def test_browser_token_executes_once_and_cannot_be_reused(self) -> None:
         app = await self._browser_app()
         token = app.plan_browser_command("navigate to example.com")["approval"]["token"]
@@ -353,9 +446,8 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 await app.execute_browser_command("navigate to example.com", approval_token="forged-token")
 
-        with self.subTest(kind="wrong-command"):
-            with self.assertRaises(ValueError):
-                await app.execute_browser_command("open example.com website", approval_token=token)
+        with self.subTest(kind="wrong-command"), self.assertRaises(ValueError):
+            await app.execute_browser_command("open example.com website", approval_token=token)
 
         # A rejected attempt does not consume the token: it still works for its own command.
         executed = await app.execute_browser_command("navigate to example.com", approval_token=token)

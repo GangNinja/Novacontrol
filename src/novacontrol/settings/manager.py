@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from novacontrol.settings.models import ApprovalMode, UserSettings
+from novacontrol.settings.models import BRAIN_MODES, ApprovalMode, UserSettings
 
 
 class SettingsManager:
@@ -21,6 +21,8 @@ class SettingsManager:
         approval_mode: ApprovalMode | None = None,
         detailed_explanations: bool | None = None,
         include_videos_in_explore: bool | None = None,
+        brain_mode: str | None = None,
+        auto_approve_run: bool | None = None,
     ) -> UserSettings:
         self._settings = replace(
             self._settings,
@@ -31,6 +33,14 @@ class SettingsManager:
             include_videos_in_explore=self._settings.include_videos_in_explore
             if include_videos_in_explore is None
             else include_videos_in_explore,
+            auto_approve_run=self._settings.auto_approve_run
+            if auto_approve_run is None
+            else auto_approve_run,
+            # An out-of-vocabulary mode falls back to auto rather than raising: a
+            # stale UI value must never wedge the settings store.
+            brain_mode=(brain_mode if brain_mode in BRAIN_MODES else "auto")
+            if brain_mode is not None
+            else self._settings.brain_mode,
         )
         return self._settings
 

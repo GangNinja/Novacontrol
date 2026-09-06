@@ -10,6 +10,7 @@ from novacontrol.integrations import (
     OpenAICompatibleLLMProvider,
     build_llm_provider_from_environment,
     build_ollama_provider,
+    make_ollama_reprobe,
 )
 
 OLLAMA_URL = "http://127.0.0.1:11434"
@@ -83,6 +84,63 @@ class ProviderResolutionTests(unittest.TestCase):
         ):
             provider = build_llm_provider_from_environment({"NOVACONTROL_DISABLE_OLLAMA": "1"})
         self.assertIsInstance(provider, EchoLLMProvider)
+
+
+class OllamaReprobeTests(unittest.IsolatedAsyncioTestCase):
+    """The lazy chat-time probe: starting Ollama after the server upgrades chat
+    and Explore without a restart. Misses are rate-limited; a hit caches."""
+
+    async def test_disabled_env_returns_probe_that_always_misses(self) -> None:
+        for env in (
+            {"NOVACONTROL_DISABLE_OLLAMA": "1"},
+            {"NOVACONTROL_ENABLE_EXTERNAL_LLM": "1", "NOVACONTROL_LLM_MODEL": "m"},
+        ):
+            with (
+                self.subTest(env=env),
+                mock.patch(
+                    "novacontrol.integrations.llm.detect_ollama",
+                    side_effect=AssertionError("no network allowed"),
+                ),
+            ):
+                reprobe = make_ollama_reprobe(env)
+                self.assertIsNone(await reprobe())
+
+    @staticmethod
+    def _reprobe_state(reprobe: object) -> dict:
+        """Reach into the closure's state dict ({provider, last_miss}) for tests."""
+        cell = next(c for c in reprobe.__closure__ if isinstance(c.cell_contents, dict))  # type: ignore[union-attr]
+        return cell.cell_contents  # type: ignore[no-any-return]
+
+    async def test_miss_is_rate_limited_then_hit_upgrades_and_caches(self) -> None:
+        detect_calls = {"n": 0}
+
+        def flaky_detect(url: str) -> dict | None:
+            detect_calls["n"] += 1
+            return {"url": url, "models": ["llama3.2:3b"]} if detect_calls["n"] >= 2 else None
+
+        reprobe = make_ollama_reprobe({})
+        state = self._reprobe_state(reprobe)
+        with mock.patch("novacontrol.integrations.llm.detect_ollama", side_effect=flaky_detect):
+            self.assertIsNone(await reprobe())  # miss #1 (arms the rate limit)
+            self.assertIsNone(await reprobe())  # inside window: skipped, no network
+            self.assertEqual(detect_calls["n"], 1)
+
+            state["last_miss"] = 0.0  # open the window
+            upgraded = await reprobe()  # detect call #2: Ollama "appeared" -> hit
+
+        self.assertIsInstance(upgraded, OpenAICompatibleLLMProvider)
+        assert isinstance(upgraded, OpenAICompatibleLLMProvider)
+        self.assertEqual(upgraded.name, "ollama")
+        self.assertEqual(upgraded.model, "llama3.2:3b")
+
+        # After a hit: same object forever, zero network.
+        with mock.patch(
+            "novacontrol.integrations.llm.detect_ollama",
+            side_effect=AssertionError("no network after a hit"),
+        ):
+            again = await reprobe()
+        self.assertIs(again, upgraded)
+
 
 
 if __name__ == "__main__":

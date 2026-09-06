@@ -3,42 +3,126 @@
    ============================================================ */
 
 :root {
-  --bg-deep: #030810;
-  --bg-mid: #0a1628;
-  --bg-surface: rgba(10, 22, 40, 0.85);
-  --bg-glass: rgba(14, 30, 56, 0.6);
-  --bg-card: rgba(16, 36, 66, 0.55);
+  /* ==========================================================
+     NovaControl token block — brand → semantic → component.
+     The only place the neon palette is authored. Any second
+     themed surface inherits the same focus-ring + motion policy
+     from this source.
+     ========================================================== */
 
-  --neon-cyan: #00f0ff;
-  --neon-cyan-dim: rgba(0, 240, 255, 0.15);
-  --neon-cyan-glow: rgba(0, 240, 255, 0.4);
-  --neon-purple: #a855f7;
-  --neon-purple-dim: rgba(168, 85, 247, 0.15);
-  --neon-purple-glow: rgba(168, 85, 247, 0.4);
-  --neon-green: #22d3ee;
-  --neon-pink: #ec4899;
-  --neon-amber: #f59e0b;
+  /* ── Brand tokens (the abstract neon identity) ─────────── */
+  --brand-cyan:        #00f0ff;
+  --brand-purple:      #a855f7;
+  --brand-green:       #22d3ee;
+  --brand-pink:        #ec4899;
+  --brand-amber:       #f59e0b;
+  --brand-ring:        #eaffff; /* high-contrast focus halo: distinct against cyan-bordered controls */
 
-  --text-primary: #e8f0ff;
-  --text-secondary: #8da4c2;
-  --text-muted: #4a6382;
+  /* ── Semantic tokens (purpose, built from brand) ───────── */
+  --bg-deep:           #030810;
+  --bg-mid:            #0a1628;
+  --bg-surface:        rgba(10, 22, 40, 0.85);
+  --bg-glass:          rgba(14, 30, 56, 0.6);
+  --bg-card:           rgba(16, 36, 66, 0.55);
+  --bg-input:          rgba(6, 16, 32, 0.8);
 
-  --border-glow: rgba(0, 240, 255, 0.12);
-  --border-dim: rgba(0, 240, 255, 0.06);
+  --text-primary:      #e8f0ff;
+  --text-secondary:    #8da4c2;
+  --text-muted:        #4a6382;
 
-  --radius: 12px;
-  --radius-sm: 8px;
-  --radius-lg: 16px;
+  --border-glow:       rgba(0, 240, 255, 0.12);
+  --border-dim:        rgba(0, 240, 255, 0.06);
+  --border-hover:      rgba(0, 240, 255, 0.20);
+
+  --neon-cyan:         var(--brand-cyan);
+  --neon-cyan-dim:     rgba(0, 240, 255, 0.15);
+  --neon-cyan-glow:    rgba(0, 240, 255, 0.40);
+  --neon-purple:       var(--brand-purple);
+  --neon-purple-dim:   rgba(168, 85, 247, 0.15);
+  --neon-purple-glow:  rgba(168, 85, 247, 0.40);
+  --neon-green:        var(--brand-green);
+  --neon-green-glow:   rgba(34, 211, 238, 0.40);
+  --neon-pink:         var(--brand-pink);
+  --neon-amber:        var(--brand-amber);
+  --neon-amber-glow:   rgba(245, 158, 11, 0.40);
+
+  --grid-foreground:   rgba(0, 240, 255, 0.02);
+
+  --focus-ring:        2px solid var(--brand-ring);
+  --focus-offset:      2px;
+  --focus-ring-danger: 2px solid var(--neon-pink);
+
+  --shadow-neon:       0 0 20px rgba(0, 240, 255, 0.15), 0 0 60px rgba(0, 240, 255, 0.05);
+  --shadow-card:       0 4px 30px rgba(0, 0, 0, 0.4), 0 0 1px rgba(0, 240, 255, 0.1);
+  --shadow-float:      0 8px 40px rgba(0, 0, 0, 0.5), 0 0 2px rgba(0, 240, 255, 0.2);
+
+  --sidebar-gradient-top:    rgba(6, 18, 38, 0.95);
+  --sidebar-gradient-bottom: rgba(4, 12, 28, 0.98);
+
+  --workspace-glow-top:      rgba(0, 240, 255, 0.03);
+  --workspace-glow-bottom:   rgba(168, 85, 247, 0.03);
+
+  --button-shine:       rgba(0, 240, 255, 0.08);
+  --button-hover-bg:    linear-gradient(135deg, rgba(0, 240, 255, 0.25), rgba(168, 85, 247, 0.15));
+  --button-bg:          linear-gradient(135deg, rgba(0, 240, 255, 0.15), rgba(168, 85, 247, 0.10));
+
+  --pill-ok-bg:         rgba(34, 211, 238, 0.10);
+  --pill-ok-border:     rgba(34, 211, 238, 0.30);
+  --pill-warn-bg:       rgba(245, 158, 11, 0.10);
+  --pill-warn-border:   rgba(245, 158, 11, 0.30);
+  --pill-error-bg:      rgba(236, 72, 153, 0.10);
+  --pill-error-border:  rgba(236, 72, 153, 0.30);
+
+  --warning-bg:        rgba(245, 158, 11, 0.08);
+  --warning-border:    rgba(245, 158, 11, 0.20);
+
+  --code-bg:           rgba(0, 240, 255, 0.08);
+  --code-block-bg:     rgba(0, 0, 0, 0.30);
+
+  --card-bg-subtle:     rgba(0, 240, 255, 0.03);
+  --card-bg-hover:      rgba(0, 240, 255, 0.06);
+
+  --video-hover-border: var(--neon-purple);
+  --video-hover-glow:   rgba(168, 85, 247, 0.15);
+
+  --highlight-bg:       rgba(0, 240, 255, 0.04);
+
+  --answering-bg:       rgba(0, 240, 255, 0.05);
+  --answering-border:   rgba(0, 240, 255, 0.12);
+
+  --user-thread-bg:     rgba(168, 85, 247, 0.08);
+  --user-thread-border: rgba(168, 85, 247, 0.15);
+
+  --welcome-gradient-start: var(--bg-card);
+  --welcome-gradient-end:   rgba(0, 240, 255, 0.03);
+
+  /* Interaction tokens: hover/glow/focus surfaces built from the palette. */
+  --nav-active-bg:          linear-gradient(135deg, var(--neon-cyan-dim), rgba(168, 85, 247, 0.08));
+  --nav-active-shadow:      0 0 20px rgba(0, 240, 255, 0.1), inset 0 0 20px rgba(0, 240, 255, 0.03);
+  --heading-glow:           0 0 20px rgba(0, 240, 255, 0.1);
+  --button-hover-shadow:    0 0 15px rgba(0, 240, 255, 0.15), inset 0 0 15px rgba(0, 240, 255, 0.05);
+  --button-hover-shadow-strong: 0 0 25px rgba(0, 240, 255, 0.2), inset 0 0 20px rgba(0, 240, 255, 0.08);
+  --danger-glow:            0 0 15px rgba(236, 72, 153, 0.15);
+  --input-focus-shadow:     0 0 15px rgba(0, 240, 255, 0.1), inset 0 0 10px rgba(0, 240, 255, 0.03);
+  --chip-glow:              0 0 10px rgba(0, 240, 255, 0.1);
+  --purple-hover-bg:        rgba(168, 85, 247, 0.2);
+  --purple-hover-glow:      0 0 12px rgba(168, 85, 247, 0.15);
+  --cyan-hover-bg:          rgba(0, 240, 255, 0.2);
+  --badge-bg:               rgba(0, 0, 0, 0.75);
+  --scan-line-gradient:     linear-gradient(90deg, transparent, rgba(0, 240, 255, 0.06), transparent);
+  --toast-glow:             0 0 20px rgba(0, 240, 255, 0.15);
+  --error-bg:               rgba(236, 72, 153, 0.06);
+  --error-border:           rgba(236, 72, 153, 0.2);
+
+  /* ── Component tokens (specific surfaces) ─────────────── */
+  --sidebar-width:      260px;
+  --radius:             12px;
+  --radius-sm:          8px;
+  --radius-lg:          16px;
 
   --font-display: 'Orbitron', sans-serif;
-  --font-body: 'Rajdhani', sans-serif;
-  --font-mono: 'Share Tech Mono', monospace;
-
-  --shadow-neon: 0 0 20px rgba(0, 240, 255, 0.15), 0 0 60px rgba(0, 240, 255, 0.05);
-  --shadow-card: 0 4px 30px rgba(0, 0, 0, 0.4), 0 0 1px rgba(0, 240, 255, 0.1);
-  --shadow-float: 0 8px 40px rgba(0, 0, 0, 0.5), 0 0 2px rgba(0, 240, 255, 0.2);
-
-  --sidebar-width: 260px;
+  --font-body:    'Rajdhani', sans-serif;
+  --font-mono:    'Share Tech Mono', monospace;
 
   color-scheme: dark;
 }
@@ -60,6 +144,8 @@
 
 .skip-link:focus {
   top: 16px;
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
 }
 
 .sr-only {
@@ -103,8 +189,8 @@ body {
   z-index: 0;
   pointer-events: none;
   background:
-    linear-gradient(rgba(0, 240, 255, 0.02) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(0, 240, 255, 0.02) 1px, transparent 1px);
+    linear-gradient(var(--grid-foreground) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-foreground) 1px, transparent 1px);
   background-size: 60px 60px;
   mask-image: radial-gradient(ellipse at center, black 30%, transparent 70%);
   -webkit-mask-image: radial-gradient(ellipse at center, black 30%, transparent 70%);
@@ -132,7 +218,7 @@ body {
   display: flex;
   flex-direction: column;
   padding: 20px 14px;
-  background: linear-gradient(180deg, rgba(6, 18, 38, 0.95) 0%, rgba(4, 12, 28, 0.98) 100%);
+  background: linear-gradient(180deg, var(--sidebar-gradient-top) 0%, var(--sidebar-gradient-bottom) 100%);
   border-right: 1px solid var(--border-glow);
   backdrop-filter: blur(20px);
   transform: rotateY(2deg);
@@ -190,7 +276,7 @@ body {
   font-family: var(--font-mono);
   font-size: 0.7rem;
   color: var(--neon-green);
-  text-shadow: 0 0 6px rgba(34, 211, 238, 0.4);
+  text-shadow: 0 0 6px var(--neon-green-glow);
 }
 
 /* ---- Navigation ---- */
@@ -239,10 +325,10 @@ body {
 }
 
 .nav-item.active {
-  background: linear-gradient(135deg, var(--neon-cyan-dim), rgba(168, 85, 247, 0.08));
+  background: var(--nav-active-bg);
   border-color: var(--neon-cyan);
   color: var(--neon-cyan);
-  box-shadow: 0 0 20px rgba(0, 240, 255, 0.1), inset 0 0 20px rgba(0, 240, 255, 0.03);
+  box-shadow: var(--nav-active-shadow);
 }
 
 .nav-item.active::before { opacity: 1; }
@@ -277,8 +363,8 @@ body {
   flex: 1;
   overflow-y: auto;
   padding: 28px 32px;
-  background: radial-gradient(ellipse at 20% 20%, rgba(0, 240, 255, 0.03) 0%, transparent 50%),
-              radial-gradient(ellipse at 80% 80%, rgba(168, 85, 247, 0.03) 0%, transparent 50%);
+  background: radial-gradient(ellipse at 20% 20%, var(--workspace-glow-top) 0%, transparent 50%),
+              radial-gradient(ellipse at 80% 80%, var(--workspace-glow-bottom) 0%, transparent 50%);
 }
 
 /* ---- Panels ---- */
@@ -313,7 +399,7 @@ body {
   font-weight: 700;
   letter-spacing: 1px;
   color: var(--text-primary);
-  text-shadow: 0 0 20px rgba(0, 240, 255, 0.1);
+  text-shadow: var(--heading-glow);
 }
 
 /* ---- Cyber Button ---- */
@@ -339,29 +425,307 @@ body {
   content: '';
   position: absolute;
   inset: 0;
-  background: linear-gradient(135deg, transparent 40%, rgba(0, 240, 255, 0.08) 50%, transparent 60%);
+  background: linear-gradient(135deg, transparent 40%, var(--button-shine) 50%, transparent 60%);
   transform: translateX(-100%);
   transition: transform 0.5s ease;
 }
 
 .cyber-btn:hover {
   border-color: var(--neon-cyan);
-  box-shadow: 0 0 15px rgba(0, 240, 255, 0.15), inset 0 0 15px rgba(0, 240, 255, 0.05);
+  box-shadow: var(--button-hover-shadow);
   color: var(--neon-cyan);
 }
 
 .cyber-btn:hover::after { transform: translateX(100%); }
 
 .cyber-btn.primary {
-  background: linear-gradient(135deg, rgba(0, 240, 255, 0.15), rgba(168, 85, 247, 0.1));
+  background: var(--button-bg);
   border-color: var(--neon-cyan);
   color: var(--neon-cyan);
 }
 
 .cyber-btn.primary:hover {
-  background: linear-gradient(135deg, rgba(0, 240, 255, 0.25), rgba(168, 85, 247, 0.15));
-  box-shadow: 0 0 25px rgba(0, 240, 255, 0.2), inset 0 0 20px rgba(0, 240, 255, 0.08);
+  background: var(--button-hover-bg);
+  box-shadow: var(--button-hover-shadow-strong);
 }
+
+/* ── Cloud LLM card (Settings panel) ───────────────────────── */
+.cloud-llm-card .cloud-hint {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin: 4px 0 12px;
+}
+
+.cloud-llm-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.cloud-llm-form .muted { color: var(--text-muted); font-size: 0.72rem; }
+
+.cloud-status {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  align-self: center;
+}
+
+/* ── JARVIS sidebar section + panels ───────────────────────── */
+.bridge-blocked {
+  border-color: var(--neon-amber);
+}
+
+.bridge-blocked .bridge-steps {
+  margin: 6px 0 0;
+  padding-left: 20px;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+}
+
+.bridge-blocked .bridge-steps li { margin: 2px 0; }
+
+.nav-section-label {
+  font-family: var(--font-display);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.28em;
+  color: var(--text-muted);
+  padding: 10px 14px 2px;
+  user-select: none;
+}
+
+.jarvis-hint {
+  font-family: var(--font-body);
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin: 2px 0 12px;
+}
+
+/* ── J.A.R.V.I.S unified panel: device switch, connect, history ─ */
+.jarvis-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.jarvis-device-switch {
+  display: inline-flex;
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.18));
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.jarvis-device-btn {
+  background: transparent;
+  border: 0;
+  color: var(--text-secondary);
+  font-family: var(--font-display);
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  padding: 6px 16px;
+  cursor: pointer;
+}
+
+.jarvis-device-btn.active {
+  background: var(--accent, #2af5e0);
+  color: #04121a;
+  font-weight: 700;
+}
+
+#jarvisVoiceButton.listening {
+  box-shadow: 0 0 0 2px var(--neon-amber, #ffb347);
+  animation: jarvis-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes jarvis-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.jarvis-history {
+  margin-top: 14px;
+  border-top: 1px solid var(--border-color, rgba(255, 255, 255, 0.12));
+  padding-top: 10px;
+}
+
+.jarvis-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: var(--font-display);
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.jarvis-history-clear {
+  background: transparent;
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.18));
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 0.68rem;
+  padding: 2px 10px;
+  cursor: pointer;
+}
+
+.jarvis-history-clear:hover {
+  color: var(--neon-red, #ff5d73);
+  border-color: var(--neon-red, #ff5d73);
+}
+
+.jarvis-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.jarvis-history-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8rem;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.jarvis-history-row:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.jarvis-history-row > span:first-child { flex-shrink: 0; }
+
+.jarvis-history-command {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.jarvis-history-device {
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 1px 8px;
+  border-radius: 999px;
+}
+
+.jarvis-history-device.is-desktop {
+  border: 1px solid var(--accent, #2af5e0);
+  color: var(--accent, #2af5e0);
+}
+
+.jarvis-history-device.is-phone {
+  border: 1px solid var(--neon-amber, #ffb347);
+  color: var(--neon-amber, #ffb347);
+}
+
+.jarvis-history-status {
+  font-size: 0.66rem;
+  color: var(--text-muted);
+}
+
+.jarvis-history-status.is-executed {
+  color: var(--accent, #2af5e0);
+}
+
+.jarvis-history-delete {
+  background: transparent;
+  border: 0;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
+.jarvis-history-delete:hover {
+  color: var(--neon-red, #ff5d73);
+}
+
+/* ── Brain mode switch (Chat panel header) ─────────────────── */
+.brain-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 4px;
+  border: 1px solid var(--border-glow);
+  border-radius: 10px;
+  background: var(--bg-input);
+}
+
+.brain-switch-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-secondary);
+  padding-left: 6px;
+}
+
+.brain-switch-select {
+  width: auto;
+  min-width: 118px;
+  padding: 6px 28px 6px 10px;
+  font-size: 0.8rem;
+  border: none;
+  background-color: transparent;
+}
+
+.brain-switch-select:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* ── Surface head row (title + inline action) ─────────────── */
+.surface-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.surface-head-row h3 { margin: 0; }
+
+/* ── Tracked tasks list (System panel) ────────────────────── */
+.task-list { display: grid; gap: 8px; margin-top: 10px; }
+
+.task-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-dim);
+  border-radius: 10px;
+  background: var(--bg-card);
+}
+
+.task-row-body { display: grid; gap: 2px; min-width: 0; flex: 1; }
+
+.task-row-title {
+  font-size: 0.82rem;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-row-meta { font-size: 0.72rem; color: var(--text-secondary); }
+
+.task-delete {
+  flex: none;
+  padding: 4px 10px;
+  font-size: 0.72rem;
+}
+
+.task-empty { font-size: 0.8rem; color: var(--text-muted); padding: 4px 2px; }
+
 
 .cyber-btn.danger {
   border-color: var(--neon-pink);
@@ -369,8 +733,8 @@ body {
 }
 
 .cyber-btn.danger:hover {
-  background: rgba(236, 72, 153, 0.1);
-  box-shadow: 0 0 15px rgba(236, 72, 153, 0.15);
+  background: var(--pill-error-bg);
+  box-shadow: var(--danger-glow);
 }
 
 .cyber-btn.small { padding: 6px 14px; font-size: 0.78rem; }
@@ -382,7 +746,7 @@ body {
   padding: 10px 14px;
   border: 1px solid var(--border-glow);
   border-radius: var(--radius-sm);
-  background: rgba(6, 16, 32, 0.8);
+  background: var(--bg-input);
   color: var(--text-primary);
   outline: none;
   transition: border-color 0.3s ease, box-shadow 0.3s ease;
@@ -394,15 +758,17 @@ body {
 
 .cyber-input:focus-visible {
   border-color: var(--neon-cyan);
-  box-shadow: 0 0 15px rgba(0, 240, 255, 0.1), inset 0 0 10px rgba(0, 240, 255, 0.03);
-  outline: 2px solid var(--neon-cyan);
-  outline-offset: 2px;
+  box-shadow: var(--input-focus-shadow);
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
 }
 
 textarea.cyber-input { resize: vertical; min-height: 60px; }
 
 select.cyber-input {
   appearance: none;
+  /* The arrow SVG is a data URI (var() can't resolve inside one); stroke
+     mirrors --brand-cyan and must stay in sync with the token block. */
   background-image: url("data:image/svg+xml,%3Csvg width='12' height='8' viewBox='0 0 12 8' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L6 6L11 1' stroke='%2300f0ff' stroke-width='1.5'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 12px center;
@@ -423,23 +789,30 @@ select.cyber-input {
 .suggestion-chip:focus-visible,
 .source-chip:focus-visible,
 .citation-chip:focus-visible,
-.video-card:focus-visible {
-  outline: 2px solid var(--neon-cyan);
-  outline-offset: 2px;
+.video-card:focus-visible,
+.jarvis-device-btn:focus-visible,
+.jarvis-history-clear:focus-visible,
+.jarvis-history-delete:focus-visible,
+.source-rail a:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
 }
 
-.cyber-btn.danger:focus-visible {
-  outline-color: var(--neon-pink);
+.cyber-btn.danger:focus-visible,
+.jarvis-history-clear:focus-visible,
+.task-delete:focus-visible {
+  outline: var(--focus-ring-danger);
+  outline-offset: var(--focus-offset);
 }
 
 select.cyber-input:focus-visible {
-  outline: 2px solid var(--neon-cyan);
-  outline-offset: 2px;
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
 }
 
 .cyber-checkbox:focus-visible {
-  outline: 2px solid var(--neon-cyan);
-  outline-offset: 2px;
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
 }
 
 /* ---- Surfaces & Cards ---- */
@@ -455,7 +828,7 @@ select.cyber-input:focus-visible {
 }
 
 .surface:hover, .command-console:hover, .info-card:hover, .metric-card:hover {
-  border-color: rgba(0, 240, 255, 0.2);
+  border-color: var(--border-hover);
   box-shadow: var(--shadow-float);
   transform: translateZ(4px);
 }
@@ -667,7 +1040,7 @@ select.cyber-input:focus-visible {
   font-family: var(--font-mono);
   font-size: 0.85em;
   padding: 2px 5px;
-  background: rgba(0, 240, 255, 0.08);
+  background: var(--code-bg);
   border-radius: 3px;
   color: var(--neon-green);
 }
@@ -686,7 +1059,7 @@ select.cyber-input:focus-visible {
   align-items: flex-start;
   padding: 10px;
   border-radius: var(--radius-sm);
-  background: rgba(0, 240, 255, 0.04);
+  background: var(--highlight-bg);
   border: 1px solid var(--border-dim);
 }
 
@@ -720,7 +1093,7 @@ select.cyber-input:focus-visible {
 .source-chip:hover {
   border-color: var(--neon-cyan);
   color: var(--neon-cyan);
-  box-shadow: 0 0 10px rgba(0, 240, 255, 0.1);
+  box-shadow: var(--chip-glow);
 }
 
 /* ---- Answer Sections ---- */
@@ -770,8 +1143,8 @@ select.cyber-input:focus-visible {
 .answer-notice {
   padding: 10px 14px;
   border-radius: var(--radius-sm);
-  background: rgba(245, 158, 11, 0.08);
-  border: 1px solid rgba(245, 158, 11, 0.2);
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
   margin-bottom: 14px;
 }
 
@@ -797,8 +1170,8 @@ select.cyber-input:focus-visible {
 }
 
 .followup-chip:hover {
-  background: rgba(168, 85, 247, 0.2);
-  box-shadow: 0 0 12px rgba(168, 85, 247, 0.15);
+  background: var(--purple-hover-bg);
+  box-shadow: var(--purple-hover-glow);
 }
 
 /* ---- Citation Row ---- */
@@ -815,7 +1188,7 @@ select.cyber-input:focus-visible {
   transition: background 0.2s ease;
 }
 
-.citation-chip:hover { background: rgba(0, 240, 255, 0.2); }
+.citation-chip:hover { background: var(--cyan-hover-bg); }
 
 /* ---- Source Rail ---- */
 .source-rail {
@@ -841,7 +1214,7 @@ select.cyber-input:focus-visible {
 .rail-card {
   padding: 10px;
   border-radius: var(--radius-sm);
-  background: rgba(0, 240, 255, 0.03);
+  background: var(--card-bg-subtle);
   border: 1px solid var(--border-dim);
   margin-bottom: 8px;
   transition: border-color 0.2s ease, background 0.2s ease;
@@ -849,7 +1222,7 @@ select.cyber-input:focus-visible {
 
 .rail-card:hover {
   border-color: var(--border-glow);
-  background: rgba(0, 240, 255, 0.06);
+  background: var(--card-bg-hover);
 }
 
 .rail-meta {
@@ -898,8 +1271,8 @@ select.cyber-input:focus-visible {
 }
 
 .video-card:hover {
-  border-color: var(--neon-purple);
-  box-shadow: 0 0 20px rgba(168, 85, 247, 0.15);
+  border-color: var(--video-hover-border);
+  box-shadow: var(--video-hover-glow);
   transform: translateY(-2px);
 }
 
@@ -925,7 +1298,7 @@ select.cyber-input:focus-visible {
   font-size: 0.65rem;
   padding: 2px 8px;
   border-radius: 4px;
-  background: rgba(0, 0, 0, 0.75);
+  background: var(--badge-bg);
   color: var(--neon-cyan);
 }
 
@@ -958,20 +1331,20 @@ select.cyber-input:focus-visible {
 }
 
 .pill.ok {
-  background: rgba(34, 211, 238, 0.1);
-  border-color: rgba(34, 211, 238, 0.3);
+  background: var(--pill-ok-bg);
+  border-color: var(--pill-ok-border);
   color: var(--neon-green);
 }
 
 .pill.warn {
-  background: rgba(245, 158, 11, 0.1);
-  border-color: rgba(245, 158, 11, 0.3);
+  background: var(--pill-warn-bg);
+  border-color: var(--pill-warn-border);
   color: var(--neon-amber);
 }
 
 .pill.error {
-  background: rgba(236, 72, 153, 0.1);
-  border-color: rgba(236, 72, 153, 0.3);
+  background: var(--pill-error-bg);
+  border-color: var(--pill-error-border);
   color: var(--neon-pink);
 }
 
@@ -986,15 +1359,15 @@ select.cyber-input:focus-visible {
 }
 
 .approval-banner.pending {
-  background: rgba(245, 158, 11, 0.08);
-  border: 1px solid rgba(245, 158, 11, 0.2);
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
 }
 
 .approval-banner.pending strong { color: var(--neon-amber); }
 
 .approval-banner.approved {
-  background: rgba(34, 211, 238, 0.08);
-  border: 1px solid rgba(34, 211, 238, 0.2);
+  background: var(--pill-ok-bg);
+  border: 1px solid var(--pill-ok-border);
 }
 
 .approval-banner.approved strong { color: var(--neon-green); }
@@ -1019,6 +1392,20 @@ select.cyber-input:focus-visible {
 
 .info-card p { font-size: 0.82rem; color: var(--text-secondary); line-height: 1.4; margin-bottom: 6px; }
 
+/* ---- AI Brain status card (System panel) ---- */
+#brainStatus { margin-bottom: 12px; }
+
+.brain-card .brain-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.brain-card strong { color: var(--text-primary); font-size: 0.86rem; }
+
+
 /* ---- Message (Chat) ---- */
 .message {
   padding: 14px;
@@ -1037,15 +1424,15 @@ select.cyber-input:focus-visible {
 }
 
 .message.user {
-  background: rgba(168, 85, 247, 0.08);
-  border-color: rgba(168, 85, 247, 0.15);
+  background: var(--user-thread-bg);
+  border-color: var(--user-thread-border);
 }
 
 .message.user strong { color: var(--neon-purple); }
 
 .message.assistant {
-  background: rgba(0, 240, 255, 0.05);
-  border-color: rgba(0, 240, 255, 0.12);
+  background: var(--answering-bg);
+  border-color: var(--answering-border);
 }
 
 .message.assistant strong { color: var(--neon-cyan); }
@@ -1071,7 +1458,7 @@ select.cyber-input:focus-visible {
 .preview-card {
   padding: 12px;
   border-radius: var(--radius-sm);
-  background: rgba(0, 240, 255, 0.03);
+  background: var(--card-bg-subtle);
   border: 1px solid var(--border-dim);
   margin-bottom: 8px;
 }
@@ -1088,7 +1475,7 @@ select.cyber-input:focus-visible {
   font-family: var(--font-mono);
   font-size: 0.75rem;
   padding: 10px;
-  background: rgba(0, 0, 0, 0.3);
+  background: var(--code-block-bg);
   border-radius: var(--radius-sm);
   overflow-x: auto;
   margin-top: 8px;
@@ -1125,8 +1512,8 @@ select.cyber-input:focus-visible {
   font-size: 0;
 }
 
-.step-dot.done { background: var(--neon-green); box-shadow: 0 0 8px rgba(34, 211, 238, 0.4); }
-.step-dot.current { background: var(--neon-amber); box-shadow: 0 0 8px rgba(245, 158, 11, 0.4); animation: pulse 2s infinite; }
+.step-dot.done { background: var(--neon-green); box-shadow: 0 0 8px var(--neon-green-glow); }
+.step-dot.current { background: var(--neon-amber); box-shadow: 0 0 8px var(--neon-amber-glow); animation: pulse 2s infinite; }
 .step-dot.remaining { background: var(--text-muted); }
 
 @keyframes pulse {
@@ -1207,7 +1594,7 @@ select.cyber-input:focus-visible {
   margin-top: 12px;
   padding: 12px;
   border-radius: var(--radius-sm);
-  background: rgba(0, 240, 255, 0.03);
+  background: var(--card-bg-subtle);
   border: 1px solid var(--border-dim);
 }
 
@@ -1253,7 +1640,7 @@ select.cyber-input:focus-visible {
   font-size: 0.75rem;
   line-height: 1.6;
   padding: 16px;
-  background: rgba(0, 0, 0, 0.3);
+  background: var(--code-block-bg);
   border: 1px solid var(--border-dim);
   border-radius: var(--radius);
   color: var(--neon-green);
@@ -1325,7 +1712,7 @@ select.cyber-input:focus-visible {
 /* ---- Welcome Card ---- */
 .welcome-card {
   padding: 28px 24px;
-  background: linear-gradient(135deg, var(--bg-card), rgba(0, 240, 255, 0.03));
+  background: linear-gradient(135deg, var(--welcome-gradient-start), var(--welcome-gradient-end));
   border: 1px solid var(--border-glow);
   border-radius: var(--radius-lg);
   margin-bottom: 20px;
@@ -1369,8 +1756,8 @@ select.cyber-input:focus-visible {
 }
 
 .example-chip:hover {
-  background: rgba(168, 85, 247, 0.2);
-  box-shadow: 0 0 12px rgba(168, 85, 247, 0.15);
+  background: var(--purple-hover-bg);
+  box-shadow: var(--purple-hover-glow);
 }
 
 /* ---- Improved Empty State ---- */
@@ -1407,7 +1794,7 @@ select.cyber-input:focus-visible {
   left: -100%;
   width: 60%;
   height: 100%;
-  background: linear-gradient(90deg, transparent, rgba(0, 240, 255, 0.06), transparent);
+  background: var(--scan-line-gradient);
   animation: scanLine 1.8s ease-in-out infinite;
 }
 
@@ -1429,7 +1816,7 @@ select.cyber-input:focus-visible {
   color: var(--neon-cyan);
   font-family: var(--font-mono);
   font-size: 0.8rem;
-  box-shadow: 0 0 20px rgba(0, 240, 255, 0.15);
+  box-shadow: var(--toast-glow);
   opacity: 0;
   transition: opacity 0.3s ease, transform 0.3s ease;
   z-index: 100;
@@ -1452,8 +1839,8 @@ select.cyber-input:focus-visible {
 /* ---- Error Card ---- */
 .error-card {
   padding: 16px 20px;
-  background: rgba(236, 72, 153, 0.06);
-  border: 1px solid rgba(236, 72, 153, 0.2);
+  background: var(--error-bg);
+  border: 1px solid var(--error-border);
   border-radius: var(--radius);
 }
 

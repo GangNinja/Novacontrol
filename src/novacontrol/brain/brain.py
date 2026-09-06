@@ -32,8 +32,24 @@ class NovaBrain:
         *,
         completion_provider: object | None = None,
         conversation: ConversationManager | None = None,
+        on_provider_upgrade: Callable[[object], None] | None = None,
+        ollama_reprobe: Callable[[], Awaitable[object | None]] | None = None,
     ) -> None:
         self.completion_provider = completion_provider or EchoLLMProvider()
+        self._on_provider_upgrade = on_provider_upgrade
+        self._ollama_reprobe = ollama_reprobe
+        # The boot-time provider the user configured (or auto-detected). Kept so
+        # set_mode("llm") can re-arm the external model after a scratch detour
+        # without rebuilding the app, and so "auto" can restore it.
+        self._boot_provider = self.completion_provider
+        # Cloud slot: a user-configured external LLM (ChatGPT/Gemini/Groq/…)
+        # installed via set_cloud_provider. Kept separate from the boot/local
+        # provider so switching local ↔ cloud never loses either configuration.
+        self._cloud_provider: object | None = None
+        # User-facing brain mode: "auto" (best local LLM, else scratch), "llm"
+        # (force the local/external env model), "scratch" (always local rules),
+        # "cloud" (the configured cloud LLM, falling back like "llm").
+        self.mode = "auto"
         self.scratch = ScratchReasoningEngine()
         self._conversation = conversation or ConversationManager(
             system_prompt=(
@@ -51,12 +67,76 @@ class NovaBrain:
         return str(getattr(self.completion_provider, "name", "unknown"))
 
     @property
+    def model_name(self) -> str:
+        """The active completion model, or '' when no external model is configured."""
+        if not self.model_configured:
+            return ""
+        return str(getattr(self.completion_provider, "model", "") or "")
+
+    @property
     def model_configured(self) -> bool:
         return str(getattr(self.completion_provider, "name", "unknown")) != "echo"
 
     @property
     def conversation(self) -> ConversationManager:
         return self._conversation
+
+    @property
+    def effective_mode(self) -> str:
+        """The brain actually answering right now: "llm" or "scratch".
+
+        Derived from the live provider, not from the user's chosen mode, so
+        forced "llm" with no model available still reports scratch honestly.
+        """
+        return "llm" if self.model_configured else "scratch"
+
+    def set_cloud_provider(self, provider: object | None) -> None:
+        """Install (or clear) the cloud LLM and switch onto it when present."""
+        self._cloud_provider = provider
+        if provider is not None:
+            self.mode = "cloud"
+            self.completion_provider = provider
+        elif self.mode == "cloud":
+            self.set_mode("auto")
+
+    @property
+    def cloud_provider_name(self) -> str:
+        """The installed cloud LLM's name ('cloud:openai'), or '' when none."""
+        if self._cloud_provider is None:
+            return ""
+        return str(getattr(self._cloud_provider, "name", ""))
+
+    def set_mode(self, mode: str) -> None:
+        """Switch the chat brain: auto | llm | scratch | cloud (no restart).
+
+        - "llm" forces the local/env model (re-arming the boot provider if a
+          previous "scratch" mode swapped it out); when no model exists this is
+          a no-op that stays on scratch.
+        - "scratch" swaps Echo in, so every chat answer is local; the boot
+          provider is remembered for a later "llm"/"auto".
+        - "cloud" activates the configured cloud LLM; with none configured it
+          behaves exactly like "llm" (best local model, else scratch).
+        - "auto" restores the boot provider; the lazy Ollama re-probe resumes
+          upgrading it when Ollama appears.
+        """
+        if mode == "cloud":
+            self.completion_provider = (
+                self._cloud_provider
+                if self._cloud_provider is not None
+                else self._boot_provider
+            )
+        elif mode == "llm":
+            if self._boot_provider is not None and str(
+                getattr(self._boot_provider, "name", "")
+            ) != "echo":
+                self.completion_provider = self._boot_provider
+            # No real model available: stay on scratch (effective_mode reports it).
+        elif mode == "scratch":
+            if str(getattr(self.completion_provider, "name", "")) != "echo":
+                self.completion_provider = EchoLLMProvider()
+        else:  # "auto"
+            self.completion_provider = self._boot_provider
+        self.mode = mode
 
     def decide(self, request: BrainRequest) -> BrainDecision:
         """Classify user intent using keyword rules, optionally augmented by LLM."""
@@ -70,15 +150,41 @@ class NovaBrain:
         logger.debug("decide %r -> %s (confidence=%.2f)", text, decision.intent.value, decision.confidence)
         return decision
 
+    async def _maybe_upgrade_provider(self) -> None:
+        """Lazily upgrade the Echo fallback to Ollama if it started after boot.
+
+        Runs only while no external model is configured AND the user has not
+        forced scratch mode — an auto-detected model must never override the
+        switch. The reprobe itself is rate-limited (one 2s probe per minute) and
+        cached after a hit. On the first successful upgrade the
+        on_provider_upgrade callback fires so other consumers (Explore synthesis)
+        swap to the same provider.
+        """
+        if self._ollama_reprobe is None or self.model_configured or self.mode == "scratch":
+            return
+        try:
+            upgraded = await self._ollama_reprobe()
+        except Exception as exc:  # a broken probe must never break chat
+            logger.warning("LLM re-probe failed: %s", exc)
+            return
+        if upgraded is not None and upgraded is not self.completion_provider:
+            self.completion_provider = upgraded
+            if self._on_provider_upgrade is not None:
+                self._on_provider_upgrade(upgraded)
+
     async def chat(self, request: BrainRequest) -> BrainResponse:
         """Multi-turn chat with conversation history."""
         self._conversation.add_user_message(request.text)
 
         decision = BrainDecision(BrainIntent.CHAT, "Answered by the configured chat model.", confidence=0.8)
 
+        await self._maybe_upgrade_provider()
+        # "scratch" mode answers locally even when a real model is configured:
+        # the provider stays swapped to Echo until set_mode moves off scratch.
         if not self.model_configured:
             payload = self.scratch.answer(request.text, request.context)
             payload["provider"] = self.provider_name
+            payload["brain_mode"] = self.effective_mode
             response_text = payload["message"]
             self._conversation.add_assistant_message(response_text, metadata={"intent": "chat", "mode": "scratch"})
             self._conversation.add_turn(request.text, response_text, intent="chat")
@@ -99,6 +205,7 @@ class NovaBrain:
             "model_configured": True,
             "provider": self.provider_name,
             "conversation_turns": self._conversation.turn_count,
+            "brain_mode": self.effective_mode,
         }
         return BrainResponse(decision=decision, payload=payload, summary=answer)
 
@@ -112,7 +219,7 @@ class NovaBrain:
             response_text = _friendly_summary(request, decision, payload)
             return BrainResponse(
                 decision=decision,
-                payload=dict(payload),
+                payload={**payload, "brain_mode": self.effective_mode},
                 summary=response_text,
             )
         try:
@@ -131,7 +238,9 @@ class NovaBrain:
         except Exception as exc:
             summary = _friendly_summary(request, decision, payload)
             logger.warning("Response shaping failed, using fallback: %s", exc)
-        return BrainResponse(decision=decision, payload=dict(payload), summary=summary)
+        return BrainResponse(
+            decision=decision, payload={**payload, "brain_mode": self.effective_mode}, summary=summary
+        )
 
     def _keyword_classify(self, lower: str) -> BrainDecision:
         """Fast keyword-based classification."""
@@ -165,14 +274,19 @@ class NovaBrain:
             return BrainDecision(
                 BrainIntent.CHAT, "Worded arithmetic is computed locally by the scratch brain.", confidence=0.88
             )
+        # Explicit web-search phrasing drives the REAL browser to a search engine
+        # ("google X", "search the web for X") — checked before EXPLORE so a query
+        # that itself sounds like a research question ("...what is X") still opens
+        # the browser instead of being rerouted to research synthesis.
+        if _looks_like_web_search(lower):
+            return BrainDecision(
+                BrainIntent.BROWSER_AUTOMATION,
+                "Request asks to search the web in a browser.",
+                confidence=0.82,
+            )
         # Explanation / research requests — but only if the scratch brain has no
         # canned local answer (covers "what is", "what are", and research verbs).
-        explore_keywords = [
-            "research", "explain", "why", "compare",
-            "teach me", "is it true", "true or false",
-            "verify", "fact check", "latest", "online",
-        ]
-        if _contains(lower, "what is", "what are", *explore_keywords) and scratchable is None:
+        if looks_like_research_question(lower) and scratchable is None:
             return BrainDecision(BrainIntent.EXPLORE, "Request asks for explanation or research.", confidence=0.86)
         import re as _re
         if _contains(lower, "roadmap", "milestone", "break down", "steps") or _re.search(r'\bplan\b', lower):
@@ -219,6 +333,41 @@ class NovaBrain:
 def _contains(text: str, *needles: str) -> bool:
     return any(needle in text for needle in needles)
 
+def looks_like_research_question(text: str) -> bool:
+    """ONE canonical detector for "this deserves a researched answer".
+
+    Covers "what is / what are" questions and the research verbs. Scratch's
+    narrow routing gate decides separately whether a canned LOCAL answer
+    exists — callers must combine both (a hit here + no scratch answer means
+    the question needs real research synthesis).
+    """
+    explore_keywords = [
+        "research", "explain", "why", "compare",
+        "teach me", "is it true", "true or false",
+        "verify", "fact check", "latest", "online",
+    ]
+    return _contains(text, "what is", "what are", *explore_keywords)
+
+
+def _looks_like_web_search(text: str) -> bool:
+    """True for explicit web-search phrasing that should drive a real browser.
+
+    Deliberately narrower than the EXPLORE research intent ("what is",
+    "explain", "research"): only phrasing that names a web search or a search
+    engine routes to the browser controller's search-engine page.
+    """
+    return _contains(
+        text,
+        "search the web",
+        "search the internet",
+        "search on the web",
+        "search web",
+        "web search",
+        "internet search",
+        "google ",
+    )
+
+
 def _looks_like_desktop_command(text: str) -> bool:
     browser_targets = (" website", " web page", " url", " http://", " https://")
     if any(target in text for target in browser_targets):
@@ -243,9 +392,28 @@ def _looks_like_desktop_command(text: str) -> bool:
 
 
 def _looks_like_phone_command(text: str) -> bool:
-    if not _contains(text, "phone", "android", "mobile", "whatsapp", "sms", "call "):
-        return False
-    return _contains(text, "open ", "launch ", "control", "send", "call ", "text ", "message")
+    """True for phrasing that should drive the phone controller.
+
+    Two families:
+    - device-anchored: a device word (phone/android/mobile/sms) plus an action
+      verb — "text mom on my phone", "open whatsapp on my phone".
+    - self-sufficient verbs: "call …", "dial …", "text …", and screenshot
+      phrasing name the phone action directly; a bare "call john" is a phone
+      command, not desktop automation or chat.
+    """
+    lower = text.strip().lower()
+    if _contains(lower, "phone", "android", "mobile", "sms"):
+        return _contains(
+            lower, "open ", "launch ", "control", "send", "call ", "text ", "message",
+            "screenshot", "dial ",
+        )
+    if _contains(lower, "whatsapp"):
+        return True  # a phone-only app; no device word needed
+    # Phone-action verbs that stand alone: text/call/dial/screenshot.
+    return (
+        lower.startswith(("call ", "dial ", "text ", "sms "))
+        or _contains(lower, "send a text", "send text", "take a screenshot", "take screenshot", "screenshot my phone", "screenshot of my phone")
+    )
 
 
 def _friendly_summary(

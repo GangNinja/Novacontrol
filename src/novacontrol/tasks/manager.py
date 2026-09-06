@@ -41,6 +41,16 @@ class TaskCenter:
     def get(self, task_id: str) -> TaskRecord:
         return self._tasks[task_id]
 
+    def delete(self, task_id: str) -> TaskRecord:
+        """Remove one task record and return it (raises KeyError when unknown)."""
+        return self._tasks.pop(task_id)
+
+    def clear(self) -> int:
+        """Remove every task record; returns how many were deleted."""
+        count = len(self._tasks)
+        self._tasks.clear()
+        return count
+
     def list(self) -> tuple[TaskRecord, ...]:
         return tuple(self._tasks[key] for key in sorted(self._tasks))
 

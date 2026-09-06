@@ -24,6 +24,15 @@ class DesktopActionType(StrEnum):
     TYPE_TEXT = "type_text"
     OPEN_FOLDER = "open_folder"
     SEARCH_START_MENU = "search_start_menu"
+    WEB_SEARCH = "web_search"
+    # Vision-guided in-app action: click a labeled element on screen.
+    VISION_CLICK = "vision_click"
+    # Direct game launch via platform deep link (steam://rungameid/<appid>).
+    GAME_LAUNCH = "game_launch"
+    # App deep-link navigation (steam://open/library, ms-settings:<page>, ...).
+    APP_NAVIGATE = "app_navigate"
+    # Vision-verified stop: close the most recently focused app window.
+    STOP_APP = "stop_app"
 
 
 class DesktopActionStatus(StrEnum):

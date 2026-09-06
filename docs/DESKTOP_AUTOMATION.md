@@ -9,8 +9,10 @@ The Phase 7 desktop automation subsystem plans desktop workflows and executes th
 - `DesktopAutomationController`: planner and approval-gated executor
 - `DesktopCommandRunner`: adapter interface for platform-specific execution
 - `NoopDesktopRunner`: safe runner that records intent without changing the desktop
-- `AutomationAuditLog`: audit log interface
-- `InMemoryAutomationAuditLog`: test and embedded audit log
+- `AutomationAuditLog` / `InMemoryAutomationAuditLog`: timestamped audit log
+  (interface + in-memory store) shared by the desktop and browser controllers —
+  it lives in `novacontrol.core.audit` and is re-exported from this package for
+  backward compatibility
 - `DesktopAutomationModule`: event-driven runtime module
 
 ## Approval Rule

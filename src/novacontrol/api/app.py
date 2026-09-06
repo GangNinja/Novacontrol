@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import MutableMapping
+from os import PathLike
 from pathlib import Path
 from typing import Any
 
@@ -70,8 +72,14 @@ def create_app() -> Any:
     class NoCacheStaticFiles(StaticFiles):
         """Static files that are never cached, so UI edits appear on the next load."""
 
-        def file_response(self, path: str, stat_result: Any, scope: Any, **kwargs: Any) -> Any:
-            response = super().file_response(path, stat_result, scope, **kwargs)
+        def file_response(
+            self,
+            full_path: str | PathLike[str],
+            stat_result: os.stat_result,
+            scope: MutableMapping[str, Any],
+            status_code: int = 200,
+        ) -> Any:
+            response = super().file_response(full_path, stat_result, scope, status_code)
             response.headers.update(_never_cache_headers())
             return response
 
@@ -155,6 +163,9 @@ def create_app() -> Any:
             include_videos_in_explore=bool(payload["include_videos_in_explore"])
             if "include_videos_in_explore" in payload
             else None,
+            auto_approve_run=bool(payload["auto_approve_run"])
+            if "auto_approve_run" in payload
+            else None,
         )
         nova.persist()
         return settings.to_dict()
@@ -163,6 +174,94 @@ def create_app() -> Any:
     async def ask(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
         response = await nova.handle_request(str(payload["request"]))
         return response.to_dict()
+
+    @app.post("/brain/mode")
+    async def brain_mode(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Switch the chat brain: auto | llm | scratch (hot-swap, no restart).
+
+        The setting persists server-side, so the choice survives reloads and
+        restarts; the returned status is what the Chat panel's switch renders.
+        """
+        try:
+            return nova.set_brain_mode(str(payload.get("mode", "")))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/brain/mode")
+    async def brain_mode_get(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return nova.brain_status()
+
+    @app.get("/brain/cloud/presets")
+    async def brain_cloud_presets(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Cloud LLM provider picker metadata (no secrets)."""
+        return {"presets": nova.cloud_llm_presets()}
+
+    @app.post("/brain/cloud")
+    async def brain_cloud_set(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Install a cloud LLM (ChatGPT/Gemini/Groq/…) as the active brain.
+
+        The API key is stored only on this machine (data/cloud_llm.json,
+        gitignored) and is never returned by any endpoint — responses carry a
+        redacted tail hint only.
+        """
+        try:
+            return nova.set_cloud_llm(
+                str(payload.get("provider", "")),
+                str(payload.get("api_key", "")),
+                model=str(payload.get("model", "")),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/brain/cloud/clear")
+    async def brain_cloud_clear(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Remove the stored cloud LLM config and its API key."""
+        return nova.clear_cloud_llm()
+
+    @app.post("/chat/clear")
+    async def chat_clear(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Wipe the server-side conversation memory (multi-turn context)."""
+        nova.brain.conversation.clear()
+        return {"status": "cleared", "conversation_turns": 0}
+
+    @app.get("/tasks")
+    async def tasks_list(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Trimmed task views for the System panel's delete buttons.
+
+        TaskRecord.to_dict() embeds the full `result` blob (a completed /ask
+        stores a whole response in it), so the listing keeps only the fields the
+        rows render — never the payload.
+        """
+        return {
+            "tasks": [
+                {
+                    "id": task.id,
+                    "title": task.title,
+                    "kind": task.kind,
+                    "status": task.status.value,
+                    "created_at": task.created_at.isoformat(),
+                }
+                for task in nova.tasks.list()
+            ]
+        }
+
+    @app.post("/tasks/delete")
+    async def tasks_delete(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Delete one tracked task by id (404 when the id is unknown)."""
+        task_id = str(payload.get("id", ""))
+        try:
+            deleted = nova.tasks.delete(task_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown task id: {task_id}") from exc
+        nova.persist()
+        return {"status": "deleted", "id": deleted.id}
+
+    @app.post("/tasks/clear")
+    async def tasks_clear(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Delete every tracked task record."""
+        count = nova.tasks.clear()
+        nova.persist()
+        return {"status": "cleared", "deleted": count}
 
     @app.post("/improve")
     async def improve(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
@@ -234,13 +333,87 @@ def create_app() -> Any:
     async def phone_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
         return nova.phone.status().to_dict()
 
+    # ── Vision tab + bug log ─────────────────────────────────────────
+    @app.get("/vision/status")
+    async def vision_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Vision capability report: model availability + open bug count."""
+        return {
+            "vision_model": nova.vision.has_vision_model,
+            "open_bugs": nova.bug_log.open_count(),
+            "bugs_path": str(nova.bug_log.path),
+        }
+
+    @app.post("/vision/describe")
+    async def vision_describe(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Capture the screen and describe it (vision model or window probe)."""
+        return await nova.vision.describe_screen()
+
+    @app.post("/vision/click")
+    async def vision_click(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Vision-locate a labeled element on screen, click it, verify."""
+        label = str(payload.get("label", "")).strip()
+        if not label:
+            raise HTTPException(status_code=422, detail="A 'label' is required.")
+        return await nova.vision.guided_click(label)
+
+    @app.get("/intelligence")
+    async def intelligence_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Global Intelligence Layer health: interpretation telemetry, the
+        self-improvement findings it produced, and the capability registry."""
+        return {
+            "telemetry": nova.intelligence.telemetry.to_dict(),
+            "findings": nova.intelligence.telemetry.improvement_findings(),
+            "capabilities": nova.intelligence.capabilities.to_dict(),
+        }
+
+    @app.get("/bugs")
+    async def list_bugs(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return nova.bug_log.to_dict()
+
+    @app.post("/bugs/{bug_id}/fix")
+    async def fix_bug(bug_id: str, _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        record = nova.bug_log.mark_fixed(bug_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="No such bug.")
+        return record.to_dict()
+
+    @app.post("/bugs/clear-fixed")
+    async def clear_fixed_bugs(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return {"removed": nova.bug_log.clear_fixed()}
+
+    @app.post("/phone/connect")
+    async def phone_connect(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Run the phone bridge pairing flow (starts ADB, probes for devices).
+
+        Read-only toward the device: the phone user still has to accept the RSA
+        authorization prompt; this only makes the prompt appear.
+        """
+        return nova.phone.connect().to_dict()
+
     @app.post("/phone/plan")
     async def phone_plan(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
         return nova.plan_phone_command(str(payload["command"]))
 
     @app.post("/phone/execute")
     async def phone_execute(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
-        return await nova.execute_phone_command(str(payload["command"]))
+        token = str(payload.get("approval_token", "") or "") or None
+        try:
+            return await nova.execute_phone_command(str(payload["command"]), approval_token=token)
+        except ValueError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    @app.post("/agent/run")
+    async def agent_run(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Run the full agentic loop (interpret → plan → perceive → act → verify → recover)."""
+        return await nova.run_agentic_task(str(payload["request"]))
+
+    @app.get("/agent/metrics")
+    async def agent_metrics(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return nova.agentic_metrics()
+
+    @app.get("/agent/knowledge")
+    async def agent_knowledge(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return nova.agentic_knowledge()
 
     @app.post("/explore")
     async def explore(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:

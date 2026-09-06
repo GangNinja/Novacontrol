@@ -1,6 +1,14 @@
 /* ── 3D Animated Background ────────────────────────────────── */
 
 (function initBackground() {
+  // Companion to the CSS prefers-reduced-motion block: readers who set the
+  // OS reduced-motion signal should also get no JS animation, because the
+  // canvas loop is motion (constant redraw, particle updates, connection
+  // lines) even when CSS transitions are collapsed.
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    return;
+  }
+
   const canvas = document.getElementById("bgCanvas");
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
@@ -81,6 +89,13 @@
 /* ── 3D Card Tilt Effect ───────────────────────────────────── */
 
 (function initTiltEffect() {
+  // Per-card tilt is motion too (the transform updates on every mousemove
+  // frame). Keep it disabled under the same OS reduced-motion signal that
+  // the CSS block uses, so the whole-page motion policy is consistent.
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    return;
+  }
+
   document.addEventListener("mousemove", (e) => {
     document.querySelectorAll(".surface, .command-console, .info-card, .metric-card").forEach((card) => {
       const rect = card.getBoundingClientRect();

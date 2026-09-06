@@ -40,6 +40,7 @@ function render(targetId, data, type = "generic") {
   else if (type === "workflow") renderWorkflow(target, data);
   else if (type === "learn") renderLearning(target, data);
   else if (type === "health") renderHealth(target, data);
+  else if (type === "phoneStatus") renderPhoneStatus(target, data);
   else if (type === "settings") renderSettingsResult(target, data);
   else renderGeneric(target, data);
   state.lastText = textForSpeech(data);

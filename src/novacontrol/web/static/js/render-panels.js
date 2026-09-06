@@ -134,6 +134,30 @@ function renderCommand(target, data) {
   rememberApproval(data);
   target.appendChild(el("p", "summary", data.summary || "Command prepared."));
 
+  // Settings → Auto-approve & run: a freshly planned, tokened command executes
+  // immediately through the exact same approve flow (one click saved). Only
+  // fires once per render of a waiting_for_approval plan with a token.
+  if (
+    state.autoApproveRun &&
+    data &&
+    data.status === "waiting_for_approval" &&
+    data.approval && data.approval.token && !data.approval.approved &&
+    typeof window.runAutoApproved === "function"
+  ) {
+    const command = data.command;
+    if (command && typeof window.runAutoApproved[command] === "function") {
+      const executeIt = window.runAutoApproved[command];
+      delete window.runAutoApproved[command]; // single-shot
+      // Defer so this render completes before the execution re-renders.
+      setTimeout(executeIt, 0);
+    }
+  }
+
+  // Phone bridge not paired: the plan is prepared but nothing can run until a
+  // device reports available, so execution is replaced by pairing guidance.
+  // Distinct from the approval banner: approving is not the missing step.
+  const bridgeBlocked = data.status === "waiting_for_phone_bridge";
+
   // Show multi-step plan
   if (data.steps && data.steps.length > 0) {
     const stepsCard = el("article", "info-card");
@@ -149,13 +173,17 @@ function renderCommand(target, data) {
     target.appendChild(stepsCard);
   }
 
-  if (data.approval) {
+  if (bridgeBlocked) {
+    target.appendChild(bridgeBlockedCard(data.bridge));
+  } else if (data.approval) {
     target.appendChild(approvalBanner(data.approval, "Approved & Executed", "All planned actions completed."));
   }
 
-  if (data.approval && !data.approval.approved && data.approval.token && data.command) {
+  // No inline Approve And Run while the bridge is blocked: the plan carries no
+  // execution token then anyway, and the button would just re-plan forever.
+  if (!bridgeBlocked && data.approval && !data.approval.approved && data.approval.token && data.command) {
     const row = el("div", "button-row action-row");
-    const approve = el("button", "", "Approve And Run");
+    const approve = el("button", "cyber-btn primary", "Approve And Run");
     approve.type = "button";
     approve.addEventListener("click", () => {
       // /command/execute re-dispatches on the intent, so this single button approves
@@ -194,7 +222,7 @@ function renderCommand(target, data) {
   action.appendChild(el("span", "pill", label(data.status || "planned")));
   grid.appendChild(action);
 
-  if (data.bridge) {
+  if (data.bridge && !bridgeBlocked) {
     const bridge = el("article", "info-card");
     bridge.appendChild(el("h4", "", "Phone Bridge"));
     bridge.appendChild(el("p", "", `${label(data.bridge.state || "unknown")} via ${data.bridge.adapter || "adapter"}`));
@@ -221,17 +249,46 @@ function renderCommand(target, data) {
   target.appendChild(grid);
 }
 
+/* ── Phone Bridge Status (JARVIS Phone panel) ───────────────── */
+
+// The waiting_for_phone_bridge banner: the plan IS prepared, but nothing can
+// run until a device reports available — so approval is not the missing step
+// and the Approve And Run button is suppressed. Shows ALL pairing next-steps
+// (not the truncated two of the ready-bridge card).
+function bridgeBlockedCard(bridge) {
+  const card = el("article", "info-card bridge-blocked");
+  card.appendChild(el("h4", "", "Phone bridge needed"));
+  card.appendChild(el("span", "pill warn", label((bridge && bridge.state) || "not_configured")));
+  card.appendChild(el("p", "", "The action is prepared, but no phone is paired yet — Approve And Run unlocks once a device reports available."));
+  const steps = el("ul", "bridge-steps");
+  ((bridge && bridge.next_steps) || []).forEach((step) => steps.appendChild(richBullet(step)));
+  card.appendChild(steps);
+  return card;
+}
+
+// GET /phone/status returns a PhoneBridgeState, not a plan/execution shape.
+// Mirrors the bridge card renderCommand already draws so pairing guidance
+// (next_steps) is shown exactly once, with the same labels.
+function renderPhoneStatus(target, data) {
+  const card = el("article", "info-card");
+  card.appendChild(el("h4", "", "Phone Bridge"));
+  card.appendChild(el("p", "", `${label(data.state || "unknown")} via ${data.adapter || "adapter"}`));
+  card.appendChild(el("span", `pill ${data.available ? "ok" : "warn"}`, data.available ? "Device ready" : "Pair needed"));
+  (data.next_steps || []).forEach((step) => card.appendChild(el("p", "", step)));
+  target.appendChild(card);
+}
+
 /* ── Build / Improvement Rendering ──────────────────────────── */
 
 function renderBuild(target, data) {
-  const payload = data.payload || data;
-  if (payload.plan?.steps) {
-    target.appendChild(el("p", "summary", payload.plan.name || "Plan created."));
-    renderActionCards(target, payload.plan.steps, "description");
-  } else if (payload.actions) {
-    target.appendChild(el("p", "summary", `Found ${payload.actions.length} improvement actions.`));
-    renderActionCards(target, payload.actions, "description");
-    renderFindings(target, payload.findings || []);
+  // /plan returns a flat {plan} / {actions} body — no envelope, no payload key.
+  if (data.plan?.steps) {
+    target.appendChild(el("p", "summary", data.plan.name || "Plan created."));
+    renderActionCards(target, data.plan.steps, "description");
+  } else if (data.actions) {
+    target.appendChild(el("p", "summary", `Found ${data.actions.length} improvement actions.`));
+    renderActionCards(target, data.actions, "description");
+    renderFindings(target, data.findings || []);
   } else {
     renderGeneric(target, data);
   }
@@ -241,7 +298,9 @@ function renderBuild(target, data) {
 
 function renderWorkflow(target, data) {
   target.appendChild(el("p", "summary", data.summary || "Improvement workflow ready."));
-  if (data.preview?.id) state.lastPreviewId = data.preview.id;
+  // Bind a freshly generated preview's id to its goal so Approve And Apply can
+  // reuse it (rememberPreview skips approve responses that carry it back applied).
+  rememberPreview(data);
 
   if (data.approval) {
     target.appendChild(approvalBanner(data.approval, "Approved", "All planned changes completed."));
@@ -393,6 +452,77 @@ function renderGeneric(target, data) {
 }
 
 /* ── Metrics Update ─────────────────────────────────────────── */
+
+// Always-visible AI brain status for the System panel: mode + provider + model
+// from /status (status.app.brain), so which brain is answering is visible at a
+// glance without reading JSON. Unknown/missing brain renders a neutral state.
+function renderBrainStatus(status) {
+  const container = byId("brainStatus");
+  if (!container) return;
+  const brain = status?.app?.brain || {};
+  const active = Boolean(brain.model_configured);
+  const effective = brain.effective_mode || (active ? "llm" : "scratch");
+  const card = el("article", "info-card brain-card");
+  card.appendChild(el("h4", "", "AI Brain"));
+  const row = el("p", "brain-line");
+  const modeText = effective === "scratch" ? "Local scratch brain" : effective === "llm" ? "Local LLM" : "Auto";
+  row.appendChild(el("span", `pill ${active ? "ok" : "warn"}`, modeText));
+  const provider = label(brain.provider || "unknown");
+  row.appendChild(el("strong", "", provider + (brain.model ? ` · ${brain.model}` : "")));
+  card.appendChild(row);
+  card.appendChild(
+    el(
+      "p",
+      "",
+      effective === "scratch"
+        ? "Answering locally with the built-in scratch brain. Switch back to Auto or Local LLM in the Chat panel to use Ollama."
+        : active
+          ? "Chat and Explore synthesis use this local model."
+          : "Auto mode: answering locally until the Ollama server is detected."
+    )
+  );
+  clearNode(container);
+  container.appendChild(card);
+}
+
+/* ── Tracked Tasks (System panel) ───────────────────────────── */
+
+function renderTaskList(tasks) {
+  const container = byId("taskList");
+  if (!container) return;
+  clearNode(container);
+  if (!Array.isArray(tasks) || !tasks.length) {
+    container.appendChild(el("p", "task-empty", "No tracked tasks yet — every request you make creates one."));
+    return;
+  }
+  tasks.slice(0, 30).forEach((task) => {
+    const row = el("div", "task-row");
+    const body = el("div", "task-row-body");
+    body.appendChild(el("span", "task-row-title", task.title || "(untitled task)"));
+    const when = task.created_at ? new Date(task.created_at).toLocaleString() : "";
+    body.appendChild(el("span", "task-row-meta", `${label(task.status || "pending")} · ${label(task.kind || "general")} · ${when}`));
+    row.appendChild(body);
+    row.appendChild(el("span", `pill ${task.status === "completed" ? "ok" : task.status === "failed" ? "err" : "warn"}`, label(task.status || "pending")));
+    const del = el("button", "cyber-btn danger small task-delete", "Delete");
+    del.type = "button";
+    del.addEventListener("click", () => deleteTask(task.id));
+    row.appendChild(del);
+    container.appendChild(row);
+  });
+}
+
+async function deleteTask(id) {
+  if (!id) return;
+  await requestJson("/tasks/delete", { id });
+  showToast("Task deleted");
+  await refreshStatus();
+}
+
+async function clearAllTasks() {
+  const result = await requestJson("/tasks/clear", {});
+  showToast(`Deleted ${result.deleted ?? 0} task(s)`);
+  await refreshStatus();
+}
 
 function updateMetrics(status) {
   const app = status.app || {};

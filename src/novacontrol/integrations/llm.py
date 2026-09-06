@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 import json
 import logging
 import os
+import time
 from typing import Any
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -51,7 +52,12 @@ LLMTransport = Callable[[str, dict[str, str], dict[str, Any]], dict[str, Any]]
 
 
 class OpenAICompatibleLLMProvider:
-    """Generic provider for OpenAI-compatible `/v1/chat/completions` APIs."""
+    """Generic provider for OpenAI-compatible `/v1/chat/completions` APIs.
+
+    ``chat_path`` lets one class serve every OpenAI-style surface: local
+    Ollama and most clouds use ``/v1/chat/completions``, while Gemini's
+    OpenAI-compatible endpoint lives under ``/v1beta/openai``.
+    """
 
     def __init__(
         self,
@@ -60,12 +66,14 @@ class OpenAICompatibleLLMProvider:
         base_url: str,
         api_key: str,
         model: str,
+        chat_path: str = "/v1/chat/completions",
         transport: LLMTransport | None = None,
     ) -> None:
         self._name = name
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
+        self.chat_path = chat_path
         self.transport = transport or _default_transport
 
     @property
@@ -82,7 +90,7 @@ class OpenAICompatibleLLMProvider:
         # slow LLM response never freezes the rest of the local app.
         response = await asyncio.to_thread(
             self.transport,
-            f"{self.base_url}/v1/chat/completions",
+            f"{self.base_url}{self.chat_path}",
             {
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
@@ -171,6 +179,85 @@ def build_ollama_provider(base_url: str = _OLLAMA_DEFAULT_URL) -> OpenAICompatib
     )
 
 
+# ── Cloud LLM providers (ChatGPT, Gemini, Groq, …) ────────
+
+# One row per OpenAI-compatible cloud endpoint. All of them speak the same
+# /chat/completions shape, differing only in base URL, chat path, default
+# model, and where the key comes from. Gemini exposes an OpenAI-compatible
+# surface under /v1beta/openai (its native generateContent API is a different
+# wire format entirely). Anthropic Claude is intentionally absent: its
+# /v1/messages endpoint is NOT OpenAI-compatible (different payload and a
+# required anthropic-version header) — it needs its own provider class.
+CLOUD_LLM_PRESETS: tuple[dict[str, str], ...] = (
+    {"id": "openai", "label": "ChatGPT (OpenAI)", "base_url": "https://api.openai.com",
+     "chat_path": "/v1/chat/completions", "default_model": "gpt-4o-mini",
+     "models": "gpt-4o-mini, gpt-4o, gpt-4.1-mini, o4-mini", "key_hint": "OPENAI_API_KEY"},
+    {"id": "gemini", "label": "Gemini (Google)", "base_url": "https://generativelanguage.googleapis.com",
+     "chat_path": "/v1beta/openai/chat/completions", "default_model": "gemini-2.0-flash",
+     "models": "gemini-2.0-flash, gemini-2.5-flash, gemini-2.5-pro", "key_hint": "GEMINI_API_KEY"},
+    {"id": "groq", "label": "Groq", "base_url": "https://api.groq.com/openai",
+     "chat_path": "/v1/chat/completions", "default_model": "llama-3.3-70b-versatile",
+     "models": "llama-3.3-70b-versatile, llama-3.1-8b-instant, mixtral-8x7b-32768", "key_hint": "GROQ_API_KEY"},
+    {"id": "openrouter", "label": "OpenRouter", "base_url": "https://openrouter.ai/api",
+     "chat_path": "/v1/chat/completions", "default_model": "openai/gpt-4o-mini",
+     "models": "openai/gpt-4o-mini, anthropic/claude-3.5-sonnet, meta-llama/llama-3.3-70b-instruct", "key_hint": "OPENROUTER_API_KEY"},
+    {"id": "mistral", "label": "Mistral", "base_url": "https://api.mistral.ai",
+     "chat_path": "/v1/chat/completions", "default_model": "mistral-small-latest",
+     "models": "mistral-small-latest, mistral-large-latest", "key_hint": "MISTRAL_API_KEY"},
+    {"id": "deepseek", "label": "DeepSeek", "base_url": "https://api.deepseek.com",
+     "chat_path": "/v1/chat/completions", "default_model": "deepseek-chat",
+     "models": "deepseek-chat, deepseek-reasoner", "key_hint": "DEEPSEEK_API_KEY"},
+)
+
+
+def cloud_llm_presets() -> list[dict[str, str]]:
+    """Metadata for the Settings panel's provider picker (no secrets)."""
+    return [
+        {k: str(row[k]) for k in ("id", "label", "default_model", "models", "key_hint")}
+        for row in CLOUD_LLM_PRESETS
+    ]
+
+
+def get_cloud_preset(provider_id: str) -> dict[str, str] | None:
+    for row in CLOUD_LLM_PRESETS:
+        if row["id"] == provider_id:
+            return dict(row)
+    return None
+
+
+def _redact_key(key: str) -> str:
+    """Never ship a raw API key anywhere: show only its tail."""
+    tail = key[-4:] if len(key) >= 8 else "****"
+    return f"…{tail}"
+
+
+def build_cloud_provider(
+    provider_id: str,
+    api_key: str,
+    *,
+    model: str = "",
+    environ: Mapping[str, str] | None = None,
+) -> OpenAICompatibleLLMProvider | None:
+    """Build a cloud provider for a preset id + key (None for unknown presets).
+
+    An explicitly passed environ wins over the host env, matching every other
+    factory in this module (an empty dict is authoritative, never falsy).
+    """
+    preset = get_cloud_preset(provider_id)
+    if preset is None or not api_key.strip():
+        return None
+    values = os.environ if environ is None else environ
+    # A model from the UI wins; otherwise env; otherwise the preset default.
+    chosen_model = (model or values.get("NOVACONTROL_LLM_MODEL", "")).strip() or preset["default_model"]
+    return OpenAICompatibleLLMProvider(
+        name=f"cloud:{preset['id']}",
+        base_url=preset["base_url"],
+        api_key=api_key.strip(),
+        model=chosen_model,
+        chat_path=preset["chat_path"],
+    )
+
+
 # ── Main provider builder ────────────────────────────────
 
 
@@ -182,7 +269,8 @@ def build_llm_provider_from_environment(environ: Mapping[str, str] | None = None
     2. Ollama auto-detection (if running locally)
     3. Echo fallback (no LLM)
     """
-    values = environ or os.environ
+    # Explicit (possibly empty) mapping wins; only None falls back to the real env.
+    values = os.environ if environ is None else environ
 
     # 1. Explicit configuration takes priority
     enabled = values.get("NOVACONTROL_ENABLE_EXTERNAL_LLM", "").strip().lower()
@@ -215,3 +303,63 @@ def build_llm_provider_from_environment(environ: Mapping[str, str] | None = None
 
     # 3. Fallback
     return EchoLLMProvider()
+
+
+# ── Lazy Ollama re-probe ─────────────────────────────────
+
+# How often a failed (no-Ollama) re-probe may run. Successful detection stops
+# probing entirely: once upgraded, the provider is the real one for the
+# process lifetime.
+_REPROBE_MIN_INTERVAL_SECONDS = 60.0
+
+
+def make_ollama_reprobe(environ: Mapping[str, str] | None = None) -> Callable[[], Awaitable[object | None]]:
+    """Build a rate-limited async probe that returns an upgraded provider or None.
+
+    The app resolves its LLM once at boot; if that yielded the Echo fallback
+    (Ollama not running yet), this probe lets the running process pick Ollama
+    up lazily when it starts later — no restart. Behavior:
+
+    - Returns None immediately when Ollama detection is disabled by env
+      (NOVACONTROL_DISABLE_OLLAMA) or when an explicit external LLM is already
+      configured (NOVACONTROL_ENABLE_EXTERNAL_LLM) — boot already settled those.
+    - Misses are rate-limited (one 2s /api/tags probe per minute) so chat stays
+      responsive; a hit upgrades once and every later call returns the SAME
+      provider object without touching the network again.
+    - The blocking urlopen probe runs in a worker thread (asyncio.to_thread),
+      matching how provider completions keep the event loop free.
+    """
+    # Explicit (possibly empty) mapping wins; only None falls back to the real env.
+    values = os.environ if environ is None else environ
+    if values.get("NOVACONTROL_ENABLE_EXTERNAL_LLM", "").strip().lower() in {"1", "true", "yes", "on"}:
+        async def disabled_by_explicit_config() -> object | None:
+            return None
+        return disabled_by_explicit_config
+    if values.get("NOVACONTROL_DISABLE_OLLAMA", "").strip().lower() in {"1", "true", "yes", "on"}:
+        async def disabled_by_flag() -> object | None:
+            return None
+        return disabled_by_flag
+    ollama_url = values.get("NOVACONTROL_OLLAMA_URL", _OLLAMA_DEFAULT_URL).strip()
+    state: dict[str, object] = {"provider": None, "last_miss": 0.0}
+
+    async def reprobe() -> object | None:
+        if state["provider"] is not None:
+            return state["provider"]  # already upgraded; same object, no I/O
+        now = time.monotonic()
+        last_miss = state["last_miss"]
+        if not isinstance(last_miss, (int, float)) or now - last_miss < _REPROBE_MIN_INTERVAL_SECONDS:
+            return None  # recent miss: skip silently
+        state["last_miss"] = now
+        info = await asyncio.to_thread(detect_ollama, ollama_url)
+        if info is None:
+            return None
+        provider: object = OpenAICompatibleLLMProvider(
+            name="ollama",
+            base_url=info["url"],
+            api_key="ollama",
+            model=_pick_ollama_model(info["models"]),
+        )
+        state["provider"] = provider
+        return provider
+
+    return reprobe

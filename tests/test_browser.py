@@ -1,17 +1,19 @@
-"""Tests for browser automation: controller, approval, events."""
+"""Tests for browser automation: controller, approval, audit, events."""
 
 from __future__ import annotations
 
 import unittest
+from datetime import datetime
 
+from conftest import AllowGateway
 from novacontrol.browser import (
     BrowserActionStatus,
     BrowserAutomationController,
     BrowserAutomationModule,
     PlaywrightBrowserRunner,
 )
+from novacontrol.core.audit import InMemoryAutomationAuditLog
 from novacontrol.core.events import Event, EventBus
-from conftest import AllowGateway
 
 
 class RecordingBrowserRunner:
@@ -30,6 +32,11 @@ class ClosableBrowserRunner(RecordingBrowserRunner):
 
     async def close(self):
         self.closed = True
+
+
+class FailingBrowserRunner:
+    async def run(self, action):
+        raise RuntimeError(f"simulated failure for {action.target}")
 
 
 class BrowserAutomationTests(unittest.IsolatedAsyncioTestCase):
@@ -52,6 +59,51 @@ class BrowserAutomationTests(unittest.IsolatedAsyncioTestCase):
         results = await controller.execute_workflow(controller.plan_navigation("https://example.com"))
         self.assertEqual(results[0].status, BrowserActionStatus.COMPLETED)
         self.assertEqual(runner.actions[0].target, "https://example.com")
+
+    async def test_approved_navigation_leaves_a_timestamped_audit_trace(self) -> None:
+        """Desktop-style audit: every approved run is appended with a timestamp."""
+        audit = InMemoryAutomationAuditLog()
+        runner = RecordingBrowserRunner()
+        controller = BrowserAutomationController(
+            approval_gateway=AllowGateway(), runner=runner, audit_log=audit,
+        )
+        results = await controller.execute_workflow(controller.plan_navigation("https://example.com"))
+        entries = await audit.read()
+
+        self.assertEqual(results[0].status, BrowserActionStatus.COMPLETED)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].action_id, results[0].action_id)
+        self.assertEqual(entries[0].status, "completed")
+        # The trace line is timestamped (raises when malformed) and carries output.
+        datetime.fromisoformat(entries[0].recorded_at)
+        self.assertEqual(entries[0].output["target"], "https://example.com")
+
+    async def test_denied_navigation_is_audited(self) -> None:
+        """Even a refused action leaves a trace, matching the desktop contract."""
+        audit = InMemoryAutomationAuditLog()
+        controller = BrowserAutomationController(runner=RecordingBrowserRunner(), audit_log=audit)
+        results = await controller.execute_workflow(controller.plan_navigation("https://example.com"))
+        entries = await audit.read()
+
+        self.assertEqual(results[0].status, BrowserActionStatus.DENIED)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].status, "denied")
+        datetime.fromisoformat(entries[0].recorded_at)
+        self.assertIsNotNone(entries[0].approval_id, "denied trace carries the denial request id")
+
+    async def test_failed_action_is_audited_with_error(self) -> None:
+        audit = InMemoryAutomationAuditLog()
+        controller = BrowserAutomationController(
+            approval_gateway=AllowGateway(), runner=FailingBrowserRunner(), audit_log=audit,
+        )
+        results = await controller.execute_workflow(controller.plan_navigation("https://example.com"))
+        entries = await audit.read()
+
+        self.assertEqual(results[0].status, BrowserActionStatus.FAILED)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].status, "failed")
+        self.assertIn("simulated failure", entries[0].error)
+        datetime.fromisoformat(entries[0].recorded_at)
 
     async def test_controller_close_delegates_to_runner(self) -> None:
         runner = ClosableBrowserRunner()

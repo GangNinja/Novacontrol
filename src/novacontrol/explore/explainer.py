@@ -42,6 +42,10 @@ class ResearchExplainer:
     def __init__(self, *, completion_provider: object | None = None) -> None:
         self._completion_provider = completion_provider
 
+    def set_completion_provider(self, provider: object) -> None:
+        """Swap the synthesis provider after construction (lazy Ollama upgrade)."""
+        self._completion_provider = provider
+
     async def explain(
         self,
         request: ExploreRequest,

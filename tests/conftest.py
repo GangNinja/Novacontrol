@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 import ast
+import os
 from collections.abc import Mapping, Sequence
 from typing import Any
+
+# LLM detection is env-gated at boot AND at chat-time (lazy re-probe); disabling
+# it process-wide keeps suites deterministic on hosts where Ollama is running.
+# The detection tests pass their own explicit environ to the factory functions.
+os.environ.setdefault("NOVACONTROL_DISABLE_OLLAMA", "1")
 
 
 def shell_launch_offenders(source_code: str) -> list[str]:

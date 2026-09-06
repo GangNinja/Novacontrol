@@ -47,6 +47,12 @@
           <button class="nav-item" data-panel="systemPanel" type="button" aria-label="System">
             <span class="nav-icon" aria-hidden="true">&#9676;</span>System
           </button>
+          <button class="nav-item jarvis-item" data-panel="jarvisPanel" type="button" aria-label="JARVIS device control">
+            <span class="nav-icon" aria-hidden="true">&#9680;</span>J.A.R.V.I.S
+          </button>
+          <button class="nav-item" data-panel="visionPanel" type="button" aria-label="Vision">
+            <span class="nav-icon" aria-hidden="true">&#9673;</span>Vision
+          </button>
           <button class="nav-item" data-panel="settingsPanel" type="button" aria-label="Settings">
             <span class="nav-icon" aria-hidden="true">&#9677;</span>Settings
           </button>
@@ -73,7 +79,7 @@
           </div>
           <div id="metricGrid" class="metric-grid"></div>
           <article class="command-console">
-            <h3>Jarvis Command</h3>
+            <h3>Quick Command</h3>
             <div class="ai-composer command-composer">
               <label for="commandInput" class="sr-only">Command</label>
               <input id="commandInput" type="text" placeholder="What should NovaControl do? Try: open notepad, open chrome" class="cyber-input" aria-label="Command input">
@@ -94,7 +100,7 @@
               </div>
             </article>
             <article class="surface">
-              <h3>Available Capabilities</h3>              <div id="capabilityList" class="capability-list"></div>
+              <h3>Available Capabilities</h3>              <div id="capabilityList" class="capability-list" tabindex="-1"></div>
             </article>
           </div>
 
@@ -112,6 +118,16 @@
               <h2>Chat</h2>
             </div>
             <div class="button-row">
+              <label class="brain-switch" title="Switch the chat brain: Auto uses the local LLM (Ollama) when available, otherwise the built-in scratch brain. LLM forces the model; Scratch always answers locally.">
+                <span class="brain-switch-label">Brain</span>
+                <select id="brainModeSwitch" class="cyber-input brain-switch-select" aria-label="Brain mode">
+                  <option value="auto">Auto</option>
+                  <option value="llm">Local LLM</option>
+                  <option value="scratch">Scratch</option>
+                  <option value="cloud">Cloud LLM</option>
+                </select>
+              </label>
+              <button id="clearChatButton" type="button" class="cyber-btn danger" aria-label="Clear chat history">Clear Chat</button>
               <button id="voiceButton" type="button" class="cyber-btn" aria-label="Start voice input">Voice Input</button>
               <button id="voiceChatButton" type="button" class="cyber-btn" aria-label="Start voice chat mode">Voice Chat</button>
               <button id="stopVoiceButton" type="button" class="cyber-btn danger" aria-label="Stop voice">Stop Voice</button>
@@ -236,6 +252,14 @@
               <button id="packageButton" type="button" class="cyber-btn">Package</button>
             </div>
           </div>
+          <div id="brainStatus" aria-live="polite"></div>
+          <article class="surface">
+            <div class="surface-head-row">
+              <h3>Tracked Tasks</h3>
+              <button id="clearTasksButton" type="button" class="cyber-btn danger small" aria-label="Delete all tasks">Delete All Tasks</button>
+            </div>
+            <div id="taskList" class="task-list" aria-live="polite"></div>
+          </article>
           <div id="systemOutput" class="friendly-output empty-state">
             <div class="empty-hint"><span class="empty-hint-icon">&#9881;</span> Click Health to check system status, or Harden to verify readiness</div>
           </div>
@@ -265,8 +289,126 @@
               <input id="includeVideos" type="checkbox" class="cyber-checkbox">
               <span>Explore videos</span>
             </label>
+            <label class="check-field" title="Planned device commands run immediately without the Approve And Run click.">
+              <input id="autoApproveRun" type="checkbox" class="cyber-checkbox">
+              <span>Auto-approve &amp; run commands</span>
+            </label>
           </div>
+          <article class="surface cloud-llm-card">
+            <h3>Cloud LLM (ChatGPT, Gemini, Groq, …)</h3>
+            <p class="cloud-hint">Pick a provider and paste its API key — it is stored only on this machine (data/cloud_llm.json, gitignored) and sent nowhere except the provider itself. Installing one switches the Chat brain to Cloud LLM; clearing it falls back to your local brain.</p>
+            <div class="cloud-llm-form">
+              <label class="field">
+                <span>Provider</span>
+                <select id="cloudProvider" class="cyber-input"></select>
+              </label>
+              <label class="field">
+                <span>Model <span class="muted">(blank = provider default)</span></span>
+                <input id="cloudModel" type="text" class="cyber-input" placeholder="provider default" autocomplete="off">
+              </label>
+              <label class="field">
+                <span>API key</span>
+                <input id="cloudApiKey" type="password" class="cyber-input" placeholder="paste API key" autocomplete="off">
+              </label>
+            </div>
+            <div class="button-row">
+              <button id="cloudConnectButton" type="button" class="cyber-btn primary">Connect Cloud LLM</button>
+              <button id="cloudClearButton" type="button" class="cyber-btn danger">Remove Cloud LLM</button>
+              <span id="cloudStatus" class="cloud-status" aria-live="polite"></span>
+            </div>
+          </article>
           <div id="settingsOutput" class="friendly-output empty-state"></div>
+        </section>
+
+        <section id="jarvisPanel" class="panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Jarvis</p>
+              <h2>J.A.R.V.I.S</h2>
+            </div>
+            <div class="jarvis-controls">
+              <div class="jarvis-device-switch" role="tablist" aria-label="JARVIS device">
+                <button id="jarvisDeviceDesktop" type="button" class="jarvis-device-btn active" role="tab" aria-selected="true" aria-label="Desktop control">Desktop</button>
+                <button id="jarvisDevicePhone" type="button" class="jarvis-device-btn" role="tab" aria-selected="false" aria-label="Phone control">Phone</button>
+              </div>
+              <button id="jarvisVoiceButton" type="button" class="cyber-btn" aria-label="Speak a JARVIS command">Voice</button>
+              <button id="jarvisPhoneConnectButton" type="button" class="cyber-btn phone-only">Connect Phone</button>
+              <button id="jarvisPhoneStatusButton" type="button" class="cyber-btn phone-only">Bridge Status</button>
+            </div>
+          </div>
+          <article class="command-console">
+            <p id="jarvisHint" class="jarvis-hint">Drive this PC: open apps/folders, chain steps ("open steam and go to library and launch gta v"), dictate into apps ("open notepad and type hello"), or say "stop that". Commands are planned first — nothing runs until you approve it (or enable auto-run in Settings).</p>
+            <div class="ai-composer command-composer">
+              <label for="jarvisInput" class="sr-only">JARVIS command</label>
+              <input id="jarvisInput" type="text" placeholder="e.g. open notepad and type hello world" class="cyber-input" aria-label="JARVIS command input">
+              <div class="composer-actions">
+                <button id="jarvisPlanButton" type="button" class="cyber-btn">Preview Action</button>
+                <button id="jarvisRunButton" type="button" class="cyber-btn primary">Approve And Run</button>
+              </div>
+            </div>
+            <div id="jarvisOutput" class="friendly-output empty-state">
+              <div class="empty-hint"><span class="empty-hint-icon">&#9654;</span> Preview an action to see exactly what will run before you approve it</div>
+            </div>
+            <div id="jarvisHistory" class="jarvis-history">
+              <div class="jarvis-history-head">
+                <span>Command history</span>
+                <button id="jarvisHistoryClearButton" type="button" class="jarvis-history-clear" aria-label="Delete full JARVIS history">Clear all</button>
+              </div>
+              <div id="jarvisHistoryList" class="jarvis-history-list"></div>
+            </div>
+          </article>
+          <div class="suggestion-row">
+            <button class="suggestion-chip" type="button" data-jarvis-desktop="open notepad">open notepad</button>
+            <button class="suggestion-chip" type="button" data-jarvis-desktop="open chrome and search for cats">open chrome and search for cats</button>
+            <button class="suggestion-chip" type="button" data-jarvis-desktop="open steam and go to library and launch gta v">steam → library → game</button>
+            <button class="suggestion-chip" type="button" data-jarvis-desktop="open notepad and type hello world">dictate to notepad</button>
+            <button class="suggestion-chip" type="button" data-jarvis-desktop="open downloads">open downloads</button>
+            <button class="suggestion-chip" type="button" data-jarvis-desktop="stop that">stop that</button>
+            <button class="suggestion-chip phone-only" type="button" data-jarvis-phone="open whatsapp on my phone">open whatsapp</button>
+            <button class="suggestion-chip phone-only" type="button" data-jarvis-phone="text mom on my phone saying running late">text mom</button>
+            <button class="suggestion-chip phone-only" type="button" data-jarvis-phone="take a screenshot on my phone">screenshot</button>
+          </div>
+        </section>
+
+        <section id="visionPanel" class="panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Perception</p>
+              <h2>Vision</h2>
+            </div>
+            <button id="visionStatusButton" type="button" class="cyber-btn">Check Vision</button>
+          </div>
+          <p class="jarvis-hint">The vision model looks at your screen, guides clicks to the right option inside apps, and verifies what it did. Failures are logged to the bug file (what, where, when) so you can review and fix them later.</p>
+          <div class="two-column">
+            <article class="surface">
+              <h3>Describe Screen</h3>
+              <p class="muted">Capture the screen and report what is visible — apps, windows, notable text.</p>
+              <button id="visionDescribeButton" type="button" class="cyber-btn">Describe Screen</button>
+            </article>
+            <article class="surface">
+              <h3>Guided Click</h3>
+              <p class="muted">Name a button or menu (e.g. "File", "Library", "Play GTA V") — the vision layer finds it on screen, clicks it, and verifies.</p>
+              <div class="ai-composer command-composer">
+                <label for="visionClickInput" class="sr-only">Element to click</label>
+                <input id="visionClickInput" type="text" placeholder="e.g. File, Library, Submit" class="cyber-input" aria-label="Vision click target">
+                <div class="composer-actions">
+                  <button id="visionClickButton" type="button" class="cyber-btn primary">Locate &amp; Click</button>
+                </div>
+              </div>
+            </article>
+          </div>
+          <div id="visionDescribeOutput" class="friendly-output empty-state">
+            <div class="empty-hint"><span class="empty-hint-icon">&#9673;</span> Run Describe Screen or a Guided Click to see the vision layer's report here</div>
+          </div>
+          <article class="surface">
+            <h3>Bug Log <span id="bugOpenCount" class="muted"></span></h3>
+            <p class="muted">Every failed action is recorded with what happened, where, and when — stored in data/bugs.json.</p>
+            <div class="button-row">
+              <button id="bugRefreshButton" type="button" class="cyber-btn">Refresh</button>
+              <button id="bugClearFixedButton" type="button" class="cyber-btn">Clear Fixed</button>
+            </div>
+            <div id="bugList" class="jarvis-history-list"></div>
+          </article>
         </section>
 
         <section id="cliPanel" class="panel">

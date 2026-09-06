@@ -8,7 +8,20 @@ from collections.abc import Mapping, Sequence
 
 from novacontrol.brain import ConversationManager, NovaBrain
 from novacontrol.brain.brain import BrainDecision, BrainIntent, BrainRequest, BrainResponse
+from novacontrol.integrations import EchoLLMProvider
 from conftest import EchoProvider, FailingProvider
+
+
+class FakeOllamaProvider:
+    """Stands in for the upgraded provider; a real one is OpenAICompatible."""
+
+    name = "ollama"
+
+    def __init__(self, prefix: str = "Ollama says") -> None:
+        self._prefix = prefix
+
+    async def complete(self, messages, **kwargs):
+        return f"{self._prefix}: done"
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +66,16 @@ INTENT_ROUTING: list[tuple[str, BrainIntent]] = [
     ("go to this website", BrainIntent.BROWSER_AUTOMATION),
     ("navigate to example.com", BrainIntent.BROWSER_AUTOMATION),
     ("fill the form at https://example.com/login with username=admin", BrainIntent.BROWSER_AUTOMATION),
+    # Web-search phrasing drives the real browser, NOT Explore synthesis — and it
+    # beats the EXPLORE gate even when the query itself sounds like a research
+    # question. The trigger is checked before EXPLORE on purpose; do not move it.
+    ("search the web for quantum computing", BrainIntent.BROWSER_AUTOMATION),
+    ("search the internet for black holes", BrainIntent.BROWSER_AUTOMATION),
+    ("web search for mars rover news", BrainIntent.BROWSER_AUTOMATION),
+    ("google bokeh photography examples", BrainIntent.BROWSER_AUTOMATION),
+    ("search the web for what is a quasar", BrainIntent.BROWSER_AUTOMATION),
+    # ...but generic "search" without web phrasing never routes to the browser.
+    ("search my memory for the meeting notes", BrainIntent.MEMORY),
     # Memory
     ("remember this", BrainIntent.MEMORY),
     # Project
@@ -255,6 +278,59 @@ class BrainResponseTests(unittest.IsolatedAsyncioTestCase):
             BrainRequest("test"), decision, {"overview": "Test overview"},
         )
         self.assertIn("test", response.summary.lower())
+
+class LazyOllamaUpgradeTests(unittest.IsolatedAsyncioTestCase):
+    """Chat-time lazy upgrade: when boot found no LLM (Echo), chat probes for a
+    freshly started Ollama and hot-swaps it in — no restart. Probes are
+    rate-limited by the reprobe; the callback lets Explore follow."""
+
+    async def test_chat_upgrades_provider_after_ollama_appears(self) -> None:
+        ollama = FakeOllamaProvider()
+        probes = {"n": 0}
+
+        async def reprobe() -> object | None:
+            probes["n"] += 1
+            return ollama if probes["n"] >= 2 else None
+
+        upgraded: list[object] = []
+        brain = NovaBrain(
+            completion_provider=EchoLLMProvider(),
+            on_provider_upgrade=upgraded.append,
+            ollama_reprobe=reprobe,
+        )
+
+        first = await brain.chat(BrainRequest(text="hello"))
+        self.assertEqual(brain.provider_name, "scratch")
+        self.assertEqual(probes["n"], 1)
+
+        second = await brain.chat(BrainRequest(text="hello again"))
+        self.assertEqual(brain.provider_name, "ollama")
+        self.assertEqual(brain.model_name, "")  # FakeOllamaProvider has no model attr
+        self.assertEqual(upgraded, [ollama])
+        # The second answer came from the NEW provider (LLM mode, not scratch).
+        self.assertTrue(second.payload["model_configured"])
+        self.assertIn("Ollama says: done", second.payload["message"])
+        self.assertNotIn("Ollama says", first.payload["message"])
+
+    async def test_configured_brain_never_probes(self) -> None:
+        async def reprobe() -> object | None:
+            raise AssertionError("a configured LLM must not probe")
+
+        brain = NovaBrain(
+            completion_provider=EchoProvider("Real model"),  # name != echo
+            ollama_reprobe=reprobe,
+        )
+        response = await brain.chat(BrainRequest(text="hello"))
+        self.assertEqual(response.payload["provider"], "test-echo")
+
+    async def test_broken_probe_never_breaks_chat(self) -> None:
+        async def reprobe() -> object | None:
+            raise RuntimeError("network on fire")
+
+        brain = NovaBrain(completion_provider=EchoLLMProvider(), ollama_reprobe=reprobe)
+        response = await brain.chat(BrainRequest(text="hello"))
+        self.assertEqual(brain.provider_name, "scratch")
+        self.assertTrue(response.payload["message"])
 
 
 if __name__ == "__main__":

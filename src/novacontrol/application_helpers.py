@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import quote_plus
 
 from novacontrol.core.security import ApprovalDecision, ApprovalRequest
 from novacontrol.self_improvement import CodeChange
@@ -101,6 +102,24 @@ _TRAILING_NOISE = re.compile(
     r"on\s+(?:the\s+|my\s+)?browser|web\s+page|website|site|page|url)\s*$"
 )
 
+# Web-search phrasing, in order of specificity. Each pattern captures the query.
+_WEB_SEARCH_PATTERNS = (
+    re.compile(r"^(?:search|look\s+up)\s+(?:the\s+)?(?:web|internet)\s+(?:for|about)\s+(.+)$"),
+    re.compile(r"^(?:web|internet)\s+search\s+(?:for\s+)?(.+)$"),
+    re.compile(r"^(?:search|look\s+up)\s+for\s+(.+?)\s+on\s+(?:the\s+)?(?:web|internet)$"),
+    re.compile(r"^google\s+(.+)$"),
+)
+
+
+def web_search_url(query: str) -> str:
+    """Build the search-engine results URL for a query.
+
+    DuckDuckGo's HTML endpoint serves a minimal, JS-free results page that is
+    reliable to drive and inspect under automation (a JS-heavy engine page can
+    hang or bot-gate a headless browser).
+    """
+    return "https://html.duckduckgo.com/html/?q=" + quote_plus(query.strip())
+
 
 def resolve_browser_url(target: str) -> str:
     """Normalize a browser target to an absolute http(s) URL."""
@@ -133,6 +152,9 @@ def parse_browser_command(command: str) -> list[dict[str, Any]]:
         "fill the form at https://example.com/login with username=admin, password=secret"
             -> [{"action": "fill_form", "target": "https://example.com/login",
                 "fields": {"username": "admin", "password": "secret"}}]
+        "search the web for quantum computing"
+            -> [{"action": "search", "target": "https://html.duckduckgo.com/html/?q=quantum+computing",
+                "query": "quantum computing"}]
     """
     lower = command.lower().strip()
     if not lower:
@@ -156,6 +178,16 @@ def parse_browser_command(command: str) -> list[dict[str, Any]]:
             return [{"action": "fill_form", "target": target, "fields": fields}]
         return []
 
+    # --- Search the web in a browser (a real engine results page) ---
+    for pattern in _WEB_SEARCH_PATTERNS:
+        match = pattern.match(lower)
+        if not match:
+            continue
+        query = _strip_target_noise(match.group(1))
+        if query:
+            return [{"action": "search", "target": web_search_url(query), "query": query}]
+        return []
+
     # --- Navigate to a website ---
     nav_match = _BROWSER_NAVIGATE_RE.match(lower)
     if nav_match:
@@ -165,69 +197,46 @@ def parse_browser_command(command: str) -> list[dict[str, Any]]:
     return []
 
 
-def parse_desktop_command(command: str) -> list[dict[str, str]]:
-    """Parse a natural language JARVIS command into a list of actions.
+def parse_phone_command(command: str) -> tuple[str, str]:
+    """Classify a phone command into (kind, argument).
 
-    Returns a list of {"action": type, "target": ..., "text": ...} dicts.
-    Examples:
-        "open notepad" -> [{"action": "open", "target": "notepad"}]
-        "open notepad and type hello world" -> [{"action": "open", "target": "notepad"}, {"action": "type", "text": "hello world"}]
-        "open folder C:\\Users" -> [{"action": "open_folder", "target": "C:\\Users"}]
-        "open chrome and search for cats" -> [{"action": "open", "target": "chrome"}, {"action": "search", "text": "cats"}]
+    Kind is one of "open" (arg = app), "text" (arg = message spec without the
+    verb/phone markers, parsed further by the controller), "call" (arg =
+    contact), or "screenshot" (arg = ""). Device markers are stripped
+    case-insensitively from the ORIGINAL so arguments keep their case.
+    "open" remains the fallback so unknown verbs keep the old behavior.
     """
-    lower = command.lower().strip()
-    actions: list[dict[str, str]] = []
-
-    # Split on ' and ' to get sequential steps
-    parts = re.split(r'\s+and\s+', lower, maxsplit=1)
-    main_part = parts[0].strip()
-    second_part = parts[1].strip() if len(parts) > 1 else None
-
-    # --- Main action ---
-    # Open folder
-    folder_match = re.match(r'(?:open|show|go to|explore)\s+(?:folder|directory|dir|file explorer)\s+(.+)', main_part)
-    if not folder_match:
-        folder_match = re.match(r'(?:open|show|go to|explore)\s+([a-z]:\\.+|~/.+|/home/.+|/Users/.+)', main_part)
-    if folder_match:
-        actions.append({"action": "open_folder", "target": folder_match.group(1).strip()})
-    else:
-        # Open application
-        app_match = re.match(r'(?:open|launch|start|run)\s+(.+)', main_part)
-        if app_match:
-            target = app_match.group(1).strip()
-            # Clean up common phrases
-            target = re.sub(r'\s*(please|for me|on my computer|on my laptop|on the computer)\s*$', '', target)
-            if target:
-                actions.append({"action": "open", "target": target})
-        else:
-            # Direct command — run as script
-            actions.append({"action": "execute", "target": command})
-
-    # --- Second action ---
-    if second_part:
-        type_match = re.match(r'(?:type|write|enter|input|put)\s+["\']?(.+?)["\']?\s*$', second_part)
-        if type_match:
-            actions.append({"action": "type", "text": type_match.group(1).strip()})
-        else:
-            search_match = re.match(r'(?:search|google|look up|find|browse)\s+(?:for\s+)?(.+)', second_part)
-            if search_match:
-                actions.append({"action": "search", "text": search_match.group(1).strip()})
-            else:
-                # Treat as additional type/text
-                actions.append({"action": "type", "text": second_part})
-
-    return actions or [{"action": "execute", "target": command}]
+    stripped = re.sub(
+        r"\s+(?:on\s+(?:my|the)\s+phone|on\s+phone|in\s+(?:my\s+)?phone|\s*phone)\b",
+        "",
+        command.strip(),
+        flags=re.IGNORECASE,
+    ).strip()
+    lower = " ".join(stripped.lower().split())
+    for verb in ("text", "sms", "message"):
+        if lower.startswith(f"{verb} "):
+            return "text", stripped[len(verb) + 1:].strip()
+    if "screenshot" in lower:
+        return "screenshot", ""
+    for verb in ("call ", "dial "):
+        if lower.startswith(verb):
+            return "call", stripped[len(verb) - 1:].strip()
+    for prefix in ("open ", "launch ", "run "):
+        if lower.startswith(prefix):
+            return "open", stripped[len(prefix):].split(" on ", 1)[0].strip() or "requested app"
+    for name in ("whatsapp", "chrome", "youtube", "gmail", "settings"):
+        if name in lower:
+            return "open", name
+    return "open", stripped or "requested app"
 
 
 def resolve_phone_target(command: str) -> str:
-    """Resolve a natural language phone command to a target application."""
-    lower = command.lower().strip()
-    for marker in (" on my phone", " on phone", " in my phone", " in phone", " phone"):
-        lower = lower.replace(marker, "")
-    for prefix in ("open ", "launch ", "run "):
-        if lower.startswith(prefix):
-            return command[len(prefix):].split(" on ", 1)[0].strip() or "requested app"
-    for name in ("whatsapp", "chrome", "youtube", "gmail", "settings"):
-        if name in lower:
-            return name
-    return command.strip() or "requested app"
+    """Resolve a natural language phone command to a target application.
+
+    Kept for callers that only need the app target of an open-application
+    command; plan_phone_command uses parse_phone_command for full coverage.
+    """
+    kind, argument = parse_phone_command(command)
+    if kind == "open":
+        return argument
+    return argument or command.strip() or "requested app"

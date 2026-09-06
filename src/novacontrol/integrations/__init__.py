@@ -1,12 +1,17 @@
 """External integrations subsystem."""
 
 from novacontrol.integrations.llm import (
+    CLOUD_LLM_PRESETS,
     EchoLLMProvider,
     LLMProviderRegistry,
     OpenAICompatibleLLMProvider,
+    build_cloud_provider,
     build_llm_provider_from_environment,
     build_ollama_provider,
+    cloud_llm_presets,
     detect_ollama,
+    get_cloud_preset,
+    make_ollama_reprobe,
 )
 from novacontrol.integrations.redis import (
     RedisEventBus,
@@ -18,17 +23,22 @@ from novacontrol.integrations.registry import IntegrationDefinition, Integration
 from novacontrol.integrations.resilient_llm import ResilientLLMProvider
 
 __all__ = [
+    "CLOUD_LLM_PRESETS",
     "EchoLLMProvider",
     "IntegrationDefinition",
     "IntegrationRegistry",
     "LLMProviderRegistry",
     "OpenAICompatibleLLMProvider",
+    "make_ollama_reprobe",
     "RedisEventBus",
     "RedisTtlCache",
     "ResilientLLMProvider",
+    "build_cloud_provider",
     "build_llm_provider_from_environment",
     "build_ollama_provider",
     "build_redis_cache",
     "build_redis_event_bus",
+    "cloud_llm_presets",
     "detect_ollama",
+    "get_cloud_preset",
 ]

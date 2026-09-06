@@ -1,6 +1,8 @@
 """Desktop automation subsystem."""
 
-from novacontrol.desktop.audit import AutomationAuditLog, InMemoryAutomationAuditLog
+# Audit names are re-exported here for backward compatibility: the log itself
+# is shared with the browser controller and lives in core/audit.py.
+from novacontrol.core.audit import AutomationAuditLog, InMemoryAutomationAuditLog
 from novacontrol.desktop.controller import (
     DesktopAutomationController,
     DesktopCommandRunner,

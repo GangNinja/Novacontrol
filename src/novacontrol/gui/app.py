@@ -14,6 +14,7 @@ from novacontrol.application import NovaControlApplication
 from novacontrol.core.security import ApprovalDecision, ApprovalRequest
 from novacontrol.explore import ExploreRequest
 from novacontrol.gui.models import DashboardTab
+from novacontrol.gui.theme import apply_dashboard_theme
 from novacontrol.gui.viewmodel import DashboardViewModel
 from novacontrol.memory import MemoryNamespace
 from novacontrol.performance import LoadTester, MetricsRegistry, Profiler, TtlCache
@@ -49,6 +50,7 @@ def create_gui_app() -> Any:
         raise RuntimeError("PySide6 is not installed. Run `pip install -e .` first.") from exc
 
     app = QApplication.instance() or QApplication([])
+    apply_dashboard_theme(app)
     window = _build_dashboard_window(
         Qt=Qt,
         QCheckBox=QCheckBox,
@@ -221,12 +223,12 @@ def _build_dashboard_window(**qt: Any) -> Any:
             row = QHBoxLayout()
             self.chat_input = QLineEdit()
             self.chat_input.setPlaceholderText("Ask NovaControl")
+            self.chat_output = QTextEdit()
+            self.chat_output.setReadOnly(True)
             ask = QPushButton("Ask")
             ask.clicked.connect(lambda: self._ask_into(self.chat_output, self.chat_input.text()))
             row.addWidget(self.chat_input)
             row.addWidget(ask)
-            self.chat_output = QTextEdit()
-            self.chat_output.setReadOnly(True)
             layout.addLayout(row)
             layout.addWidget(self.chat_output)
             return widget
@@ -306,6 +308,8 @@ def _build_dashboard_window(**qt: Any) -> Any:
                     "explore",
                 ]
             )
+            self.demo_output = QTextEdit()
+            self.demo_output.setReadOnly(True)
             run = QPushButton("Run Demo")
             run.clicked.connect(self._run_selected_demo)
             tests = QPushButton("Run Tests")
@@ -314,8 +318,6 @@ def _build_dashboard_window(**qt: Any) -> Any:
             row.addWidget(run)
             row.addWidget(tests)
             row.addStretch()
-            self.demo_output = QTextEdit()
-            self.demo_output.setReadOnly(True)
             layout.addLayout(row)
             layout.addWidget(self.demo_output)
             return widget
