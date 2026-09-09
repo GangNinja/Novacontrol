@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import ast
 import shutil
+import sys
 import tempfile
 import unittest
 from datetime import datetime
@@ -583,9 +585,95 @@ class JarvisDesktopCommandTests(unittest.TestCase):
         self.assertEqual(resolve("settings"), "ms-settings:")
         self.assertEqual(resolve("notepad"), "notepad.exe")
         self.assertEqual(resolve("calculator"), "calc.exe")
-        # Unknown names and paths pass through untouched.
-        self.assertEqual(resolve("visual studio code"), "visual studio code")
+        # Known apps resolve to a launchable target (alias, Start Menu .lnk,
+        # App Paths exe, or UWP shell: target) — anything beats a raw name.
+        resolved_vscode = resolve("visual studio code")
+        self.assertTrue(
+            resolved_vscode == "visual studio code"
+            or "visual studio code" in resolved_vscode.lower(),
+            f"VS Code should resolve or pass through, got {resolved_vscode!r}",
+        )
+        # Paths and explicit file names always pass through untouched.
         self.assertEqual(resolve("C:/Games/SomeGame.exe"), "C:/Games/SomeGame.exe")
+
+    def test_index_lookup_matches_exact_whole_word_and_shortest(self) -> None:
+        from novacontrol.desktop.controller import _index_lookup
+
+        index = {
+            "visual studio code": "VSCode.lnk",
+            "google chrome": "Chrome.lnk",
+            "chrome canary": "ChromeCanary.lnk",
+        }
+        # Whole-word: 'code' finds VS Code; a raw substring search would have
+        # no way to prefer it over longer names deterministically.
+        self.assertEqual(_index_lookup(index, "code"), "VSCode.lnk")
+        # 'chrome' matches two entries; the shortest name wins.
+        self.assertEqual(_index_lookup(index, "chrome"), "Chrome.lnk")
+        self.assertIsNone(_index_lookup(index, "totally unknown app"))
+        self.assertIsNone(_index_lookup(index, ""))
+
+    def test_loose_spoken_folder_names_are_not_swallowed_as_apps(self) -> None:
+        from novacontrol.desktop.controller import parse_desktop_command
+
+        # 'open the games folder' must plan an OPEN_FOLDER (searched on disk at
+        # execution), not an app launch of the literal string 'the games folder'.
+        steps = parse_desktop_command("open the games folder")
+        self.assertEqual(steps[0].kind, "open_folder")
+        self.assertEqual(steps[0].target, "games")
+        steps = parse_desktop_command("open my projects folder")
+        self.assertEqual(steps[0].kind, "open_folder")
+        self.assertEqual(steps[0].target, "projects")
+        # In-app sections stay navigation, not folder searches.
+        steps = parse_desktop_command("open steam and go to library")
+        self.assertEqual(steps[0].kind, "open")
+
+    def test_resolve_folder_searches_temp_roots(self) -> None:
+        """Spoken folder names resolve across the search roots by whole-word match."""
+        import unittest.mock
+
+        from novacontrol.desktop.controller import _resolve_folder
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "D-Games").mkdir()
+            (base / "Projects").mkdir()
+            with unittest.mock.patch(
+                "novacontrol.desktop.controller._folder_search_roots", return_value=[base]
+            ):
+                self.assertEqual(Path(_resolve_folder("games")).name, "D-Games")
+                self.assertEqual(Path(_resolve_folder("projects")).name, "Projects")
+                # Unknown names resolve to the CWD-relative literal path (no
+                # wrong folder opens; the file manager reports it as missing).
+                self.assertEqual(
+                    _resolve_folder("no such folder xyz"),
+                    str(Path("no such folder xyz").resolve()),
+                )
+
+    def test_launch_open_uses_explorer_for_uwp_shell_targets(self) -> None:
+        """shell:AppsFolder targets go through explorer, not cmd start."""
+        import subprocess as sp
+        import unittest.mock
+
+        runner = LocalDesktopRunner()
+        captured = {}
+        real_popen = sp.Popen  # captured BEFORE the module attribute is patched
+
+        def fake_popen(args, **kwargs):
+            captured["args"] = list(args)
+            return real_popen([sys.executable, "-c", "pass"], stdout=sp.DEVNULL)
+
+        async def run():
+            with unittest.mock.patch.object(
+                LocalDesktopRunner, "_resolve_app_target",
+                staticmethod(lambda t: "shell:AppsFolder\\App_abc!App"),
+            ), unittest.mock.patch(
+                "novacontrol.desktop.controller.subprocess.Popen", side_effect=fake_popen
+            ):
+                return await runner._launch_open("microsoft store")
+
+        asyncio.run(run())
+        self.assertEqual(captured["args"][0], "explorer")
+        self.assertEqual(captured["args"][1], "shell:AppsFolder\\App_abc!App")
 
     def test_web_search_plan_carries_query(self) -> None:
         from novacontrol.desktop.models import DesktopAction, DesktopActionType

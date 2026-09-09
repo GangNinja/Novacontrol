@@ -397,6 +397,33 @@
               </div>
             </article>
           </div>
+          <article class="surface cloud-llm-card">
+            <h3>Vision Model <span id="visionModelStatus" class="cloud-status" aria-live="polite"></span></h3>
+            <p class="cloud-hint">Optional: wire a multimodal model so element location is semantic instead of OCR-only. Ollama (local) needs a vision model pulled, e.g. <code>ollama pull llama3.2-vision</code>; cloud providers use the same API-key storage as the chat brain — the key stays on this machine.</p>
+            <div class="cloud-llm-form">
+              <label class="field">
+                <span>Provider</span>
+                <select id="visionModelProvider" class="cyber-input" aria-label="Vision model provider">
+                  <option value="ollama">Ollama (local)</option>
+                  <option value="openai">ChatGPT (OpenAI)</option>
+                  <option value="gemini">Gemini (Google)</option>
+                  <option value="openrouter">OpenRouter</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Model <span class="muted">(blank = auto/detected)</span></span>
+                <input id="visionModelName" type="text" class="cyber-input" placeholder="auto" autocomplete="off" aria-label="Vision model name">
+              </label>
+              <label class="field" id="visionModelKeyField">
+                <span>API key <span class="muted">(cloud only)</span></span>
+                <input id="visionModelKey" type="password" class="cyber-input" placeholder="paste API key" autocomplete="off" aria-label="Vision model API key">
+              </label>
+            </div>
+            <div class="button-row">
+              <button id="visionModelConnectButton" type="button" class="cyber-btn primary">Connect Vision Model</button>
+              <button id="visionModelClearButton" type="button" class="cyber-btn danger">Remove Vision Model</button>
+            </div>
+          </article>
           <div id="visionDescribeOutput" class="friendly-output empty-state">
             <div class="empty-hint"><span class="empty-hint-icon">&#9673;</span> Run Describe Screen or a Guided Click to see the vision layer's report here</div>
           </div>
@@ -428,6 +455,7 @@
     <script src="/static/js/render-utils.js?v=__NC_ASSET_VERSION__"></script>
     <script src="/static/js/render-explore.js?v=__NC_ASSET_VERSION__"></script>
     <script src="/static/js/render-panels.js?v=__NC_ASSET_VERSION__"></script>
+    <script src="/static/js/activity.js?v=__NC_ASSET_VERSION__"></script>
     <script src="/static/js/voice.js?v=__NC_ASSET_VERSION__"></script>
     <script src="/static/js/effects.js?v=__NC_ASSET_VERSION__"></script>
     <script src="/static/app.js?v=__NC_ASSET_VERSION__"></script>

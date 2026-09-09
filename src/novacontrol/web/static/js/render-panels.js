@@ -188,9 +188,12 @@ function renderCommand(target, data) {
     approve.addEventListener("click", () => {
       // /command/execute re-dispatches on the intent, so this single button approves
       // desktop plans AND browser plans (which must reach execute_browser_command).
+      // The correlation id keeps THIS execution's progress rows out of any
+      // concurrent same-family run's panel (and vice versa).
+      const correlationId = newCorrelationId();
       run(target.id, "command", () =>
-        requestJson("/command/execute", { command: data.command, approval_token: data.approval.token })
-      , null, { onSuccess: () => { clearApproval(data.command); recordActivity("command", "Command executed", data.command); } });
+        requestJson("/command/execute", { command: data.command, approval_token: data.approval.token, correlation_id: correlationId })
+      , null, { correlationId, onSuccess: () => clearApproval(data.command) });
     });
     row.appendChild(approve);
     target.appendChild(row);
@@ -560,4 +563,46 @@ function updateMetrics(status) {
     item.appendChild(el("p", "", route.description));
     capabilities.appendChild(item);
   });
+}
+
+/* ── Vision guided-click result card ───────────────────────── */
+
+// A guided click renders its own card, not the generic JSON dump: action
+// status, how the element was located, whether verification SAW the screen
+// change ("Verified" vs "Unverified" vs the honest reason it could not),
+// and any open bugs this verified click auto-resolved.
+function renderVisionClickResult(target, data) {
+  const verification = data.verification || {};
+  const changed = verification.changed;
+  const locatedBy = data.output && data.output.located_by ? String(data.output.located_by) : "ocr";
+  const point = data.output && data.output.coordinates ? data.output.coordinates : null;
+
+  const card = el("article", "info-card vision-result-card");
+  card.appendChild(el("h4", "", `Guided click: ${String(data.label || "")}`));
+
+  const statusRow = el("p", "pill-row");
+  const statusOk = data.status === "completed";
+  statusRow.appendChild(el("span", `pill ${statusOk ? "ok" : "error"}`, statusOk ? "Completed" : String(data.status || "failed")));
+  if (changed === true) statusRow.appendChild(el("span", "pill ok", "Verified"));
+  else if (changed === false) statusRow.appendChild(el("span", "pill error", "Unverified: no visible change"));
+  else statusRow.appendChild(el("span", "pill warn", "Unverified"));
+  statusRow.appendChild(el("span", "pill", `located by ${locatedBy}`));
+  card.appendChild(statusRow);
+
+  const lines = [];
+  if (point) lines.push(`Clicked at (${point[0]}, ${point[1]})`);
+  if (verification.changed_pct != null) lines.push(`Screen changed by ${verification.changed_pct}%`);
+  if (verification.label_gone_near_click === true) lines.push("The label left the click area (button likely activated)");
+  if (verification.note) lines.push(String(verification.note));
+  if (typeof data.resolved_bugs === "number" && data.resolved_bugs > 0) {
+    lines.push(`Auto-resolved ${data.resolved_bugs} open bug(s) for this flow — the log now records the passing evidence.`);
+  }
+  if (data.error) lines.push(`Error: ${String(data.error)}`);
+  if (!lines.length) lines.push(textForSpeech(data) || "Click executed.");
+  const list = el("ul", "vision-result-lines");
+  lines.forEach((line) => list.appendChild(el("li", "", line)));
+  card.appendChild(list);
+
+  clearNode(target);
+  target.appendChild(card);
 }

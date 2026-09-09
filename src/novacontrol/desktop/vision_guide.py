@@ -17,6 +17,8 @@ the caller must fail honestly instead of clicking blind coordinates.
 from __future__ import annotations
 
 import asyncio
+import json
+import sys
 from typing import Any
 
 from novacontrol.intelligence.normalize import normalize
@@ -96,6 +98,130 @@ def _extract_words(image: Any) -> list[tuple[str, str, int, int]]:
     return words
 
 
+# Windows.Media.Ocr — the OS-built OCR engine. This is what makes vision
+# work WITHOUT any LLM wired: real text recognition with real coordinates,
+# replacing the old pixel-run guessing for every common label.
+_OCR_POWERSHELL_PREFIX = """
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$null = [Windows.Storage.StorageFile, Windows.Foundation, ContentType = WindowsRuntime]
+$null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation, ContentType = WindowsRuntime]
+$null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]
+$null = [Windows.Globalization.Language, Windows.Foundation, ContentType = WindowsRuntime]
+$asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
+Function Await($WinRtTask, $ResultType) {
+  $t = $asTask.MakeGenericMethod($ResultType).Invoke($null, @($WinRtTask))
+  $t.Wait(-1) | Out-Null
+  $t.Result
+}
+$engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+if (-not $engine) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage([Windows.Globalization.Language]::new('en-US')) }
+if (-not $engine) { Write-Output '[]'; exit 0 }
+"""
+
+_OCR_POWERSHELL_BODY = """
+$file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($path)) ([Windows.Storage.StorageFile])
+$stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
+$decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+$bitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+$result = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
+$words = @()
+$lineIndex = 0
+foreach ($line in $result.Lines) {
+  $order = 0
+  foreach ($word in $line.Words) {
+    $r = $word.BoundingRect
+    $words += @{ text = $word.Text; line = $lineIndex; order = $order; x = [int]$r.X; y = [int]$r.Y; w = [int]$r.Width; h = [int]$r.Height }
+    $order++
+  }
+  $lineIndex++
+}
+Write-Output (@($words) | ConvertTo-Json -Compress)
+"""
+
+
+async def _ocr_words(image_path: str) -> list[dict[str, Any]] | None:
+    """OCR the screenshot with Windows' built-in engine; None when unavailable.
+
+    Returns word records {text, line, order, x, y, w, h} — real recognized text
+    with real screen coordinates. Any failure (non-Windows, no language pack,
+    timeout) degrades to None so callers fall back to weaker strategies.
+    """
+    if not sys.platform.startswith("win"):
+        return None
+    # GetFileFromPathAsync demands an ABSOLUTE path — a relative one raises
+    # and the whole OCR call degrades to None.
+    from pathlib import Path
+
+    absolute = str(Path(image_path).resolve())
+    script = _OCR_POWERSHELL_PREFIX + f"$path = '{absolute}'\n" + _OCR_POWERSHELL_BODY
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "powershell", "-NoProfile", "-Command", script,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=25)
+        # strict=False: OCR'd words can carry literal control characters and
+        # PowerShell's ConvertTo-Json does not escape them — strict parsing
+        # would reject the whole payload (a real bug this caught live).
+        data = json.loads(stdout.decode("utf-8", errors="replace").strip() or "[]", strict=False)
+    except Exception:
+        return None
+    if isinstance(data, dict):  # single-word JSON comes back unwrapped
+        data = [data]
+    return data or None
+
+
+def _word_center(word: dict[str, Any]) -> tuple[int, int]:
+    return int(word["x"]) + int(word["w"]) // 2, int(word["y"]) + int(word["h"]) // 2
+
+
+def _span_center(words: list[dict[str, Any]]) -> tuple[int, int]:
+    left = min(int(w["x"]) for w in words)
+    top = min(int(w["y"]) for w in words)
+    right = max(int(w["x"]) + int(w["w"]) for w in words)
+    bottom = max(int(w["y"]) + int(w["h"]) for w in words)
+    return (left + right) // 2, (top + bottom) // 2
+
+
+def _match_ocr_words(words: list[dict[str, Any]], label: str) -> tuple[int, int] | None:
+    """Match a spoken label against OCR'd words; click-center of the match.
+
+    Three passes, strictest first: an exact consecutive-word phrase on one
+    line ("play gta v" ↔ "PLAY GTA V"), an exact single word ("Library"),
+    then a word containing the label ("PLAY" inside the line "PLAY GTA V").
+    All comparisons run through the GIL normalizer so case/punctuation never
+    block a match.
+    """
+    target = normalize(label).strip()
+    if not target or not words:
+        return None
+    lines: dict[int, list[dict[str, Any]]] = {}
+    for word in words:
+        lines.setdefault(int(word.get("line", 0)), []).append(word)
+    ordered = [lines[key] for key in sorted(lines)]
+    # 1) exact phrase of consecutive words on one line
+    for line_words in ordered:
+        for start in range(len(line_words)):
+            for end in range(start + 1, len(line_words) + 1):
+                span = line_words[start:end]
+                joined = normalize(" ".join(str(w["text"]) for w in span)).strip()
+                if joined == target:
+                    return _span_center(span)
+    # 2) exact single word
+    for line_words in ordered:
+        for word in line_words:
+            if normalize(str(word["text"])).strip() == target:
+                return _word_center(word)
+    # 3) a single word containing the label (short label inside a longer word)
+    for line_words in ordered:
+        for word in line_words:
+            if target in normalize(str(word["text"])):
+                return _word_center(word)
+    return None
+
+
 def _heuristic_landmark(label: str, width: int, height: int) -> tuple[int, int] | None:
     """Common UI landmarks for well-known labels."""
     normalized = label.strip().lower()
@@ -117,12 +243,44 @@ def _heuristic_landmark(label: str, width: int, height: int) -> tuple[int, int] 
     return None
 
 
+def _parse_llm_point(answer: str, width: int, height: int) -> tuple[int, int] | None:
+    """Parse a vision model's locate answer into a pixel point.
+
+    Accepts the JSON contract {"found": bool, "x": 0-1000, "y": 0-1000} with
+    coordinates on a normalized 0-1000 grid (resolution-independent, the same
+    convention vision models are commonly RL-trained on), and degrades to the
+    legacy coarse-region vocabulary ("middle-right") when the JSON is absent.
+    Anything else — including coordinate-free region words that _region_point
+    cannot resolve — returns None so the caller falls back to OCR.
+    """
+    text = str(answer).strip()
+    if not text:
+        return None
+    if "{" in text:
+        import json as _json
+        import re as _re
+
+        match = _re.search(r"\{.*\}", text, _re.S)
+        if match:
+            try:
+                data = _json.loads(match.group(0))
+                if isinstance(data, dict) and data.get("found") is True:
+                    x_raw, y_raw = data.get("x"), data.get("y")
+                    if isinstance(x_raw, (int, float)) and isinstance(y_raw, (int, float)):
+                        if 0 <= x_raw <= 1000 and 0 <= y_raw <= 1000:
+                            return int(x_raw / 1000 * width), int(y_raw / 1000 * height)
+            except (_json.JSONDecodeError, ValueError, TypeError):
+                pass  # malformed JSON: fall through to region vocabulary
+    return _region_point(normalize(text), width, height)
+
+
 async def _llm_region(provider: Any, image_path: str, label: str) -> tuple[int, int] | None:
-    """Ask the vision model where the label is; returns a region-derived point.
+    """Ask the vision model where the label is; returns a pixel point.
 
     The screenshot is embedded in the message as OpenAI-format multimodal
     content — providers drop unknown kwargs like `image=`, so it MUST travel
-    inside the message content or the model never sees the picture.
+    inside the message content or the model never sees the picture. The answer
+    is parsed by _parse_llm_point (JSON 0-1000 grid, region fallback).
     """
     from novacontrol.vision.multimodal import _load_image_base64
 
@@ -130,10 +288,13 @@ async def _llm_region(provider: Any, image_path: str, label: str) -> tuple[int, 
     if not image_data:
         return None
     prompt = (
-        "You are locating a UI element in a screenshot. "
-        f"Where is '{label}'? Answer with ONLY one of: "
-        "top-left, top-center, top-right, middle-left, center, "
-        "middle-right, bottom-left, bottom-center, bottom-right, or 'absent'."
+        "You are locating a UI element in a screenshot for a computer-control agent. "
+        f"Find the element labeled '{label}'. "
+        "Answer with ONLY a JSON object: "
+        '{"found": true, "x": <0-1000>, "y": <0-1000>} '
+        "where x/y are the element's center on a 0-1000 grid across the whole "
+        "image (0,0 top-left, 1000,1000 bottom-right). "
+        'If it is not visible answer {"found": false}. No other text.'
     )
     messages = [
         {
@@ -151,13 +312,10 @@ async def _llm_region(provider: Any, image_path: str, label: str) -> tuple[int, 
         answer = await provider.complete(messages)
     except Exception:
         return None
-    text = normalize(str(answer))
-    if not text or "absent" in text:
-        return None
     from PIL import Image as PILImage
 
     with PILImage.open(image_path) as img:
-        return _region_point(text, img.width, img.height)
+        return _parse_llm_point(str(answer), img.width, img.height)
 
 
 async def locate_element(
@@ -167,10 +325,27 @@ async def locate_element(
     if Image is None:  # pragma: no cover
         return None
 
-    if llm_provider is not None:
+    # Only a REAL multimodal provider may participate in location. The Echo
+    # fallback "answers" by echoing the prompt back — and the prompt embeds the
+    # whole screenshot as base64 plus the region vocabulary itself, so the echo
+    # always contains words like 'top-left' and can never carry real screen
+    # understanding (the exact trap vision.py's has_vision_model gates against;
+    # this runner-side gate closes the same hole for locating).
+    provider_name = str(getattr(llm_provider, "name", "") or "").lower()
+    real_provider = llm_provider is not None and "echo" not in provider_name
+    if real_provider:
         point = await _llm_region(llm_provider, screenshot_path, label)
         if point is not None:
             return point[0], point[1], "llm_vision"
+
+    # Real OCR next: recognized text beats both geometric landmarks and the
+    # pixel-run band, because it knows WHAT the words say, not just where
+    # dark pixels cluster.
+    ocr = await _ocr_words(screenshot_path)
+    if ocr:
+        match = _match_ocr_words(ocr, label)
+        if match is not None:
+            return match[0], match[1], "ocr"
 
     loop = asyncio.get_running_loop()
 

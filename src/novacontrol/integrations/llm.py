@@ -231,6 +231,116 @@ def _redact_key(key: str) -> str:
     return f"…{tail}"
 
 
+# ── Vision model configuration ───────────────────────────
+#
+# The vision layer (vision_guide.locate_element, VisionController, agentcore
+# perception) needs a MULTIMODAL model — one that accepts image content — to
+# locate UI elements semantically. Chat models cannot: they either reject the
+# image or hallucinate around the prompt text. This registry names the models
+# known to accept {type: image_url} content per surface.
+
+# Ollama model-name prefixes that are multimodal (vision) models, best first.
+OLLAMA_VISION_MODEL_PREFIXES: tuple[str, ...] = (
+    "llava",
+    "llama3.2-vision",
+    "llama3.1-vision",
+    "moondream",
+    "minicpm-v",
+    "qwen2-vl",
+    "qwen2.5vl",
+    "bakllava",
+)
+
+# Cloud presets whose default/current models accept image_url content. Keys
+# reuse CLOUD_LLM_PRESETS ids so the same stored key configures both brains.
+VISION_CAPABLE_CLOUD_PRESETS: tuple[str, ...] = ("openai", "gemini", "openrouter")
+
+
+def is_ollama_vision_model(model_name: str) -> bool:
+    """True when an Ollama model name looks like a multimodal (vision) model."""
+    lower = model_name.lower()
+    return any(lower.startswith(prefix) or f":{prefix}" in lower or f"/{prefix}" in lower
+               for prefix in OLLAMA_VISION_MODEL_PREFIXES)
+
+
+def _pick_ollama_vision_model(models: list[str]) -> str:
+    """Pick the best vision model from an Ollama model list ('' when none)."""
+    for model in models:
+        if is_ollama_vision_model(model):
+            return model
+    return ""
+
+
+def build_vision_provider(
+    provider_id: str,
+    credential: str,
+    *,
+    model: str = "",
+    ollama_url: str = _OLLAMA_DEFAULT_URL,
+) -> tuple[OpenAICompatibleLLMProvider | None, str]:
+    """Build a MULTIMODAL provider for the vision layer.
+
+    Two surfaces, one shape:
+    - ``ollama``: probes a running Ollama for a vision model (llava,
+      llama3.2-vision, moondream, …). ``credential`` is ignored (local API);
+      an explicit ``model`` must BE a vision model. Returns (None, reason)
+      when Ollama is unreachable or carries no vision model.
+    - a cloud preset id (openai/gemini/openrouter): builds the same
+      OpenAI-compatible provider the chat brain uses, pinned to a
+      vision-capable model (the preset default is one). The key requirement
+      matches build_cloud_provider.
+
+    Returns ``(provider, "")`` on success or ``(None, reason)`` — callers show
+    the reason instead of silently degrading to OCR-only.
+    """
+    if provider_id == "ollama":
+        info = detect_ollama(ollama_url)
+        if info is None:
+            return None, "Ollama is not reachable at " + ollama_url
+        if model.strip():
+            chosen = model.strip()
+            if not is_ollama_vision_model(chosen):
+                return None, (
+                    f"{chosen!r} is not a vision model. Pull one, e.g. "
+                    "`ollama pull llama3.2-vision` or `ollama pull llava`."
+                )
+        else:
+            chosen = _pick_ollama_vision_model(list(info["models"]))
+            if not chosen:
+                return None, (
+                    "No vision model found in Ollama. Pull one, e.g. "
+                    "`ollama pull llama3.2-vision` or `ollama pull llava`."
+                )
+        return OpenAICompatibleLLMProvider(
+            name="vision:ollama",
+            base_url=info["url"],
+            api_key="ollama",
+            model=chosen,
+        ), ""
+
+    preset = get_cloud_preset(provider_id)
+    if preset is None:
+        return None, (
+            f"Unknown vision model provider: {provider_id!r}. "
+            "Valid providers: ollama, " + ", ".join(VISION_CAPABLE_CLOUD_PRESETS)
+        )
+    if provider_id not in VISION_CAPABLE_CLOUD_PRESETS:
+        return None, (
+            f"{preset['label']} has no vision-capable models registered here. "
+            "Valid providers: ollama, " + ", ".join(VISION_CAPABLE_CLOUD_PRESETS)
+        )
+    if not credential.strip():
+        return None, "An API key is required for a cloud vision model."
+    chosen = model.strip() or preset["default_model"]
+    return OpenAICompatibleLLMProvider(
+        name=f"vision:{provider_id}",
+        base_url=preset["base_url"],
+        api_key=credential.strip(),
+        model=chosen,
+        chat_path=preset["chat_path"],
+    ), ""
+
+
 def build_cloud_provider(
     provider_id: str,
     api_key: str,

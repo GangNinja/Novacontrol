@@ -19,6 +19,12 @@ dependencies = [
   "uvicorn[standard]>=0.30",
   "pydantic>=2.8",
   "pyyaml>=6.0",
+  # Vision layer: image loading for OCR/LLM element location (vision_guide)
+  # and the Pillow fallback of the pixel-diff verification (desktop/vision).
+  "pillow>=10.0",
+  # Vision layer fast path: numpy-backed pixel-diff + change-region
+  # localization for guided-click verification (desktop/vision).
+  "opencv-python>=4.10",
 ]
 
 [project.optional-dependencies]

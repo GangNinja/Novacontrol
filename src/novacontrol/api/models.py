@@ -1,9 +1,84 @@
-"""API metadata models."""
+"""API metadata models and request bodies."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+
+from pydantic import BaseModel, ConfigDict, field_validator
+
+
+# ── Request bodies ────────────────────────────────────────────────
+#
+# Pydantic models give the API contract real teeth: a missing required key is
+# a 422 with a field-level error (not a KeyError masked as a 500), and empty
+# or whitespace-only input is rejected at the edge with a 400 before it can
+# reach — and crash — the research pipeline.
+
+
+class AskRequest(BaseModel):
+    """POST /ask — one natural-language request."""
+
+    model_config = ConfigDict(
+        json_schema_extra={"examples": [{"request": "open chrome"}]}
+    )
+
+    request: str
+
+    @field_validator("request")
+    @classmethod
+    def _request_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("request must not be empty or whitespace")
+        return value
+
+
+class ExploreRequest_(BaseModel):
+    """POST /explore — research one topic.
+
+    Named with a trailing underscore to avoid shadowing the application-layer
+    ExploreRequest dataclass imported by this module's consumers.
+    """
+
+    model_config = ConfigDict(
+        json_schema_extra={"examples": [{"topic": "how do black holes form"}]}
+    )
+
+    topic: str
+    depth: str = "deep"
+    include_videos: bool = True
+    max_sources: int = 6
+    max_videos: int = 5
+    last_topic: str = ""
+    prior_topics: list[str] = []
+    # Run-scoped correlation id minted by the client: echoed on every
+    # explore.progress event so concurrent researches interleave in the UI
+    # without mixing rows. Optional; the server mints one when absent.
+    correlation_id: str = ""
+
+    @field_validator("topic")
+    @classmethod
+    def _topic_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("topic must not be empty or whitespace")
+        return value
+
+
+class CommandPlanRequest(BaseModel):
+    """POST /command/plan — plan one natural device command."""
+
+    model_config = ConfigDict(
+        json_schema_extra={"examples": [{"command": "open calculator"}]}
+    )
+
+    command: str
+
+    @field_validator("command")
+    @classmethod
+    def _command_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("command must not be empty or whitespace")
+        return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +136,8 @@ class ApiSurface:
                 ApiRoute("GET", "/phone/status", "Inspect phone bridge status.", authenticated=True),
                 ApiRoute("POST", "/phone/connect", "Run the phone bridge pairing flow.", authenticated=True),
                 ApiRoute("GET", "/vision/status", "Vision capability report: model availability and open bug count.", authenticated=True),
+                ApiRoute("POST", "/vision/model", "Install a multimodal vision model (ollama or a cloud provider) for element location.", authenticated=True),
+                ApiRoute("POST", "/vision/model/clear", "Remove the configured vision model; element location returns to OCR-only.", authenticated=True),
                 ApiRoute("POST", "/vision/describe", "Capture the screen and describe it (vision model or window probe).", authenticated=True),
                 ApiRoute("POST", "/vision/click", "Vision-locate a labeled element on screen, click it, and verify.", authenticated=True),
                 ApiRoute("GET", "/intelligence", "Global Intelligence Layer: telemetry, findings, and capabilities.", authenticated=True),
@@ -73,6 +150,7 @@ class ApiSurface:
                 ApiRoute("GET", "/agent/metrics", "Agentic evaluation metrics (success, recovery, verification rates).", authenticated=True),
                 ApiRoute("GET", "/agent/knowledge", "Application knowledge graph: workflows, confidence, freshness.", authenticated=True),
                 ApiRoute("POST", "/explore", "Research a topic and return an Explore report.", authenticated=True),
+                ApiRoute("GET", "/activity", "Recent completed actions (commands, research, learning) for the web timeline.", authenticated=True),
                 ApiRoute("GET", "/events/stream", "Live activity channel: the application EventBus as SSE."),
                 ApiRoute("GET", "/settings", "Read local user settings.", authenticated=True),
                 ApiRoute("POST", "/settings", "Update local user settings.", authenticated=True),

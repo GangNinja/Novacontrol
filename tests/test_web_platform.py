@@ -735,6 +735,128 @@ class StatePreviewTokenTests(unittest.TestCase):
         self.assertIn("all preview-token cases passed", proc.stderr)
 
 
+class ActivityTimelineDomTests(unittest.TestCase):
+    """DOM-level pins for the server-fed Recent Activity timeline (activity.js).
+
+    The feed used to be localStorage-written by whichever tab initiated the
+    action, so it missed CLI/GUI/second-tab activity. It is now seeded from
+    /activity and appended live from <family>.completed SSE events. These
+    tests drive the REAL activity.js in Node (like ExtractAnswerTextTests)
+    against a minimal DOM shim: completions render newest-first, events from
+    any family map to the right pill, unknown families are ignored, and the
+    5-second de-dupe window suppresses a seed/stream double-append.
+    """
+
+    NODE = shutil.which("node")
+    STATIC = Path("src/novacontrol/web/static")
+
+    def _run_activity(self, driver: str) -> dict:
+        if self.NODE is None:
+            self.skipTest("node is not installed")
+        scripts = "\n".join(
+            (self.STATIC / name).read_text(encoding="utf-8")
+            for name in ("js/dom.js", "js/state.js", "js/render-utils.js", "js/activity.js")
+        )
+        shim = """
+function makeNode(tag) {
+  const node = {
+    tagName: String(tag).toUpperCase(), children: [], _text: "", className: "", style: {},
+    _classes() { return this.className ? this.className.split(/\\s+/) : []; },
+    appendChild(child) { child.parentNode = this; this.children.push(child); return child; },
+    get firstChild() { return this.children[0] || null; },
+    removeChild(child) {
+      const i = this.children.indexOf(child);
+      if (i >= 0) this.children.splice(i, 1);
+      return child;
+    },
+    addEventListener() {},
+    get classList() {
+      const self = this;
+      return {
+        add(...n) { const s = new Set(self._classes()); n.forEach(x => s.add(x)); self.className = [...s].join(" "); },
+        remove(...n) { const s = new Set(self._classes()); n.forEach(x => s.delete(x)); self.className = [...s].join(" "); },
+        toggle(name, on) { const s = new Set(self._classes()); (on === undefined ? !s.has(name) : on) ? s.add(name) : s.delete(name); self.className = [...s].join(" "); },
+        contains(name) { return self._classes().includes(name); },
+      };
+    },
+    get textContent() {
+      if (this.children.length === 0) return this._text;
+      return this.children.map(c => c.textContent).join("");
+    },
+    set textContent(value) { this._text = String(value); this.children = []; },
+  };
+  return node;
+}
+function flatten(node, out = []) { out.push(node); for (const c of node.children || []) flatten(c, out); return out; }
+function qsa(root, selector) {
+  const cls = selector.startsWith(".") ? selector.slice(1) : null;
+  const tag = cls ? null : selector.toUpperCase();
+  return flatten(root).filter(n => n !== root && (cls ? n._classes().includes(cls) : n.tagName === tag));
+}
+const registry = new Map();
+const byIdEl = makeNode("div"); registry.set("homeActivity", byIdEl);
+const document = {
+  createElement: (tag) => makeNode(tag),
+  createTextNode: (text) => { const n = makeNode("#text"); n._text = String(text); return n; },
+  getElementById: (id) => registry.get(id) || null,
+  querySelector: () => null,
+};
+"""
+        script = (
+            "const fs = require('fs');"
+            + shim
+            + "eval(fs.readFileSync('src/novacontrol/web/static/js/dom.js','utf8') + '\\n'"
+            " + fs.readFileSync('src/novacontrol/web/static/js/state.js','utf8') + '\\n'"
+            " + fs.readFileSync('src/novacontrol/web/static/js/render-utils.js','utf8') + '\\n'"
+            " + fs.readFileSync('src/novacontrol/web/static/js/activity.js','utf8') + '\\n'"
+            " + " + json.dumps(driver) + ");"
+        )
+        proc = subprocess.run([self.NODE, "-e", script], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return json.loads(proc.stdout.strip().splitlines()[-1])
+
+    def test_completions_render_newest_first_with_pills(self) -> None:
+        driver = """
+recordActivityFromEvent({ type: "command.completed", title: "Command executed", detail: "open notepad", at: Date.now() });
+recordActivityFromEvent({ type: "explore.completed", title: "Research complete", detail: "black holes", at: Date.now() });
+recordActivityFromEvent({ type: "learn.completed", title: "Learning cycle", detail: "improve memory", at: Date.now() });
+console.log(JSON.stringify({
+  rows: qsa(byId("homeActivity"), ".activity-item").map(r => r.textContent),
+  pills: qsa(byId("homeActivity"), ".activity-type").map(p => p.textContent),
+}));
+"""
+        result = self._run_activity(driver)
+        self.assertEqual(len(result["rows"]), 3)
+        self.assertIn("improve memory", result["rows"][0])  # newest first
+        self.assertIn("open notepad", result["rows"][2])
+        self.assertEqual(result["pills"], ["Learn", "Research", "Command"])
+
+    def test_unknown_family_and_empty_title_are_ignored(self) -> None:
+        driver = """
+recordActivityFromEvent({ type: "vision.completed", title: "Nope", detail: "x", at: Date.now() });
+recordActivityFromEvent({ type: "command.completed", title: "", detail: "x", at: Date.now() });
+recordActivityFromEvent({ type: "command.completed", title: "Command executed", detail: "open calc", at: Date.now() });
+console.log(JSON.stringify({ rows: qsa(byId("homeActivity"), ".activity-item").map(r => r.textContent) }));
+"""
+        result = self._run_activity(driver)
+        self.assertEqual(len(result["rows"]), 1)
+        self.assertIn("open calc", result["rows"][0])
+
+    def test_dedupe_window_suppresses_seed_and_stream_double(self) -> None:
+        now = 1_700_000_000_000
+        driver = f"""
+// Simulate the real seed: loadActivityFromServer fills the array AND renders.
+activityEntries = [{{ type: "command", title: "Command executed", detail: "open steam", at: {now} }}];
+renderActivityFeed();
+// The completing tab also receives its own SSE event for the same action —
+// the 5s de-dupe window must drop it, leaving exactly one row.
+recordActivityFromEvent({{ type: "command.completed", title: "Command executed", detail: "open steam", at: {now + 1000} }});
+console.log(JSON.stringify({{ rows: qsa(byId("homeActivity"), ".activity-item").map(r => r.textContent) }}));
+"""
+        result = self._run_activity(driver)
+        self.assertEqual(len(result["rows"]), 1)  # duplicate within 5s window dropped
+
+
 class BackendFrontendContractTests(unittest.TestCase):
     """Every backend surface must map to an intended frontend render branch.
 
@@ -798,6 +920,8 @@ class BackendFrontendContractTests(unittest.TestCase):
         ("GET", "/phone/status"): "no-render",  # bridge status (CLI/demos only)
         ("POST", "/phone/connect"): "renderPhoneStatus",  # Connect Phone button — pairing flow, bridge-shaped result
         ("GET", "/vision/status"): "no-render",  # Vision panel toast-only status check
+        ("POST", "/vision/model"): "no-render",  # vision model card connect button; refreshes card
+        ("POST", "/vision/model/clear"): "no-render",  # vision model card remove button; refreshes card
         ("POST", "/vision/describe"): "renderGeneric",  # Vision panel Describe Screen
         ("POST", "/vision/click"): "renderGeneric",  # Vision panel guided click
         ("GET", "/intelligence"): "no-render",  # GIL telemetry (API/CLI surface; surfaced via /status)
@@ -808,6 +932,7 @@ class BackendFrontendContractTests(unittest.TestCase):
         ("GET", "/agent/metrics"): "no-render",  # evaluation ledger metrics
         ("GET", "/agent/knowledge"): "no-render",  # application knowledge graph dump
         ("GET", "/plugins"): "no-render",  # plugin marketplace API (CLI only)
+        ("GET", "/activity"): "no-render",  # timeline seed fetched by js/activity.js, not run()
     }
     ALLOWED_NON_RENDER = {"no-render", "load-settings"}
 

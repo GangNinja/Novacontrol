@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from collections.abc import MutableMapping
 from os import PathLike
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from novacontrol.api.auth import ApiTokenAuthenticator
 from novacontrol.api.middleware import RateLimitMiddleware, RequestLoggingMiddleware, SecurityHeadersMiddleware
-from novacontrol.api.models import ApiSurface
+from novacontrol.api.models import ApiSurface, AskRequest, CommandPlanRequest, ExploreRequest_
 from novacontrol.application import NovaControlApplication
 from novacontrol.core.events import Event
 from novacontrol.explore import ExploreRequest
@@ -58,6 +60,21 @@ def _never_cache_headers() -> dict[str, str]:
         "Pragma": "no-cache",
         "Expires": "0",
     }
+
+
+def sse_frame(event: Event) -> str:
+    """Serialize one bus event as an SSE frame with a correlation id.
+
+    Correlation contract: every frame names its activity. Sources that track
+    runs (explore/command progress) put the RUN-scoped id in the payload;
+    everything else falls back to the event's own id, so a consumer can always
+    group frames into activities.
+    """
+    payload = dict(event.payload)
+    payload["event_type"] = event.type
+    if event.correlation_id and "correlation_id" not in payload:
+        payload["correlation_id"] = event.correlation_id
+    return f"event: {event.type}\ndata: {json.dumps(payload, default=str)}\n\n"
 
 
 def create_app() -> Any:
@@ -171,8 +188,8 @@ def create_app() -> Any:
         return settings.to_dict()
 
     @app.post("/ask")
-    async def ask(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
-        response = await nova.handle_request(str(payload["request"]))
+    async def ask(payload: AskRequest, _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        response = await nova.handle_request(payload.request)
         return response.to_dict()
 
     @app.post("/brain/mode")
@@ -306,14 +323,16 @@ def create_app() -> Any:
         return response
 
     @app.post("/command/plan")
-    async def command_plan(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
-        return nova.plan_command(str(payload["command"]))
+    async def command_plan(payload: CommandPlanRequest, _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return nova.plan_command(payload.command)
 
     @app.post("/command/execute")
     async def command_execute(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
         token = str(payload.get("approval_token", "") or "") or None
         try:
-            return await nova.execute_command(str(payload["command"]), approval_token=token)
+            return await nova.execute_command(
+                str(payload["command"]), approval_token=token, correlation_id=str(payload.get("correlation_id", "") or "")
+            )
         except ValueError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
 
@@ -325,7 +344,9 @@ def create_app() -> Any:
     async def desktop_execute(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
         token = str(payload.get("approval_token", "") or "") or None
         try:
-            return await nova.execute_desktop_command(str(payload["command"]), approval_token=token)
+            return await nova.execute_desktop_command(
+                str(payload["command"]), approval_token=token, correlation_id=str(payload.get("correlation_id", "") or "")
+            )
         except ValueError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
 
@@ -339,9 +360,34 @@ def create_app() -> Any:
         """Vision capability report: model availability + open bug count."""
         return {
             "vision_model": nova.vision.has_vision_model,
+            "vision_llm": nova.vision_llm_status(),
             "open_bugs": nova.bug_log.open_count(),
             "bugs_path": str(nova.bug_log.path),
         }
+
+    @app.post("/vision/model")
+    async def vision_model_set(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Install a multimodal vision model (hot swap, no restart).
+
+        provider=ollama probes the local Ollama for a vision model (llava,
+        llama3.2-vision, …); provider=openai|gemini|openrouter uses the same
+        API-key shape as the chat cloud LLM. The key is stored only on this
+        machine (data/novacontrol-state.json vision_llm namespace, gitignored)
+        and never returned by any endpoint.
+        """
+        try:
+            return nova.set_vision_llm(
+                str(payload.get("provider", "")),
+                str(payload.get("api_key", "")),
+                model=str(payload.get("model", "")),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/vision/model/clear")
+    async def vision_model_clear(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Remove the configured vision model; element location returns to OCR-only."""
+        return nova.clear_vision_llm()
 
     @app.post("/vision/describe")
     async def vision_describe(_principal: str = Depends(require_auth)) -> dict[str, Any]:
@@ -354,7 +400,11 @@ def create_app() -> Any:
         label = str(payload.get("label", "")).strip()
         if not label:
             raise HTTPException(status_code=422, detail="A 'label' is required.")
-        return await nova.vision.guided_click(label)
+        try:
+            return await nova.vision.guided_click(label)
+        except ValueError as exc:
+            # Command-shaped labels and empty plans are user-fixable errors.
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/intelligence")
     async def intelligence_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
@@ -398,7 +448,9 @@ def create_app() -> Any:
     async def phone_execute(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
         token = str(payload.get("approval_token", "") or "") or None
         try:
-            return await nova.execute_phone_command(str(payload["command"]), approval_token=token)
+            return await nova.execute_phone_command(
+                str(payload["command"]), approval_token=token, correlation_id=str(payload.get("correlation_id", "") or "")
+            )
         except ValueError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
 
@@ -416,22 +468,34 @@ def create_app() -> Any:
         return nova.agentic_knowledge()
 
     @app.post("/explore")
-    async def explore(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
-        last_topic = str(payload.get("last_topic", "")) or None
-        prior_topics = tuple(payload.get("prior_topics", ())) if isinstance(payload.get("prior_topics"), list) else ()
+    async def explore(payload: ExploreRequest_, _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        last_topic = payload.last_topic or None
+        prior_topics = tuple(payload.prior_topics)
         if last_topic and not prior_topics:
             prior_topics = (last_topic,)
         report = await nova.explore.research(
             ExploreRequest(
-                topic=str(payload["topic"]),
-                depth=str(payload.get("depth", "deep")),
-                include_videos=bool(payload.get("include_videos", True)),
-                max_sources=int(payload.get("max_sources", 6)),
-                max_videos=int(payload.get("max_videos", 5)),
+                topic=payload.topic,
+                depth=payload.depth,
+                include_videos=payload.include_videos,
+                max_sources=payload.max_sources,
+                max_videos=payload.max_videos,
                 prior_topics=prior_topics,
+                # Run-scoped correlation: the client's id comes back on every
+                # explore.progress frame so concurrent researches interleave
+                # cleanly in the UI. Blank → the request mints its own.
+                id=str(getattr(payload, "correlation_id", "") or "") or uuid4().hex,
             )
         )
+        # The service announces explore.completed on the bus for live tabs; the
+        # journal record happens here where the request (and its topic) lives.
+        nova.activity.record("research", "Research complete", payload.topic)
         return report.to_dict()
+
+    @app.get("/activity")
+    async def activity(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Recent completed actions, newest first — seeds the web timeline."""
+        return {"activity": nova.activity.recent()}
 
     @app.get("/events/stream")
     async def events_stream(
@@ -474,9 +538,7 @@ def create_app() -> Any:
                     except asyncio.TimeoutError:
                         yield ": keep-alive\n\n"  # comment frame; ignored by EventSource
                         continue
-                    payload = dict(event.payload)
-                    payload["event_type"] = event.type
-                    yield f"event: {event.type}\ndata: {json.dumps(payload, default=str)}\n\n"
+                    yield sse_frame(event)
             finally:
                 await nova.event_bus.unsubscribe("*", forward)
 

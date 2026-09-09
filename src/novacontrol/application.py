@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import time
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ from novacontrol.brain import BrainDecision, BrainIntent, BrainRequest, NovaBrai
 from novacontrol.brain.brain import looks_like_research_question
 from novacontrol.brain.scratch import scratchable_intent
 from novacontrol.browser import BrowserAutomationController, BrowserAutomationModule, PlaywrightBrowserRunner
+from novacontrol.core.activity import RecentActivityLog
 from novacontrol.core.buglog import BugLog
 from novacontrol.core.events import Event, EventBus
 from novacontrol.core.runtime import EventDrivenRuntime
@@ -49,6 +51,7 @@ from novacontrol.integrations import (
     CLOUD_LLM_PRESETS,
     build_cloud_provider,
     build_llm_provider_from_environment,
+    build_vision_provider,
     cloud_llm_presets,
     get_cloud_preset,
     make_ollama_reprobe,
@@ -119,6 +122,10 @@ class NovaControlApplication:
     def __init__(self, *, data_dir: str | Path | None = None) -> None:
         self.event_bus = EventBus(continue_on_error=True)
         self.runtime = EventDrivenRuntime(self.event_bus)
+        # Server-side recent-activity journal: every completed command, research
+        # run, and learning cycle lands here, so the web timeline can be seeded
+        # once and then fed live from /events/stream — no localStorage, no polling.
+        self.activity = RecentActivityLog(limit=50)
         # Lazy Ollama upgrade: if boot found no LLM, each chat request probes for a
         # freshly started Ollama (rate-limited) and hot-swaps it in — for the brain
         # AND Explore synthesis — without a server restart. The callback resolves
@@ -131,6 +138,10 @@ class NovaControlApplication:
         self.data_dir = Path(data_dir) if data_dir is not None else self._DEFAULT_DATA_DIR
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.state_store = JsonStateStore(self.data_dir)
+        # Configured vision model (None = OCR/landmarks only). Set BEFORE the
+        # desktop runner, VisionController, and agentcore perception are built
+        # so boot wiring picks it up; set_vision_llm/clear_vision_llm hot-swap
+        # it later through _apply_vision_provider.
         self.settings = (
             SettingsManager.from_dict(self.state_store.read("settings"))
             if self.state_store is not None
@@ -211,7 +222,17 @@ class NovaControlApplication:
         # self-approve: execution requires a token the server itself issued for the exact command.
         self.approval_ttl_seconds = _APPROVAL_TTL_SECONDS
         self._pending_approvals: dict[str, dict[str, Any]] = {}
-        self.desktop = DesktopAutomationController(runner=LocalDesktopRunner())
+        # Explicitly configured vision model (None = OCR/landmarks only). The
+        # runner/vision/agentic wiring below reads it; set_vision_llm hot-swaps
+        # it later via _apply_vision_provider.
+        self.desktop = DesktopAutomationController(
+            runner=LocalDesktopRunner(
+                # The brain's multimodal provider (an Ollama vision model when
+                # wired, the Echo fallback otherwise) feeds vision-guided
+                # element location inside the runner that performs clicks.
+                vision_provider=self.brain.completion_provider,
+            ),
+        )
         self.phone = PhoneControlController()
         self.browser = BrowserAutomationController(runner=PlaywrightBrowserRunner())
         # Vision-guided control + the shared bug log (data/bugs.json survives
@@ -221,6 +242,11 @@ class NovaControlApplication:
             self.desktop, bug_log=self.bug_log,
             llm_provider=self.brain.completion_provider,
         )
+        # A dedicated vision model (configured in the Vision panel) overrides
+        # the shared chat provider for element location — a user running a
+        # small text chat model can still wire llava for vision. Restored from
+        # the persisted config at the end of __init__ (_restore_vision_provider).
+        self._vision_provider: object | None = None
         # THE Global Intelligence Layer — the single language brain every
         # entry point consumes before any subsystem sees raw text. It shares
         # the brain's LLM provider (semantic fallback only when deterministic
@@ -257,6 +283,9 @@ class NovaControlApplication:
             persist_fn=self._agentic_persist,
             event_bus=self.event_bus,
         )
+        # Last boot step: re-apply any persisted vision model so element
+        # location uses it immediately (no restart, no UI round-trip).
+        self._restore_vision_provider()
 
         self.runtime.register_module(MemoryModule(self.memory))
         self.runtime.register_module(PlanningModule(self.planning, self.workflow_executor))
@@ -408,6 +437,85 @@ class NovaControlApplication:
         self._sync_explore_provider()
         self.persist()
         return self.brain_status()
+
+    # -- Vision model configuration -----------------------------------
+
+    # Namespaces in the same gitignored JsonStateStore as the chat cloud LLM:
+    # keys never leave this machine except to the provider's own endpoint.
+    _VISION_LLM_NAMESPACE = "vision_llm"
+
+    def vision_llm_status(self) -> dict[str, Any]:
+        """Configured vision model summary. The key is NEVER included — only a
+        redacted tail — so no endpoint can leak it."""
+        provider = self._vision_provider
+        if provider is None:
+            return {"configured": False}
+        name = str(getattr(provider, "name", ""))
+        surface = name.split(":", 1)[-1] if ":" in name else name
+        stored = self._cloud_llm_store.read(self._VISION_LLM_NAMESPACE) if self._cloud_llm_store is not None else {}
+        preset = get_cloud_preset(surface)
+        return {
+            "configured": True,
+            "provider": surface,
+            "label": ("Ollama (local)" if surface == "ollama" else (preset["label"] if preset else surface)),
+            "model": str(getattr(provider, "model", "")),
+            "api_key_hint": _redact_key(str(stored.get("api_key", ""))) if stored.get("api_key") else "",
+        }
+
+    def set_vision_llm(self, provider_id: str, credential: str = "", *, model: str = "") -> dict[str, Any]:
+        """Install a multimodal model for the vision layer (hot swap, no restart).
+
+        ``ollama`` probes the running instance for a vision model (llava,
+        llama3.2-vision, …); a cloud preset id (openai/gemini/openrouter) uses
+        the same key shape as the chat cloud LLM. The provider is swapped into
+        every vision consumer: the desktop runner's element locator, the
+        VisionController, and the agentcore perception engine.
+        """
+        provider, reason = build_vision_provider(provider_id, credential, model=model)
+        if provider is None:
+            raise ValueError(reason)
+        if self._cloud_llm_store is not None:
+            self._cloud_llm_store.write(
+                self._VISION_LLM_NAMESPACE,
+                {"provider": provider_id, "api_key": credential.strip(), "model": model.strip()},
+            )
+        self._apply_vision_provider(provider)
+        return self.vision_llm_status()
+
+    def clear_vision_llm(self) -> dict[str, Any]:
+        """Remove the stored vision model config; the layer returns to OCR-only."""
+        if self._cloud_llm_store is not None:
+            self._cloud_llm_store.write(self._VISION_LLM_NAMESPACE, {})
+        self._apply_vision_provider(None)
+        return self.vision_llm_status()
+
+    def _apply_vision_provider(self, provider: object | None) -> None:
+        """Swap the vision provider into every consumer that locates elements.
+
+        Boot-time wiring happens in __init__; this is the runtime path used by
+        set/clear so a model can be installed or removed without a restart.
+        """
+        self._vision_provider = provider
+        # 1. The desktop runner's locate_element (guided clicks).
+        self.desktop.runner.vision_provider = provider
+        # 2. The VisionController (describe/verify surface).
+        self.vision.set_llm_provider(provider)
+        # 3. The agentcore perception engine.
+        self.agentic.perception._provider = provider
+
+    def _restore_vision_provider(self) -> None:
+        """Boot-time restore of a persisted vision model (never raises)."""
+        stored = self._cloud_llm_store.read(self._VISION_LLM_NAMESPACE) if self._cloud_llm_store is not None else {}
+        provider_id = str(stored.get("provider", ""))
+        if not provider_id:
+            return
+        provider, _reason = build_vision_provider(
+            provider_id,
+            str(stored.get("api_key", "")),
+            model=str(stored.get("model", "")),
+        )
+        if provider is not None:
+            self._apply_vision_provider(provider)
 
     async def start(self) -> None:
         await self.runtime.start()
@@ -628,6 +736,7 @@ class NovaControlApplication:
             {"goal": goal, "feedback": feedback, "actions": [a.to_dict() for a in plan.actions], "findings": [f.to_dict() for f in plan.findings]},
             text=f"Learning cycle for {goal}. Feedback: {feedback}", importance=0.8,
         )
+        self._record_activity("learn", "Learning cycle", goal)
         return {"mode": "local_feedback_learning", "message": "Recorded a learning cycle and produced a safe self-improvement plan.", "memory": record.to_dict(), "plan": plan.to_dict()}
 
     async def autonomous_learning_loop(self, goal: str, *, iterations: int = 3, feedback: str = "") -> dict[str, Any]:
@@ -639,6 +748,7 @@ class NovaControlApplication:
             findings = cycle["plan"]["findings"]
             results.append({"iteration": index + 1, "memory_key": cycle["memory"]["key"], "action_count": len(cycle["plan"]["actions"]), "finding_count": len(findings), "top_findings": findings[:3]})
             next_feedback = "Focus next cycle on: " + "; ".join(finding["message"] for finding in findings[:3])
+        self._record_activity("learn", "Training run", goal)
         return {"mode": "autonomous_local_learning", "training_scope": "feedback memory, planning heuristics, and verified code-improvement plans", "weight_training": False, "iterations": results, "next_feedback": next_feedback}
 
     # --- Improvement Workflow ---
@@ -790,12 +900,16 @@ class NovaControlApplication:
         plan["approval"]["token"] = self._mint_approval(command, plan)
         return plan
 
-    async def execute_desktop_command(self, command: str, *, approval_token: str | None = None) -> dict[str, Any]:
+    async def execute_desktop_command(
+        self, command: str, *, approval_token: str | None = None, correlation_id: str = ""
+    ) -> dict[str, Any]:
         """Execute a previously planned desktop command, guarded by a server-issued approval token.
 
         Execution requires a valid, unconsumed token minted by plan_desktop_command for the exact
         command; a missing, unknown, expired, or replayed token raises ValueError (HTTP 403) and
         nothing runs. Use plan_desktop_command to preview before approving.
+        ``correlation_id`` (optional) tags the run's progress events so concurrent
+        executions interleave cleanly in the UI; blank mints a server-side id.
         """
         if not approval_token:
             raise ValueError(
@@ -808,6 +922,7 @@ class NovaControlApplication:
             controller=self.desktop,
             action_cls=DesktopAction, action_type_cls=DesktopActionType, workflow_cls=DesktopWorkflow,
             result_label="action",
+            correlation_id=correlation_id,
         )
 
     def plan_browser_command(self, command: str) -> dict[str, Any]:
@@ -858,12 +973,15 @@ class NovaControlApplication:
         plan["approval"]["token"] = self._mint_approval(command, plan)
         return plan
 
-    async def execute_browser_command(self, command: str, *, approval_token: str | None = None) -> dict[str, Any]:
+    async def execute_browser_command(
+        self, command: str, *, approval_token: str | None = None, correlation_id: str = ""
+    ) -> dict[str, Any]:
         """Execute a previously planned browser command, guarded by a server-issued approval token.
 
         Browser actions (navigate, fill forms) require a valid, unconsumed token minted by
         plan_browser_command for the exact command; a missing, unknown, expired, or replayed token
         raises ValueError (HTTP 403) and nothing runs. Use plan_browser_command to preview first.
+        ``correlation_id`` (optional) tags the run's progress events.
         """
         if not approval_token:
             raise ValueError(
@@ -876,6 +994,7 @@ class NovaControlApplication:
             controller=self.browser,
             action_cls=BrowserAction, action_type_cls=BrowserActionType, workflow_cls=BrowserWorkflow,
             result_label="browser action",
+            correlation_id=correlation_id,
         )
 
     async def _execute_planned_command(
@@ -888,6 +1007,7 @@ class NovaControlApplication:
         action_type_cls: Any,
         workflow_cls: Any,
         result_label: str,
+        correlation_id: str = "",
     ) -> dict[str, Any]:
         """Consume a valid token, rebuild the stored plan, and run it through a controller.
 
@@ -902,10 +1022,19 @@ class NovaControlApplication:
         )
 
         # Announce each action on the app bus as it starts, so the single
-        # activity channel shows live command progress while actions run.
+        # activity channel shows live command progress while actions run. Every
+        # announcement of ONE execution shares a run-scoped correlation_id so a
+        # UI can interleave two concurrent executions of the same family
+        # (two Approve And Runs in two tabs) without mixing their rows.
+        correlation_id = correlation_id.strip() or uuid4().hex
+
         async def announce(detail: str) -> None:
             await self.event_bus.publish(
-                Event(type="command.progress", payload={"step": "executing", "detail": detail}, source="command")
+                Event(
+                    type="command.progress",
+                    payload={"step": "executing", "detail": detail, "correlation_id": correlation_id, "command": command},
+                    source="command",
+                )
             )
 
         # Execute with auto-approval (a server-minted token was validated above)
@@ -919,7 +1048,32 @@ class NovaControlApplication:
         plan["execution_results"] = [r.to_dict() for r in results]
         succeeded = sum(1 for r in results if r.status.value == "completed")
         plan["summary"] = f"Executed {succeeded}/{len(results)} {result_label}(s) successfully."
+        if succeeded:
+            self._record_activity("command", "Command executed", command)
         return plan
+
+    def _record_activity(self, type_: str, title: str, detail: str = "") -> None:
+        """Record one completed action in the recent-activity journal AND
+        announce it on the bus as ``<type>.completed`` so every open UI tab
+        appends it to the Recent Activity timeline over the shared SSE channel
+        — including actions that started from another client (CLI, GUI, a
+        second tab). Journal is in-memory (bounded); the SSE frame carries the
+        same {type, title, detail, at} shape as /activity returns."""
+        self.activity.record(type_, title, detail)
+        entry = self.activity.recent(limit=1)
+        payload = dict(entry[0]) if entry else {"type": type_, "title": title, "detail": detail}
+        self._bus_schedule(
+            Event(type=f"{type_}.completed", payload=payload, source="activity")
+        )
+
+    def _bus_schedule(self, event: Event) -> None:
+        """Publish on the app bus, tolerating a closed/absent loop (journal
+        recording must never fail the completed action it reports)."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self.event_bus.publish(event))
 
     def plan_phone_command(self, command: str) -> dict[str, Any]:
         """Plan a phone workflow for open/text/call/screenshot phrasing.
@@ -967,7 +1121,7 @@ class NovaControlApplication:
         return plan
 
     async def execute_phone_command(
-        self, command: str, *, approval_token: str | None = None
+        self, command: str, *, approval_token: str | None = None, correlation_id: str = ""
     ) -> dict[str, Any]:
         """Run a planned phone action, guarded by a server-issued approval token.
 
@@ -990,6 +1144,7 @@ class NovaControlApplication:
             controller=self.phone,
             action_cls=PhoneAction, action_type_cls=PhoneActionType, workflow_cls=PhoneWorkflow,
             result_label="phone action",
+            correlation_id=correlation_id,
         )
 
     _PHONE_INTENTS = frozenset({
@@ -1037,15 +1192,21 @@ class NovaControlApplication:
     def plan_command(self, command: str) -> dict[str, Any]:
         return self._dispatch_device_command(command)
 
-    async def execute_command(self, command: str, *, approval_token: str | None = None) -> dict[str, Any]:
-        """Execute a previously planned command, guarded by a server-issued approval token."""
+    async def execute_command(
+        self, command: str, *, approval_token: str | None = None, correlation_id: str = ""
+    ) -> dict[str, Any]:
+        """Execute a previously planned command, guarded by a server-issued approval token.
+
+        ``correlation_id`` (optional) tags the run's progress events so two
+        concurrent executions of the same family interleave cleanly in the UI.
+        """
         decision = self.brain.decide(BrainRequest(text=command, context=self.status()))
         if decision.intent is BrainIntent.DESKTOP_AUTOMATION:
-            return await self.execute_desktop_command(command, approval_token=approval_token)
+            return await self.execute_desktop_command(command, approval_token=approval_token, correlation_id=correlation_id)
         if decision.intent is BrainIntent.BROWSER_AUTOMATION:
-            return await self.execute_browser_command(command, approval_token=approval_token)
+            return await self.execute_browser_command(command, approval_token=approval_token, correlation_id=correlation_id)
         if decision.intent is BrainIntent.PHONE_CONTROL:
-            return await self.execute_phone_command(command, approval_token=approval_token)
+            return await self.execute_phone_command(command, approval_token=approval_token, correlation_id=correlation_id)
         return self._dispatch_device_command(command)
 
     # --- Status ---

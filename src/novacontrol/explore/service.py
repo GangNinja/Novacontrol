@@ -51,13 +51,29 @@ class ExploreService:
         self._event_bus = event_bus
         self._recent_topics: deque[str] = deque(maxlen=5)
 
-    async def _emit(self, step: str, detail: str = "", **extra: Any) -> None:
-        """Publish a progress event if an event bus is attached."""
+    async def _emit(self, step: str, detail: str = "", *, correlation_id: str = "", **extra: Any) -> None:
+        """Publish a progress event if an event bus is attached.
+
+        ``correlation_id`` is the run-scoped id (the ExploreRequest id) so a UI
+        can interleave two concurrent researches without mixing their rows.
+        """
         if self._event_bus is None:
             return
         payload: dict[str, Any] = {"step": step, "detail": detail}
         payload.update(extra)
+        if correlation_id:
+            payload["correlation_id"] = correlation_id
         await self._event_bus.publish(Event(type="explore.progress", payload=payload, source="explore"))
+
+    async def _announce_completion(self, topic: str) -> None:
+        """Publish an explore.completed event so open tabs add the research to
+        the Recent Activity timeline over SSE (the journal is recorded by the
+        API layer that owns this request)."""
+        if self._event_bus is None:
+            return
+        await self._event_bus.publish(
+            Event(type="explore.completed", payload={"type": "research", "title": "Research complete", "detail": topic}, source="explore")
+        )
 
     async def research(self, request: ExploreRequest) -> ExploreReport:
         from novacontrol.explore.query import resolve_followup_topic
@@ -79,22 +95,23 @@ class ExploreService:
         cache_key = _cache_key(request)
         cached = self.cache.get(cache_key)
         if cached is not None:
-            await self._emit("cached", f"Returning cached result for '{request.topic}'")
+            await self._emit("cached", f"Returning cached result for '{request.topic}'", correlation_id=request.id)
+            await self._announce_completion(request.topic)
             return cached
 
-        await self._emit("searching", f"Searching for '{request.topic}'...", topic=request.topic)
+        await self._emit("searching", f"Searching for '{request.topic}'...", correlation_id=request.id, topic=request.topic)
         sources, search_warnings = await self._safe_search(request)
-        await self._emit("sources_found", f"Found {len(sources)} source(s)", count=len(sources))
+        await self._emit("sources_found", f"Found {len(sources)} source(s)", correlation_id=request.id, count=len(sources))
 
         if request.include_videos:
-            await self._emit("searching_videos", "Searching for related videos...")
+            await self._emit("searching_videos", "Searching for related videos...", correlation_id=request.id)
             videos, video_warnings = await self._safe_video_search(request)
-            await self._emit("videos_found", f"Found {len(videos)} video(s)", count=len(videos))
+            await self._emit("videos_found", f"Found {len(videos)} video(s)", correlation_id=request.id, count=len(videos))
         else:
             videos, video_warnings = ((), ())
 
         warnings = (*search_warnings, *video_warnings)
-        await self._emit("synthesizing", "Synthesizing answer...")
+        await self._emit("synthesizing", "Synthesizing answer...", correlation_id=request.id)
         report = await self.explainer.explain(
             request,
             sources,
@@ -114,7 +131,8 @@ class ExploreService:
         if track_lower and track_lower not in self._recent_topics:
             self._recent_topics.append(track_lower)
 
-        await self._emit("complete", f"Research complete: {len(sources)} sources, {len(videos)} videos", topic=request.topic)
+        await self._emit("complete", f"Research complete: {len(sources)} sources, {len(videos)} videos", correlation_id=request.id, topic=request.topic)
+        await self._announce_completion(request.topic)
         return report
 
     async def _safe_search(self, request: ExploreRequest) -> tuple[tuple[ResearchSource, ...], tuple[str, ...]]:

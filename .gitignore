@@ -18,6 +18,9 @@ build/
 .idea/
 .vscode/
 logs/
+# Vision-guided screen captures written to the server CWD at runtime
+vision_*.png
+screenshot*.png
 data/
 tmp/
 *.sqlite3
@@ -27,3 +30,4 @@ roadmap.md
 AUDIT.md
 ROADMAP.md
 .freebuff/
+token.txt

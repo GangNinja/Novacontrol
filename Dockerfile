@@ -33,11 +33,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy installed packages from builder
 COPY --from=builder /install /usr/local
 
-# Copy application source
+# Copy application source.
+# docs/ is deliberately NOT copied: .dockerignore may exclude docs/, and a
+# COPY of an ignore-excluded path fails the whole build ("file not found" /
+# "excluded by .dockerignore"). Docs are a development artifact — the runtime
+# image ships application code, configs, and scripts only.
 COPY src/ src/
 COPY configs/ configs/
 COPY scripts/ scripts/
-COPY docs/ docs/
 
 # Create data directory
 RUN mkdir -p data logs

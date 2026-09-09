@@ -51,6 +51,29 @@ INTENT_ROUTING: list[tuple[str, BrainIntent]] = [
     # ...but with no research verb, plan nouns still route PLAN, not EXPLORE.
     ("break down the plan", BrainIntent.PLAN),
     ("plan the project", BrainIntent.PLAN),
+    # Cross-intent boundary: research verbs beat DEVICE TARGETS. A question
+    # ABOUT an app/browser/phone topic deserves a researched answer, not an
+    # action against it. Do not let the desktop/browser/phone keyword blocks
+    # steal these back.
+    ("explain how to open notepad", BrainIntent.EXPLORE),
+    ("what is notepad", BrainIntent.EXPLORE),
+    ("how does notepad work", BrainIntent.EXPLORE),
+    ("explain how to open chrome", BrainIntent.EXPLORE),
+    ("what is task manager", BrainIntent.EXPLORE),
+    ("explain how to navigate a website", BrainIntent.EXPLORE),
+    ("what is a browser cache", BrainIntent.EXPLORE),
+    ("how do cookies work in the browser", BrainIntent.EXPLORE),
+    ("what is a login form", BrainIntent.EXPLORE),
+    ("explain how whatsapp works", BrainIntent.EXPLORE),
+    ("what is a screenshot", BrainIntent.EXPLORE),
+    ("how does bluetooth work on my phone", BrainIntent.EXPLORE),
+    # Cross-intent boundary: memory-topic questions route EXPLORE even though
+    # they contain the "memory" keyword; only explicit store phrasing routes
+    # MEMORY — even when the remembered content names a device target.
+    ("explain how human memory works", BrainIntent.EXPLORE),
+    ("what is muscle memory", BrainIntent.EXPLORE),
+    ("how does computer memory work", BrainIntent.EXPLORE),
+    ("remember this: open notepad is my favorite app", BrainIntent.MEMORY),
     # Worded arithmetic, including spelled-out numbers and powers -> local CHAT.
     ("what is fifteen times three", BrainIntent.CHAT),
     ("what is 2 to the power of 8", BrainIntent.CHAT),
@@ -88,15 +111,58 @@ INTENT_ROUTING: list[tuple[str, BrainIntent]] = [
     ("make it intelligent", BrainIntent.SELF_IMPROVEMENT),
 ]
 
+# ---------------------------------------------------------------------------
+# Gate-order boundary probe: phrases that hit TWO gates at once. The expected
+# intent encodes which gate must win; if anyone reorders _keyword_classify's
+# checks, the violating pair fails a named subTest instead of silently
+# rerouting real user input.
+# ---------------------------------------------------------------------------
 
-class BrainIntentRoutingTests(unittest.IsolatedAsyncioTestCase):
-    """Table-driven: every (text, expected_intent) pair is one subTest."""
+BOUNDARY_PROBES: list[tuple[str, BrainIntent, str]] = [
+    # greeting + plan: a greeting prefix must not mask a planning request.
+    # The GREETING gate fires first in scratchable_intent, but decide() only
+    # honors it for BARE greetings — plan nouns after a greeting still route
+    # PLAN via the plan-noun block.
+    ("hey create a roadmap", BrainIntent.PLAN, "greeting<plan"),
+    ("hello, plan the project", BrainIntent.PLAN, "greeting<plan"),
+    ("good morning, break this down into steps", BrainIntent.PLAN, "greeting<plan"),
+    # math + plan: arithmetic is computed locally even when the tail names
+    # planning nouns ("steps", "roadmap") — the MATH gate sits above the plan
+    # block on purpose (see the comment there).
+    ("add 5 and 7 and show steps", BrainIntent.CHAT, "math<plan"),
+    ("what is 12 times 4 and break it down into steps", BrainIntent.CHAT, "math<plan"),
+    ("calculate 2 plus 2 then create a roadmap", BrainIntent.CHAT, "math<plan"),
+    # self-improvement + explore: research verbs asking ABOUT self-improvement
+    # still route to the self-improvement engine — its gate sits above EXPLORE
+    # so meta questions about NovaControl's own improvement keep their dedicated
+    # (sandboxed) path rather than becoming web research.
+    ("explain how you improve yourself", BrainIntent.SELF_IMPROVEMENT, "selfimprovement<explore"),
+    ("what is self improvement", BrainIntent.SELF_IMPROVEMENT, "selfimprovement<explore"),
+    ("research how to make yourself intelligent", BrainIntent.SELF_IMPROVEMENT, "selfimprovement<explore"),
+    ("compare yourself before and after you improve yourself", BrainIntent.SELF_IMPROVEMENT, "selfimprovement<explore"),
+    ("why should you improve your code", BrainIntent.SELF_IMPROVEMENT, "selfimprovement<explore"),
+    # self-improvement + plan / + agent: the dedicated gate wins over the generic
+    # blocks it lexically overlaps.
+    ("make it intelligent and create a roadmap", BrainIntent.SELF_IMPROVEMENT, "selfimprovement<plan"),
+    ("improve your code and implement a feature", BrainIntent.SELF_IMPROVEMENT, "selfimprovement<agent"),
+]
 
-    def test_intent_routing(self) -> None:
+
+class GateBoundaryProbeTests(unittest.TestCase):
+    """Every gate pair that can lexically collide, with the winner pinned."""
+
+    def test_gate_boundaries(self) -> None:
         brain = NovaBrain()
-        for text, expected in INTENT_ROUTING:
-            with self.subTest(text=text):
+        for text, expected, pair in BOUNDARY_PROBES:
+            with self.subTest(pair=pair, text=text):
                 decision = brain.decide(BrainRequest(text))
+                self.assertEqual(
+                    decision.intent,
+                    expected,
+                    f"gate-order regression on [{pair}]: {text!r} routed "
+                    f"{decision.intent.value}, expected {expected.value}",
+                )
+
                 self.assertEqual(decision.intent, expected, f"Failed for '{text}'")
 
     def test_empty_and_whitespace_route_to_clarify(self) -> None:

@@ -69,6 +69,65 @@ class MathEvaluatorTests(unittest.TestCase):
         self.assertIn("couldn't", result["message"].lower())
 
 
+class ExamMathTests(unittest.TestCase):
+    """JEE/exam math: logs, degree trig, combinatorics, quadratics, APs."""
+
+    def setUp(self) -> None:
+        self.engine = ScratchReasoningEngine()
+
+    def _message(self, text: str) -> str:
+        result = self.engine.answer(text, {})
+        return str(result["message"])
+
+    def test_evaluator_functions(self) -> None:
+        cases = [
+            ("ncr(10, 3)", 120),
+            ("npr(10, 3)", 720),
+            ("factorial(5)", 120),
+            ("sind(30)", 0.5),
+            ("cosd(60)", 0.5),
+            ("tand(45)", 1.0),
+            ("log(8, 2)", 3),
+        ]
+        for expr, expected in cases:
+            with self.subTest(expr=expr):
+                result = _safe_eval_math(expr)
+                self.assertIsNotNone(result)
+                self.assertAlmostEqual(result, expected, places=4)
+
+    def test_worded_forms(self) -> None:
+        cases = [
+            ("log base 2 of 8", "3"),
+            ("log of 100 base 10", "2"),
+            ("sin 30 degrees", "0.5"),
+            ("10C3", "120"),
+            ("10P3", "720"),
+            ("8 choose 2", "28"),
+            ("5 p 3", "60"),
+            ("factorial of 5", "120"),
+            ("6 factorial", "720"),
+        ]
+        for text, expected in cases:
+            with self.subTest(text=text):
+                self.assertIn(expected, self._message(text))
+
+    def test_quadratics(self) -> None:
+        self.assertIn("x = 3 and x = 2", self._message("solve x^2 - 5x + 6 = 0"))
+        self.assertIn("x = 3 and x = -4.5", self._message("solve 2x^2 + 3x - 27 = 0"))
+        self.assertIn("2i", self._message("x^2 + 4 = 0"))
+        self.assertIn("repeated", self._message("solve x^2 - 4x + 4 = 0"))
+
+    def test_arithmetic_progressions(self) -> None:
+        self.assertIn("47", self._message("a = 2 d = 5 find the 10th term"))
+        self.assertIn("245", self._message("sum of the first 10 terms of an ap with a 2 and d 5"))
+
+    def test_non_math_still_routes_away(self) -> None:
+        for text in ("open notepad", "what is the capital of france", "what time is it"):
+            with self.subTest(text=text):
+                message = self._message(text)
+                self.assertNotIn("couldn't evaluate", message.lower())
+
+
 # ---------------------------------------------------------------------------
 # Temperature conversion
 # ---------------------------------------------------------------------------

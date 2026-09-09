@@ -28,6 +28,28 @@ _OPS: dict[str, Any] = {
     "**": operator.pow,
 }
 
+def _ncr(n: float, r: float) -> float:
+    """Combinations: n choose r (exam shorthand 10C3 and worded "8 choose 2")."""
+    return float(math.comb(int(n), int(r)))
+
+
+def _npr(n: float, r: float) -> float:
+    """Permutations: n P r."""
+    return float(math.perm(int(n), int(r)))
+
+
+def _sind(degrees: float) -> float:
+    return math.sin(math.radians(degrees))
+
+
+def _cosd(degrees: float) -> float:
+    return math.cos(math.radians(degrees))
+
+
+def _tand(degrees: float) -> float:
+    return math.tan(math.radians(degrees))
+
+
 _MATH_FUNCS: dict[str, Any] = {
     "sqrt": math.sqrt,
     "abs": abs,
@@ -35,11 +57,19 @@ _MATH_FUNCS: dict[str, Any] = {
     "sin": math.sin,
     "cos": math.cos,
     "tan": math.tan,
-    "log": math.log,
+    # Degree variants: JEE/NCERT phrasing is angle-in-degrees ("sin 30 degrees").
+    "sind": _sind,
+    "cosd": _cosd,
+    "tand": _tand,
+    "log": math.log,  # log(x) natural, log(x, base) arbitrary base
     "log10": math.log10,
     "log2": math.log2,
     "floor": math.floor,
     "ceil": math.ceil,
+    # Combinatorics + factorials for JEE counting problems.
+    "ncr": _ncr,
+    "npr": _npr,
+    "factorial": math.factorial,
     "pi": math.pi,
     "e": math.e,
     "tau": math.tau,
@@ -314,8 +344,22 @@ _MATH_EXPR = re.compile(r'[\d]\s*[+\-*/^]\s*[\d]')
 # builder slices down to the two operands (trailing phrasing like "... and show
 # steps" must never reach the evaluator). Groups capture both operands.
 _ADD_FORM = re.compile(r'\badd\s+(\d+(?:\.\d+)?)\s+and\s+(\d+(?:\.\d+)?)', re.IGNORECASE)
-# Bare function calls the evaluator supports ("sqrt(144)", "log(1000)").
-_FUNC_CALL_MATH = re.compile(r'\b(?:sqrt|sin|cos|tan|log|log10|log2|abs|floor|ceil|round)\s*\(', re.IGNORECASE)
+# Bare function calls the evaluator supports ("sqrt(144)", "log(1000)",
+# "ncr(10, 3)") — including the JEE/exam functions.
+_FUNC_CALL_MATH = re.compile(
+    r'\b(?:sqrt|sind|cosd|tand|sin|cos|tan|log|log10|log2|abs|floor|ceil|round|ncr|npr|factorial)\s*\(',
+    re.IGNORECASE,
+)
+
+# Exam-math shapes beyond plain expression evaluation: quadratics to solve and
+# arithmetic-progression term/sum questions. Detected by _math_detect and
+# answered by _quadratic_answer / _ap_answer before the generic evaluator.
+_EXAM_MATH = re.compile(
+    r"(?:solve|roots?\s+of|factorise|factorize)[^\n]*x\s*\^?\s*2"
+    r"|\d+\s*(?:st|nd|rd|th)\s+term"
+    r"|sum\s+of\s+(?:the\s+)?first\s+\d+\s+terms",
+    re.IGNORECASE,
+)
 
 # Declarative worded-arithmetic intent registry: one (phrase pattern, symbolic
 # rewrite) row per natural-language way of saying arithmetic. Routing
@@ -394,6 +438,90 @@ def _power_rewrite(match: re.Match[str], exp: int) -> str:
     return f"{_fmt_number(value)}**{exp}"
 
 
+def _percent_rewrite(match: re.Match[str]) -> str:
+    """""XX percent of Y" -> (X/100)*Y."""
+    percent = _operand_value(match.group(1))
+    base = _operand_value(match.group(2))
+    if percent is None or base is None:
+        return match.group(0)
+    return f"({_fmt_number(percent)}/100)*{_fmt_number(base)}"
+
+
+def _log_base_rewrite(match: re.Match[str]) -> str:
+    """Rewrite 'log base B of V' -> log(V, B) — the exam phrasing for log_B(V)."""
+    base = _operand_value(match.group(1))
+    value = _operand_value(match.group(2))
+    if base is None or value is None:
+        return match.group(0)
+    return f"log({_fmt_number(value)}, {_fmt_number(base)})"
+
+
+def _log_of_base_rewrite(match: re.Match[str]) -> str:
+    """Rewrite 'log of V base B' -> log(V, B)."""
+    value = _operand_value(match.group(1))
+    base = _operand_value(match.group(2))
+    if base is None or value is None:
+        return match.group(0)
+    return f"log({_fmt_number(value)}, {_fmt_number(base)})"
+
+
+def _binary_func_word_rule(operator: str, func: str) -> tuple[re.Pattern[str], Callable[[re.Match[str]], str]]:
+    """Worded binary function form ('8 choose 2' -> ncr(8, 2))."""
+    pattern = re.compile(
+        r"\b(" + _OPERAND_SEQ + r")\s+" + operator + r"\s+(" + _OPERAND_SEQ + r")\b",
+        re.IGNORECASE,
+    )
+
+    def rewrite(match: re.Match[str]) -> str:
+        left = _operand_value(match.group(1))
+        right = _operand_value(match.group(2))
+        if left is None or right is None:
+            return match.group(0)
+        return f"{func}({_fmt_number(left)}, {_fmt_number(right)})"
+
+    return pattern, rewrite
+
+
+_TRIG_FUNC = {"sin": "sind", "cos": "cosd", "tan": "tand"}
+_TRIG_RADIAN_FUNC = {"sin": "sin", "cos": "cos", "tan": "tan"}
+
+
+def _trig_degrees_rewrite(match: re.Match[str]) -> str:
+    """Rewrite 'sin 30 degrees' -> degree-based trig (explicit exam convention)."""
+    func = _TRIG_FUNC[match.group(1).lower()]
+    value = _operand_value(match.group(2))
+    if value is None:
+        return match.group(0)
+    return f"{func}({_fmt_number(value)})"
+
+
+def _trig_radians_rewrite(match: re.Match[str]) -> str:
+    """Rewrite bare 'sin 30' -> sin(30) — radians, the historical engine default."""
+    func = _TRIG_RADIAN_FUNC[match.group(1).lower()]
+    value = _operand_value(match.group(2))
+    if value is None:
+        return match.group(0)
+    return f"{func}({_fmt_number(value)})"
+
+
+def _factorial_rewrite(match: re.Match[str]) -> str:
+    """Rewrite 'factorial of 5' / '5 factorial' -> factorial(5)."""
+    value = _operand_value(match.group(1))
+    if value is None:
+        return match.group(0)
+    return f"factorial({_fmt_number(value)})"
+
+
+def _nc_symbolic_rewrite(match: re.Match[str]) -> str:
+    """Rewrite the glued exam shorthand 10C3 -> ncr(10, 3)."""
+    return f"ncr({match.group(1)}, {match.group(2)})"
+
+
+def _np_symbolic_rewrite(match: re.Match[str]) -> str:
+    """Rewrite the glued exam shorthand 10P3 -> npr(10, 3)."""
+    return f"npr({match.group(1)}, {match.group(2)})"
+
+
 # An operand: a decimal literal or one or more number words ("fifteen", "two
 # hundred and five"), never an arbitrary letter run — "how many times a year"
 # cannot match because "how"/"a" are not number words.
@@ -409,8 +537,12 @@ _OPERAND_SEQ = r"(?:\d+(?:\.\d+)?|" + _NUM_TOKEN + r")(?:[\s-]+(?:and[\s-]+)?(?:
 
 
 def _binary_word_rule(operator: str, op: str) -> tuple[re.Pattern[str], Callable[[re.Match[str]], str]]:
+    # (?<![*)]) — the left operand must start clean: a number glued onto an
+    # already-rewritten power ("5**2 times 2") or function call belongs to the
+    # compound rows, never to a simple binary row (which would rewrite the bare
+    # exponent "2 times 2" and steal the compound row's match).
     pattern = re.compile(
-        r"\b(" + _OPERAND_SEQ + r")\s+" + operator + r"\s+(" + _OPERAND_SEQ + r")\b",
+        r"(?<![*)])\b(" + _OPERAND_SEQ + r")\s+" + operator + r"\s+(" + _OPERAND_SEQ + r")\b",
         re.IGNORECASE,
     )
     return pattern, lambda m: _binary_rewrite(m, op)
@@ -418,16 +550,49 @@ def _binary_word_rule(operator: str, op: str) -> tuple[re.Pattern[str], Callable
 
 Rewrite = str | Callable[[re.Match[str]], str]
 
+# An operand of a COMPOUND worded expression: everything _OPERAND_SEQ covers
+# (digits, spelled-out cardinals) PLUS forms produced by earlier rewrites in
+# the fixed-point loop — a power ("2**3" from "2 cubed") or a function call
+# ("sqrt(9)" from "square root of 9"). Without these, a binary operator whose
+# neighbor was already translated can never match ("2 cubed plus the square
+# root of 9" -> "2**3 plus sqrt(9)" would strand "plus" untranslated).
+_COMPOUND_OPERAND = r"(?:" + _OPERAND_SEQ + r"|\d+(?:\.\d+)?(?:\*\*\d+)?|[a-z]+\(\d+(?:\.\d+)?\))"
+
+
+def _resolve_side(text: str) -> str:
+    """Normalize one captured operand side: words -> digits, symbolic passes through."""
+    value = _operand_value(text)
+    return _fmt_number(value) if value is not None else text.strip()
+
+
+def _compound_binary_word_rule(operator: str, op: str) -> tuple[re.Pattern[str], Callable[[re.Match[str]], str]]:
+    """Binary rule whose operands may be worded OR already-symbolic forms."""
+    # Trailing lookahead instead of \b: when the right operand is a function
+    # call ("sqrt(9)") the match ends in ")", a non-word char, and a trailing
+    # \b would demand a word char on the other side — always false at a space
+    # or end of string. (?![a-z*]) blocks only a glued-on letter/power op.
+    pattern = re.compile(
+        r"\b(" + _COMPOUND_OPERAND + r")\s+" + operator + r"\s+(" + _COMPOUND_OPERAND + r")(?![a-z*])",
+        re.IGNORECASE,
+    )
+
+    def rewrite(match: re.Match[str]) -> str:
+        left = _resolve_side(match.group(1))
+        right = _resolve_side(match.group(2))
+        return f"{left}{op}{right}"
+
+    return pattern, rewrite
+
 _MATH_WORD_RULES: tuple[tuple[re.Pattern[str], Rewrite], ...] = (
-    # Spelled-out binary operators -> symbols ("15 times 3", "fifteen times three").
-    _binary_word_rule("plus", "+"),
-    _binary_word_rule("minus", "-"),
-    _binary_word_rule("times", "*"),
-    _binary_word_rule("over", "/"),
-    _binary_word_rule("multiplied by", "*"),
-    _binary_word_rule("divided by", "/"),
-    # Powers: "2 to the power of 8" -> 2**8 (words work too: "two to the power of eight").
+    # "to the power of" leads: claiming the power pair first keeps
+    # "square root of 8 to the power of 3" -> "sqrt(8)**3" instead of letting a
+    # later row mis-slice the expression.
     _binary_word_rule("to the power of", "**"),
+    # Worded math functions/powers NEXT: a unary row must claim its operand
+    # before a simple binary row can steal it as a bare digit. Binary-first
+    # ordering mangled "the square root of 81 minus 5 squared" — the simple
+    # minus row ate "81 minus 5" before "square root of"/"squared" could claim
+    # their operands, stranding an unevaluable "81-5".
     # Worded math functions -> supported calls ("square root of 256", "5 squared").
     (re.compile(r"\b(?:the\s+)?square\s+root\s+of\s+(" + _OPERAND_SEQ + r")\b", re.IGNORECASE),
      lambda m: _unary_rewrite(m, "sqrt")),
@@ -437,7 +602,69 @@ _MATH_WORD_RULES: tuple[tuple[re.Pattern[str], Rewrite], ...] = (
      lambda m: _power_rewrite(m, 2)),
     (re.compile(r"\b(" + _OPERAND_SEQ + r")\s+cubed\b", re.IGNORECASE),
      lambda m: _power_rewrite(m, 3)),
+    # Spelled-out binary operators -> symbols ("15 times 3", "fifteen times three").
+    _binary_word_rule("plus", "+"),
+    _binary_word_rule("minus", "-"),
+    _binary_word_rule("times", "*"),
+    _binary_word_rule("over", "/"),
+    _binary_word_rule("multiplied by", "*"),
+    _binary_word_rule("divided by", "/"),
+    # Compound forms: binary operators whose neighbors may already have been
+    # rewritten by the rows above ("2 cubed plus the square root of 9" ->
+    # "2**3+sqrt(9)"). Registered AFTER the simple rows so simple phrases keep
+    # their original single-rule translation; the fixed-point loop lets these
+    # fire on a later pass once neighbors are symbolic.
+    _compound_binary_word_rule("plus", "+"),
+    _compound_binary_word_rule("minus", "-"),
+    _compound_binary_word_rule("times", "*"),
+    _compound_binary_word_rule("multiplied by", "*"),
+    _compound_binary_word_rule("divided by", "/"),
+    _compound_binary_word_rule("over", "/"),
+    # Percentage of: "15 percent of 200" -> (15/100)*200 (words work: "ten percent of 300").
+    (re.compile(r"\b(" + _OPERAND_SEQ + r")\s+percent\s+of\s+(" + _OPERAND_SEQ + r")\b", re.IGNORECASE),
+     lambda m: _percent_rewrite(m)),
+    # ── JEE / exam forms ─────────────────────────────────────────────
+    # log base B of V ("log base 2 of 8") — registered BEFORE the log-of row so
+    # both orderings of base/value stay unambiguous.
+    (re.compile(r"\blog\s+base\s+(" + _OPERAND_SEQ + r")\s+of\s+(" + _OPERAND_SEQ + r")\b", re.IGNORECASE),
+     _log_base_rewrite),
+    (re.compile(r"\blog\s+(?:of\s+)?(" + _OPERAND_SEQ + r")\s+base\s+(" + _OPERAND_SEQ + r")\b", re.IGNORECASE),
+     _log_of_base_rewrite),
+    # Degree trig: "sin 30 degrees", "cos of 60" — exam convention is degrees.
+    (re.compile(r"\b(sin|cos|tan)\s+(?:of\s+)?(" + _OPERAND_SEQ + r")\s*(?:degrees?|°)\b", re.IGNORECASE),
+     _trig_degrees_rewrite),
+    (re.compile(r"\b(sin|cos|tan)\s+(?:of\s+)?(" + _OPERAND_SEQ + r")\b(?!.{0,20}\bdegrees?\b)", re.IGNORECASE),
+     _trig_radians_rewrite),
+    # Combinatorics: worded and glued exam shorthand.
+    _binary_func_word_rule("choose", "ncr"),
+    _binary_func_word_rule("p", "npr"),
+    (re.compile(r"\b(\d+)\s*[cC]\s*(\d+)\b(?!at)"), _nc_symbolic_rewrite),
+    (re.compile(r"\b(\d+)\s*[pP]\s*(\d+)\b(?![a-z])"), _np_symbolic_rewrite),
+    # Factorials: "factorial of 5", "6 factorial".
+    (re.compile(r"\bfactorial\s+of\s+(" + _OPERAND_SEQ + r")\b", re.IGNORECASE),
+     _factorial_rewrite),
+    (re.compile(r"\b(" + _OPERAND_SEQ + r")\s+factorial\b", re.IGNORECASE),
+     _factorial_rewrite),
 )
+
+
+def rewrite_worded_math(expr: str, *, max_passes: int = 8) -> str:
+    """Apply the rule registry to a fixed point: worded math -> symbolic.
+
+    ONE canonical walk, consumed by the answer builder and importable by tests
+    (the drift guard uses it to bring a raw phrase to the state where a given
+    compound row actually fires — compound rows only match after simpler rows
+    have rewritten their neighbors).
+    """
+    for _ in range(max_passes):
+        changed = False
+        for pattern, replacement in _MATH_WORD_RULES:
+            updated = pattern.sub(replacement, expr)
+            if updated != expr:
+                expr, changed = updated, True
+        if not changed:
+            break
+    return expr
 
 
 def is_arithmetic_query(lower: str) -> bool:
@@ -453,6 +680,7 @@ def is_arithmetic_query(lower: str) -> bool:
         _MATH_EXPR.search(lower)
         or _ADD_FORM.search(lower)
         or _FUNC_CALL_MATH.search(lower)
+        or _EXAM_MATH.search(lower)
         or any(pattern.search(lower) for pattern, _ in _MATH_WORD_RULES)
     )
 
@@ -465,6 +693,27 @@ def is_arithmetic_query(lower: str) -> bool:
 _MATH_PATTERNS = re.compile(
     r'^[\d\s+\-*/().,%^]+$|'
     r'(calculate|compute|add|what is|what\'?s)\s+[\d\s+\-*/().%^]+',
+    re.IGNORECASE,
+)
+
+# Quadratic standard form: ax^2 + bx + c (spaces optional around terms, the
+# leading coefficient may be implicit — "x^2 - 5x + 6" — c may be missing, x
+# may be written x^2 or x**2).
+_QUADRATIC = re.compile(
+    r"(-?\d+(?:\.\d+)?)?\s*\*?\s*x\s*\^?\s*2\s*"
+    r"(?:([+-])\s*(\d+(?:\.\d+)?)\s*\*?\s*x\s*)?"
+    r"(?:([+-])\s*(\d+(?:\.\d+)?)\s*)?",
+    re.IGNORECASE,
+)
+
+# Arithmetic progression: "a = 2 d = 5", "first term 3 common difference 4",
+# "ap with a 2 and d 5".
+_AP_SPEC = re.compile(
+    r"(?:a(?:\s*=|\s+is)?\s*(-?\d+(?:\.\d+)?))\s*(?:and\s*)?(?:"
+    r"d(?:\s*=|\s+is)?\s*(-?\d+(?:\.\d+)?)"
+    r"|common\s+difference\s*(?:of|is|=)?\s*(-?\d+(?:\.\d+)?)"
+    r"|first\s+term\s*(?:of|is|=)?\s*(-?\d+(?:\.\d+)?)"
+    r"|\bwith\b)",
     re.IGNORECASE,
 )
 
@@ -491,8 +740,109 @@ _TEMP_PATTERN = re.compile(
 # Answer builders
 # ---------------------------------------------------------------------------
 
+def _quadratic_answer(text: str) -> dict[str, Any] | None:
+    """Solve ax^2 + bx + c = 0 via the discriminant (JEE algebra staple).
+
+    Returns None when the text is not a recognizable standard-form quadratic.
+    """
+    cleaned = text.lower().replace("**", "^")
+    cleaned = re.sub(r"\b(equation|solve|the|roots?|of)\b", " ", cleaned)
+    cleaned = cleaned.replace("= 0", "").replace("=0", "")
+    match = _QUADRATIC.search(cleaned)
+    if not match:
+        return None
+    a = float(match.group(1).replace(" ", "")) if match.group(1) else 1.0
+    if a == 0:
+        return None
+    b = 0.0
+    if match.group(2):
+        b = float(match.group(3)) * (-1 if match.group(2) == "-" else 1)
+    c = 0.0
+    if match.group(4):
+        c = float(match.group(5)) * (-1 if match.group(4) == "-" else 1)
+
+    discriminant = b * b - 4 * a * c
+    two_a = 2 * a
+    if discriminant > 0:
+        root1 = (-b + math.sqrt(discriminant)) / two_a
+        root2 = (-b - math.sqrt(discriminant)) / two_a
+        roots = f"x = {_fmt_number(root1)} and x = {_fmt_number(root2)}"
+        kind = "two distinct real roots"
+    elif discriminant == 0:
+        root = -b / two_a
+        roots = f"x = {_fmt_number(root)} (repeated)"
+        kind = "one repeated real root"
+    else:
+        real = -b / two_a
+        imag = math.sqrt(-discriminant) / two_a
+        sign = "+" if imag >= 0 else "-"
+        roots = f"x = {_fmt_number(real)} {sign} {_fmt_number(abs(imag))}i"
+        kind = "complex conjugate roots"
+    return {
+        "message": f"Solving `{text.strip()}`: {roots} ({kind}).",
+        "sections": [
+            {"title": "Quadratic", "items": [
+                f"Equation: {_fmt_number(a)}x^2 + {_fmt_number(b)}x + {_fmt_number(c)} = 0",
+                f"Discriminant: {_fmt_number(discriminant)}",
+                f"Roots: {roots}",
+            ]},
+        ],
+    }
+
+
+def _ap_answer(text: str) -> dict[str, Any] | None:
+    """Arithmetic-progression term/sum from an a-and-d spec (JEE sequences).
+
+    Understands "a = 2 d = 5 find the 10th term" and "sum of the first 10 terms
+    of an ap with a 2 and d 5". Returns None when no a/d pair is present.
+    """
+    lower = text.lower()
+    spec = _AP_SPEC.search(lower)
+    if not spec:
+        return None
+    a = float(spec.group(1))
+    d: float | None = None
+    for group in spec.groups()[1:]:
+        if group is not None:
+            d = float(group)
+            break
+    if d is None:
+        # "ap with a 2 and d 5" style: second number after "d"
+        d_match = re.search(r"\bd\s*(?:=|is)?\s*(-?\d+(?:\.\d+)?)", lower)
+        if not d_match:
+            return None
+        d = float(d_match.group(1))
+
+    term_match = re.search(r"(\d+)\s*(?:st|nd|rd|th)\s+term", lower)
+    sum_match = re.search(r"sum\s+of\s+(?:the\s+)?first\s+(\d+)\s+terms", lower)
+    items: list[str] = [f"First term a = {_fmt_number(a)}", f"Common difference d = {_fmt_number(d)}"]
+    if term_match:
+        n = int(term_match.group(1))
+        nth = a + (n - 1) * d
+        items.append(f"{n}th term = a + (n-1)d = {_fmt_number(nth)}")
+        message = f"The {n}th term of the AP is **{_fmt_number(nth)}**."
+    elif sum_match:
+        n = int(sum_match.group(1))
+        total = n / 2 * (2 * a + (n - 1) * d)
+        items.append(f"Sum of first {n} terms = n/2·(2a + (n-1)d) = {_fmt_number(total)}")
+        message = f"The sum of the first {n} terms is **{_fmt_number(total)}**."
+    else:
+        return None
+    return {"message": message, "sections": [{"title": "Arithmetic progression", "items": items}]}
+
+
 def _math_answer(text: str) -> dict[str, Any]:
-    """Evaluate a math expression and explain the result."""
+    """Evaluate a math expression and explain the result.
+
+    Exam shapes (quadratics, AP term/sum questions) are answered by their
+    dedicated solvers before the general expression evaluator.
+    """
+    quadratic = _quadratic_answer(text)
+    if quadratic is not None:
+        return quadratic
+    ap = _ap_answer(text)
+    if ap is not None:
+        return ap
     expr = text.lower()
     add_form = expr.startswith("add ")
     # Keep only the two operands for "add X and Y ..." so trailing phrasing
@@ -511,13 +861,7 @@ def _math_answer(text: str) -> dict[str, Any]:
     # spelled-out operator can expose a neighboring operand to a later rule
     # ("5 squared times 2" -> "5**2 times 2" -> "5**2*2"). Same table that
     # routing uses, so translation can never drift from recognition.
-    changed = True
-    while changed:
-        changed = False
-        for pattern, replacement in _MATH_WORD_RULES:
-            updated = pattern.sub(replacement, expr)
-            if updated != expr:
-                expr, changed = updated, True
+    expr = rewrite_worded_math(expr)
     if add_form:
         expr = re.sub(r'\band\b', '+', expr)
     expr = re.sub(r'\bwhat is\b', '', expr).strip().rstrip('?.!,;:')
@@ -866,7 +1210,9 @@ def _conversion_match(lower: str, cleaned: str) -> bool:
 
 
 def _math_detect(lower: str, cleaned: str) -> bool:
-    """Engine-wide math: symbolic/worded arithmetic plus the complement shapes."""
+    """Engine-wide math: symbolic/worded arithmetic, exam shapes, complement shapes."""
+    if _EXAM_MATH.search(lower):
+        return True
     if not (is_arithmetic_query(lower) or _MATH_PATTERNS.search(lower)):
         return False
     # "what is 2+2" is still math, but prose like "what is the capital..." is not.
@@ -878,8 +1224,13 @@ def _math_detect(lower: str, cleaned: str) -> bool:
 
 
 def _math_routing(lower: str, cleaned: str) -> bool:
-    return is_arithmetic_query(lower) or any(
-        lower.startswith(p) for p in ("calculate ", "compute ", "sqrt", "sin ", "cos ", "log")
+    return (
+        is_arithmetic_query(lower)
+        or _EXAM_MATH.search(lower) is not None
+        or any(
+            lower.startswith(p)
+            for p in ("calculate ", "compute ", "sqrt", "sin ", "cos ", "log", "solve ")
+        )
     )
 
 

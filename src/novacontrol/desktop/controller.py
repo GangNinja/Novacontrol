@@ -151,6 +151,16 @@ def parse_desktop_command(command: str) -> list[DesktopStep]:
             main_part,
         )
     )
+    # 'open the games folder' / 'open my projects' — a loose spoken folder name
+    # is NOT an app name: it is searched for on disk at execution time, so the
+    # parser must not swallow it into the app branch. Excluded app-ish shapes:
+    # known apps/URLs (the resolver is authoritative for those) and words that
+    # are actually apps' UI sections (library/store are in-app navigation).
+    loose_folder = None
+    if not folder_match and not known_folder:
+        loose_match = re.match(r"(?:open|show|go to)\s+(?:the\s+|my\s+)?(.+?)\s*(?:folder|directory)\b", main_part)
+        if loose_match:
+            loose_folder = loose_match.group(1).strip()
     if folder_match:
         steps.append(DesktopStep(kind="open_folder", target=folder_match.group(1).strip()))
     elif known_folder:
@@ -158,6 +168,8 @@ def parse_desktop_command(command: str) -> list[DesktopStep]:
         name = known_folder.group(1).lower()
         special = {"drive c": "C:\\", "c drive": "C:\\"}
         steps.append(DesktopStep(kind="open_folder", target=special.get(name, f"%USERPROFILE%\\{name.capitalize()}")))
+    elif loose_folder:
+        steps.append(DesktopStep(kind="open_folder", target=loose_folder))
     else:
         # Standalone screenshot: 'take a screenshot', 'capture my screen',
         # bare 'screenshot'.
@@ -234,6 +246,10 @@ def parse_desktop_command(command: str) -> list[DesktopStep]:
 
 @runtime_checkable
 class DesktopCommandRunner(Protocol):
+    # Optional multimodal vision provider used by vision-guided actions; the
+    # application hot-swaps it at runtime (set/clear vision model).
+    vision_provider: object | None
+
     async def run(self, action: DesktopAction) -> Mapping[str, Any]:
         """Run an approved desktop action."""
 
@@ -261,8 +277,239 @@ def _window_matches(process_name: str, title: str, stem: str) -> bool:
     return bool(stem) and (name == stem or stem in name or stem in window)
 
 
+# ---------------------------------------------------------------------------
+# Universal installed-app resolution: ANY installed program must be openable
+# by its spoken name, not just the handful in APP_ALIASES. Three fast sources
+# (Start Menu .lnk, registry App Paths, PATH) feed a cached index; the UWP
+# catalog (Get-StartApps) is consulted separately and only on a miss, in a
+# worker thread, because that probe shells out to PowerShell.
+# ---------------------------------------------------------------------------
+
+
+def _norm_label(value: str) -> str:
+    """Normalize a label for matching: collapse whitespace/underscores, casefold."""
+    return re.sub(r"[\s_-]+", " ", value).strip().lower()
+
+
+def _index_lookup(index: Mapping[str, str], spoken: str) -> str | None:
+    """Look a spoken name up in an index: exact first, then whole-word match.
+
+    The whole-word pass makes 'code' find 'Visual Studio Code' and 'chrome'
+    find 'Google Chrome'. Ranking: entries ENDING in the spoken word beat
+    prefix matches ('google chrome' beats 'chrome canary' for 'chrome' —
+    people say the brand word last), then the shortest name wins so matches
+    stay deterministic.
+    """
+    value = _norm_label(spoken)
+    if not value:
+        return None
+    if value in index:
+        return index[value]
+    best: tuple[int, int, str] | None = None
+    for name in index:
+        if re.search(rf"\b{re.escape(value)}\b", _norm_label(name)):
+            key = (0 if _norm_label(name).endswith(value) else 1, len(name), name)
+            if best is None or key < best:
+                best = key
+    return index[best[2]] if best else None
+
+
+def _build_app_index(start_menu_roots: list[Path]) -> dict[str, str]:
+    """installed-app name (casefolded) -> launchable target.
+
+    Sources, in priority order (first source wins per name):
+      1. Start Menu shortcuts (*.lnk) — covers every installed desktop app.
+      2. Registry 'App Paths' (HKLM + HKCU) — 'start <name>.exe' resolves
+         through it even when the exe is not on PATH (chrome, firefox, ...).
+    """
+    index: dict[str, str] = {}
+    for root in start_menu_roots:
+        if not root.is_dir():
+            continue
+        try:
+            for lnk in root.rglob("*.lnk"):
+                index.setdefault(_norm_label(lnk.stem), str(lnk))
+        except OSError:
+            continue
+    if sys.platform.startswith("win"):
+        try:
+            import winreg
+
+            for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                try:
+                    with winreg.OpenKey(
+                        hive, r"Software\Microsoft\Windows\CurrentVersion\App Paths"
+                    ) as key:
+                        position = 0
+                        while True:
+                            try:
+                                subkey = winreg.EnumKey(key, position)
+                            except OSError:
+                                break
+                            position += 1
+                            if subkey.lower().endswith(".exe"):
+                                # 'start <name>.exe' finds App Paths entries.
+                                index.setdefault(_norm_label(subkey[:-4]), subkey)
+                except OSError:
+                    continue
+        except ImportError:
+            pass  # non-Windows: Start Menu scan already returned what it has
+    return index
+
+
+_app_index_cache: dict[str, str] | None = None
+
+
+def _app_index(*, force: bool = False) -> dict[str, str]:
+    """The machine's installed-app index, built once and cached."""
+    global _app_index_cache
+    if _app_index_cache is None or force:
+        profile = Path(os.environ.get("USERPROFILE", str(Path.home())))
+        roots = [
+            Path(os.environ.get("APPDATA", str(profile / "AppData" / "Roaming")))
+            / "Microsoft" / "Windows" / "Start Menu" / "Programs",
+            Path(os.environ.get("PROGRAMDATA", "C:\\ProgramData"))
+            / "Microsoft" / "Windows" / "Start Menu" / "Programs",
+        ]
+        _app_index_cache = _build_app_index(roots)
+    return _app_index_cache
+
+
+_uwp_index_cache: dict[str, str] | None = None
+
+
+def _uwp_index(*, force: bool = False) -> dict[str, str]:
+    """UWP/Store app name -> AUMID launch target (built once, on first miss).
+
+    Get-StartApps lists desktop entries too; only true AUMIDs (contain '!')
+    are indexable here — desktop apps are already covered by _app_index.
+    """
+    global _uwp_index_cache
+    if _uwp_index_cache is not None and not force:
+        return _uwp_index_cache
+    index: dict[str, str] = {}
+    if sys.platform.startswith("win"):
+        try:
+            out = subprocess.run(
+                [
+                    "powershell", "-NoProfile", "-Command",
+                    "Get-StartApps | ForEach-Object { $_.Name + '|' + $_.AppID }",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            for line in out.stdout.splitlines():
+                name, sep, appid = line.rpartition("|")
+                appid = appid.strip()
+                if sep and name.strip() and appid and "!" in appid and not re.search(r"\s", appid):
+                    index[_norm_label(name)] = f"shell:AppsFolder\\{appid}"
+        except (OSError, subprocess.SubprocessError):
+            pass  # probe unavailable; UWP launch just stays unresolved
+    _uwp_index_cache = index
+    return index
+
+
+def _uwp_lookup(spoken: str) -> str | None:
+    return _index_lookup(_uwp_index(), spoken)
+
+
+# Spoken folder name -> real location. Checked before any search; 'shell:'
+# targets are launched by explorer directly.
+_KNOWN_FOLDERS: dict[str, str] = {
+    "documents": "%USERPROFILE%\\Documents",
+    "downloads": "%USERPROFILE%\\Downloads",
+    "pictures": "%USERPROFILE%\\Pictures",
+    "music": "%USERPROFILE%\\Music",
+    "videos": "%USERPROFILE%\\Videos",
+    "desktop": "%USERPROFILE%\\Desktop",
+    "recycle bin": "shell:RecycleBinFolder",
+    "trash": "shell:RecycleBinFolder",
+}
+
+
+def _folder_search_roots() -> list[Path]:
+    """Directories whose immediate children are searched for spoken folders:
+    the user profile and its common locations, OneDrive when present, and the
+    root of every mounted drive (games on the D drive, tools on E, ...)."""
+    profile = Path(os.environ.get("USERPROFILE", str(Path.home())))
+    roots = [profile, profile / "Desktop", profile / "Documents", profile / "Downloads"]
+    onedrive = os.environ.get("OneDrive")
+    if onedrive:
+        base = Path(onedrive)
+        roots.extend([base, base / "Desktop", base / "Documents"])
+    for letter in "CDEFGH":
+        drive = Path(f"{letter}:\\")
+        if drive.is_dir():
+            roots.append(drive)
+    return roots
+
+
+def _find_folder_by_name(name: str) -> Path | None:
+    """Search the roots for a directory matching the spoken name.
+
+    Exact (normalized) match first, then whole-word containment ('my games
+    folder' finds 'SteamGames'); shortest name wins so matches are stable.
+    """
+    wanted = _norm_label(name)
+    if not wanted:
+        return None
+    best: tuple[int, int, str, Path] | None = None
+    for root in _folder_search_roots():
+        try:
+            children = [child for child in root.iterdir() if child.is_dir()]
+        except OSError:
+            continue
+        for child in children:
+            stem = _norm_label(child.name)
+            if stem == wanted:
+                score = 0
+            elif re.search(rf"\b{re.escape(wanted)}\b", stem):
+                score = 1
+            elif (wanted.startswith(stem) or wanted.endswith(stem)) and len(stem) > 2:
+                score = 2
+            else:
+                continue
+            key = (score, len(stem), str(child).lower(), child)
+            if best is None or key[:3] < best[:3]:
+                best = key
+    return best[3] if best else None
+
+
+def _resolve_folder(value: str) -> str:
+    """Resolve a spoken or typed folder to a real openable path.
+
+    Real paths (and env templates) pass through expanded; known shell folders
+    map directly; anything else is searched across the user profile and drive
+    roots. When nothing matches, the input is returned honestly — explorer
+    will report the missing path rather than the wrong folder opening.
+    """
+    text = value.strip().strip('"')
+    if "%" in text:
+        text = os.path.expandvars(text)
+    lower = re.sub(r"^(?:the|my)\s+", "", text.lower())
+    lower = re.sub(r"\s+folders?$", "", lower).strip()
+    if lower in _KNOWN_FOLDERS:
+        known = _KNOWN_FOLDERS[lower]
+        return os.path.expandvars(known) if "%" in known else known
+    path = Path(text).expanduser()
+    if path.exists():
+        return str(path)
+    if path.anchor:  # an absolute path that does not exist: keep it honest
+        return str(path)
+    match = _find_folder_by_name(lower)
+    return str(match) if match else str(path.resolve())
+
+
 class NoopDesktopRunner:
     """Safe runner that records intent without changing the desktop."""
+
+    def __init__(self, *, command_timeout_seconds: float = 60, vision_provider: object | None = None) -> None:
+        # Same constructor surface as LocalDesktopRunner so the application can
+        # wire the vision provider identically for both (the noop ignores it).
+        self.command_timeout_seconds = command_timeout_seconds
+        self.vision_provider = vision_provider
 
     async def run(self, action: DesktopAction) -> Mapping[str, Any]:
         return {"would_run": action.to_dict()}
@@ -271,8 +518,15 @@ class NoopDesktopRunner:
 class LocalDesktopRunner:
     """Runs approved desktop actions on the local machine."""
 
-    def __init__(self, *, command_timeout_seconds: float = 60) -> None:
+    def __init__(
+        self,
+        *,
+        command_timeout_seconds: float = 60,
+        vision_provider: object | None = None,
+    ) -> None:
         self.command_timeout_seconds = command_timeout_seconds
+        # Multimodal LLM for vision-guided element location (None = OCR/landmarks only).
+        self.vision_provider = vision_provider
 
     async def run(self, action: DesktopAction) -> Mapping[str, Any]:
         if action.type is DesktopActionType.OPEN_APPLICATION:
@@ -393,20 +647,38 @@ class LocalDesktopRunner:
     def _resolve_app_target(target: str) -> str:
         """Resolve a spoken app name to a launchable Windows target.
 
-        Paths, aliases, and known exe names pass through; anything else is
-        returned unchanged (still launchable via `start` / shell association).
+        Resolution order: paths/explicit file names pass through; the curated
+        alias table (URI schemes like steam:, spotify:); the installed-app
+        index (Start Menu shortcuts + registry App Paths — ANY installed app,
+        not just the aliases); the UWP/Store catalog; finally the raw name,
+        which `start` still resolves through file association.
         """
         value = target.strip().lower()
         if "\\" in value or "/" in value or "." in value:
             return target  # a path or explicit file/exe name — launch as-is
         if value in LocalDesktopRunner.APP_ALIASES:
             return LocalDesktopRunner.APP_ALIASES[value]
+        indexed = _index_lookup(_app_index(), target)
+        if indexed:
+            return indexed
+        uwp = _uwp_lookup(target)
+        if uwp:
+            return uwp
         return target
 
     async def _launch_open(self, target: str) -> int:
         resolved = self._resolve_app_target(target)
         if sys.platform.startswith("win"):
-            if "://" in resolved or re.match(r"^[a-z0-9]+:(?!\\\\)", resolved, re.IGNORECASE):
+            if resolved.startswith("shell:"):
+                # UWP/Store app (shell:AppsFolder\<AUMID>): explorer is the
+                # documented launcher for these paths; `start` treats shell:
+                # as a folder to open rather than the app to activate.
+                process = subprocess.Popen(
+                    ["explorer", resolved],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            elif "://" in resolved or re.match(r"^[a-z0-9]+:(?!\\\\)", resolved, re.IGNORECASE):
                 # URI scheme (steam:, spotify:, ms-settings:, mailto:): the shell's
                 # protocol handler registry launches the right app.
                 process = subprocess.Popen(
@@ -660,17 +932,13 @@ class LocalDesktopRunner:
     async def _open_folder(self, folder_path: str) -> Mapping[str, Any]:
         """Open a folder in the system file manager.
 
-        Spoken folders may arrive as environment templates ('%USERPROFILE%/Documents')
-        — expand them; a path that does not exist is still resolved (the file
-        manager will report it) but never silently created here.
+        The target goes through _resolve_folder first: spoken names ('games',
+        'projects', known shell folders) resolve to real locations across the
+        user profile and drive roots; real paths and env templates pass
+        through expanded. A name that matches nothing is resolved as-is (the
+        file manager will report it) but never silently created here.
         """
-        value = folder_path.strip()
-        if "%" in value:
-            value = os.path.expandvars(value)
-        path = Path(value).expanduser()
-        if not path.exists():
-            path = path.resolve()
-        target = str(path)
+        target = _resolve_folder(folder_path)
         if sys.platform.startswith("win"):
             process = subprocess.Popen(
                 ["explorer", target],
@@ -934,7 +1202,11 @@ class LocalDesktopRunner:
 
         path = screenshot_path or "vision_locate.png"
         await self._take_screenshot(save_path=path)
-        location = await locate_element(path, label)
+        # The wired vision provider (if any) participates in location; without
+        # one, locate_element still runs real Windows OCR + landmarks.
+        location = await locate_element(
+            path, label, llm_provider=getattr(self, "vision_provider", None)
+        )
         if location is None:
             raise VerificationError(
                 f"Vision could not locate '{label}' on screen — nothing was clicked."
@@ -944,6 +1216,9 @@ class LocalDesktopRunner:
             raise ValueError("Vision-guided clicking currently requires Windows.")
         script = (
             "Add-Type -AssemblyName System.Windows.Forms;"
+            "$sig = '[DllImport(\"user32.dll\")] public static extern bool SetProcessDPIAware();';"
+            "$t = Add-Type -MemberDefinition $sig -Name Dpi -Namespace W -PassThru;"
+            "$t::SetProcessDPIAware() | Out-Null;"
             f"[System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point({x}, {y});"
             "Start-Sleep -Milliseconds 120;"
             "[System.Windows.Forms.UserControl]::MouseButtons;"  # no-op read keeps the assembly warm
@@ -957,6 +1232,9 @@ class LocalDesktopRunner:
         await asyncio.sleep(1.0)
         after = "vision_after.png"
         await self._take_screenshot(save_path=after)
+        # The verification pass (VisionController._verify_after_click) diffs
+        # around this point — remember the last click site.
+        self._last_click_point = (x, y)
         return {
             "adapter": "local-desktop",
             "action": "vision_click",
@@ -965,6 +1243,10 @@ class LocalDesktopRunner:
             "located_by": how,
             "before": path,
             "after": after,
+            # Real key names (not positional) so the verification pass can
+            # diff the two captures without re-capturing.
+            "before_path": path,
+            "after_path": after,
         }
 
     async def _stop_app(self, target: str) -> Mapping[str, Any]:
@@ -1045,12 +1327,21 @@ class LocalDesktopRunner:
     async def _take_screenshot(self, save_path: str = "screenshot.png") -> Mapping[str, Any]:
         """Capture a screenshot using platform-native tools."""
         if sys.platform.startswith("win"):
-            # Use PowerShell to take screenshot
+            # Use PowerShell to take screenshot. The shell is DPI-unaware by
+            # default, so Screen.PrimaryScreen.Bounds reports the virtualized
+            # (logical) size — on a high-DPI display that is HALF the physical
+            # resolution, and Windows OCR then reads far less text (a real bug
+            # this caught: 66 words vs 171, missing small labels like "Vision").
+            # SetProcessDPIAware() makes the bounds report PHYSICAL pixels so
+            # the captured image carries the same detail the eye sees.
             script = (
                 "Add-Type -AssemblyName System.Windows.Forms; "
                 "Add-Type -AssemblyName System.Drawing; "
-                "$bmp = [System.Drawing.Bitmap]::new([System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width, "
-                "[System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height); "
+                "$sig = '[DllImport(\"user32.dll\")] public static extern bool SetProcessDPIAware();'; "
+                "$t = Add-Type -MemberDefinition $sig -Name Dpi -Namespace W -PassThru; "
+                "$t::SetProcessDPIAware() | Out-Null; "
+                "$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; "
+                "$bmp = [System.Drawing.Bitmap]::new($bounds.Width, $bounds.Height); "
                 "$g = [System.Drawing.Graphics]::FromImage($bmp); "
                 "$g.CopyFromScreen(0, 0, 0, 0, $bmp.Size); "
                 f"$bmp.Save('{save_path}'); "
@@ -1296,17 +1587,94 @@ _STEAM_APP_IDS: dict[str, str] = {
 }
 
 
+def _installed_steam_games() -> dict[str, str]:
+    """Games actually installed on this machine: spoken name -> Steam AppID.
+
+    Reads Steam's own appmanifest_*.acf files from the standard library
+    locations. This is what makes 'launch <any installed game>' work without a
+    hard-coded table: Steam records the exact appid and display name for every
+    installed title. Cached once per process — installs don't change mid-run.
+    Returns {} on any failure (no Steam, unusual layout) — callers fall back.
+    """
+    global _installed_games_cache  # noqa: PLW0603
+    if _installed_games_cache is not None:
+        return _installed_games_cache
+    games: dict[str, str] = {}
+    if sys.platform.startswith("win"):
+        import os
+
+        candidates: list[Path] = [
+            Path(os.environ.get("PROGRAMFILES(X86)", "C:\\Program Files (x86)"))
+            / "Steam" / "steamapps",
+            Path(os.environ.get("PROGRAMFILES", "C:\\Program Files")) / "Steam" / "steamapps",
+        ]
+        # The registry is the truth for custom install drives ('E:\\steam',
+        # per-user installs) — HKCU\\Software\\Valve\\Steam\\SteamPath.
+        try:
+            import winreg
+
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\\Valve\\Steam") as key:
+                steam_path, _kind = winreg.QueryValueEx(key, "SteamPath")
+                if steam_path:
+                    candidates.insert(0, Path(steam_path.replace("/", "\\")) / "steamapps")
+        except OSError:
+            pass  # no Steam registry entry; env-path candidates still apply
+        # Extra libraries live in libraryfolders.vdf — parse them so games on
+        # other drives are found too.
+        for base in list(candidates):
+            vdf = base.parent / "steamapps" / "libraryfolders.vdf"
+            if vdf.exists():
+                try:
+                    for match in re.finditer(r'"path"\s+"([^"]+)"', vdf.read_text(encoding="utf-8", errors="replace")):
+                        candidates.append(Path(match.group(1).replace("\\\\", "\\")) / "steamapps")
+                except OSError:
+                    pass
+        for folder in candidates:
+            try:
+                for manifest in folder.glob("appmanifest_*.acf"):
+                    text = manifest.read_text(encoding="utf-8", errors="replace")
+                    id_match = re.search(r'"appid"\s+"(\d+)"', text)
+                    name_match = re.search(r'"name"\s+"([^"]+)"', text)
+                    if id_match and name_match:
+                        games[name_match.group(1).strip().lower()] = id_match.group(1)
+            except OSError:
+                continue
+    _installed_games_cache = games
+    return games
+
+
+_installed_games_cache: dict[str, str] | None = None
+
+
 def _steam_game_id(game: str) -> str | None:
-    """Resolve a spoken game name to a Steam AppID (None = unknown game)."""
-    """Resolve a spoken game name to a Steam AppID (None = unknown game)."""
+    """Resolve a spoken game name to a Steam AppID (None = unknown game).
+
+    Two registries, static first: the well-known table, then the games Steam
+    reports as INSTALLED on this machine (appmanifest_*.acf) — so a user's own
+    library works even when the title is not in the table.
+    """
     value = game.strip().lower()
     value = re.sub(r"\s*(game|please|now)\s*$", "", value)
     value = re.sub(r"\s+", " ", value)
+    if not value:
+        return None  # empty input matches nothing — the reversed word-boundary
+        # check below would otherwise match EVERY name against an empty string
     if value in _STEAM_APP_IDS:
         return _STEAM_APP_IDS[value]
-    # Substring match: 'launch grand theft auto v enhanced' -> 'gta v' key.
+    # Substring match with WORD BOUNDARIES: 'launch grand theft auto v
+    # enhanced' -> 'gta v' key, but 'supermarket together' must NOT match the
+    # 'ark' key inside 'superm*ark*et' (a real bug this guard fixed).
     for name, appid in _STEAM_APP_IDS.items():
-        if name in value:
+        if re.search(rf"\b{re.escape(name)}\b", value):
+            return appid
+    # Installed-library resolution: exact manifest name, then whole-word
+    # substring in either direction ('grand theft auto v enhanced' matches the
+    # installed 'Grand Theft Auto V Enhanced' manifest name).
+    installed = _installed_steam_games()
+    if value in installed:
+        return installed[value]
+    for name, appid in installed.items():
+        if re.search(rf"\b{re.escape(name)}\b", value) or re.search(rf"\b{re.escape(value)}\b", name):
             return appid
     return None
 
@@ -1408,6 +1776,9 @@ class DesktopAutomationController:
         audit_log: AutomationAuditLog | None = None,
     ) -> None:
         self.approval_gateway = approval_gateway or DenyByDefaultApprovalGateway()
+        # Screen coordinates of the most recent vision-guided click (None = none yet).
+        # Set by LocalDesktopRunner._vision_click; consumed by verification.
+        self._last_click_point: tuple[int, int] | None = None
         self.runner = runner or NoopDesktopRunner()
         self.audit_log = audit_log or InMemoryAutomationAuditLog()
 

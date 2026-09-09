@@ -8,9 +8,11 @@ from novacontrol.integrations.llm import (
     build_cloud_provider,
     build_llm_provider_from_environment,
     build_ollama_provider,
+    build_vision_provider,
     cloud_llm_presets,
     detect_ollama,
     get_cloud_preset,
+    is_ollama_vision_model,
     make_ollama_reprobe,
 )
 from novacontrol.integrations.redis import (
@@ -38,7 +40,9 @@ __all__ = [
     "build_ollama_provider",
     "build_redis_cache",
     "build_redis_event_bus",
+    "build_vision_provider",
     "cloud_llm_presets",
     "detect_ollama",
     "get_cloud_preset",
+    "is_ollama_vision_model",
 ]

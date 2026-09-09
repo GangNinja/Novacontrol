@@ -293,6 +293,13 @@ class NovaBrain:
             return BrainDecision(BrainIntent.PLAN, "Request asks for planning.", confidence=0.84)
         if _looks_like_phone_command(lower):
             return BrainDecision(BrainIntent.PHONE_CONTROL, "Request asks for phone control.", confidence=0.82)
+        # Explicit store-into-memory phrasing ("remember this: …") must not be
+        # stolen by device targets named inside the remembered content — the
+        # remembered text routinely mentions apps ("remember this: open notepad
+        # is my favorite app"). Generic "memory" mentions stay below, so topic
+        # questions like "how does computer memory work" still reach research.
+        if _contains(lower, "remember this", "remember that", "remember for me"):
+            return BrainDecision(BrainIntent.MEMORY, "Request asks to store something in memory.", confidence=0.85)
         if _looks_like_desktop_command(lower):
             return BrainDecision(BrainIntent.DESKTOP_AUTOMATION, "Request asks for desktop automation.", confidence=0.8)
         if _contains(lower, "browser", "website", "navigate", "fill form", "fill the form", "download"):
@@ -336,15 +343,22 @@ def _contains(text: str, *needles: str) -> bool:
 def looks_like_research_question(text: str) -> bool:
     """ONE canonical detector for "this deserves a researched answer".
 
-    Covers "what is / what are" questions and the research verbs. Scratch's
-    narrow routing gate decides separately whether a canned LOCAL answer
-    exists — callers must combine both (a hit here + no scratch answer means
-    the question needs real research synthesis).
+    Covers "what is / what are" questions, the research verbs, and "how
+    does/do …" question forms. Scratch's narrow routing gate decides
+    separately whether a canned LOCAL answer exists — callers must combine
+    both (a hit here + no scratch answer means the question needs real
+    research synthesis).
+
+    The "how does/do" forms matter for cross-intent freezing: without them,
+    "how do cookies work in the browser" was stolen by the browser keyword
+    block and "how does computer memory work" by the memory block — a topic
+    noun must not outrank an explicit question.
     """
     explore_keywords = [
         "research", "explain", "why", "compare",
         "teach me", "is it true", "true or false",
         "verify", "fact check", "latest", "online",
+        "how does", "how do ",
     ]
     return _contains(text, "what is", "what are", *explore_keywords)
 

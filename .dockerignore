@@ -24,7 +24,9 @@ tmp/
 *.sqlite3
 *.db
 tests/
+docs/
 freebuff/
+.freebuff/
 .audit.md
 .roadmap.md
 AUDIT.md

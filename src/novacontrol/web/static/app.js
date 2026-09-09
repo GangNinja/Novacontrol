@@ -143,7 +143,6 @@ function setupActions() {
         if (data && data.status === "executed") {
           clearApproval(command);
           recordJarvisHistory(command, "executed", jarvisDevice);
-          recordActivity("command", "Command executed", command);
         }
       },
     });
@@ -222,7 +221,8 @@ function setupActions() {
     // Approve And Run: reuse the token from the last preview of THIS command and
     // only re-plan (which mints a fresh token) when none is stored. A consumed or
     // expired token gets one automatic re-plan so a stale approval can't dead-end.
-    const execute = (token) => requestJson("/command/execute", { command, approval_token: token });
+    const correlationId = newCorrelationId();
+    const execute = (token) => requestJson("/command/execute", { command, approval_token: token, correlation_id: correlationId });
     run("commandOutput", "command", async () => {
       const stored = approvalFor(command);
       if (stored) {
@@ -237,10 +237,10 @@ function setupActions() {
       if (!fresh) return plan; // not an executable desktop action — show the planned result
       return execute(fresh);
     }, "commandRunButton", {
+      correlationId,
       onSuccess: (data) => {
         if (data && data.status === "executed") {
           clearApproval(command);
-          recordActivity("command", "Command executed", command);
         }
       },
     });
@@ -290,16 +290,17 @@ function setupActions() {
     // state. Live research steps arrive over the single /events/stream activity
     // channel (run() shows them under the scan-line) while this POST completes
     // with the finished report.
+    const correlationId = newCorrelationId();
     run("exploreOutput", "explore", async () => {
-      const body = { topic, include_videos: true };
+      const body = { topic, include_videos: true, correlation_id: correlationId };
       if (state.lastExploredTopic) body.last_topic = state.lastExploredTopic;
       return requestJson("/explore", body);
     }, "exploreButton", {
+      correlationId,
       loadingText: "Researching — live progress appears below...",
       successToast: "Research complete",
       onSuccess: (report) => {
         trackExploredTopic(topic);
-        recordActivity("research", "Research complete", topic);
       },
     });
   });
@@ -338,17 +339,13 @@ function setupActions() {
   byId("learnButton").addEventListener("click", () => {
     const goal = byId("learnGoal").value.trim() || "improve NovaControl";
     const feedback = byId("learnFeedback").value.trim();
-    run("learnOutput", "learn", () => requestJson("/learn", { goal, feedback }), "learnButton", {
-      onSuccess: () => recordActivity("learn", "Learning cycle", goal),
-    });
+    run("learnOutput", "learn", () => requestJson("/learn", { goal, feedback }), "learnButton");
   });
 
   byId("trainButton").addEventListener("click", () => {
     const goal = byId("learnGoal").value.trim() || "improve NovaControl";
     const feedback = byId("learnFeedback").value.trim();
-    run("learnOutput", "learn", () => requestJson("/train", { goal, feedback, iterations: 3 }), "trainButton", {
-      onSuccess: () => recordActivity("learn", "Training run", goal),
-    });
+    run("learnOutput", "learn", () => requestJson("/train", { goal, feedback, iterations: 3 }), "trainButton");
   });
 
   byId("systemHealthButton").addEventListener("click", () =>
@@ -374,62 +371,11 @@ function setupActions() {
 
 /* ── Recent Activity (Command Center timeline) ────────────── */
 
-const ACTIVITY_KEY = "novacontrol.activity";
-const ACTIVITY_LIMIT = 25;
-const ACTIVITY_PILL = { command: "ok", research: "", learn: "warn" };
-
-function loadActivity() {
-  try {
-    const raw = JSON.parse(localStorage.getItem(ACTIVITY_KEY) || "[]");
-    return Array.isArray(raw) ? raw : [];
-  } catch {
-    return [];
-  }
-}
-
-// Record a completed user action into the home timeline. Kept in localStorage so
-// history survives reloads; capped so the feed stays cheap.
-function recordActivity(type, title, detail) {
-  const entries = loadActivity();
-  entries.unshift({ type, title, detail: detail || "", at: Date.now() });
-  try {
-    localStorage.setItem(ACTIVITY_KEY, JSON.stringify(entries.slice(0, ACTIVITY_LIMIT)));
-  } catch (_) { /* storage unavailable — feed still lives for this session */ }
-  renderActivityFeed();
-}
-
-function timeAgo(at) {
-  const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
-  if (seconds < 60) return "just now";
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-  return new Date(at).toLocaleDateString();
-}
-
-function renderActivityFeed() {
-  const feed = byId("homeActivity");
-  if (!feed) return;
-  const entries = loadActivity();
-  clearNode(feed);
-  feed.classList.toggle("empty-state", entries.length === 0);
-  if (!entries.length) {
-    const hint = el("div", "empty-hint");
-    hint.appendChild(el("span", "empty-hint-icon", "\u26A1"));
-    hint.appendChild(document.createTextNode(" Executed commands, research, and learning cycles will appear here"));
-    feed.appendChild(hint);
-    return;
-  }
-  entries.slice(0, ACTIVITY_LIMIT).forEach((entry) => {
-    const row = el("div", "activity-item");
-    row.appendChild(el("span", `pill activity-type ${ACTIVITY_PILL[entry.type] || ""}`.trim(), label(entry.type || "activity")));
-    const body = el("div", "activity-body");
-    body.appendChild(el("strong", "", entry.title || label(entry.type)));
-    if (entry.detail) body.appendChild(el("span", "", entry.detail));
-    row.appendChild(body);
-    row.appendChild(el("time", "activity-time", timeAgo(entry.at)));
-    feed.appendChild(row);
-  });
-}
+// The timeline lives in js/activity.js and is SERVER-fed: /activity seeds it,
+// completion events on /events/stream append live. The old localStorage copy
+// (ACTIVITY_KEY + recordActivity) is gone — the server journal is the source,
+// so actions from every client (CLI, GUI, any tab) appear and nothing is
+// duplicated per-browser.
 
 /* ── Chat History (survives reloads) ──────────────────────── */
 
@@ -754,17 +700,65 @@ function setupVision() {
   byId("visionClickButton").addEventListener("click", () => {
     const label = byId("visionClickInput").value.trim();
     if (!label) { showToast("Type what to click first"); return; }
-    run("visionDescribeOutput", "generic", () => requestJson("/vision/click", { label }), "visionClickButton", {
+    run("visionDescribeOutput", "visionClick", () => requestJson("/vision/click", { label }), "visionClickButton", {
       successToast: "Vision click executed",
     });
   });
+
+  // ── Vision model card (semantic element location) ───────────────
+  // Same key-storage shape as the chat cloud LLM: provider+key persist in the
+  // gitignored data dir, /vision/status carries only a redacted tail.
+  const renderVisionModelCard = (status) => {
+    const configured = status && status.configured;
+    byId("visionModelStatus").textContent = configured
+      ? `configured: ${status.label} · ${status.model}${status.api_key_hint ? ` (key ${status.api_key_hint})` : ""}`
+      : "not configured — OCR + landmarks";
+    // Ollama needs no API key; hide the key field for it.
+    byId("visionModelKeyField").hidden = byId("visionModelProvider").value === "ollama";
+  };
+
+  const refreshVisionModelCard = async () => {
+    try { renderVisionModelCard((await requestJson("/vision/status")).vision_llm); }
+    catch (_) { byId("visionModelStatus").textContent = "status unavailable"; }
+  };
+
+  byId("visionModelProvider").addEventListener("change", () => {
+    byId("visionModelKeyField").hidden = byId("visionModelProvider").value === "ollama";
+  });
+
+  byId("visionModelConnectButton").addEventListener("click", async () => {
+    const provider = byId("visionModelProvider").value;
+    const body = { provider, model: byId("visionModelName").value.trim() };
+    if (provider !== "ollama") body.api_key = byId("visionModelKey").value.trim();
+    if (provider !== "ollama" && !body.api_key) { showToast("Paste the provider's API key first"); return; }
+    try {
+      const status = await requestJson("/vision/model", body);
+      renderVisionModelCard(status);
+      showToast(`Vision model connected: ${status.model}`);
+    } catch (error) {
+      showToast(String(error.message || error));
+    }
+  });
+
+  byId("visionModelClearButton").addEventListener("click", async () => {
+    try {
+      const status = await requestJson("/vision/model/clear", {});
+      renderVisionModelCard(status);
+      byId("visionModelKey").value = "";
+      showToast("Vision model removed — element location is OCR-only again");
+    } catch (error) {
+      showToast(String(error.message || error));
+    }
+  });
+
+  refreshVisionModelCard();
 
   byId("visionStatusButton").addEventListener("click", async () => {
     try {
       const status = await requestJson("/vision/status");
       showToast(status.vision_model
         ? "Vision model wired — screen understanding is live"
-        : "No vision model — using window probes and OCR landmarks (install an Ollama vision model to upgrade)");
+        : "No vision model — using window probes and OCR landmarks (configure one in the Vision Model card)");
     } catch (error) {
       showToast(String(error.message || error));
     }
@@ -782,8 +776,12 @@ function setupVision() {
     bugs.forEach((bug) => {
       const row = el("div", "jarvis-history-row" + (bug.status === "fixed" ? " fixed" : ""));
       const main = el("div", "jarvis-history-main");
+      const proof = bug.status === "fixed" && bug.details && bug.details.auto_resolved
+        ? ` · auto-resolved ${String(bug.details.auto_resolved.resolved_at || "")}` +
+          (bug.details.auto_resolved.changed_pct != null ? ` (screen changed ${bug.details.auto_resolved.changed_pct}%)` : "")
+        : "";
       main.appendChild(el("span", "jarvis-history-text", bug.what));
-      main.appendChild(el("span", "jarvis-history-meta", `${bug.where} · ${bug.when}${bug.status === "fixed" ? " · fixed" : ""}`));
+      main.appendChild(el("span", "jarvis-history-meta", `${bug.where} · ${bug.when}${bug.status === "fixed" ? " · fixed" : ""}${proof}`));
       row.appendChild(main);
       if (bug.status !== "fixed") {
         const fixBtn = el("button", "jarvis-history-delete", "Mark fixed");
@@ -835,4 +833,5 @@ setupVoice();
 restoreActivePanel(); // must run after setupTabs binds the nav clicks
 renderChatHistory();
 connectActivitySource(); // one live activity channel for the whole page
+loadActivityFromServer(); // seed the timeline from the server journal
 refreshStatus();

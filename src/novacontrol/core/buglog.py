@@ -116,6 +116,42 @@ class BugLog:
                 return record
         return None
 
+    def resolve_matching(
+        self,
+        *,
+        where: str,
+        label: str,
+        evidence: dict[str, Any],
+    ) -> int:
+        """Auto-resolve open bugs for one flow when fresh proof it works arrives.
+
+        Called after a verified successful action (a guided click whose
+        pixel-diff verification passed): any still-open bug recorded against
+        the same ``where`` for the same label is marked fixed, with the new
+        evidence embedded under ``details.auto_resolved`` — the log then shows
+        the failure was transient and was later confirmed working, including
+        when and with what proof. Legacy records that carry the label only in
+        their ``what`` text (no ``details.label``) are matched too.
+
+        Returns how many records were resolved.
+        """
+        target = label.strip().lower()
+        resolved = 0
+        for record in self._records:
+            if record.status != "open" or record.where != where:
+                continue
+            record_label = str(record.details.get("label", "")).strip().lower()
+            if record_label == target or f"'{target}'" in record.what.lower():
+                record.status = "fixed"
+                record.details = {
+                    **record.details,
+                    "auto_resolved": {**evidence, "resolved_at": _utc_now()},
+                }
+                resolved += 1
+        if resolved:
+            self._save()
+        return resolved
+
     def clear_fixed(self) -> int:
         before = len(self._records)
         self._records = [r for r in self._records if r.status != "fixed"]
