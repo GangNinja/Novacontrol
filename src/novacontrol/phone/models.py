@@ -20,6 +20,9 @@ class PhoneActionType(StrEnum):
     SEND_TEXT = "send_text"
     CALL = "call"
     SCREENSHOT = "screenshot"
+    SEARCH = "search"  # in-app/provider web search (youtube, google, maps)
+    OPEN_FILE = "open_file"  # a specific document (by name) via the device chooser
+    CONTACT_LOOKUP = "contact_lookup"  # resolve a saved contact name to a number
 
 
 class PhoneActionStatus(StrEnum):

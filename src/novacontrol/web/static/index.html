@@ -53,6 +53,9 @@
           <button class="nav-item" data-panel="visionPanel" type="button" aria-label="Vision">
             <span class="nav-icon" aria-hidden="true">&#9673;</span>Vision
           </button>
+          <button class="nav-item" data-panel="routingPanel" type="button" aria-label="Routing explorer">
+            <span class="nav-icon" aria-hidden="true">&#9679;</span>Routing
+          </button>
           <button class="nav-item" data-panel="settingsPanel" type="button" aria-label="Settings">
             <span class="nav-icon" aria-hidden="true">&#9677;</span>Settings
           </button>
@@ -438,6 +441,35 @@
           </article>
         </section>
 
+        <section id="routingPanel" class="panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Intent Analysis</p>
+              <h2>Routing Explorer</h2>
+            </div>
+          </div>
+          <div class="welcome-card">
+            <h3>Where does your utterance land?</h3>
+            <p>Trace any phrase through NovaBrain's intent gates and preview what you would actually see — the scratch answer text, the research headline, or the plan outline. Traced live by the running server; an embedded mirror takes over when the server is unreachable.</p>
+            <div class="example-chips">
+              <button class="example-chip" onclick="document.getElementById('routingInput').value='open notepad and type hello';document.getElementById('routingTraceButton').click()">open notepad and type hello</button>
+              <button class="example-chip" onclick="document.getElementById('routingInput').value='what is 2 cubed plus the square root of 9';document.getElementById('routingTraceButton').click()">2 cubed + sqrt(9)</button>
+              <button class="example-chip" onclick="document.getElementById('routingInput').value='open steam and go to library and launch gta v';document.getElementById('routingTraceButton').click()">steam → library → game</button>
+            </div>
+          </div>
+          <div class="ai-composer top-composer">
+            <label for="routingInput" class="sr-only">Utterance to route</label>
+            <input id="routingInput" type="text" placeholder="Type any phrase… e.g. 'search cats on youtube on my phone'" class="cyber-input" aria-label="Utterance to route">
+            <div class="composer-actions">
+              <button id="routingTraceButton" type="button" class="cyber-btn primary">Trace Route</button>
+            </div>
+          </div>
+          <p id="routingSource" class="routing-source" aria-live="polite"></p>
+          <div id="routingOutput" class="ai-mode-output empty-state">
+            <div class="empty-hint"><span class="empty-hint-icon">&#9873;</span> Trace an utterance to see which intent gate owns it and a preview of the result</div>
+          </div>
+        </section>
+
         <section id="cliPanel" class="panel">
           <div class="section-head">
             <div>
@@ -456,6 +488,7 @@
     <script src="/static/js/render-explore.js?v=__NC_ASSET_VERSION__"></script>
     <script src="/static/js/render-panels.js?v=__NC_ASSET_VERSION__"></script>
     <script src="/static/js/activity.js?v=__NC_ASSET_VERSION__"></script>
+    <script src="/static/js/routing-explorer.js?v=__NC_ASSET_VERSION__"></script>
     <script src="/static/js/voice.js?v=__NC_ASSET_VERSION__"></script>
     <script src="/static/js/effects.js?v=__NC_ASSET_VERSION__"></script>
     <script src="/static/app.js?v=__NC_ASSET_VERSION__"></script>

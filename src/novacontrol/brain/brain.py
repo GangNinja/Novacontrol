@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
@@ -242,75 +243,163 @@ class NovaBrain:
             decision=decision, payload={**payload, "brain_mode": self.effective_mode}, summary=summary
         )
 
-    def _keyword_classify(self, lower: str) -> BrainDecision:
-        """Fast keyword-based classification."""
-        # One narrow classifier owns all "scratch can answer this locally"
-        # detection (greeting / math / time / conversion / knowledge /
-        # recommendation). decide() only interprets its returned intent name.
-        scratchable = scratchable_intent(lower)
-        if scratchable == "greeting":
-            return BrainDecision(BrainIntent.CHAT, "Request is a simple chat message.", confidence=0.9)
-        if _contains(
-            lower,
-            "self improve",
-            "self-improve",
-            "improve yourself",
-            "improve itself",
-            "code itself",
-            "code yourself",
-            "upgrade yourself",
-            "improve your code",
-            "make it intelligent",
-            "make yourself intelligent",
-        ):
-            return BrainDecision(
-                BrainIntent.SELF_IMPROVEMENT,
-                "Request asks NovaControl to inspect and improve its own code.",
-                confidence=0.9,
-            )
+    # The routing gates, in evaluation order. Each gate is
+    # (name, intent, confidence, reason, predicate(lower, scratchable)). The
+    # FIRST match wins — the same order decide() has always used. This table is
+    # the single source of truth for the routing explorer's live trace.
+    _ROUTING_GATES: tuple[tuple[str, BrainIntent, float, str, Callable[[str, str | None], bool]], ...] = (
+        (
+            "scratch_greeting", BrainIntent.CHAT, 0.9,
+            "Request is a simple chat message.",
+            lambda lower, scratchable: scratchable == "greeting",
+        ),
+        (
+            "self_improvement", BrainIntent.SELF_IMPROVEMENT, 0.9,
+            "Request asks NovaControl to inspect and improve its own code.",
+            lambda lower, scratchable: _contains(
+                lower,
+                "self improve", "self-improve", "improve yourself", "improve itself",
+                "code itself", "code yourself", "upgrade yourself", "improve your code",
+                "make it intelligent", "make yourself intelligent",
+            ),
+        ),
         # Arithmetic is always answered locally by the scratch evaluator — never
         # research, and never stolen by later keyword blocks ("steps" -> planning).
-        if scratchable == "math":
-            return BrainDecision(
-                BrainIntent.CHAT, "Worded arithmetic is computed locally by the scratch brain.", confidence=0.88
-            )
+        (
+            "scratch_math", BrainIntent.CHAT, 0.88,
+            "Worded arithmetic is computed locally by the scratch brain.",
+            lambda lower, scratchable: scratchable == "math",
+        ),
+        # Device-anchored ACTION phrasing ("search cats on youtube on my phone",
+        # "open spotify on phone") outranks the web-search, research, and plan
+        # gates: a device word plus an explicit launch/search verb is a phone
+        # command even when the topic sounds researchy ("latest news").
+        # Question forms ("how does message delivery work on android") carry
+        # no launch/search verb, so they fall through to the research gate —
+        # which is why this is NOT simply _looks_like_phone_command() here.
+        (
+            "phone_anchored_action", BrainIntent.PHONE_CONTROL, 0.84,
+            "Request asks for phone control.",
+            lambda lower, scratchable: (
+                _looks_like_phone_command(lower)
+                and _contains(lower, "phone", "android", "mobile")
+                and _contains(lower, "open ", "launch ", "search", "find ", "look up", "look for")
+            ),
+        ),
         # Explicit web-search phrasing drives the REAL browser to a search engine
         # ("google X", "search the web for X") — checked before EXPLORE so a query
         # that itself sounds like a research question ("...what is X") still opens
         # the browser instead of being rerouted to research synthesis.
-        if _looks_like_web_search(lower):
-            return BrainDecision(
-                BrainIntent.BROWSER_AUTOMATION,
-                "Request asks to search the web in a browser.",
-                confidence=0.82,
-            )
+        (
+            "web_search", BrainIntent.BROWSER_AUTOMATION, 0.82,
+            "Request asks to search the web in a browser.",
+            lambda lower, scratchable: _looks_like_web_search(lower),
+        ),
         # Explanation / research requests — but only if the scratch brain has no
         # canned local answer (covers "what is", "what are", and research verbs).
-        if looks_like_research_question(lower) and scratchable is None:
-            return BrainDecision(BrainIntent.EXPLORE, "Request asks for explanation or research.", confidence=0.86)
-        import re as _re
-        if _contains(lower, "roadmap", "milestone", "break down", "steps") or _re.search(r'\bplan\b', lower):
-            return BrainDecision(BrainIntent.PLAN, "Request asks for planning.", confidence=0.84)
-        if _looks_like_phone_command(lower):
-            return BrainDecision(BrainIntent.PHONE_CONTROL, "Request asks for phone control.", confidence=0.82)
+        (
+            "research_question", BrainIntent.EXPLORE, 0.86,
+            "Request asks for explanation or research.",
+            lambda lower, scratchable: looks_like_research_question(lower) and scratchable is None,
+        ),
+        (
+            "plan", BrainIntent.PLAN, 0.84,
+            "Request asks for planning.",
+            lambda lower, scratchable: _contains(lower, "roadmap", "milestone", "break down", "steps")
+            or re.search(r"\bplan\b", lower) is not None,
+        ),
+        (
+            "phone_command", BrainIntent.PHONE_CONTROL, 0.82,
+            "Request asks for phone control.",
+            lambda lower, scratchable: _looks_like_phone_command(lower),
+        ),
         # Explicit store-into-memory phrasing ("remember this: …") must not be
         # stolen by device targets named inside the remembered content — the
         # remembered text routinely mentions apps ("remember this: open notepad
         # is my favorite app"). Generic "memory" mentions stay below, so topic
         # questions like "how does computer memory work" still reach research.
-        if _contains(lower, "remember this", "remember that", "remember for me"):
-            return BrainDecision(BrainIntent.MEMORY, "Request asks to store something in memory.", confidence=0.85)
-        if _looks_like_desktop_command(lower):
-            return BrainDecision(BrainIntent.DESKTOP_AUTOMATION, "Request asks for desktop automation.", confidence=0.8)
-        if _contains(lower, "browser", "website", "navigate", "fill form", "fill the form", "download"):
-            return BrainDecision(BrainIntent.BROWSER_AUTOMATION, "Request asks for browser automation.", confidence=0.8)
-        if _contains(lower, "remember", "recall", "memory"):
-            return BrainDecision(BrainIntent.MEMORY, "Request refers to memory.", confidence=0.72)
-        if _contains(lower, "code", "test", "debug", "review", "implement", "fix", "document"):
-            return BrainDecision(BrainIntent.AGENT, "Request should be delegated to a specialized agent.", confidence=0.78)
-        if _contains(lower, "project", "task", "bug", "progress"):
-            return BrainDecision(BrainIntent.PROJECT, "Request refers to project management.", confidence=0.72)
-        return BrainDecision(BrainIntent.CHAT, "Fallback to model-backed chat.", confidence=0.55)
+        (
+            "memory_store", BrainIntent.MEMORY, 0.85,
+            "Request asks to store something in memory.",
+            lambda lower, scratchable: _contains(lower, "remember this", "remember that", "remember for me"),
+        ),
+        (
+            "desktop_command", BrainIntent.DESKTOP_AUTOMATION, 0.8,
+            "Request asks for desktop automation.",
+            lambda lower, scratchable: _looks_like_desktop_command(lower),
+        ),
+        (
+            "browser", BrainIntent.BROWSER_AUTOMATION, 0.8,
+            "Request asks for browser automation.",
+            lambda lower, scratchable: _contains(
+                lower, "browser", "website", "navigate", "fill form", "fill the form", "download"
+            ),
+        ),
+        (
+            "memory", BrainIntent.MEMORY, 0.72,
+            "Request refers to memory.",
+            lambda lower, scratchable: _contains(lower, "remember", "recall", "memory"),
+        ),
+        (
+            "agent", BrainIntent.AGENT, 0.78,
+            "Request should be delegated to a specialized agent.",
+            lambda lower, scratchable: _contains(
+                lower, "code", "test", "debug", "review", "implement", "fix", "document"
+            ),
+        ),
+        (
+            "project", BrainIntent.PROJECT, 0.72,
+            "Request refers to project management.",
+            lambda lower, scratchable: _contains(lower, "project", "task", "bug", "progress"),
+        ),
+        (
+            "chat_fallback", BrainIntent.CHAT, 0.55,
+            "Fallback to model-backed chat.",
+            lambda lower, scratchable: True,
+        ),
+    )
+
+    def _keyword_classify(self, lower: str) -> BrainDecision:
+        """Fast keyword-based classification (first matching routing gate)."""
+        # One narrow classifier owns all "scratch can answer this locally"
+        # detection (greeting / math / time / conversion / knowledge /
+        # recommendation). decide() only interprets its returned intent name.
+        scratchable = scratchable_intent(lower)
+        for _name, intent, confidence, reason, predicate in self._ROUTING_GATES:
+            if predicate(lower, scratchable):
+                return BrainDecision(intent, reason, confidence=confidence)
+        raise AssertionError("chat_fallback gate always matches")
+
+    def route_utterance(self, text: str) -> dict[str, Any]:
+        """Trace every routing gate for an utterance, in evaluation order.
+
+        The routing explorer consumes this: each rung reports whether it
+        matched and the decision it would produce, so the user sees exactly
+        which gate owns their phrasing and why. Mirrors decide() exactly — the
+        landing decision IS decide(text).
+        """
+        text = text.strip()
+        if not text:
+            decision = BrainDecision(BrainIntent.CLARIFY, "Request is empty.", confidence=1.0)
+            return {**decision.to_dict(), "trace": []}
+        lower = text.lower()
+        scratchable = scratchable_intent(lower)
+        trace: list[dict[str, Any]] = []
+        for name, intent, confidence, reason, predicate in self._ROUTING_GATES:
+            matched = predicate(lower, scratchable)
+            trace.append(
+                {
+                    "gate": name,
+                    "matched": matched,
+                    "intent": intent.value if matched else None,
+                    "confidence": confidence if matched else None,
+                    "reason": reason if matched else None,
+                }
+            )
+            if matched:
+                break
+        decision = self.decide(BrainRequest(text=text))
+        return {**decision.to_dict(), "trace": trace}
 
     def _build_chat_messages(self, request: BrainRequest) -> list[dict[str, str]]:
         """Build LLM message list with conversation history."""
@@ -419,7 +508,7 @@ def _looks_like_phone_command(text: str) -> bool:
     if _contains(lower, "phone", "android", "mobile", "sms"):
         return _contains(
             lower, "open ", "launch ", "control", "send", "call ", "text ", "message",
-            "screenshot", "dial ",
+            "screenshot", "dial ", "search", "find ", "look up", "look for",
         )
     if _contains(lower, "whatsapp"):
         return True  # a phone-only app; no device word needed

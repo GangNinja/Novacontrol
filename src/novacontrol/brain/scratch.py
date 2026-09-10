@@ -1168,7 +1168,7 @@ def _greeting_match(lower: str, cleaned: str) -> bool:
 
 def _phone_control_match(lower: str, cleaned: str) -> bool:
     if _contains(lower, "phone", "android", "mobile", "sms"):
-        return any(w in lower for w in ("open ", "launch ", "control", "send", "call ", "text ", "message", "screenshot", "dial "))
+        return any(w in lower for w in ("open ", "launch ", "control", "send", "call ", "text ", "message", "screenshot", "dial ", "search", "find ", "look up", "look for"))
     if "whatsapp" in lower:
         return True  # a phone-only app; no device word needed
     # Phone-action verbs that stand alone: text/call/dial/screenshot.
@@ -1338,7 +1338,8 @@ _INTENT_ROWS: tuple[_ScratchIntent, ...] = (
                    examples=("hi", "good morning")),
     _ScratchIntent("phone_control", False, _phone_control_match, answer=_phone_answer,
                    examples=("open whatsapp on my phone", "text mom on my phone",
-                             "call john", "take a screenshot on my phone")),
+                             "call john", "take a screenshot on my phone",
+                             "search cats on youtube on my phone")),
     _ScratchIntent("desktop_control", False, _desktop_control_match, answer=_desktop_answer,
                    examples=("open notepad",)),
     _ScratchIntent("capabilities", False, _capabilities_match, answer=_capabilities_answer,

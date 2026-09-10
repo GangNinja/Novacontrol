@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from novacontrol.api.auth import ApiTokenAuthenticator
 from novacontrol.api.middleware import RateLimitMiddleware, RequestLoggingMiddleware, SecurityHeadersMiddleware
-from novacontrol.api.models import ApiSurface, AskRequest, CommandPlanRequest, ExploreRequest_
+from novacontrol.api.models import ApiSurface, AskRequest, BrainDecideRequest, CommandPlanRequest, ExploreRequest_
 from novacontrol.application import NovaControlApplication
 from novacontrol.core.events import Event
 from novacontrol.explore import ExploreRequest
@@ -75,6 +75,50 @@ def sse_frame(event: Event) -> str:
     if event.correlation_id and "correlation_id" not in payload:
         payload["correlation_id"] = event.correlation_id
     return f"event: {event.type}\ndata: {json.dumps(payload, default=str)}\n\n"
+
+
+def _routing_preview(nova: NovaControlApplication, text: str, intent: str) -> dict[str, Any]:
+    """A small preview of what the user would actually see for a landing rung.
+
+    Cheap and side-effect free by design: scratch answers run locally, plan
+    outlines are deterministic, and the research "headline" uses the same
+    offline overview generator the report would show — full research (sources,
+    key points) is one click away in the Explore panel, never triggered here.
+    """
+    from novacontrol.brain.scratch import scratchable_intent
+    from novacontrol.explore.sections import overview as overview_headline
+
+    try:
+        scratchable = scratchable_intent(text.lower())
+        if scratchable:
+            payload = nova.brain.scratch.answer(text, context=nova.status())
+            return {"kind": "scratch", "text": str(payload.get("message", ""))[:400]}
+        if intent == "explore":
+            return {
+                "kind": "explore",
+                "headline": overview_headline(text, (), provider_status="offline")[:200],
+                "note": "Running Explore adds sources, key points, and a detailed explanation.",
+            }
+        if intent == "plan":
+            plan = PlanningEngine().create_plan(text)
+            return {
+                "kind": "plan",
+                "outline": [step.title for step in plan.steps][:8],
+                "needs_clarification": bool(getattr(plan, "needs_clarification", False)),
+            }
+        if intent in ("desktop_automation", "phone_control", "browser_automation"):
+            device_plan = nova.plan_command(text)
+            return {
+                "kind": "plan",
+                "outline": [str(a.get("type") or a.get("action") or "") for a in device_plan.get("workflow", {}).get("actions", [])][:8],
+                "target": device_plan.get("target"),
+                "summary": str(device_plan.get("summary", ""))[:200],
+            }
+        if intent == "chat":
+            return {"kind": "info", "text": "Answered by the configured chat model."}
+        return {"kind": "info", "text": f"Routed to {intent}. Open that panel to run it."}
+    except Exception as exc:  # a broken preview must never break the trace
+        return {"kind": "info", "text": f"Preview unavailable: {type(exc).__name__}"}
 
 
 def create_app() -> Any:
@@ -466,6 +510,24 @@ def create_app() -> Any:
     @app.get("/agent/knowledge")
     async def agent_knowledge(_principal: str = Depends(require_auth)) -> dict[str, Any]:
         return nova.agentic_knowledge()
+
+    @app.post("/brain/decide")
+    async def brain_decide(payload: BrainDecideRequest, _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Trace an utterance through the routing gates with a rung preview.
+
+        The routing explorer in the web UI posts here while the server is up:
+        the response carries the landing intent plus the full gate trace and a
+        small preview of what the user would actually see (scratch answer text,
+        research headline, or plan outline). The UI's embedded mirror is only a
+        fallback for when this server is unreachable.
+        """
+        routed = nova.brain.route_utterance(payload.text)
+        # The trace is the contract; a preview failure must never break it.
+        try:
+            routed["preview"] = _routing_preview(nova, payload.text, routed["intent"])
+        except Exception as exc:
+            routed["preview"] = {"kind": "info", "text": f"Preview unavailable: {type(exc).__name__}"}
+        return routed
 
     @app.post("/explore")
     async def explore(payload: ExploreRequest_, _principal: str = Depends(require_auth)) -> dict[str, Any]:

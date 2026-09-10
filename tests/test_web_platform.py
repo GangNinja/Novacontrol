@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from novacontrol.api import ApiSurface
+from novacontrol.api.route_consumers import NON_RENDER_ROLES, ROUTE_CONSUMERS as ROUTE_CONSUMER_TABLE
 from novacontrol.brain import BrainIntent
 
 
@@ -878,63 +879,14 @@ class BackendFrontendContractTests(unittest.TestCase):
         self.render_utils = (static / "js" / "render-utils.js").read_text(encoding="utf-8")
         self.render_panels = (static / "js" / "render-panels.js").read_text(encoding="utf-8")
 
-    # Route -> renderer that owns the body, or one of ALLOWED_NON_RENDER markers:
-    #   no-render    — infrastructure / channel / CLI-only endpoint with no panel
-    #   load-settings — GET /settings fills the settings form (loadSettings), no render
-    ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
-        # Rendered panels (run(type) -> renderer dispatch, render-utils.js).
-        ("POST", "/ask"): "renderChatResult",  # envelope branches by route/intent
-        ("POST", "/explore"): "renderExplore",
-        ("POST", "/command/plan"): "renderCommand",
-        ("POST", "/command/execute"): "renderCommand",
-        ("POST", "/desktop/plan"): "renderCommand",
-        ("POST", "/desktop/execute"): "renderCommand",
-        ("POST", "/phone/plan"): "renderCommand",
-        ("POST", "/phone/execute"): "renderCommand",
-        ("POST", "/plan"): "renderBuild",
-        ("POST", "/improve/workflow"): "renderWorkflow",
-        ("POST", "/improve/preview"): "renderWorkflow",
-        ("POST", "/improve/approve"): "renderWorkflow",
-        ("POST", "/learn"): "renderLearning",
-        ("POST", "/train"): "renderLearning",
-        ("GET", "/system/health"): "renderHealth",
-        ("GET", "/system/harden"): "renderHealth",
-        ("GET", "/system/package"): "renderGeneric",  # explicit generic fallback
-        ("GET", "/status"): "renderGeneric",  # home metrics + generic fallback card
-        ("POST", "/settings"): "renderSettingsResult",
-        ("POST", "/brain/mode"): "no-render",  # switch handler; refreshStatus re-renders
-        ("GET", "/brain/mode"): "no-render",  # syncBrainSwitch reads the persisted mode
-        ("GET", "/brain/cloud/presets"): "no-render",  # cloud card provider picker
-        ("POST", "/brain/cloud"): "no-render",  # connectCloudLlm + refreshStatus
-        ("POST", "/brain/cloud/clear"): "no-render",  # removeCloudLlm + refreshStatus
-        ("POST", "/chat/clear"): "no-render",  # clearChatButton wipes the thread locally
-        ("GET", "/tasks"): "no-render",  # reserved for future explicit lists
-        ("POST", "/tasks/delete"): "no-render",  # deleteTask row button + refreshStatus
-        ("POST", "/tasks/clear"): "no-render",  # clearTasksButton + refreshStatus
-        # Enumerated non-render consumers.
-        ("GET", "/settings"): "load-settings",
-        ("GET", "/events/stream"): "no-render",  # EventSource activity channel
-        ("GET", "/"): "no-render",  # served HTML (index.html)
-        ("GET", "/health"): "no-render",  # infrastructure probe
-        ("POST", "/improve"): "no-render",  # raw plan API (CLI/demos only)
-        ("GET", "/phone/status"): "no-render",  # bridge status (CLI/demos only)
-        ("POST", "/phone/connect"): "renderPhoneStatus",  # Connect Phone button — pairing flow, bridge-shaped result
-        ("GET", "/vision/status"): "no-render",  # Vision panel toast-only status check
-        ("POST", "/vision/model"): "no-render",  # vision model card connect button; refreshes card
-        ("POST", "/vision/model/clear"): "no-render",  # vision model card remove button; refreshes card
-        ("POST", "/vision/describe"): "renderGeneric",  # Vision panel Describe Screen
-        ("POST", "/vision/click"): "renderGeneric",  # Vision panel guided click
-        ("GET", "/intelligence"): "no-render",  # GIL telemetry (API/CLI surface; surfaced via /status)
-        ("GET", "/bugs"): "no-render",  # Bug log rows rendered by app.js renderBugs, not run()
-        ("POST", "/bugs/{bug_id}/fix"): "no-render",  # Mark-fixed row button re-fetches /bugs
-        ("POST", "/bugs/clear-fixed"): "no-render",  # Clear Fixed button re-fetches /bugs
-        ("POST", "/agent/run"): "no-render",  # agentic loop (API/CLI surface; UI lands with the JARVIS panel)
-        ("GET", "/agent/metrics"): "no-render",  # evaluation ledger metrics
-        ("GET", "/agent/knowledge"): "no-render",  # application knowledge graph dump
-        ("GET", "/plugins"): "no-render",  # plugin marketplace API (CLI only)
-        ("GET", "/activity"): "no-render",  # timeline seed fetched by js/activity.js, not run()
-    }
-    ALLOWED_NON_RENDER = {"no-render", "load-settings"}
+    # Route -> renderer that owns the body, or one of the NON_RENDER_ROLES markers
+    # (no-render — infrastructure / channel / CLI-only endpoint with no panel;
+    #  load-settings — GET /settings fills the settings form, no render).
+    # The table is the SHARED registry in novacontrol.api.route_consumers:
+    # scripts/generate_api_reference.py regenerates docs/API.md from the same
+    # rows, so the test, the docs, and the wire contract cannot drift apart.
+    ROUTE_CONSUMERS = ROUTE_CONSUMER_TABLE
+    ALLOWED_NON_RENDER = set(NON_RENDER_ROLES)
 
     # run(type) -> renderer dispatch, mirroring render() in render-utils.js.
     RENDER_DISPATCH = [

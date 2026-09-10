@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import urllib.parse
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -151,7 +152,14 @@ class AdbPhoneRunner:
             # ACTION_SENDTO with the sms: URI opens the messaging app pre-filled;
             # nothing transmits until the user presses send ON THE PHONE, so the
             # device owner keeps the final say over every outgoing message.
+            # A saved contact NAME resolves to its number first; raw numbers
+            # (and unknown names, which the messaging app can still match
+            # against the on-device contact book) pass through untouched.
             recipient = str(action.parameters.get("recipient") or "").replace(" ", "")
+            if recipient and not recipient.lstrip("+").isdigit():
+                resolved = self._resolve_contact(recipient)
+                if resolved:
+                    recipient = resolved.replace(" ", "")
             body = str(action.parameters.get("message") or "")
             return self._run_adb(
                 (
@@ -163,15 +171,85 @@ class AdbPhoneRunner:
             # ACTION_DIAL only opens the dialer pre-filled — it never places the
             # call without the user pressing call ON THE PHONE.
             contact = str(action.parameters.get("contact") or action.target).replace(" ", "")
+            if contact and not contact.lstrip("+").isdigit():
+                resolved = self._resolve_contact(contact)
+                if resolved:
+                    contact = resolved.replace(" ", "")
             return self._run_adb(
                 (
                     "shell", "am", "start", "-a", "android.intent.action.DIAL",
                     "-d", f"tel:{contact}",
                 )
             )
+        if action.type is PhoneActionType.SEARCH:
+            query = str(action.parameters.get("query") or "")
+            provider = str(action.parameters.get("provider") or "google")
+            return self._run_adb(
+                (
+                    "shell", "am", "start", "-a", "android.intent.action.VIEW",
+                    "-d", _search_uri(query, provider),
+                )
+            )
+        if action.type is PhoneActionType.OPEN_FILE:
+            name = str(action.parameters.get("name") or action.target)
+            # FIND_CONTENT resolves the file through the system chooser; the
+            # device owner picks the app, so nothing opens without consent.
+            return self._run_adb(
+                (
+                    "shell", "am", "start", "-a", "android.intent.action.VIEW",
+                    "-d", f"content://media/external/file?q={urllib.parse.quote(name)}",
+                )
+            )
+        if action.type is PhoneActionType.CONTACT_LOOKUP:
+            name = str(action.parameters.get("name") or action.target)
+            number = self._resolve_contact(name)
+            return {
+                "adapter": "adb",
+                "command": "adb shell content query --uri content://com.android.contacts/data/phones",
+                "exit_code": 0 if number else 1,
+                "resolved_number": number or "",
+                "stdout": number or "contact not found",
+                "stderr": "",
+            }
         if action.type is PhoneActionType.SCREENSHOT:
             return self._screenshot_to_file()
         raise ValueError(f"Unsupported phone action type: {action.type}")
+
+    def _resolve_contact(self, name: str) -> str:
+        """Resolve a saved contact name to its phone number via the contacts
+        provider (read-only; needs no extra permission over an adb session)."""
+        if not self.adb_path:
+            raise RuntimeError("adb is not installed or not available on PATH.")
+        wanted = re.sub(r"\s+", " ", name.strip().lower())
+        result = self._run_adb(
+            ("shell", "content", "query", "--uri", "content://com.android.contacts/data/phones")
+        )
+        if result.get("exit_code") != 0:
+            return ""
+        for line in str(result.get("stdout", "")).splitlines():
+            if not line.strip().startswith("Row:"):
+                continue
+            # Row fields are key=value pairs in arbitrary order, e.g.
+            # Row: 5 ... display_name=Mom, ... data1=+91 70131 73263 ...
+            dm = re.search(r"\bdisplay_name=([^,]+)", line)
+            num = re.search(r"\bdata1=([^,]+)", line)
+            if not dm or not num:
+                continue
+            display = dm.group(1).strip()
+            number = num.group(1).strip()
+            if re.sub(r"\s+", " ", display.lower()) == wanted:
+                return number
+        return ""
+
+    def resolve_contact_prefix(self, text: str) -> str:
+        """Return the longest leading word-sequence of ``text`` that matches a
+        saved contact name ("mom good night" -> "mom" when mom is saved)."""
+        words = text.split()
+        for size in range(min(len(words), 3), 0, -1):
+            candidate = " ".join(words[:size])
+            if self._resolve_contact(candidate):
+                return candidate
+        return ""
 
     def _screenshot_to_file(self) -> Mapping[str, Any]:
         """Capture the device screen to a real PNG on this computer.
@@ -285,6 +363,64 @@ class PhoneControlController:
             ),
         )
 
+    def plan_search(self, query_spec: str) -> PhoneWorkflow:
+        """Plan an in-app/provider search: "search cats on youtube".
+
+        The provider comes after on/in when present, defaulting to google.
+        The runner opens a VIEW intent on the provider's search URL, which
+        Android routes into the installed app (or browser) — nothing is
+        typed or submitted beyond the URL itself.
+        """
+        query, provider = _phone_search_parts(query_spec)
+        return PhoneWorkflow(
+            name=f"Search {query!r} in {provider} on phone",
+            actions=(
+                PhoneAction(
+                    type=PhoneActionType.SEARCH,
+                    target=provider,
+                    description=f"Search for {query!r} in {provider} on the paired phone",
+                    parameters={"query": query, "provider": provider},
+                ),
+            ),
+        )
+
+    def plan_open_file(self, spec: str) -> PhoneWorkflow:
+        """Plan opening a named file or folder on the phone.
+
+        Files open through the system chooser (the device owner picks the
+        app); folders land in the Files app.
+        """
+        name, is_folder = _phone_file_parts(spec)
+        if is_folder:
+            action = PhoneAction(
+                type=PhoneActionType.OPEN_APPLICATION,
+                target="com.google.android.apps.nbu.files",
+                description=f"Open the Files app on the paired phone",
+                parameters={"label": "Files", "package": "com.google.android.apps.nbu.files"},
+            )
+        else:
+            action = PhoneAction(
+                type=PhoneActionType.OPEN_FILE,
+                target=name,
+                description=f"Open the file {name!r} on the paired phone",
+                parameters={"name": name},
+            )
+        return PhoneWorkflow(name=f"Open {name} on phone", actions=(action,))
+
+    def plan_contact_lookup(self, name: str) -> PhoneWorkflow:
+        """Plan resolving a saved contact name to a phone number (read-only)."""
+        return PhoneWorkflow(
+            name=f"Look up {name} in contacts on phone",
+            actions=(
+                PhoneAction(
+                    type=PhoneActionType.CONTACT_LOOKUP,
+                    target=name,
+                    description=f"Look up the phone number for {name!r} in the paired phone's contacts",
+                    parameters={"name": name},
+                ),
+            ),
+        )
+
     def plan_send_text(self, message: str) -> PhoneWorkflow:
         """Plan a send-text action; target and recipient live in parameters.
 
@@ -292,6 +428,15 @@ class PhoneControlController:
         the plan so the user reviews exactly what would be sent.
         """
         recipient, body = _phone_message_parts(message)
+        if not recipient:
+            # "text mom good night" — no say/saying/that/: separator. Only split
+            # when the leading words are a SAVED contact on the device, so free
+            # text is never silently split at the wrong word.
+            resolver = getattr(self.runner, "resolve_contact_prefix", None)
+            if resolver is not None:
+                prefix = resolver(message)
+                if prefix:
+                    recipient, body = prefix, message[len(prefix):].strip()
         return PhoneWorkflow(
             name="Send text on phone",
             actions=(
@@ -400,12 +545,37 @@ class PhoneControlController:
 def _phone_package(application: str) -> tuple[str, str]:
     value = " ".join(application.strip().split()) or "requested app"
     lower = value.lower()
+    # Substring aliases cover common spoken names; unknown names fall back to
+    # a package-shaped literal or a package-manager search so EVERY installed
+    # app is reachable, not just the alias list.
     aliases = {
         "whatsapp": ("WhatsApp", "com.whatsapp"),
         "chrome": ("Chrome", "com.android.chrome"),
         "youtube": ("YouTube", "com.google.android.youtube"),
+        "youtube music": ("YouTube Music", "com.google.android.apps.youtube.music"),
+        "yt music": ("YouTube Music", "com.google.android.apps.youtube.music"),
         "gmail": ("Gmail", "com.google.android.gm"),
         "settings": ("Settings", "com.android.settings"),
+        "spotify": ("Spotify", "com.spotify.music"),
+        "instagram": ("Instagram", "com.instagram.android"),
+        "threads": ("Threads", "com.instagram.barcelona"),
+        "telegram": ("Telegram", "org.telegram.messenger"),
+        "maps": ("Maps", "com.google.android.apps.maps"),
+        "camera": ("Camera", "com.android.camera"),
+        "photos": ("Photos", "com.google.android.apps.photos"),
+        "gallery": ("Gallery", "com.miui.gallery"),
+        "files": ("Files", "com.google.android.apps.nbu.files"),
+        "file manager": ("Files", "com.google.android.apps.nbu.files"),
+        "play store": ("Play Store", "com.android.vending"),
+        "play games": ("Play Games", "com.google.android.play.games"),
+        "flipkart": ("Flipkart", "com.flipkart.android"),
+        "chatgpt": ("ChatGPT", "com.openai.chatgpt"),
+        "perplexity": ("Perplexity", "ai.perplexity.app.android"),
+        "google tv": ("Google TV", "com.google.android.videos"),
+        "podcasts": ("Podcasts", "com.google.android.apps.podcasts"),
+        "google news": ("Google News", "com.google.android.apps.magazines"),
+        "meet": ("Meet", "com.google.android.apps.tachyon"),
+        "duo": ("Meet", "com.google.android.apps.tachyon"),
     }
     for name, mapped in aliases.items():
         if name in lower:
@@ -413,6 +583,57 @@ def _phone_package(application: str) -> tuple[str, str]:
     if "." in value and " " not in value:
         return value, value
     return value, value
+
+
+def _phone_search_parts(query_spec: str) -> tuple[str, str]:
+    """Split "cats on youtube" / "cats in google" into (query, provider)."""
+    match = re.match(
+        r"^\s*(?P<query>.+?)\s+(?:on|in)\s+(?P<provider>[a-z0-9 ]+?)\s*$",
+        " ".join(query_spec.strip().split()),
+        re.IGNORECASE,
+    )
+    if match:
+        return match.group("query").strip(), match.group("provider").strip().lower()
+    return " ".join(query_spec.strip().split()), "google"
+
+
+def _phone_file_parts(spec: str) -> tuple[str, bool]:
+    """Return (name, is_folder) for an open-files phrasing."""
+    value = " ".join(spec.strip().split())
+    # Strip articles and the parser's "file " marker so the name stays clean:
+    # "the file report.pdf" -> "report.pdf", "the report.pdf file" -> "report.pdf".
+    value = re.sub(r"^(?:the|a|an)\s+", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"^file\s+", "", value, flags=re.IGNORECASE)
+    match = re.match(r"^(?P<name>.+?)\s+(?:folder|directory|file)$", value, re.IGNORECASE)
+    if match:
+        name = match.group("name").strip()
+        is_folder = match.group(0).lower().endswith(("folder", "directory"))
+        return name or "Files", is_folder
+    if value.lower().startswith(("folder ", "directory ")):
+        return value.split(" ", 1)[1].strip(), True
+    bare = value.lower() in ("", "file", "folder", "directory", "files")
+    if bare:
+        # No name given ("open the file"): open the Files app.
+        return "Files", True
+    return value, False
+
+
+def _search_uri(query: str, provider: str) -> str:
+    """The provider's search URL; Android routes it into the installed app."""
+    encoded = urllib.parse.quote(query)
+    if "youtube" in provider:
+        return f"https://www.youtube.com/results?search_query={encoded}"
+    if "maps" in provider or "map" == provider:
+        return f"https://www.google.com/maps/search/{encoded}"
+    if "play" in provider and "store" in provider:
+        return f"https://play.google.com/store/search?q={encoded}"
+    if "spotify" in provider:
+        return f"https://open.spotify.com/search/{encoded}"
+    if "amazon" in provider:
+        return f"https://www.amazon.in/s?k={encoded}"
+    if "flipkart" in provider:
+        return f"https://www.flipkart.com/search?q={encoded}"
+    return f"https://www.google.com/search?q={encoded}"
 
 
 def _phone_message_parts(message: str) -> tuple[str, str]:

@@ -277,6 +277,30 @@ def _window_matches(process_name: str, title: str, stem: str) -> bool:
     return bool(stem) and (name == stem or stem in name or stem in window)
 
 
+def _window_stems(target: str, resolved: str | None = None) -> list[str]:
+    """Stems a launch may verify against: the spoken target, its resolved form,
+    and — for http(s) URL launches — any common browser process.
+
+    'Open the browser' resolves to a neutral URL and is launched through the
+    shell's protocol handler, so the window that appears belongs to whichever
+    browser is the user's default (chrome/msedge/...), never the URL itself.
+    Only http(s) qualifies: steam://open/main must NOT match a Chrome window.
+    """
+    stems = [_window_stem(target)]
+    is_http = resolved is not None and resolved.strip().lower().startswith(("http://", "https://"))
+    if resolved and _norm_label(resolved) != _norm_label(target):
+        resolved_stem = _window_stem(resolved)
+        if resolved_stem and resolved_stem not in stems:
+            stems.append(resolved_stem)
+    if is_http:
+        stems.extend(
+            s
+            for s in ("chrome", "msedge", "firefox", "brave", "opera", "vivaldi", "browser")
+            if s not in stems
+        )
+    return stems
+
+
 # ---------------------------------------------------------------------------
 # Universal installed-app resolution: ANY installed program must be openable
 # by its spoken name, not just the handful in APP_ALIASES. Three fast sources
@@ -599,9 +623,10 @@ class LocalDesktopRunner:
         raise ValueError(f"Unsupported desktop action type: {action.type}")
 
     async def _open_application(self, target: str) -> Mapping[str, Any]:
+        resolved = self._resolve_app_target(target)
         pid = await self._launch_open(target)
-        verified = await self._wait_for_window(target)
-        output: dict[str, Any] = {"adapter": "local-desktop", "pid": pid, "target": target}
+        verified = await self._wait_for_window(target, resolved=resolved)
+        output: dict[str, Any] = {"adapter": "local-desktop", "pid": pid, "target": target, "resolved": resolved}
         if verified is None:
             # Probe unavailable (non-Windows or probe failed): don't fail a launch we
             # cannot check, but never claim it was verified.
@@ -656,12 +681,21 @@ class LocalDesktopRunner:
         value = target.strip().lower()
         if "\\" in value or "/" in value or "." in value:
             return target  # a path or explicit file/exe name — launch as-is
+        # Strip leading articles so "the browser" resolves like "browser";
+        # paths were already returned above so they are never mangled. Only
+        # true articles: "my computer" / "my files" are real target names.
+        value = re.sub(r"^(the|a|an)\s+", "", value).strip()
         if value in LocalDesktopRunner.APP_ALIASES:
             return LocalDesktopRunner.APP_ALIASES[value]
-        indexed = _index_lookup(_app_index(), target)
+        if value in ("browser", "web browser", "default browser"):
+            # No single "browser app": the default browser is whatever the OS
+            # has registered for http:. Launching a neutral URL through the
+            # protocol handler opens it on every platform and every browser.
+            return "http://localhost"
+        indexed = _index_lookup(_app_index(), value)
         if indexed:
             return indexed
-        uwp = _uwp_lookup(target)
+        uwp = _uwp_lookup(value)
         if uwp:
             return uwp
         return target
@@ -732,14 +766,14 @@ class LocalDesktopRunner:
             return None
 
     async def _wait_for_window(
-        self, target: str, *, timeout_seconds: float = 8.0
+        self, target: str, *, resolved: str | None = None, timeout_seconds: float = 8.0
     ) -> dict[str, Any] | None:
-        """Poll for a visible window matching the target.
+        """Poll for a visible window matching the target (or its resolved form).
 
         Returns a dict with the matched title when found, an empty dict when the probe ran
         but nothing appeared, and None when the probe is unavailable.
         """
-        stem = _window_stem(target)
+        stems = _window_stems(target, resolved)
         deadline = time.monotonic() + timeout_seconds
         while True:
             lines = await self._window_lines()
@@ -747,7 +781,7 @@ class LocalDesktopRunner:
                 return None
             for line in lines:
                 name, sep, title = line.partition("|")
-                if _window_matches(name, title if sep else "", stem):
+                if any(_window_matches(name, title if sep else "", stem) for stem in stems):
                     return {"window": (title if sep else name).strip()}
             if time.monotonic() >= deadline:
                 return {}

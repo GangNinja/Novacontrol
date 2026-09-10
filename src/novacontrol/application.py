@@ -114,6 +114,20 @@ def _workflow_from_plan(workflow_data: dict[str, Any], *, action_cls: Any, actio
     return workflow_cls(name=workflow_data["name"], actions=actions, id=workflow_data["id"])
 
 
+def _workflow_classes_for_family(family: str) -> tuple[Any, Any, Any] | None:
+    """Model classes for a serialized plan's device family (None = unknown)."""
+    if family == "desktop":
+        from novacontrol.desktop.models import DesktopAction, DesktopActionType, DesktopWorkflow
+        return DesktopAction, DesktopActionType, DesktopWorkflow
+    if family == "browser":
+        from novacontrol.browser.models import BrowserAction, BrowserActionType, BrowserWorkflow
+        return BrowserAction, BrowserActionType, BrowserWorkflow
+    if family == "phone":
+        from novacontrol.phone.models import PhoneAction, PhoneActionType, PhoneWorkflow
+        return PhoneAction, PhoneActionType, PhoneWorkflow
+    return None
+
+
 class NovaControlApplication:
     """Runnable local composition of NovaControl services."""
 
@@ -889,6 +903,7 @@ class NovaControlApplication:
                 actions_descriptions = descriptions
         plan: dict[str, Any] = {
             "route": "desktop_automation",
+            "family": "desktop",
             "status": "waiting_for_approval",
             "command": command,
             "target": first_target,
@@ -962,6 +977,7 @@ class NovaControlApplication:
         combined = BrowserWorkflow(name=command[:60], actions=tuple(browser_actions))
         plan: dict[str, Any] = {
             "route": "browser_automation",
+            "family": "browser",
             "status": "waiting_for_approval",
             "command": command,
             "target": parsed_actions[0]["target"],
@@ -1016,6 +1032,16 @@ class NovaControlApplication:
         token was already validated), then mark the plan executed.
         """
         plan = self._consume_approval(approval_token, command)
+        # The token's plan records which device family minted it. The caller
+        # dispatches by brain intent, but the inline Approve button posts
+        # /command/execute for plans minted by ANY /plan endpoint — so the
+        # stored family wins when it disagrees with the intent dispatch, or a
+        # desktop execute_script plan would be rebuilt as a browser action and
+        # crash ('execute_script' is not a valid BrowserActionType).
+        family = str(plan.get("family", "") or "")
+        family_classes = _workflow_classes_for_family(family)
+        if family_classes is not None:
+            action_cls, action_type_cls, workflow_cls = family_classes
         workflow = _workflow_from_plan(
             plan["workflow"],
             action_cls=action_cls, action_type_cls=action_type_cls, workflow_cls=workflow_cls,
@@ -1095,6 +1121,15 @@ class NovaControlApplication:
             workflow = self.phone.plan_screenshot()
             summary = "Prepared a screenshot capture on your phone."
             target = "screen"
+        elif kind == "search":
+            workflow = self.phone.plan_search(argument)
+            query, provider = workflow.actions[0].parameters["query"], workflow.actions[0].parameters["provider"]
+            summary = f"Prepared a {provider} search for {query!r} on your phone."
+            target = provider
+        elif kind == "open_files":
+            workflow = self.phone.plan_open_file(argument)
+            summary = f"Prepared to open {argument!r} on your phone."
+            target = workflow.actions[0].target
         else:
             workflow = self.phone.plan_open_application(argument)
             summary = f"Prepared a phone action for {argument}."
@@ -1102,6 +1137,7 @@ class NovaControlApplication:
         status = self.phone.status()
         plan: dict[str, Any] = {
             "route": "phone_control",
+            "family": "phone",
             "status": "waiting_for_approval" if status.available else "waiting_for_phone_bridge",
             "command": command,
             "target": target,

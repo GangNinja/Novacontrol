@@ -829,6 +829,7 @@ function setupVision() {
 setupTabs();
 setupActions();
 setupVision();
+setupRoutingExplorer();
 setupVoice();
 restoreActivePanel(); // must run after setupTabs binds the nav clicks
 renderChatHistory();

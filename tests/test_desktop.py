@@ -458,6 +458,37 @@ class DesktopVerificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(_window_matches("explorer", "C:\\Users\\me\\Documents", "documents"))
         self.assertFalse(_window_matches("explorer", "This PC", "notepad"))
 
+    def test_window_stems_include_default_browsers_for_http_launches(self) -> None:
+        from novacontrol.desktop.controller import _window_matches, _window_stems
+
+        # "Open the browser" launches a neutral http URL through the protocol
+        # handler, so the window belongs to the user's default browser.
+        stems = _window_stems("the browser", "http://localhost")
+        self.assertIn("chrome", stems)
+        self.assertIn("msedge", stems)
+        self.assertTrue(any(_window_matches("chrome", "New Tab - Google Chrome", s) for s in stems))
+        self.assertTrue(any(_window_matches("msedge", "Bing - Microsoft Edge", s) for s in stems))
+        # https URLs passed directly get the same treatment.
+        url_stems = _window_stems("example.com", "https://example.com")
+        self.assertIn("firefox", url_stems)
+        # A steam:// launch must NOT verify against a browser window.
+        steam_stems = _window_stems("steam", "steam://open/main")
+        self.assertNotIn("chrome", steam_stems)
+        self.assertFalse(any(_window_matches("chrome", "New Tab - Google Chrome", s) for s in steam_stems))
+
+    def test_resolve_strips_articles_and_knows_the_browser(self) -> None:
+        from novacontrol.desktop.controller import LocalDesktopRunner
+
+        resolve = LocalDesktopRunner._resolve_app_target
+        # Articles are stripped before lookup: "the notepad" == "notepad".
+        # (Only true articles — "my computer" is itself an alias key.)
+        self.assertEqual(resolve("the notepad"), resolve("notepad"))
+        self.assertEqual(resolve("my computer"), "explorer.exe")
+        # The browser is the user's default: launch a neutral http URL through
+        # the OS protocol handler instead of failing to find an app named that.
+        self.assertTrue(resolve("the browser").startswith("http://"))
+        self.assertTrue(resolve("web browser").startswith("http://"))
+
     async def test_open_reports_verified_when_window_appears(self) -> None:
         runner = ProbingRunner(window_lines=["Notepad|Untitled - Notepad"])
         output = await runner._open_application("notepad")

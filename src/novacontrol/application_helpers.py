@@ -221,9 +221,43 @@ def parse_phone_command(command: str) -> tuple[str, str]:
     for verb in ("call ", "dial "):
         if lower.startswith(verb):
             return "call", stripped[len(verb) - 1:].strip()
+    # In-app/provider search: "search cats on youtube", "find cafes in maps".
+    # Bare "search cats" (no provider/device anchor) is NOT claimed here so
+    # research-style questions keep flowing to Explore via brain routing.
+    search_match = re.match(
+        r"^\s*(?:search(?:\s+for)?|find|look\s+up|look\s+for)\s+(?P<rest>.+)$",
+        stripped,
+        re.IGNORECASE,
+    )
+    if search_match:
+        rest = search_match.group("rest").strip()
+        rest_lower = " ".join(rest.lower().split())
+        provider_anchored = re.search(r"\s+(?:on|in)\s+\S+", rest_lower) and any(
+            provider in rest_lower
+            for provider in ("youtube", "google", "maps", "spotify", "amazon", "flipkart", "play store")
+        )
+        # A device anchor in the ORIGINAL ("search cats on my phone") still
+        # counts even though the marker was stripped — the query defaults to
+        # google then. Bare "search X" (no provider, no device) stays unclaimed.
+        device_anchored = bool(re.search(r"\b(?:phone|android|mobile)\b", command, re.IGNORECASE))
+        if provider_anchored or device_anchored:
+            return "search", rest
     for prefix in ("open ", "launch ", "run "):
         if lower.startswith(prefix):
-            return "open", stripped[len(prefix):].split(" on ", 1)[0].strip() or "requested app"
+            argument = stripped[len(prefix):].split(" on ", 1)[0].strip() or "requested app"
+            # Files and folders: "open downloads folder", "open file report.pdf".
+            arg_lower = " ".join(argument.lower().split())
+            # Files and folders: "open downloads folder", "open file report.pdf",
+            # "open the report.pdf file", "open the file", or a bare filename
+            # with an extension ("open report.pdf").  A trailing " file" noun
+            # ("the report.pdf file") counts too, not just the prefix form.
+            if (
+                arg_lower.startswith(("file ", "the file ", "a file "))
+                or arg_lower.endswith((" folder", " directory", " file"))
+                or re.search(r"\.\w{1,8}$", arg_lower)
+            ):
+                return "open_files", argument
+            return "open", argument
     for name in ("whatsapp", "chrome", "youtube", "gmail", "settings"):
         if name in lower:
             return "open", name

@@ -144,6 +144,34 @@ class CommandExecutionApiTests(_IsolatedApiTestCase):
                 self.assertTrue(executed["approval"]["approved"])
                 self.assertGreaterEqual(len(executed["execution_results"]), 1)
 
+    def test_cross_family_token_executes_with_minting_family(self) -> None:
+        """A token minted by /desktop/plan must run under the DESKTOP executor.
+
+        The inline Approve And Run button always posts /command/execute, which
+        re-dispatches by brain intent. For a browser-intent phrase planned via
+        the desktop endpoint, the intent dispatch hands the token to the browser
+        executor and the stored desktop workflow (e.g. an execute_script action)
+        explodes on rebuild ('execute_script' is not a valid BrowserActionType).
+        The plan's family stamp now overrides the intent dispatch.
+        """
+        response = self._client.post("/desktop/plan", json={"command": "open the browser and search for cats"})
+        self.assertEqual(response.status_code, 200)
+        plan = response.json()
+        self.assertEqual(plan["route"], "desktop_automation")
+        self.assertEqual(plan["family"], "desktop")
+        token = plan["approval"]["token"]
+
+        # /command/execute re-dispatches by brain intent (browser for this phrase);
+        # the minting family (desktop) must win.
+        response = self._client.post(
+            "/command/execute", json={"command": "open the browser and search for cats", "approval_token": token}
+        )
+        self.assertEqual(response.status_code, 200)
+        executed = response.json()
+        self.assertEqual(executed["route"], "desktop_automation")
+        self.assertEqual(executed["status"], "executed")
+        self.assertGreaterEqual(len(executed["execution_results"]), 1)
+
     def test_execute_requires_token(self) -> None:
         for command, expected_route in DEVICE_COMMANDS:
             with self.subTest(command=command):

@@ -286,7 +286,9 @@ function renderPhoneStatus(target, data) {
 function renderBuild(target, data) {
   // /plan returns a flat {plan} / {actions} body — no envelope, no payload key.
   if (data.plan?.steps) {
-    target.appendChild(el("p", "summary", data.plan.name || "Plan created."));
+    // Plan payloads identify themselves with `goal` (Plan.to_dict); the old
+    // `name` read never matched, so the summary was always the fallback.
+    target.appendChild(el("p", "summary", data.plan.name || data.plan.goal || "Plan created."));
     renderActionCards(target, data.plan.steps, "description");
   } else if (data.actions) {
     target.appendChild(el("p", "summary", `Found ${data.actions.length} improvement actions.`));

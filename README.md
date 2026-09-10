@@ -38,6 +38,8 @@ One brain → many capabilities:
 - **Capability registry** — every subsystem declares its intents, required entities, risk level, executor, and *verification strategy*; the orchestrator derives execution and confirmation policy from that table.
 - **Safety-first execution** — device actions require a server-minted, single-use, expiring approval token; auto-approve is opt-in.
 - **Auto-resolving bug log** — open verification bugs are marked fixed automatically (with evidence) when a later pixel-diff proves the click actually changed the screen.
+- **Routing Explorer** — a dedicated panel that traces any utterance through NovaBrain's intent gates, showing which rung owns it and a live preview of what you would actually see (the scratch answer text, the research headline, or the plan outline). Traced by the live server (`POST /brain/decide`); an embedded JS mirror takes over when the server is unreachable.
+- **Full phone control over ADB** — the J.A.R.V.I.S phone mode opens any installed app (alias or package), runs in-app searches via deep links (YouTube/Google/Maps/Spotify…), texts saved contacts by name (resolved against the device contact book, never split by guesswork), and opens files/folders through the Files app or system chooser.
 
 ## 🧠 Architecture
 
@@ -172,8 +174,15 @@ what is 2 cubed plus the square root of 9 → 11 (offline scratch brain)
 log base 2 of 8 plus 10C3                → 123 (JEE-style: logs + combinatorics)
 solve x^2 - 5x + 6 = 0                   → worked quadratic solution with roots
 stop that                                → graceful WM_CLOSE of the last app
+open youtube on my phone                 → launches YouTube on the paired device
+search cats on youtube on my phone       → YouTube deep-link search (nothing typed)
+open the report.pdf file on my phone     → opens the file via the system chooser
+open the downloads folder on my phone    → opens the Files app
+open steam and go to library and launch gta v
+                                         → 3-step desktop plan: launch → deep-link navigate →
+                                           vision-guided launch with process verification
 take a screenshot on my phone            → PNG pulled to data/screenshots/, verified
-text mom saying hi from NovaControl      → pre-fills messaging; you press send
+text sesi 2 saying hi from NovaControl  → resolves the saved contact → pre-fills messaging; you press send
 ```
 
 ### Voice input
@@ -186,6 +195,18 @@ The J.A.R.V.I.S tab has a **VOICE** button using OS-native speech recognition an
 2. On the device: **Settings → About → tap Build number 7×** → **Developer options → enable USB debugging**
 3. Plug in over USB → press **Connect Phone** in the J.A.R.V.I.S tab → accept the RSA prompt on the device
 
+Once paired, phone mode can: **open any installed app** (by alias or package name, discovered from the device), **search inside apps** via deep links (`search cats on youtube on my phone` opens YouTube pre-loaded with the query — nothing is typed), **text a saved contact by name** (the leading words are resolved against the on-device contact book first, so free text is never split by guesswork; the messaging app is pre-filled and *you* press send), **call by saved name** (dialer pre-filled), and **open files/folders** (a named file opens through the system chooser; folders land in the Files app). Bridge status and next steps are surfaced in the J.A.R.V.I.S phone tab, and every executed action lands in the Recent Activity timeline.
+
+### Routing Explorer
+
+The **Routing** panel answers *"where does my utterance land?"*. Type any phrase and it shows the full gate walk — every intent gate NovaBrain evaluates in order, which one matched (and why), the landing intent with confidence, and a small preview of what you would actually see on that rung:
+
+- **scratch** rungs (greetings, math, conversions, knowledge) — the real local answer text;
+- **explore** — the report headline the research run would produce;
+- **plan / device actions** — the real plan outline and action list.
+
+While the server is up, tracing runs live through `POST /brain/decide` (the landing decision *is* `NovaBrain.decide()` — the explorer can't disagree with chat). If the server is unreachable, an **embedded JS mirror** of the gate table takes over so the explorer still answers offline; it is labelled as approximate in the UI, and its gate names/order are drift-guarded against the Python table in CI.
+
 ### CLI
 
 ```powershell
@@ -197,7 +218,7 @@ python -m novacontrol demo phase12
 
 ## 🔌 API
 
-FastAPI app factory with REST + SSE + WebSocket surfaces. Full route catalog in [docs/API.md](docs/API.md); the most useful endpoints:
+FastAPI app factory with REST + SSE + WebSocket surfaces. The full route catalog in [docs/API.md](docs/API.md) is **generated** from the shared route registry (`novacontrol.api.route_consumers`) — after adding a route, run `python scripts/generate_api_reference.py` (CI enforces `--check`). The most useful endpoints:
 
 | Method | Route | Purpose |
 |---|---|---|
@@ -210,6 +231,7 @@ FastAPI app factory with REST + SSE + WebSocket surfaces. Full route catalog in 
 | `GET` | `/bugs` · `POST /bugs/{id}/fix` | Bug log review and resolution |
 | `GET` | `/tasks` · `POST /tasks/delete` · `/tasks/clear` | Task center |
 | `POST` | `/brain/mode` · `/brain/cloud` | Switch scratch/LLM brain and configure cloud providers |
+| `POST` | `/brain/decide` | Trace an utterance through the routing gates, with a per-rung preview |
 | `POST` | `/explore` | Research pipeline |
 | `GET` | `/events/stream` | Live SSE activity channel — every frame carries a `correlation_id` |
 | `GET` | `/health` · `/status` | Health and route metadata |
@@ -293,7 +315,7 @@ The suite is hermetic: phone and desktop tests use fake runners (`NoopPhoneRunne
 |---|---|
 | Global Intelligence Layer | ✅ Complete — regression-tested (punctuation, case, typos, variations, context, multi-intent) |
 | Desktop control | ✅ Working (Windows) — apps, folders, chains, dictation, vision-guided clicks |
-| Phone control | ✅ Live-verified against a real device — apps, screenshots, pre-filled texts/calls |
+| Phone control | ✅ Live-verified against a real device (Xiaomi Pad) — any installed app, in-app YouTube/Google/Maps searches, saved-contact texts/calls, files & folders, screenshots |
 | Browser automation | ⚠️ Controller + Playwright runner implemented; real-page workflows still maturing |
 | Voice | ⚠️ OS-native STT/TTS with graceful fallback; quality depends on platform speech services |
 | GUI dashboard | ⚠️ PySide6 app present, secondary to the web UI |

@@ -33,6 +33,19 @@ class AskRequest(BaseModel):
         return value
 
 
+class BrainDecideRequest(BaseModel):
+    """POST /brain/decide — trace an utterance through the routing gates."""
+
+    text: str
+
+    @field_validator("text")
+    @classmethod
+    def _text_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("text must not be empty or whitespace")
+        return value
+
+
 class ExploreRequest_(BaseModel):
     """POST /explore — research one topic.
 
@@ -128,6 +141,7 @@ class ApiSurface:
                 ApiRoute("POST", "/improve/approve", "Approve a preview for code changes.", authenticated=True),
                 ApiRoute("POST", "/learn", "Run a local feedback learning cycle.", authenticated=True),
                 ApiRoute("POST", "/train", "Run bounded autonomous local learning iterations.", authenticated=True),
+                ApiRoute("POST", "/brain/decide", "Trace an utterance through the routing gates with a rung preview.", authenticated=True),
                 ApiRoute("POST", "/plan", "Create and optionally execute a plan.", authenticated=True),
                 ApiRoute("POST", "/command/plan", "Plan a natural desktop or phone command.", authenticated=True),
                 ApiRoute("POST", "/command/execute", "Execute an approved natural desktop or phone command.", authenticated=True),

@@ -1948,3 +1948,150 @@ select.cyber-input:focus-visible {
   color: var(--text-muted);
   font-family: var(--font-mono);
 }
+
+/* ── Routing Explorer ─────────────────────────────────────── */
+
+.routing-source {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin: 0.25rem 0 0.75rem;
+  font-family: var(--font-mono);
+}
+
+.routing-result {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.routing-landing {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--accent, #00e5ff);
+  border-radius: 10px;
+  background: rgba(0, 229, 255, 0.06);
+}
+
+.routing-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.routing-intent {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--text-primary);
+  font-size: 1.05rem;
+}
+
+.routing-conf {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+
+.routing-gates {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.routing-gate {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.4rem 0.7rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+.routing-gate.skipped {
+  color: var(--text-muted);
+  opacity: 0.55;
+}
+
+.routing-gate.matched {
+  background: rgba(0, 229, 255, 0.08);
+  border: 1px solid rgba(0, 229, 255, 0.25);
+  color: var(--text-primary);
+}
+
+.routing-gate-mark {
+  font-family: var(--font-mono);
+  width: 1.1em;
+}
+
+.routing-gate-name {
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.routing-gate-intent {
+  font-family: var(--font-mono);
+  color: var(--accent, #00e5ff);
+  font-size: 0.78rem;
+}
+
+.routing-gate-reason {
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+}
+
+.routing-preview {
+  border: 1px dashed rgba(0, 229, 255, 0.4);
+  border-radius: 10px;
+  padding: 0.9rem 1rem;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.routing-preview-head {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
+}
+
+.routing-preview-body {
+  font-size: 0.9rem;
+  color: var(--text-primary);
+  line-height: 1.5;
+  margin: 0;
+}
+
+.routing-preview-body blockquote,
+blockquote.routing-preview-body {
+  border-left: 3px solid var(--accent, #00e5ff);
+  padding-left: 0.75rem;
+  margin: 0;
+}
+
+.routing-preview-note {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  margin-top: 0.5rem;
+}
+
+.routing-outline {
+  margin: 0.25rem 0 0;
+  padding-left: 1.3rem;
+  font-size: 0.88rem;
+  color: var(--text-primary);
+}
+
+.routing-outline li {
+  margin: 0.2rem 0;
+}
+
+.routing-utterance {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  text-align: right;
+}
