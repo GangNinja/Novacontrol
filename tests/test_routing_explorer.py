@@ -9,8 +9,12 @@ headline, plan outline). These tests pin:
   * the landing decision always equals NovaBrain.decide() for the same text;
   * per-rung preview shapes: scratch text / explore headline / plan outline /
     device-action plan outline / info text; blank input is a 422;
-  * the embedded JS mirror (the offline fallback) lands the same intent on a
-    representative probe table, driven by the REAL static JS in Node.
+  * the ``classifiers`` block (narrow routing gate vs broad engine) covering
+    every deliberate-disagreement relation: match, order, engine_only,
+    breadth, unknown;
+  * the embedded JS mirror (the offline fallback) lands the same intent AND
+    the same classifier relation on a representative probe table, driven by
+    the REAL static JS in Node.
 """
 
 from __future__ import annotations
@@ -132,6 +136,43 @@ class RoutingDecideEndpointTests(unittest.TestCase):
         self.assertEqual(result["trace"][-1]["gate"], "scratch_greeting")
         self.assertEqual(len(result["trace"]), 1)
 
+    # (utterance, narrow intent, broad intent, expected relation) — every
+    # deliberate-disagreement class the explorer highlights.
+    CLASSIFIER_CASES = [
+        ("hello", "greeting", "greeting", "match"),
+        ("what is 2 cubed plus the square root of 9", "math", "math", "match"),
+        ("what is the capital of france", "knowledge", "knowledge", "match"),
+        ("what time is 2 plus 3", "math", "time", "order"),
+        ("search cats on youtube on my phone", None, "phone_control", "engine_only"),
+        ("open notepad and type hello", None, "desktop_control", "engine_only"),
+        ("hello there", None, "unknown", "unknown"),
+    ]
+
+    def test_classifiers_block_covers_every_relation(self) -> None:
+        """The explorer returns narrow-vs-broad with all five relations."""
+        for text, narrow, broad, relation in self.CLASSIFIER_CASES:
+            with self.subTest(text=text):
+                result = self._trace(text)
+                cls = result["classifiers"]
+                self.assertEqual(cls["narrow"], narrow)
+                self.assertEqual(cls["broad"], broad)
+                self.assertEqual(cls["relation"], relation)
+                self.assertIsInstance(cls["note"], str)
+                self.assertTrue(cls["note"])
+
+    def test_classifiers_agree_with_the_engines_directly(self) -> None:
+        """The block is computed from scratchable_intent + classify_broad."""
+        from novacontrol.brain.brain import _classifier_relation
+        from novacontrol.brain.scratch import classify_broad, scratchable_intent
+
+        for text, _n, _b, _r in self.CLASSIFIER_CASES:
+            with self.subTest(text=text):
+                cls = self._trace(text)["classifiers"]
+                expected = _classifier_relation(
+                    scratchable_intent(text.lower()), classify_broad(text.lower())
+                )
+                self.assertEqual(cls, expected)
+
 
 @unittest.skipIf(TestClient is None, "httpx not installed")
 class RoutingPreviewShapeTests(unittest.TestCase):
@@ -226,6 +267,54 @@ class RoutingJsMirrorTests(unittest.TestCase):
         ("remember this: buy milk", "memory", "memory_store"),
         ("this sentence is totally random", "chat", "chat_fallback"),
     ]
+
+    # (utterance, expected relation) — the mirror must classify the SAME
+    # deliberate-disagreement relations as the Python engine.
+    MIRROR_RELATIONS = [
+        ("hello", "match"),
+        ("what is 2 cubed plus the square root of 9", "match"),
+        ("what is the capital of france", "match"),
+        ("recommend a good movie", "match"),
+        ("convert 10 km to miles", "match"),
+        ("what time is 2 plus 3", "order"),
+        ("search cats on youtube on my phone", "engine_only"),
+        ("open notepad and type hello", "engine_only"),
+        ("hello there", "unknown"),
+    ]
+
+    def test_mirror_relations_track_the_python_engines(self) -> None:
+        """The JS broad-classifier mirror reports the same relations as Python.
+
+        The relation label is the explorer's core honesty check — if the
+        offline mirror ever claims "match" where the engine would say "order"
+        (or vice versa), the comparison card lies. This pins them equal on a
+        probe table that exercises every relation.
+        """
+        if self.NODE is None:
+            self.skipTest("node is not installed")
+        rows = "\n".join(
+            "  [" + json.dumps(t) + ", " + json.dumps(relation) + "],"
+            for t, relation in self.MIRROR_RELATIONS
+        )
+        script = (
+            "global.window = global;"
+            "const fs = require('fs');"
+            "eval(fs.readFileSync('src/novacontrol/web/static/js/routing-explorer.js','utf8'));"
+            "const rows = [\n" + rows + "\n];"
+            "let failed = 0;"
+            "for (const [text, relation] of rows) {"
+            "  const r = window.routingExplorerMirror.mirrorTrace(text);"
+            "  if (r.classifiers.relation !== relation) {"
+            "    console.error('FAIL ' + JSON.stringify(text) + ': relation ' + r.classifiers.relation + ' !== ' + relation);"
+            "    failed++;"
+            "  }"
+            "}"
+            "console.error(failed ? failed + ' relation(s) failed' : 'all mirror relations passed');"
+            "process.exit(failed ? 1 : 0);"
+        )
+        proc = subprocess.run([self.NODE, "-e", script], capture_output=True, text=True)  # type: ignore[list-item]
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("all mirror relations passed", proc.stderr)
 
     def test_mirror_gate_names_track_the_python_table(self) -> None:
         """The JS mirror's gate names and order must match the Python table.

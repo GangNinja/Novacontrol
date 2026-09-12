@@ -27,6 +27,7 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("POST", "/ask"): "renderChatResult",  # envelope branches by route/intent
     ("POST", "/brain/decide"): "no-render",  # routing-explorer.js renders the trace itself
     ("POST", "/explore"): "renderExplore",
+    ("GET", "/explore/trending"): "no-render",  # example chips fetched by js/routing-explorer.js sibling app.js loader, not run()
     ("POST", "/command/plan"): "renderCommand",
     ("POST", "/command/execute"): "renderCommand",
     ("POST", "/desktop/plan"): "renderCommand",

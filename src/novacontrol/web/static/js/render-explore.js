@@ -13,6 +13,16 @@ function tryRenderResearch(target, data) {
   return true;
 }
 
+/** Shape probe only: true when `data` looks like a research report.
+ *
+ * renderChatResult uses this to route /ask research payloads to the chat
+ * bubble renderer without rendering the full Explore page inside the
+ * conversation; renderExplore keeps the (target, data) page-render form.
+ */
+function looksLikeResearch(data) {
+  return Boolean(data && (data.overview || data.key_points || data.sources || data.videos));
+}
+
 function renderExplore(target, data) {
   if (!tryRenderResearch(target, data)) {
     renderAiAnswerPage(target, data, state.lastQuery || data.topic || "Research");

@@ -25,15 +25,19 @@ function renderChatResult(data) {
   if (state.lastQuery) appendMessage("user", state.lastQuery);
 
   // /ask answers travel in one flat envelope {route, intent, summary, data}:
-  // `data` is the handler payload. A full research report (Explore intent) is
-  // that payload, and the report renderer owns its shape — unwrap once and
-  // delegate instead of probing envelope-vs-flat candidates.
+  // `data` is the handler payload. Chat is a CONVERSATION, not an Explore page:
+  // research answers render as a message bubble with the sourced answer text
+  // and their source chips — the full report page (sections, sources rail,
+  // follow-up chips) stays in the Explore panel where it belongs.
   const payload = data.data || data;
-
-  if (tryRenderResearch(stream, payload)) return;
 
   if ((data.route === "desktop_automation" || payload.workflow?.actions) && payload.approval) {
     renderCommand(stream, payload);
+    return;
+  }
+
+  if (looksLikeResearch(payload)) {
+    renderResearchBubble(stream, payload);
     return;
   }
 
@@ -44,6 +48,45 @@ function renderChatResult(data) {
     route: data.route || data.intent || "answer",
     payload,
   });
+}
+
+// Research answers INSIDE the conversation: the answer text as a markdown
+// bubble (the shared extractor already prefers `answer` over `overview`) —
+// the template builders structure it as an intro line, "**What it is:**" /
+// "**Key points:**" headings and bullets, and renderMd renders those live.
+// Under it: the source chips so every claim stays clickable, plus an
+// "explore" hand-off chip that jumps to the Explore panel with the same
+// topic pre-filled — the full report page (sections, sources rail, "Ask
+// Next" chips) lives THERE, never duplicated inside the chat.
+function renderResearchBubble(stream, report) {
+  const answer = extractAnswerText(report, "");
+  appendMessage(
+    "assistant",
+    answer || "I researched the topic but the sources returned nothing usable — try Explore for the full report.",
+    { route: "explore" },
+  );
+  const bubble = stream.querySelector(".message.assistant:last-of-type");
+  if (!bubble) return;
+  if (report.source_chips?.length) bubble.appendChild(sourceChips(report.source_chips));
+  const handoff = el("div", "pill-row");
+  const chip = el("button", "explore-handoff", "explore");
+  chip.type = "button";
+  chip.title = "Open the full research report in Explore";
+  chip.addEventListener("click", () => {
+    // Hand off the ALREADY-FETCHED report: render it into the Explore output
+    // directly (no second research round-trip), then switch to the panel.
+    const output = byId("exploreOutput");
+    if (output) {
+      clearNode(output);
+      output.classList.remove("empty-state");
+      renderExplore(output, report);
+      output.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    const nav = document.querySelector('.nav-item[data-panel="explorePanel"]');
+    if (nav) nav.click();
+  });
+  handoff.appendChild(chip);
+  bubble.appendChild(handoff);
 }
 
 function renderGeneralAiPage(target, { query, summary, route, payload }) {

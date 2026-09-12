@@ -13,7 +13,7 @@ One brain → many capabilities:
 | 🌐 **Browser automation** | Playwright-backed navigation, extraction, form filling, and web-app checks behind an approval policy |
 | 👁 **Vision** | Screen understanding, guided clicks ("click the Library button"), pixel-diff verification, optional multimodal vision model |
 | 📱 **Phone control** | Android over adb: launch apps, verified screenshots, pre-filled texts/calls |
-| 🔎 **Research** | Multi-stage research pipeline that streams live progress into the UI |
+| 🔎 **Research** | Multi-stage research pipeline that streams live progress into the UI; topics suggested from live daily news, answers synthesized from site-chrome-cleaned facts |
 | 💬 **Dual brain** | Fully local scratch brain — incl. worded & exam-grade (JEE) math — or a real LLM (Ollama / OpenAI-compatible / Gemini-style) |
 
 ---
@@ -38,8 +38,13 @@ One brain → many capabilities:
 - **Capability registry** — every subsystem declares its intents, required entities, risk level, executor, and *verification strategy*; the orchestrator derives execution and confirmation policy from that table.
 - **Safety-first execution** — device actions require a server-minted, single-use, expiring approval token; auto-approve is opt-in.
 - **Auto-resolving bug log** — open verification bugs are marked fixed automatically (with evidence) when a later pixel-diff proves the click actually changed the screen.
-- **Routing Explorer** — a dedicated panel that traces any utterance through NovaBrain's intent gates, showing which rung owns it and a live preview of what you would actually see (the scratch answer text, the research headline, or the plan outline). Traced by the live server (`POST /brain/decide`); an embedded JS mirror takes over when the server is unreachable.
+- **Routing Explorer** — a dedicated panel that traces any utterance through NovaBrain's intent gates, showing which rung owns it and a live preview of what you would actually see (the scratch answer text, the research headline, or the plan outline). Traced by the live server (`POST /brain/decide`); an embedded JS mirror takes over when the server is unreachable. A **broad-classifier toggle** re-runs the same utterance through the scratch engine's wide `_classify()` view and highlights where the narrow gate and the broad engine deliberately disagree (order / engine-only / breadth / unknown / match) — including casual phrasings, which the mirror's research detector knows ("things to know about X", "wtf is X", …), drift-guarded against the Python keyword list.
 - **Full phone control over ADB** — the J.A.R.V.I.S phone mode opens any installed app (alias or package), runs in-app searches via deep links (YouTube/Google/Maps/Spotify…), texts saved contacts by name (resolved against the device contact book, never split by guesswork), and opens files/folders through the Files app or system chooser.
+- **Answers built from content, not chrome** — search snippets routinely glue consent banners, footers, and trademark lines onto real text. A sentence-level site-chrome filter strips them *before* synthesis, so a researched answer explains the topic instead of quoting "By using this site, you agree to the Terms of Use" or "This page was last edited on …". Chat and Explore share the pipeline **and** the filter, so both answer from the same cleaned facts.
+- **Chat stays a conversation; Explore keeps the report** — a research question asked in Chat answers inside the chat stream as a structured answer card (the sourced answer text with its "What it is:" / "Key points:" sections, clickable source chips, and an `explore` chip that jumps to the full report); the full research page — sections, sources rail, related videos, follow-up suggestions — lives only in the Explore panel. "How to" instructional questions route to research instead of the chat fallback, and a compound topic needs two content-word matches before a source is accepted, so "container garden" no longer pulls in Docker pages.
+- **Understands casual phrasing** — you don't have to type perfect questions. Scaffold forms ("things to know about X", "what should i know about X", "whats the deal with X", "tell me stuff about X", "any facts about X", "wtf is X") all route to research, and the search topic is anchored to what FOLLOWS the scaffold — so "the most important things to know about brics summit 2026" researches BRICS, not dictionary pages for the word "important". Explicit memory-store phrasing ("remember this: …") still outranks research words inside the remembered content.
+- **Daily-updates topic suggestions** — the Explore panel's topic chips are never a hardcoded list: they come from `GET /explore/trending`, which fetches live top-story news headlines (Google News RSS, standard library only, no API key), trims each into a research topic, caches for 30 minutes, invalidates by day, and rotates the visible window hourly — so each visit suggests a different slice of what's actually happening in the world. When the feed is unreachable the panel degrades to a few static help examples.
+- **Command-center web UI** — one committed design layer over every panel: a fluid layout (`clamp()` gutters, content-sized rails, breakpoints from 1920px down to phones) that reflows instead of clipping, plus a verified fit audit across all 11 panels and 11 widths.
 
 ## 🧠 Architecture
 
@@ -159,6 +164,8 @@ Open **http://127.0.0.1:8000/** and try:
 - `open notepad and type hello`
 - `what is quantum tunneling` (research — streams live stages)
 - `take a screenshot on my phone`
+- `whats the deal with brics summit 2026` (casual phrasing — routes to research, searches the actual topic)
+- The Explore panel opens with **today's news topics** as one-click research chips
 
 ### Natural-language command examples
 
@@ -183,6 +190,31 @@ open steam and go to library and launch gta v
                                            vision-guided launch with process verification
 take a screenshot on my phone            → PNG pulled to data/screenshots/, verified
 text sesi 2 saying hi from NovaControl  → resolves the saved contact → pre-fills messaging; you press send
+how to start a container garden on a balcony → researches gardening (not Docker)
+whats the deal with quantum computing    → researches quantum computing
+tell me stuff about the mariana trench   → researches the mariana trench
+remember this: facts about cats          → stores to memory (does NOT research cats)
+```
+
+### How Explore understands what you type
+
+Research queries rarely arrive as perfect sentences, so Explore's language layer anchors on **scaffold markers** instead of rigid grammar: the real topic is whatever *follows* "things to know about", "should i know about", "the deal with", "stuff/facts about", "info on", "wtf is", "basics of". The router accepts the same casual forms, so "whats the deal with quantum computing" routes to research *and* searches for quantum computing — not for "deal". Scaffold adjectives never leak into the search (the fix for researching the word "important" instead of the BRICS summit). Sources must clear a topical-relevance gate: a compound topic ("container garden", "brics summit 2026") needs two content-word matches from a page, so Docker and shipping-container pages can't answer a gardening question, while comparison topics ("compare email, chat, and phone calls") stay per-item.
+
+### Web interface
+
+The browser UI is a single-page command center served by the API (`/`): a grouped sidebar (Core / Intelligence / Automation / Engineering) over eleven panels — **Command**, **Chat**, **Explore**, **Routing**, **J.A.R.V.I.S**, **Vision**, **Build**, **Learn**, **System**, **Settings**, **CLI** — backed by one SSE channel (`/events/stream`) for live progress and the Recent Activity timeline.
+
+Layout is fluid rather than fixed: gutters, heights, and rails are `clamp()`-based tokens, so the same markup reflows from a 1920px desktop to a 390px phone without a separate mobile build — below 700px the sidebar becomes a top command deck whose pills **wrap into rows**, so every destination stays visible (never hidden behind a sideways scroll). The stylesheet is a single design-token block plus one component layer — consolidated with a **computed-style A/B audit** (`scripts/ui_audit.py --baseline <old.css>`) that proves a cleanup changed nothing the browser can see — and reduced-motion is respected throughout.
+
+Chat presentation follows conversation conventions on purpose: research answers arrive as structured answer cards — the answer text with its heading sections and bullets, source chips, and an `explore` hand-off chip that renders the already-fetched report into the Explore panel (no second research round-trip) — while the full report furniture (query chip, verification, sources/videos rail, follow-up question chips) remains the Explore panel's job. `ChatResearchBubbleDomTests` pins this split — the Explore page must never render inside the chat stream. The Explore panel's welcome card shows live **trending topic chips** (today's news, rotating hourly) instead of fixed examples.
+
+Verify the UI end to end:
+
+```powershell
+$env:PYTHONPATH='src'
+python -m pytest tests/ -q            # includes the UI contract + focus-ring + reduced-motion suites
+python scripts/ui_audit.py --url http://127.0.0.1:8001/                  # every panel fits at every breakpoint
+python scripts/ui_audit.py --url http://127.0.0.1:8001/ --baseline old.css  # zero computed-style drift
 ```
 
 ### Voice input
@@ -207,6 +239,8 @@ The **Routing** panel answers *"where does my utterance land?"*. Type any phrase
 
 While the server is up, tracing runs live through `POST /brain/decide` (the landing decision *is* `NovaBrain.decide()` — the explorer can't disagree with chat). If the server is unreachable, an **embedded JS mirror** of the gate table takes over so the explorer still answers offline; it is labelled as approximate in the UI, and its gate names/order are drift-guarded against the Python table in CI.
 
+A **"Compare with broad classifier"** toggle re-runs the same utterance through the scratch engine's *broad* `_classify()` view and highlights where the narrow routing gate and the broad engine deliberately disagree: **order** (e.g. `what time is 2 plus 3` — the narrow router promotes math ahead of time), **engine-only** (`open notepad and type hello` — the broad engine sees desktop_control but its row is routing_safe=False so routing dispatches to real automation instead of a canned answer), **breadth** (a wide engine match with no exact canned key), **unknown** (neither classifier has a local answer), or **match**. The JS mirror computes the same relation offline, and the Python↔JS relation parity is drift-guarded in CI.
+
 ### CLI
 
 ```powershell
@@ -228,11 +262,12 @@ FastAPI app factory with REST + SSE + WebSocket surfaces. The full route catalog
 | `GET`/`POST` | `/vision/describe` · `/vision/click` | Screen understanding and guided clicks |
 | `POST` | `/vision/model` · `/vision/model/clear` | Configure/clear the multimodal vision model (hot swap) |
 | `GET` | `/intelligence` | GIL telemetry, improvement findings, capability registry |
-| `GET` | `/bugs` · `POST /bugs/{id}/fix` | Bug log review and resolution |
+| `GET` | `/bugs` · `POST /bugs/{id}/fix` · `POST /bugs/clear-fixed` | Bug log review, resolution, and clearing resolved entries |
 | `GET` | `/tasks` · `POST /tasks/delete` · `/tasks/clear` | Task center |
 | `POST` | `/brain/mode` · `/brain/cloud` | Switch scratch/LLM brain and configure cloud providers |
 | `POST` | `/brain/decide` | Trace an utterance through the routing gates, with a per-rung preview |
 | `POST` | `/explore` | Research pipeline |
+| `GET` | `/explore/trending` | Current daily research topics from live top-story news (rotating window; feeds the Explore panel's chips) |
 | `GET` | `/events/stream` | Live SSE activity channel — every frame carries a `correlation_id` |
 | `GET` | `/health` · `/status` | Health and route metadata |
 
@@ -292,7 +327,16 @@ Type checking:
 python -m mypy src
 ```
 
-The suite is hermetic: phone and desktop tests use fake runners (`NoopPhoneRunner`, `NoopDesktopRunner`) — no real device or OS interaction during tests.
+The suite is hermetic: phone and desktop tests use fake runners (`NoopPhoneRunner`, `NoopDesktopRunner`) — no real device or OS interaction during tests. Trending-topic tests inject fake headline fetchers, so the news feature is tested without network too (one live smoke is run manually, not in CI).
+
+UI and rendered-output quality have their own harnesses:
+
+```powershell
+python scripts/ui_audit.py --url http://127.0.0.1:8001/        # fit audit: 11 panels x 11 widths
+python scripts/ui_audit.py --url http://127.0.0.1:8001/ --baseline old.css   # computed-style A/B
+```
+
+For a browser-driven smoke of the real page (guided-click result card, reduced motion), install the browser extra: `pip install -e ".[browser]"` then `python -m playwright install chromium`.
 
 ## 🛠 Development
 
@@ -321,6 +365,9 @@ The suite is hermetic: phone and desktop tests use fake runners (`NoopPhoneRunne
 | GUI dashboard | ⚠️ PySide6 app present, secondary to the web UI |
 | Vision tab | ✅ Working — guided clicks + pixel-diff verification (OpenCV fast path); optional multimodal vision model (Ollama/OpenAI/Gemini/OpenRouter) upgrades location to semantic |
 | Scratch brain math | ✅ Worded arithmetic, conversions, percentages, and JEE-style logs/trig/combinatorics/quadratics/AP — all offline, regression-pinned |
+| Research answer quality | ✅ Site-chrome filter (consent banners, footers, trademark lines) applied before synthesis; scaffold-anchored topic extraction ("things to know about brics summit 2026" researches BRICS, not dictionary pages for "important"); topical-relevance guard rejects single-word hijacks on compound topics ("container garden" ≠ Docker) — pinned by `tests/test_synthesizer.py` + `tests/test_explore.py` |
+| Trending topic suggestions | ✅ `GET /explore/trending` — live Google News RSS headlines (no API key, no hardcoded lists), cached 30 min, invalidated daily, rotated hourly; offline degrades to static help chips — pinned by `tests/test_explore_trending.py` |
+| Web UI / responsive | ✅ Command-center redesign with fluid auto-fit — 11 panels verified overflow-free from 390px to 1920px, plus a computed-style A/B guard for stylesheet cleanups |
 | Self-improvement | ⚠️ Telemetry + sandboxed previews implemented; fully autonomous improvement is *not* enabled |
 
 See [docs/STATUS.md](docs/STATUS.md) for the phase-by-phase history.
@@ -329,7 +376,10 @@ See [docs/STATUS.md](docs/STATUS.md) for the phase-by-phase history.
 
 - Desktop automation is **Windows-only** today (PowerShell, Start Menu, `shell:` URIs)
 - Vision-guided clicks work without a vision model via OCR/landmarks, but semantic location needs one configured (Ollama vision model or cloud key)
-- The offline scratch brain's research synthesis is deterministic — *sourced* reports need a configured LLM/online provider
+- The offline scratch brain's research synthesis is deterministic — *sourced* reports need a configured LLM/online provider; without a model the answer is assembled from cleaned snippets, so its depth tracks what search returns
+- Chrome filtering removes site furniture from snippets, but it cannot invent missing facts: a topic whose search results are all low quality still yields a shallow answer
+- Trending topic suggestions track Google News top stories: very new stories may have thin coverage for a few minutes, and the rotation cadence (30-min refetch, hourly window) is fixed rather than user-configurable
+- Template research answers quote source snippets, so bullets can be terse; connecting an LLM (Vision panel → model config) upgrades synthesis to flowing prose
 - Phone texts/calls never send/dial themselves — by design
 - No packaged binaries yet; run from source
 
@@ -340,6 +390,8 @@ See [docs/STATUS.md](docs/STATUS.md) for the phase-by-phase history.
 - [ ] Non-Ollama local vision-model runtimes (llama.cpp / LM Studio); per-application learned UI maps
 - [ ] Packaged desktop distribution
 - [ ] Expanded cloud-LLM presets and model routing
+- [ ] Trending-chip shuffle (exclude seen topics on demand) and a user-selectable news edition in Settings
+- [ ] LLM-powered chat synthesis: flowing prose answers when a model is configured, template fallback otherwise
 
 ## 🤝 Contributing
 

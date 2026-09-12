@@ -485,3 +485,89 @@ def _thumbnail(renderer: dict[str, object]) -> str:
 def _duration(renderer: dict[str, object]) -> str:
     length_text = renderer.get("lengthText", {})
     return _runs_text(length_text)
+
+
+# ────────────────────────────────────────────────────────────
+# Trending research topics (daily world updates)
+# ────────────────────────────────────────────────────────────
+
+class _RssHeadlineParser(HTMLParser):
+    """Minimal RSS reader: <item><title>/<pubDate> pairs from a news feed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._in_item = False
+        self._in_title = False
+        self._in_date = False
+        self._text: list[str] = []
+        self.headlines: list[tuple[str, str]] = []  # (title, pubDate)
+        self._title = ""
+        self._date = ""
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "item":
+            self._in_item = True
+            self._title = ""
+        elif self._in_item and tag == "title":
+            self._in_title = True
+            self._text = []
+        elif self._in_item and tag == "pubdate":
+            self._in_date = True
+            self._text = []
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title or self._in_date:
+            self._text.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "title" and self._in_title:
+            self._title = " ".join("".join(self._text).split())
+            self._in_title = False
+        elif tag == "pubdate" and self._in_date:
+            self._in_date = False
+        elif tag == "item" and self._in_item:
+            self._in_item = False
+            if self._title:
+                self.headlines.append((self._title, self._date))
+            self._date = ""
+
+
+def _news_feed_url(edition: str) -> str:
+    """Google News RSS top-stories URL for a home-country edition.
+
+    ``edition`` is an ISO-ish country code ("us", "in", "gb"); unknown codes
+    fall back to the US edition rather than erroring.
+    """
+    code = (edition or "us").strip().lower() or "us"
+    supported = {"us": ("en-US", "US", "US:en"), "in": ("en-IN", "IN", "IN:en"), "gb": ("en-GB", "GB", "GB:en")}
+    hl, gl, ceid = supported.get(code, supported["us"])
+    return f"https://news.google.com/rss?hl={hl}&gl={gl}&ceid={ceid}"
+
+
+def fetch_trending_headlines(*, edition: str = "us", timeout: int = 8) -> tuple[str, ...]:
+    """Live top-story headlines from Google News RSS (standard library only).
+
+    Returns clean headline strings (publisher suffix stripped). Empty tuple on
+    any failure — callers own the fallback, network problems must never raise
+    into the API layer.
+    """
+    url = _news_feed_url(edition)
+    try:
+        request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urlopen(request, timeout=timeout) as response:
+            xml = response.read().decode("utf-8", errors="replace")
+    except Exception:
+        return ()
+    parser = _RssHeadlineParser()
+    try:
+        parser.feed(xml)
+    except Exception:
+        return ()
+    titles: list[str] = []
+    for title, _date in parser.headlines:
+        # Google News appends " - Publisher"; the research topic is the story.
+        cleaned = re.sub(r"\s+-\s+[^-]{2,40}$", "", title).strip()
+        cleaned = unescape(cleaned)
+        if len(cleaned) >= 8:
+            titles.append(cleaned)
+    return tuple(titles)

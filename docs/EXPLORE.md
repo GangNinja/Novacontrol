@@ -28,6 +28,27 @@ Explore should let the user ask about any topic and receive:
 - `ExploreService`: orchestrates research, videos, and explanation
 - `ExploreModule`: event-driven runtime module
 
+## Answer quality: the site-chrome filter
+
+Search snippets glue site furniture onto real content — consent banners ("By
+using this site, you agree to the Terms of Use"), Wikipedia footers ("This page
+was last edited on …"), trademark lines, newsletter and sign-in frames. The
+synthesizer used to treat those as facts, so a researched answer could open
+with a Terms-of-Use sentence instead of an explanation.
+
+`synthesizer.clean_snippet()` now runs every snippet through
+`strip_boilerplate()` first: chrome is detected **per sentence**, so a snippet
+that mixes chrome with real content keeps the content, and a snippet that is
+nothing but chrome cleans to `""` and every consumer skips it (facts, key
+points, highlights, section items, source references, and the LLM prompt).
+`is_boilerplate(text)` exposes the same verdict for tests and callers.
+
+This is shared with Chat: a research question asked in Chat runs the identical
+pipeline, so both surfaces answer from the same cleaned facts. The behaviour is
+pinned by `SiteChromeFilterTests` in `tests/test_synthesizer.py`, which uses the
+verbatim snippets behind the original failure and also guards against
+over-filtering (a legitimate sentence *about* privacy policies must survive).
+
 ## CLI
 
 ```powershell

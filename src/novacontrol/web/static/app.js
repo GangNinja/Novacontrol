@@ -826,6 +826,32 @@ function setupVision() {
 
 /* ── Initialize ────────────────────────────────────────────── */
 
+/* ── Trending Explore topics ──────────────────────────────── */
+
+// The Explore panel's topic chips come from live top-story news (server-fed,
+// rotating hourly, invalidated daily) — never a hardcoded list. The static
+// HTML chips are the offline fallback and stay until real topics arrive.
+async function loadTrendingTopics() {
+  const holder = byId("trendingChips");
+  if (!holder) return;
+  try {
+    const data = await requestJson("/explore/trending?count=6");
+    const topics = Array.isArray(data.topics) ? data.topics.filter((t) => typeof t === "string" && t.trim()) : [];
+    if (!topics.length) return; // feed unavailable: keep the static help chips
+    clearNode(holder);
+    topics.forEach((topic) => {
+      const chip = el("button", "example-chip trending-chip", topic);
+      chip.type = "button";
+      chip.title = "Research this topic";
+      chip.addEventListener("click", () => {
+        byId("exploreInput").value = topic;
+        byId("exploreButton").click();
+      });
+      holder.appendChild(chip);
+    });
+  } catch (_) { /* offline or auth-less: static chips remain */ }
+}
+
 setupTabs();
 setupActions();
 setupVision();
@@ -835,4 +861,5 @@ restoreActivePanel(); // must run after setupTabs binds the nav clicks
 renderChatHistory();
 connectActivitySource(); // one live activity channel for the whole page
 loadActivityFromServer(); // seed the timeline from the server journal
+loadTrendingTopics(); // Explore chips from today's news (falls back to static chips)
 refreshStatus();

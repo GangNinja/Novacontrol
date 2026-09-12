@@ -29,15 +29,28 @@
           </div>
         </div>
         <nav class="nav" aria-label="Workspace">
+          <span class="nav-section-label" aria-hidden="true">Core</span>
           <button class="nav-item active" data-panel="homePanel" type="button" aria-label="Command">
             <span class="nav-icon" aria-hidden="true">&#9670;</span>Command
           </button>
+          <span class="nav-section-label" aria-hidden="true">Intelligence</span>
           <button class="nav-item" data-panel="chatPanel" type="button" aria-label="Chat">
             <span class="nav-icon" aria-hidden="true">&#9672;</span>Chat
           </button>
           <button class="nav-item" data-panel="explorePanel" type="button" aria-label="Explore">
             <span class="nav-icon" aria-hidden="true">&#9673;</span>Explore
           </button>
+          <button class="nav-item" data-panel="routingPanel" type="button" aria-label="Routing explorer">
+            <span class="nav-icon" aria-hidden="true">&#9679;</span>Routing
+          </button>
+          <span class="nav-section-label" aria-hidden="true">Automation</span>
+          <button class="nav-item jarvis-item" data-panel="jarvisPanel" type="button" aria-label="JARVIS device control">
+            <span class="nav-icon" aria-hidden="true">&#9680;</span>J.A.R.V.I.S
+          </button>
+          <button class="nav-item" data-panel="visionPanel" type="button" aria-label="Vision">
+            <span class="nav-icon" aria-hidden="true">&#9673;</span>Vision
+          </button>
+          <span class="nav-section-label" aria-hidden="true">Engineering</span>
           <button class="nav-item" data-panel="buildPanel" type="button" aria-label="Build">
             <span class="nav-icon" aria-hidden="true">&#9674;</span>Build
           </button>
@@ -46,15 +59,6 @@
           </button>
           <button class="nav-item" data-panel="systemPanel" type="button" aria-label="System">
             <span class="nav-icon" aria-hidden="true">&#9676;</span>System
-          </button>
-          <button class="nav-item jarvis-item" data-panel="jarvisPanel" type="button" aria-label="JARVIS device control">
-            <span class="nav-icon" aria-hidden="true">&#9680;</span>J.A.R.V.I.S
-          </button>
-          <button class="nav-item" data-panel="visionPanel" type="button" aria-label="Vision">
-            <span class="nav-icon" aria-hidden="true">&#9673;</span>Vision
-          </button>
-          <button class="nav-item" data-panel="routingPanel" type="button" aria-label="Routing explorer">
-            <span class="nav-icon" aria-hidden="true">&#9679;</span>Routing
           </button>
           <button class="nav-item" data-panel="settingsPanel" type="button" aria-label="Settings">
             <span class="nav-icon" aria-hidden="true">&#9677;</span>Settings
@@ -165,9 +169,9 @@
             </div>
           </div>
           <div class="welcome-card">
-            <h3>Research Any Topic</h3>
-            <p>Search the web and get a synthesized answer with sources, key findings, and follow-up questions.</p>
-            <div class="example-chips">
+            <h3>Research What's Happening</h3>
+            <p>Live topics from today's news, refreshed through the day — or type anything. Search the web and get a synthesized answer with sources, key findings, and follow-up questions.</p>
+            <div class="example-chips" id="trendingChips">
               <button class="example-chip" onclick="document.getElementById('exploreInput').value='How does photosynthesis work';document.getElementById('exploreButton').click()">How does photosynthesis work</button>
               <button class="example-chip" onclick="document.getElementById('exploreInput').value='Best programming languages for beginners';document.getElementById('exploreButton').click()">Best programming languages</button>
               <button class="example-chip" onclick="document.getElementById('exploreInput').value='Compare React vs Vue vs Svelte';document.getElementById('exploreButton').click()">React vs Vue vs Svelte</button>
@@ -464,6 +468,10 @@
               <button id="routingTraceButton" type="button" class="cyber-btn primary">Trace Route</button>
             </div>
           </div>
+          <label class="check-field routing-broad-toggle" title="Re-run the same utterance through the broad _classify() engine and highlight where the narrow gate and the broad engine deliberately disagree.">
+            <input id="routingBroadToggle" type="checkbox" class="cyber-checkbox">
+            <span>Compare with broad classifier</span>
+          </label>
           <p id="routingSource" class="routing-source" aria-live="polite"></p>
           <div id="routingOutput" class="ai-mode-output empty-state">
             <div class="empty-hint"><span class="empty-hint-icon">&#9873;</span> Trace an utterance to see which intent gate owns it and a preview of the result</div>

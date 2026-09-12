@@ -67,6 +67,27 @@ INTENT_ROUTING: list[tuple[str, BrainIntent]] = [
     ("explain how whatsapp works", BrainIntent.EXPLORE),
     ("what is a screenshot", BrainIntent.EXPLORE),
     ("how does bluetooth work on my phone", BrainIntent.EXPLORE),
+    # Casual scaffold phrasing — how people actually type. No textbook question
+    # word, still a research request.
+    ("whats the deal with brics summit 2026", BrainIntent.EXPLORE),
+    ("tell me stuff about quantum computing", BrainIntent.EXPLORE),
+    ("any facts about the mariana trench", BrainIntent.EXPLORE),
+    ("things to know about berlin", BrainIntent.EXPLORE),
+    ("what should i know about the brics summit 2026", BrainIntent.EXPLORE),
+    ("wtf is quantum entanglement", BrainIntent.EXPLORE),
+    # ...but explicit store-to-memory phrasing outranks research words inside
+    # the remembered content, and local recommendations stay local.
+    ("remember this: facts about cats", BrainIntent.MEMORY),
+    ("what should i eat", BrainIntent.CHAT),
+    ("recommend a movie", BrainIntent.CHAT),
+    # "How to" instructional questions want a researched answer, not the chat
+    # fallback's "use Explore" deflection — but action imperatives with a
+    # device target stay device commands, and the phone anchor still wins.
+    ("how to start a container garden on a balcony", BrainIntent.EXPLORE),
+    ("how to tie a tie", BrainIntent.EXPLORE),
+    ("how to open notepad", BrainIntent.EXPLORE),
+    ("open notepad", BrainIntent.DESKTOP_AUTOMATION),
+    ("how to open spotify on my phone", BrainIntent.PHONE_CONTROL),
     # Cross-intent boundary: memory-topic questions route EXPLORE even though
     # they contain the "memory" keyword; only explicit store phrasing routes
     # MEMORY — even when the remembered content names a device target.

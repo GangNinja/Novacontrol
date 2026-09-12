@@ -9,7 +9,7 @@ from typing import Any
 
 from novacontrol.brain.conversation import ConversationManager
 from novacontrol.brain.models import BrainDecision, BrainIntent, BrainRequest, BrainResponse
-from novacontrol.brain.scratch import ScratchReasoningEngine, scratchable_intent
+from novacontrol.brain.scratch import ScratchReasoningEngine, classify_broad, scratchable_intent
 from novacontrol.integrations import EchoLLMProvider
 
 logger = logging.getLogger(__name__)
@@ -297,10 +297,17 @@ class NovaBrain:
         ),
         # Explanation / research requests — but only if the scratch brain has no
         # canned local answer (covers "what is", "what are", and research verbs).
+        # NOT when the text is being REMEMBERED: "remember this: facts about
+        # cats" stores the fact list, it does not research cats — the explicit
+        # store phrasing outranks research words inside the remembered content.
         (
             "research_question", BrainIntent.EXPLORE, 0.86,
             "Request asks for explanation or research.",
-            lambda lower, scratchable: looks_like_research_question(lower) and scratchable is None,
+            lambda lower, scratchable: (
+                looks_like_research_question(lower)
+                and scratchable is None
+                and not _contains(lower, "remember this", "remember that", "remember for me")
+            ),
         ),
         (
             "plan", BrainIntent.PLAN, 0.84,
@@ -377,11 +384,16 @@ class NovaBrain:
         matched and the decision it would produce, so the user sees exactly
         which gate owns their phrasing and why. Mirrors decide() exactly — the
         landing decision IS decide(text).
+
+        Also returns the ``classifiers`` block: the narrow routing gate
+        (scratchable_intent — what decide() consults) compared with the broad
+        engine's full classification, so the explorer can highlight where the
+        two deliberately disagree.
         """
         text = text.strip()
         if not text:
             decision = BrainDecision(BrainIntent.CLARIFY, "Request is empty.", confidence=1.0)
-            return {**decision.to_dict(), "trace": []}
+            return {**decision.to_dict(), "trace": [], "classifiers": _classifier_relation(None, "unknown")}
         lower = text.lower()
         scratchable = scratchable_intent(lower)
         trace: list[dict[str, Any]] = []
@@ -399,7 +411,8 @@ class NovaBrain:
             if matched:
                 break
         decision = self.decide(BrainRequest(text=text))
-        return {**decision.to_dict(), "trace": trace}
+        classifiers = _classifier_relation(scratchable, classify_broad(lower))
+        return {**decision.to_dict(), "trace": trace, "classifiers": classifiers}
 
     def _build_chat_messages(self, request: BrainRequest) -> list[dict[str, str]]:
         """Build LLM message list with conversation history."""
@@ -426,6 +439,52 @@ class NovaBrain:
         return str(await complete(messages))
 
 
+def _classifier_relation(narrow: str | None, broad: str) -> dict[str, str | None]:
+    """Compare the narrow routing gate with the broad engine's view.
+
+    The routing explorer highlights the DELIBERATE disagreements between the
+    two classifiers: the narrow router hides engine-only intents (phone /
+    desktop / capabilities are routing_safe=False so the request reaches real
+    automation), demands exact canned keys before answering locally, and
+    promotes math ahead of time/conversion — while the broad engine keeps its
+    historical row order and wide detect predicates.
+    """
+    if narrow is not None and narrow == broad:
+        return {"narrow": narrow, "broad": broad, "relation": "match",
+                "note": "Both classifiers land on the same intent."}
+    if narrow is None and broad in ("phone_control", "desktop_control", "capabilities"):
+        return {
+            "narrow": narrow, "broad": broad, "relation": "engine_only",
+            "note": (
+                f"The broad engine sees {broad}, but its row is routing_safe=False: "
+                "the narrow router deliberately hides it so the request is dispatched "
+                "to real device automation instead of a canned local answer."
+            ),
+        }
+    if narrow is None and broad == "unknown":
+        return {
+            "narrow": narrow, "broad": broad, "relation": "unknown",
+            "note": "Neither classifier has a local answer — the request falls through to research or the configured model.",
+        }
+    if narrow is None:
+        return {
+            "narrow": narrow, "broad": broad, "relation": "breadth",
+            "note": (
+                f"The broad engine matches {broad} with its wide detect, but the narrow router "
+                "requires an exact canned key, so routing deliberately sends it onward "
+                "(usually Explore) instead of answering locally."
+            ),
+        }
+    return {
+        "narrow": narrow, "broad": broad, "relation": "order",
+        "note": (
+            f"The narrow router promotes {narrow} ahead of time/conversion, while the broad "
+            f"engine keeps its historical order and lands on {broad}. Routing intentionally "
+            "uses the narrow order."
+        ),
+    }
+
+
 def _contains(text: str, *needles: str) -> bool:
     return any(needle in text for needle in needles)
 
@@ -441,13 +500,25 @@ def looks_like_research_question(text: str) -> bool:
     The "how does/do" forms matter for cross-intent freezing: without them,
     "how do cookies work in the browser" was stolen by the browser keyword
     block and "how does computer memory work" by the memory block — a topic
-    noun must not outrank an explicit question.
+    noun must not outrank an explicit question. "How to" covers instructional
+    requests ("how to start a container garden") that want a researched
+    answer, not the chat fallback's "use Explore" deflection.
+
+    The casual-scaffold forms ("things to know about X", "the deal with X",
+    "stuff/facts about X", "wtf is X") are how people actually type; they are
+    research requests even though no textbook question word appears. The
+    explore extractor anchors on the same scaffolding to pull the topic out.
     """
     explore_keywords = [
         "research", "explain", "why", "compare",
-        "teach me", "is it true", "true or false",
+        "teach me", "tell me about", "is it true", "true or false",
         "verify", "fact check", "latest", "online",
-        "how does", "how do ",
+        "how does", "how do ", "how to",
+        # Casual scaffold phrasing -> researched answer.
+        "things to know about", "should i know about", "need to know about",
+        "the deal with", "stuff about", "facts about", "info on",
+        "information about", "basics of", "gist of", "lowdown on", "scoop on",
+        "wtf is", "wth is", "what the heck is", "what the hell is",
     ]
     return _contains(text, "what is", "what are", *explore_keywords)
 

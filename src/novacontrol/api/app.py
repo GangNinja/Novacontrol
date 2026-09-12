@@ -17,6 +17,7 @@ from novacontrol.api.models import ApiSurface, AskRequest, BrainDecideRequest, C
 from novacontrol.application import NovaControlApplication
 from novacontrol.core.events import Event
 from novacontrol.explore import ExploreRequest
+from novacontrol.explore.trending import TrendingTopicsProvider
 from novacontrol.planning import PlanningEngine, WorkflowExecutor
 from novacontrol.release import ReleaseHardeningChecker, RuntimePackageBuilder, SystemHealthMonitor
 from novacontrol.settings import ApprovalMode
@@ -123,6 +124,9 @@ def _routing_preview(nova: NovaControlApplication, text: str, intent: str) -> di
 
 def create_app() -> Any:
     """Create the NovaControl API app."""
+    # Daily-updates provider for the Explore panel's topic suggestions: one
+    # per app (cached + rotating), edition defaults to India.
+    trending = TrendingTopicsProvider()
     try:
         from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
         from fastapi.responses import HTMLResponse
@@ -528,6 +532,19 @@ def create_app() -> Any:
         except Exception as exc:
             routed["preview"] = {"kind": "info", "text": f"Preview unavailable: {type(exc).__name__}"}
         return routed
+
+    @app.get("/explore/trending")
+    async def explore_trending(count: int = 6, _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Current daily research topics from live top-story news.
+
+        The pool refetches at most every 30 minutes and is invalidated by day;
+        the visible window rotates hourly, so the Explore panel offers a
+        different slice of what's happening in the world each visit — never a
+        hardcoded list. ``exclude`` (comma-separated) lets the UI hide topics
+        already shown elsewhere on the page.
+        """
+        bounded = max(1, min(count, 12))
+        return trending.topics(count=bounded)
 
     @app.post("/explore")
     async def explore(payload: ExploreRequest_, _principal: str = Depends(require_auth)) -> dict[str, Any]:

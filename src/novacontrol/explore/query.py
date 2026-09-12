@@ -94,11 +94,77 @@ def _join_items(items: Sequence[str]) -> str:
 # Topic cleaning
 # ────────────────────────────────────────────────────────────
 
+# Casual question scaffolding: users type "things to know about X", "what
+# should i know about X", "whats the deal with X", "tell me stuff about X",
+# "wtf is X" — the real topic is what FOLLOWS the marker, not what follows
+# "what are". Anchoring on the marker keeps scaffold adjectives like
+# "important" out of the search (which is how "...about brics summit 2026"
+# ended up returning dictionary pages for the WORD "important").
+_SCAFFOLD_MARKERS: tuple[re.Pattern[str], ...] = (
+    # "the deal with X" / "whats the deal with X"
+    re.compile(r"^(?:what(?:'s|s|\s+is)\s+)?the\s+deal\s+(?:with|about)\s+(.+)$", re.IGNORECASE),
+    # "what should i know about X" / "what do i need to know about X"
+    re.compile(r"^(?:what|anything)\s+(?:should|do|can|must)\s+i\s+(?:need\s+to\s+|to\s+)?know\s+(?:about|on|regarding)\s+(.+)$", re.IGNORECASE),
+    # "tell me stuff about X" / "give me facts on X"
+    re.compile(r"^(?:tell|give)\s+(?:me\s+)?(?:some\s+|any\s+)?(?:stuff|things?|facts?|info(?:rmation)?|details?|gist|scoop|lowdown)\s+(?:about|on|regarding)\s+(.+)$", re.IGNORECASE),
+    # "wtf is X" / "what the heck is X"
+    re.compile(r"^(?:wtf|wth|dafuq|what\s+the\s+(?:heck|hell))\s+(?:is|are|was|were)\s+(.+)$", re.IGNORECASE),
+    # "i want to know about X" / "what do you think about X"
+    re.compile(r"^(?:i\s+(?:want|need|would\s+like)\s+to\s+|what\s+(?:do|does)\s+[^?]*?\s+)?(?:think|know|hear|read|learn)\s+about\s+(.+)$", re.IGNORECASE),
+    # "<adjectives> things/facts/info ... about X" — "the most important
+    # things to know about X", "key facts about X", "info on X". The bounded
+    # adjective run must not contain comparison scaffolding ("compare laptops
+    # with details on pricing" is about the laptops, not "pricing").
+    re.compile(
+        r"^(?:the\s+|any\s+|some\s+)?"
+        r"(?!.*\b(?:compare|versus|vs\.?|with|without|between)\b)"
+        r"(?:[\w-]+\s+){0,5}?"
+        r"(?:things?|stuff|facts?|info(?:rmation)?|details?|essentials?|gist|scoop|lowdown)\s+"
+        r"(?:to\s+know\s+|i\s+should\s+know\s+|should\s+i\s+know\s+|one\s+should\s+know\s+)?"
+        r"(?:about|on|regarding|concerning)\s+(.+)$",
+        re.IGNORECASE,
+    ),
+    # "the basics of X" / "the gist of X"
+    re.compile(r"^(?:the\s+)?(?:[\w-]+\s+){0,3}?(?:basics|essentials?|gist|scoop|lowdown)\s+of\s+(.+)$", re.IGNORECASE),
+)
+
+# Pronoun one-liners: "know about it" carries no topic.
+_SCAFFOLD_NON_TOPICS = frozenset({"it", "this", "that", "them", "him", "her", "you", "me", "us"})
+
+
+def _scaffold_anchor(text: str) -> str | None:
+    """Topic anchored after a casual scaffold marker, or None.
+
+    "What are the most important things to know about brics summit 2026?"
+    -> "brics summit 2026". Returns None when no marker matches, leaving the
+    existing question-prefix extraction in charge.
+    """
+    for marker in _SCAFFOLD_MARKERS:
+        m = marker.match(text.strip())
+        if m:
+            tail = m.group(1).strip(" ?.!")
+            if tail and tail.lower() not in _SCAFFOLD_NON_TOPICS:
+                return tail
+    return None
+
+
 def _clean_topic(topic: str) -> str:
     text = " ".join(topic.strip().split())
     text = re.sub(r"^(please\s+)?(can|could|would)\s+you\s+", "", text, flags=re.IGNORECASE)
     text = re.sub(r"^(please\s+)?", "", text, flags=re.IGNORECASE)
-    how_question = text.lower().startswith(("explain how ", "how "))
+    # Casual scaffold anchor, tried on the raw text AND again after removing a
+    # leading question word ("what are the most important things to know about
+    # X" anchors on the second pass, where the marker regex can match).
+    anchor = _scaffold_anchor(text)
+    if anchor is None:
+        anchor = _scaffold_anchor(re.sub(r"^what(?:'s|s|\s+(?:is|are))\s+", "", text, flags=re.IGNORECASE))
+    if anchor is not None:
+        # Casual scaffold: the topic is everything after the marker. Skip the
+        # question-prefix machinery; the shared suffix cleanup below still runs.
+        text = anchor
+        how_question = False
+    else:
+        how_question = text.lower().startswith(("explain how ", "how "))
     personal_how = re.match(r"^how\s+(do|can|should)\s+i\s+(.+)$", text, flags=re.IGNORECASE)
     if personal_how:
         text = personal_how.group(2)
@@ -224,6 +290,14 @@ def extract_search_topic(topic: str) -> str:
     'How does quantum computing work?' -> 'quantum computing'
     """
     text = topic.lower().strip(" ?.")
+    # Casual scaffold anchor first (same markers as _clean_topic): the topic
+    # is what FOLLOWS "things to know about" / "the deal with" / "stuff about"
+    # — anchoring here keeps scaffold words like "important" out of searches.
+    anchor = _scaffold_anchor(text)
+    if anchor is None:
+        anchor = _scaffold_anchor(re.sub(r"^what(?:'s|s|\s+(?:is|are))\s+", "", text, flags=re.IGNORECASE))
+    if anchor is not None:
+        text = anchor
     for prefix in (
         r"^(please\s+)?(can|could|would)\s+you\s+",
         r"^(please\s+)?explain\s+(how\s+)?",
@@ -364,9 +438,18 @@ def is_relevant(title: str, snippet: str, url: str, topic: str) -> bool:
             return sum(1 for w in product_words if w in combined) >= 1
     # Function words ('and', 'the', 'for') are too common to carry relevance
     # alone; only fall back to them when the topic has no real content tokens.
+    # Multi-word topics need TWO content-word matches: a single-word match lets
+    # polysemous nouns through — 'container garden' matched Docker's "A script
+    # that builds a container image" and shipping-container sales on "container"
+    # alone, and those off-topic facts then became the answer. Exception: a
+    # COMPARISON topic ("compare X, Y, Z ...") is a set of sub-topics, and a
+    # source covering any single item is legitimately relevant.
     content_words = topic_words - _FUNCTION_WORDS
     if content_words:
-        return sum(1 for w in content_words if w in combined) >= 1
+        topic_lower = topic.lower()
+        is_comparison = topic_lower.startswith("compare") or re.search(r"\bvs\.?\b|\bversus\b", topic_lower) is not None
+        needed = 1 if is_comparison else min(2, len(content_words))
+        return sum(1 for w in content_words if w in combined) >= needed
     return sum(1 for w in topic_words if w in combined) >= 1
 
 

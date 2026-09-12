@@ -17,11 +17,70 @@ logger = logging.getLogger(__name__)
 
 
 # ────────────────────────────────────────────────────────────
+# Site-chrome detection
+# ────────────────────────────────────────────────────────────
+# Search snippets routinely glue site chrome onto real content: consent
+# banners ("by using this site, you agree to the Terms of Use"), Wikipedia
+# footers ("this page was last edited on …"), trademark lines, newsletter and
+# sign-in frames. Synthesis used to treat those as facts, so a research answer
+# could open with a Terms-of-Use sentence instead of an explanation. Chrome is
+# detected SENTENCE BY SENTENCE and stripped, so a snippet that mixes chrome
+# with real content keeps the content.
+
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+_CHROME_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"^by (using|continuing to use|browsing|accessing) (this|our) (site|website|service)",
+        r"\bterms of (use|service)\b[^.]*\bprivacy policy\b",
+        r"\bprivacy policy\b[^.]*\bterms of (use|service)\b",
+        r"\bis a registered trademark of\b",
+        r"\bthis page was last edited\b",
+        r"\blast (updated|edited|modified|reviewed) on\b",
+        r"\b(we|this (site|website)|our (site|website)) use[s]? cookies\b",
+        r"\b(accept|allow) (all )?cookies\b",
+        r"\bcookie (preferences|settings|consent)\b",
+        r"\ball rights reserved\b",
+        r"(^|\s)(©|\(c\))\s*\d{2,4}\b",
+        r"\benable javascript\b",
+        r"\bjavascript is (disabled|required)\b",
+        r"\bsubscribe (now|today)\b",
+        r"\b(sign in|log in) to (your|continue|access)\b",
+        r"\bskip to (main )?content\b",
+        r"\bfollow us on (facebook|twitter|x|instagram|linkedin|youtube)\b",
+        r"\bshare (this|on) (article|page|post)\b",
+        r"\bread (more|next|the full (article|story))\s*$",
+        r"^\s*(menu|search|home|sign up|log in|share|advertisement)\s*$",
+    )
+)
+
+
+def _is_chrome_sentence(sentence: str) -> bool:
+    return any(pattern.search(sentence) for pattern in _CHROME_PATTERNS)
+
+
+def strip_boilerplate(text: str) -> str:
+    """Drop site-chrome sentences, keeping the real content around them."""
+    sentences = [s for s in _SENTENCE_SPLIT.split(text) if s.strip()]
+    return " ".join(s for s in sentences if not _is_chrome_sentence(s)).strip()
+
+
+def is_boilerplate(text: str) -> bool:
+    """True when nothing usable remains after the chrome sentences are gone."""
+    return len(strip_boilerplate(text)) < 15
+
+
+# ────────────────────────────────────────────────────────────
 # Snippet cleaning
 # ────────────────────────────────────────────────────────────
 
 def clean_snippet(text: str) -> str:
-    """Clean a raw search snippet into a readable fact."""
+    """Clean a raw search snippet into a readable fact.
+
+    Returns "" when the snippet is nothing but site chrome, so callers skip it
+    rather than presenting a consent banner or footer as a research fact.
+    """
     cleaned = " ".join(text.split()).strip()
     # Date prefixes
     cleaned = re.sub(r"^[A-Z][a-z]{2}\s+\d{1,2},\s*\d{4}\s*[·•\-–]\s*", "", cleaned)
@@ -44,6 +103,10 @@ def clean_snippet(text: str) -> str:
     cleaned = re.sub(r"[›»>]+", " ", cleaned)
     cleaned = cleaned.replace("&amp;", "&")
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    # Site chrome is never a fact — strip it and bail out if nothing is left.
+    cleaned = strip_boilerplate(cleaned)
+    if not cleaned:
+        return ""
     if cleaned and cleaned[0].islower():
         cleaned = cleaned[0].upper() + cleaned[1:]
     if cleaned and cleaned[-1] not in ".!?":
@@ -489,9 +552,9 @@ async def try_llm_synthesis(
         return None
 
     source_list = "\n".join(
-        f"- [{s.title}]({s.url}): {clean_snippet(s.snippet or '')}"
+        f"- [{s.title}]({s.url}): {text}"
         for s in sources[:5]
-        if s.snippet and len(s.snippet.strip()) > 10
+        if (text := clean_snippet(s.snippet or "")) and len(text) > 10
     )
     facts_text = "\n".join(f"{i+1}. {f}" for i, f in enumerate(facts))
 

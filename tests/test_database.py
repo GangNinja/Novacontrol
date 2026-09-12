@@ -1,4 +1,10 @@
-"""Tests for the SQLAlchemy database layer."""
+"""Tests for the SQLAlchemy database layer.
+
+The whole module skips cleanly when sqlalchemy is missing: it lives in the
+OPTIONAL `database` extra (pip install -e ".[database]"), and CI installs only
+`.[dev]`. Importing unconditionally aborted the entire suite at collection —
+the CI failure behind the red Test (py3.12/py3.13) checks.
+"""
 
 from __future__ import annotations
 
@@ -8,16 +14,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from novacontrol.database.engine import DatabaseEngine
-from novacontrol.database.models import (
-    AuditEventModel,
-    Base,
-    KnowledgeArticleModel,
-    MemoryRecordModel,
-    ProjectModel,
-    SettingsModel,
-    TaskModel,
-)
+try:
+    from novacontrol.database.engine import DatabaseEngine
+    from novacontrol.database.models import (
+        AuditEventModel,
+        Base,
+        KnowledgeArticleModel,
+        MemoryRecordModel,
+        ProjectModel,
+        SettingsModel,
+        TaskModel,
+    )
+except ModuleNotFoundError as _exc:  # optional extra not installed (CI default)
+    raise unittest.SkipTest(f"sqlalchemy not installed — optional `database` extra: {_exc}")
 
 
 def _make_engine(tmpdir: str) -> DatabaseEngine:

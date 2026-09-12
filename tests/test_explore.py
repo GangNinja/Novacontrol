@@ -544,6 +544,87 @@ class ShoppingQueryContextTests(unittest.TestCase):
             "how does the federal budget work",
         ))
 
+    def test_compound_topic_rejects_single_word_hijacks(self) -> None:
+        """A compound topic needs TWO content-word matches: one-word matches let
+        polysemous nouns through — 'container garden' pulled in Docker's
+        "builds a container image" and shipping-container sales on "container"
+        alone, and those off-topic facts became the answer."""
+        from novacontrol.explore.query import is_relevant
+        topic = "how to start a container garden on a balcony"
+        hijacks = [
+            ("Docker overview",
+             "A Dockerfile is a script containing a series of instructions on how to build a container image.",
+             "https://docs.docker.com/get-started/"),
+            ("Shipping containers for sale",
+             "Buy shipping containers with delivery across India; 20ft and 40ft container prices.",
+             "https://dir.indiamart.com/shipping-container.html"),
+            ("Container tracking",
+             "Track a container by number in real time.",
+             "https://www.track-trace.com/container"),
+        ]
+        for title, snippet, url in hijacks:
+            with self.subTest(title=title):
+                self.assertFalse(is_relevant(title, snippet, url, topic))
+
+    def test_compound_topic_still_matches_real_pages(self) -> None:
+        """Genuine pages about a compound topic share at least two content words."""
+        from novacontrol.explore.query import is_relevant
+        topic = "how to start a container garden on a balcony"
+        self.assertTrue(is_relevant(
+            "How to Start a Container Garden",
+            "Growing vegetables in pots: choose containers with drainage, use potting mix, water daily.",
+            "https://www.thespruce.com/container-gardening-basics",
+            topic,
+        ))
+        self.assertTrue(is_relevant(
+            "Balcony gardening for beginners",
+            "Turn a small balcony into a garden with containers, herbs and vertical planters.",
+            "https://www.gardeningknowhow.com/special/containers/balcony-gardening.htm",
+            topic,
+        ))
+
+    def test_casual_scaffold_queries_extract_the_real_topic(self) -> None:
+        """Users type causal phrasings, not perfect sentences. The topic is
+        what FOLLOWS the scaffold marker — anchoring keeps scaffold adjectives
+        like 'important' out of searches (which is how '...about brics summit
+        2026' returned dictionary pages for the WORD 'important')."""
+        from novacontrol.explore.query import extract_search_topic
+        cases = [
+            ("What are the most important things to know about brics summit 2026?", "brics summit 2026"),
+            ("what should i know about the brics summit 2026", "brics summit 2026"),
+            ("whats the deal with brics summit 2026", "brics summit 2026"),
+            ("tell me stuff about quantum computing", "quantum computing"),
+            ("wtf is quantum entanglement", "quantum entanglement"),
+            ("the most important facts about vitamin d", "vitamin d"),
+            ("key info on machine learning", "machine learning"),
+            # Non-scaffold inputs pass through the existing machinery.
+            ("how to start a container garden on a balcony", "container garden"),
+            ("what is quantum computing", "quantum computing"),
+            ("quantum computing", "quantum computing"),
+        ]
+        for query, expected in cases:
+            with self.subTest(query=query):
+                self.assertEqual(extract_search_topic(query), expected)
+
+    def test_brics_query_rejects_dictionary_pages(self) -> None:
+        """The screenshot bug: 'important things to know about brics summit
+        2026' searched for the WORD 'important' and surfaced dictionary pages.
+        With the topic anchored, those pages are irrelevant."""
+        from novacontrol.explore.query import is_relevant
+        topic = "brics summit 2026"
+        self.assertTrue(is_relevant(
+            "BRICS summit 2026: what to expect",
+            "Leaders meet to discuss expansion and trade.",
+            "https://www.reuters.com/brics-2026",
+            topic,
+        ))
+        self.assertFalse(is_relevant(
+            "Important Definition & Meaning - Merriam-Webster",
+            "Synonyms for IMPORTANT: major, significant, historic, big, meaningful.",
+            "https://www.merriam-webster.com/dictionary/important",
+            topic,
+        ))
+
     def test_comparison_topic_matches_punctuated_sources(self) -> None:
         """Punctuation in the topic must not block matching its own sources."""
         from novacontrol.explore.query import is_relevant

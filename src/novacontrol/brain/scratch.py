@@ -1267,6 +1267,11 @@ def _recommendation_detect(lower: str, cleaned: str) -> bool:
 
 
 def _recommendation_routing(lower: str, cleaned: str) -> bool:
+    # "What should I know about X" / "what do I need to know about X" is a
+    # research scaffold naming a TOPIC, not a request for a local
+    # recommendation — the research gate owns it.
+    if any(m in lower for m in ("know about", "need to know", "things to know")):
+        return False
     if any(w in lower for w in ("recommend", "suggest", "what should i", "what can i eat")):
         return True
     return any(lower.startswith(p) for p in ("movie", "book", "food", "i want to watch", "i want to read"))
@@ -1394,6 +1399,18 @@ def _classify(lower: str) -> str:
     cleaned = lower.strip(" .,!?\"'")
     row = _first_match(_ENGINE_ORDER, lower, cleaned, routing=False)
     return row.kind if row else "unknown"
+
+
+def classify_broad(lower: str) -> str:
+    """Public read-only surface for the broad engine classification.
+
+    The routing explorer compares this full-engine view (which also sees
+    engine-only intents like ``phone_control``/``desktop_control``/
+    ``capabilities``) with the narrow routing gate (:func:`scratchable_intent`)
+    to highlight where the two deliberately disagree. Purely a read — nothing
+    here changes how answers are produced.
+    """
+    return _classify(lower)
 
 
 def scratchable_intent(lower: str) -> str | None:

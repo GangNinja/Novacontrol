@@ -164,6 +164,7 @@ class ApiSurface:
                 ApiRoute("GET", "/agent/metrics", "Agentic evaluation metrics (success, recovery, verification rates).", authenticated=True),
                 ApiRoute("GET", "/agent/knowledge", "Application knowledge graph: workflows, confidence, freshness.", authenticated=True),
                 ApiRoute("POST", "/explore", "Research a topic and return an Explore report.", authenticated=True),
+                ApiRoute("GET", "/explore/trending", "Current daily research topics from live top-story news (rotating window).", authenticated=True),
                 ApiRoute("GET", "/activity", "Recent completed actions (commands, research, learning) for the web timeline.", authenticated=True),
                 ApiRoute("GET", "/events/stream", "Live activity channel: the application EventBus as SSE."),
                 ApiRoute("GET", "/settings", "Read local user settings.", authenticated=True),

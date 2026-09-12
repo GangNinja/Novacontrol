@@ -407,6 +407,7 @@ function makeNode(tag) {{
     _text: "",
     className: "",
     style: {{}},
+    parentNode: null,
     _classes() {{ return this.className ? this.className.split(/\s+/) : []; }},
     appendChild(child) {{
       if (child && child.__fragment) {{
@@ -417,7 +418,17 @@ function makeNode(tag) {{
       this.children.push(child);
       return child;
     }},
-    addEventListener() {{}},
+    removeChild(child) {{
+      const i = this.children.indexOf(child);
+      if (i !== -1) this.children.splice(i, 1);
+      child.parentNode = null;
+      return child;
+    }},
+    get firstChild() {{ return this.children[0] || null; }},
+    get lastChild() {{ return this.children[this.children.length - 1] || null; }},
+    addEventListener(type, fn) {{ (this._listeners = this._listeners || {{}})[type] = fn; }},
+    // Simulated user click: fire the stored "click" listener (if any).
+    click() {{ const fn = this._listeners && this._listeners.click; if (fn) fn(); }},
     get classList() {{
       const self = this;
       return {{
@@ -954,7 +965,12 @@ class BackendFrontendContractTests(unittest.TestCase):
         self.assertEqual(intents, set(self.INTENT_BRANCH), "add new intents to INTENT_BRANCH")
         self.assertTrue(set(self.INTENT_BRANCH.values()) <= self.ALLOWED_BRANCHES)
         # Each allowed branch must actually exist in renderChatResult's code.
-        self.assertIn("tryRenderResearch", self.render_panels)  # report branch
+        # Report branch: the research ANSWER renders as a chat bubble (with
+        # source chips), never the full Explore page inside the conversation.
+        self.assertIn("looksLikeResearch(payload)", self.render_panels)  # report branch
+        self.assertIn("renderResearchBubble(stream, payload)", self.render_panels)
+        self.assertIn("function renderResearchBubble(", self.render_panels)
+        self.assertNotIn("tryRenderResearch(stream, payload)", self.render_panels)  # no Explore page in chat
         self.assertIn("renderCommand(stream, payload)", self.render_panels)  # command branch
         # General branch: renderGeneralAiPage with its neutral explicit fallback.
         self.assertIn("function renderGeneralAiPage(", self.render_panels)
@@ -1012,7 +1028,8 @@ class BackendIntentRendererContractTests(unittest.TestCase):
 
     # /ask envelope intent -> branch path inside renderChatResult. Generated from
     # the three real branches the chat renderer owns:
-    #   report  -> tryRenderResearch(stream, payload)
+    #   report  -> looksLikeResearch(payload) + renderResearchBubble(stream, payload)
+    #              (sourced answer bubble + source chips, NOT the Explore page)
     #   command -> renderCommand(stream, payload)
     #   general -> renderGeneralAiPage(stream, { query, summary, route, payload })
     # Every BrainIntent.value must map here; if a new intent would not clearly
@@ -1087,7 +1104,8 @@ class BackendIntentRendererContractTests(unittest.TestCase):
         for route, branch in self.HANDLER_ROUTES.items():
             with self.subTest(route=route):
                 if branch == "report":
-                    self.assertIn("tryRenderResearch(stream, payload)", self.render_panels)
+                    self.assertIn("looksLikeResearch(payload)", self.render_panels)
+                    self.assertIn("renderResearchBubble(stream, payload)", self.render_panels)
                 elif branch == "command":
                     self.assertIn("renderCommand(stream, payload)", self.render_panels)
                 else:
@@ -1117,11 +1135,162 @@ class BackendIntentRendererContractTests(unittest.TestCase):
             branch = self.HANDLER_ROUTES[route]
             with self.subTest(intent=intent.value, route=route, branch=branch):
                 if branch == "report":
-                    self.assertIn("tryRenderResearch(stream, payload)", self.render_panels)
+                    self.assertIn("looksLikeResearch(payload)", self.render_panels)
+                    self.assertIn("renderResearchBubble(stream, payload)", self.render_panels)
                 elif branch == "command":
                     self.assertIn("renderCommand(stream, payload)", self.render_panels)
                 else:
                     self.assertIn("renderGeneralAiPage(stream", self.render_panels)
+
+
+class ChatResearchBubbleDomTests(unittest.TestCase):
+    """Research answers INSIDE Chat render as conversation bubbles, not an
+    Explore page.
+
+    The user's complaint: asking a research question in Chat produced the full
+    Explore dashboard inside the chat stream — query chip, section headings,
+    "Ask Next" question chips, sources rail — instead of an answer bubble.
+    renderChatResult must route report payloads to renderResearchBubble (answer
+    text + source chips only) and never call tryRenderResearch.
+
+    Runs the REAL static JS in Node against the same minimal DOM shim the
+    renderGeneralAiPage tests use; skips without Node.
+    """
+
+    NODE = shutil.which("node")
+    STATIC = Path("src/novacontrol/web/static")
+
+    # index.html load order (effects.js/app.js excluded like the general-page
+    # harness; render-explore.js is REQUIRED here — the bubble path consumes
+    # looksLikeResearch and sourceChips from it).
+    SCRIPTS = ("js/dom.js", "js/state.js", "js/render-utils.js", "js/render-explore.js", "js/render-panels.js")
+
+    def _run_chat_render(self, envelope: dict, query: str) -> dict:
+        if self.NODE is None:
+            self.skipTest("node is not installed")
+        scripts = "\\n".join(
+            (self.STATIC / name).read_text(encoding="utf-8") for name in self.SCRIPTS
+        )
+        driver = f"""
+const envelope = {json.dumps(envelope)};
+state.lastQuery = {json.dumps(query)};
+const stream = makeNode("div");
+stream.id = "chatStream";
+// Minimal querySelector: only the selector renderResearchBubble uses.
+stream.querySelector = (sel) => {{
+  if (sel.startsWith(".message.assistant")) {{
+    const msgs = qsa(stream, ".message").filter((n) => n._classes().includes("assistant"));
+    return msgs.length ? msgs[msgs.length - 1] : null;
+  }}
+  return null;
+}};
+document.getElementById = (id) => (id === "chatStream" ? stream : null);
+// Track nav hand-off without a real SPA: the explore chip must click the
+// Explore nav item, never re-run research (no exploreButton click).
+var navClicks = 0;
+document.querySelector = (sel) => {{
+  if (sel === '.nav-item[data-panel="explorePanel"]') return {{ click: () => {{ navClicks += 1; }} }};
+  return null;
+}};
+renderChatResult(envelope);
+// Simulated user click on the explore hand-off chip: must switch panels
+// (navClicks) without re-running research (exploreButton must stay untouched).
+const handoff = qsa(stream, ".explore-handoff")[0];
+if (handoff) handoff.click();
+console.log(JSON.stringify({{
+  messages: qsa(stream, ".message").map((n) => ({{ cls: n.className, text: n.textContent }})),
+  chips: qsa(stream, ".source-chip").map((n) => n.textContent),
+  exploreHandoffs: qsa(stream, ".explore-handoff").map((n) => n.textContent),
+  navClicks: navClicks,
+  explorePage: {{
+    layouts: qsa(stream, ".ai-answer-layout").length,
+    queryChips: qsa(stream, ".query-chip").length,
+    sections: qsa(stream, ".answer-section").length,
+    followups: qsa(stream, ".followup-chip").length,
+    rails: qsa(stream, ".source-rail").length,
+    highlights: qsa(stream, ".highlight-grid").length,
+  }},
+}}));
+"""
+        script = (
+            "const fs = require('fs');"
+            + RenderGeneralAiPageDomTests.SHIM.format()
+            + "eval(fs.readFileSync('src/novacontrol/web/static/js/dom.js','utf8') + '\\n'"
+            + "".join(
+                f" + fs.readFileSync('src/novacontrol/web/static/js/{name.split('/')[-1]}','utf8') + '\\n'"
+                for name in self.SCRIPTS[1:]
+            )
+            + " + " + json.dumps(driver) + ");"
+        )
+        proc = subprocess.run([self.NODE, "-e", script], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, f"chat renderer crashed under the shim: {proc.stderr}")
+        return json.loads(proc.stdout)
+
+    def _report_envelope(self) -> tuple[dict, str]:
+        query = "explain quantum computing in simple terms"
+        report = {
+            "topic": "quantum computing",
+            "overview": "Research on quantum computing from example.edu: 2 source(s) analyzed.",
+            "answer": (
+                "Based on research from example.edu, here is what you need to know about quantum computing:\n\n"
+                "**What it is:**\n- A quantum computer stores information in qubits, which can hold "
+                "superpositions of 0 and 1 at the same time.\n- Entanglement links qubits so measuring "
+                "one instantly constrains the other."
+            ),
+            "key_points": ["Qubits superpose.", "Entanglement links qubits."],
+            "source_chips": [
+                {"label": "example.edu", "url": "https://example.edu/quantum"},
+                {"label": "physics.stackexchange.com", "url": "https://physics.stackexchange.com/qubits"},
+            ],
+            "sources": [
+                {"title": "Quantum basics", "url": "https://example.edu/quantum", "snippet": "Qubits superpose.", "source_type": "web"},
+            ],
+            "learning_path": ["Learn qubits.", "Learn entanglement.", "Build a circuit."],
+            "follow_up_questions": ["What is a qubit?", "How does entanglement work?"],
+        }
+        return {"route": "explore", "intent": "explore", "summary": report["answer"], "data": report}, query
+
+    def test_research_answer_renders_as_a_conversation_bubble(self) -> None:
+        """The explore branch renders user+assistant bubbles with the structured
+        answer text (intro line, "What it is:" heading, bullets), source chips,
+        and an explore hand-off chip — and NONE of the Explore-page furniture
+        (no "Ask Next" question chips, no sources rail, no page layout)."""
+        envelope, query = self._report_envelope()
+        result = self._run_chat_render(envelope, query)
+
+        self.assertEqual(len(result["messages"]), 2, "expected the user bubble + the answer bubble")
+        user, assistant = result["messages"]
+        self.assertIn("user", user["cls"])
+        self.assertIn(query, user["text"])
+        self.assertIn("assistant", assistant["cls"])
+        # The structured answer body: intro line + section heading + bullets.
+        self.assertIn("here is what you need to know about quantum computing", assistant["text"])
+        self.assertIn("What it is:", assistant["text"])
+        self.assertIn("superpositions of 0 and 1", assistant["text"])  # the real answer body
+        # Sourced claims stay clickable.
+        self.assertEqual(result["chips"], ["example.edu", "physics.stackexchange.com"])
+        # The explore hand-off chip is present, and clicking it switches to the
+        # Explore panel — it must NOT re-run research (no exploreButton click).
+        self.assertEqual(result["exploreHandoffs"], ["explore"])
+        self.assertGreaterEqual(result["navClicks"], 1, "explore chip must switch to the Explore panel")
+
+        # The Explore page must NOT appear inside the conversation.
+        page = result["explorePage"]
+        self.assertEqual(page["layouts"], 0, "no ai-answer-layout in the chat stream")
+        self.assertEqual(page["queryChips"], 0, "no query chip in the chat stream")
+        self.assertEqual(page["sections"], 0, "no Explore answer-sections in the chat stream")
+        self.assertEqual(page["followups"], 0, "no Ask Next question chips in chat")
+        self.assertEqual(page["rails"], 0, "no sources rail in the chat stream")
+        self.assertEqual(page["highlights"], 0, "no highlight grid in the chat stream")
+
+    def test_empty_research_answer_falls_back_to_honest_text(self) -> None:
+        """A report with no answer text must not render an empty bubble."""
+        envelope, query = self._report_envelope()
+        envelope["data"]["answer"] = ""
+        envelope["data"]["overview"] = ""  # extractor would fall back to overview otherwise
+        result = self._run_chat_render(envelope, query)
+        assistant = result["messages"][-1]
+        self.assertIn("sources returned nothing usable", assistant["text"])
 
 
 if __name__ == "__main__":

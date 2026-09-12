@@ -51,6 +51,7 @@ The Phase 12 API subsystem provides REST and WebSocket entrypoints through FastA
 - `GET /agent/metrics`: Agentic evaluation metrics (success, recovery, verification rates). *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /agent/knowledge`: Application knowledge graph: workflows, confidence, freshness. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /explore`: Research a topic and return an Explore report. *(frontend: web panel `renderExplore`)*
+- `GET /explore/trending`: Current daily research topics from live top-story news (rotating window). *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /activity`: Recent completed actions (commands, research, learning) for the web timeline. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /events/stream`: Live activity channel: the application EventBus as SSE. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /settings`: Read local user settings. *(frontend: no web panel - API/CLI or infrastructure)*

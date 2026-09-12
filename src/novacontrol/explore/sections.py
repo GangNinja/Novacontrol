@@ -124,10 +124,10 @@ def _source_based_sections(frame: QueryFrame, sources: Sequence[ResearchSource])
 
     if sources:
         ref_items = tuple(
-            {"text": f"{clean_source_title(s.title, s.url)}: {clean_snippet(s.snippet or 'See source for details.')}",
+            {"text": f"{clean_source_title(s.title, s.url)}: {text}",
              "source_indices": (i,)}
             for i, s in enumerate(sources[:4], start=1)
-            if s.snippet and len(s.snippet.strip()) > 10
+            if (text := clean_snippet(s.snippet or "")) and len(text) > 10
         )
         if ref_items:
             sections.append({"title": "From The Sources", "items": ref_items})
@@ -187,9 +187,9 @@ def _ideas_sections(frame: QueryFrame, sources: Sequence[ResearchSource]) -> tup
     topic = frame.subject
     if sources:
         items = tuple(
-            {"text": clean_snippet(s.snippet or s.title), "source_indices": (i,)}
+            {"text": text, "source_indices": (i,)}
             for i, s in enumerate(sources[:5], start=1)
-            if s.snippet and len(s.snippet.strip()) > 15
+            if (text := clean_snippet(s.snippet or s.title)) and len(text) > 15
         )
         if items:
             return (
@@ -274,8 +274,9 @@ def detailed_explanation(frame: QueryFrame, sources: Sequence[ResearchSource], d
     for i, source in enumerate(sources[:6], start=1):
         snippet = (source.snippet or "").strip()
         title = source.title or f"Source {i}"
-        if snippet and len(snippet) > 15:
-            sections.append(f"{i}. {title}: {clean_snippet(snippet)}")
+        cleaned = clean_snippet(snippet) if len(snippet) > 15 else ""
+        if cleaned:
+            sections.append(f"{i}. {title}: {cleaned}")
         else:
             sections.append(f"{i}. {title} (see source for details)")
     if depth == "deep":

@@ -33,6 +33,20 @@
     if (/\d/.test(lower) && contains(lower, "plus", "minus", "times", "divided by", "percent of", "squared", "cubed", "sqrt", "square root", "+", "-", "*", "/")) {
       return "math";
     }
+    // Other narrow (routing_safe) canned kinds, so match/breadth relations
+    // stay honest in the mirror too.
+    if (contains(lower, "what time", "current time", "the time now", "whats the time", "what's the time", "time in ") && /\d/.test(lower)) {
+      return "time";
+    }
+    if (contains(lower, "convert ", " km", "km to", "miles", "celsius", "fahrenheit", "kg to", "pounds", "cm to", "inches", "usd", "euros", " inr")) {
+      return "conversion";
+    }
+    if (contains(lower, "capital of", "president of", "invented ", "discovered ", "population of") && contains(lower, "what is", "what are", "who is", "who was")) {
+      return "knowledge";
+    }
+    if (contains(lower, "recommend", "suggest")) {
+      return "recommendation";
+    }
     return null;
   }
 
@@ -51,7 +65,15 @@
   }
 
   function mirrorResearch(lower) {
-    return contains(lower, "what is", "what are", "how does", "how do", "why is", "explain", "research", "tell me about");
+    return contains(
+      lower,
+      "what is", "what are", "how does", "how do", "how to", "why is", "explain", "research", "tell me about",
+      // Casual scaffold phrasing (kept in sync with brain.looks_like_research_question).
+      "things to know about", "should i know about", "need to know about",
+      "the deal with", "stuff about", "facts about", "info on",
+      "information about", "basics of", "gist of", "lowdown on", "scoop on",
+      "wtf is", "wth is", "what the heck is", "what the hell is",
+    );
   }
 
   function mirrorDesktop(lower) {
@@ -114,9 +136,56 @@
     return { kind: "info", text: "Routed to " + intent + ". Open that panel to run it." };
   }
 
+  /* ── Embedded mirror of the broad _classify() engine ──────────
+   *
+   * Approximates the scratch engine's historical row order (greeting →
+   * phone → desktop → capabilities → time → conversion → math → knowledge →
+   * recommendation) so the explorer can show the narrow-vs-broad comparison
+   * offline too. Approximate by design: the real engine parses spelled-out
+   * numbers and regex tables; the mirror uses phrase heuristics.
+   */
+
+  function mirrorClassifyBroad(lower) {
+    var cleaned = lower.trim().replace(/\s+/g, " ");
+    // Engine order mirrors _ENGINE_ORDER in scratch.py.
+    if (MIRROR_GREETINGS.indexOf(cleaned) !== -1) return "greeting";
+    if (mirrorPhoneCommand(lower)) return "phone_control";
+    if (mirrorDesktop(lower)) return "desktop_control";
+    if (contains(lower, "what can you do", "your capabilities", "who are you", "what are you")) return "capabilities";
+    if (contains(lower, "what time", "current time", "the time now", "whats the time", "what's the time", "time in ")) return "time";
+    if (contains(lower, " km", "km to", "miles", "celsius", "fahrenheit", "kg to", "pounds", "cm to", "inches", "usd", "euros", " inr", " minutes to ", " hours to ", "days to ")) return "conversion";
+    if (mirrorScratchable(lower) === "math") return "math";
+    if (contains(lower, "what is", "what are", "who is", "who was", "how many", "capital of", "invented ", "president of", "population of")) return "knowledge";
+    if (contains(lower, "recommend", "suggest", "what should i", "movie", "book", "food", "eat", "watch")) return "recommendation";
+    return "unknown";
+  }
+
+  // JS port of brain.py's _classifier_relation.
+  function mirrorClassifierRelation(narrow, broad) {
+    if (narrow !== null && narrow === broad) {
+      return { narrow: narrow, broad: broad, relation: "match",
+               note: "Both classifiers land on the same intent." };
+    }
+    if (narrow === null && (broad === "phone_control" || broad === "desktop_control" || broad === "capabilities")) {
+      return { narrow: narrow, broad: broad, relation: "engine_only",
+               note: "The broad engine sees " + broad + ", but its row is routing_safe=False: the narrow router deliberately hides it so the request is dispatched to real device automation instead of a canned local answer." };
+    }
+    if (narrow === null && broad === "unknown") {
+      return { narrow: narrow, broad: broad, relation: "unknown",
+               note: "Neither classifier has a local answer — the request falls through to research or the configured model." };
+    }
+    if (narrow === null) {
+      return { narrow: narrow, broad: broad, relation: "breadth",
+               note: "The broad engine matches " + broad + " with its wide detect, but the narrow router requires an exact canned key, so routing deliberately sends it onward (usually Explore) instead of answering locally." };
+    }
+    return { narrow: narrow, broad: broad, relation: "order",
+             note: "The narrow router promotes " + narrow + " ahead of time/conversion, while the broad engine keeps its historical order and lands on " + broad + ". Routing intentionally uses the narrow order." };
+  }
+
   function mirrorTrace(text) {
     var lower = text.trim().toLowerCase();
     var s = mirrorScratchable(lower);
+    var broad = mirrorClassifyBroad(lower);
     var trace = [];
     var landing = null;
     for (var i = 0; i < MIRROR_GATES.length; i++) {
@@ -133,7 +202,8 @@
     if (!landing) landing = MIRROR_GATES[MIRROR_GATES.length - 1];
     return {
       intent: landing.intent, confidence: landing.confidence, reason: landing.reason,
-      trace: trace, source: "mirror", preview: mirrorPreview(text, landing.intent)
+      trace: trace, source: "mirror", preview: mirrorPreview(text, landing.intent),
+      classifiers: mirrorClassifierRelation(s, broad)
     };
   }
 
@@ -143,6 +213,25 @@
     return String(value == null ? "" : value)
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
+  function renderClassifiers(cls) {
+    if (!cls) return "";
+    var relation = cls.relation || "unknown";
+    var disagree = relation !== "match";
+    var labels = { match: "Agree", order: "Order differs", engine_only: "Engine-only", breadth: "Breadth", unknown: "Neither" };
+    var label = labels[relation] || relation;
+    var html = "";
+    html += '<div class="routing-classifiers' + (disagree ? " disagree" : "") + '">';
+    html += '<div class="routing-preview-head">Broad vs narrow classifiers <span class="routing-rel-badge ' + esc(relation) + '">' + esc(label) + '</span></div>';
+    html += '<div class="routing-cmp">';
+    html += '<span class="routing-cmp-cell"><span class="routing-cmp-label">narrow (gate)</span><span class="routing-cmp-val">' + esc(cls.narrow || "—") + '</span></span>';
+    html += '<span class="routing-cmp-vs">vs</span>';
+    html += '<span class="routing-cmp-cell"><span class="routing-cmp-label">broad (engine)</span><span class="routing-cmp-val">' + esc(cls.broad || "unknown") + '</span></span>';
+    html += '</div>';
+    html += '<div class="routing-preview-note">' + esc(cls.note || "") + '</div>';
+    html += '</div>';
+    return html;
   }
 
   function renderTrace(result, source, text) {
@@ -161,6 +250,10 @@
     html += '<span class="routing-intent">' + esc(result.intent) + '</span>';
     html += '<span class="routing-conf">' + Math.round((result.confidence || 0) * 100) + '% confident</span>';
     html += '</div>';
+
+    if (byId("routingBroadToggle") && byId("routingBroadToggle").checked) {
+      html += renderClassifiers(result.classifiers);
+    }
 
     html += '<ol class="routing-gates">';
     result.trace.forEach(function (row) {
@@ -198,6 +291,8 @@
     out.innerHTML = html;
   }
 
+  var lastTrace = null;  // { result, source, text } so the toggle can re-render
+
   function traceUtterance() {
     var text = byId("routingInput").value.trim();
     if (!text) { showToast("Type an utterance first"); return; }
@@ -208,11 +303,14 @@
 
     requestJson("/brain/decide", { text: text })
       .then(function (data) {
+        lastTrace = { result: data, source: "live", text: text };
         renderTrace(data, "live", text);
       })
       .catch(function () {
         // Server unreachable (or erroring): the embedded mirror takes over.
-        renderTrace(mirrorTrace(text), "mirror", text);
+        var mirrored = mirrorTrace(text);
+        lastTrace = { result: mirrored, source: "mirror", text: text };
+        renderTrace(mirrored, "mirror", text);
         showToast("Server unreachable — used the embedded routing mirror");
       })
       .finally(function () {
@@ -228,11 +326,28 @@
     input.addEventListener("keydown", function (event) {
       if (event.key === "Enter") traceUtterance();
     });
+    var toggle = byId("routingBroadToggle");
+    if (toggle) {
+      toggle.addEventListener("change", function () {
+        // Re-render the cached trace so the comparison appears/disappears
+        // without another round trip; re-trace when the input changed.
+        if (lastTrace) {
+          renderTrace(lastTrace.result, lastTrace.source, lastTrace.text);
+        } else {
+          traceUtterance();
+        }
+      });
+    }
   }
 
   if (typeof window.setupRoutingExplorer !== "function") {
     window.setupRoutingExplorer = setupRoutingExplorer;
   }
   // Also expose the pure mirror for tests and for the offline fallback path.
-  window.routingExplorerMirror = { mirrorTrace: mirrorTrace, mirrorPreview: mirrorPreview };
+  window.routingExplorerMirror = {
+    mirrorTrace: mirrorTrace,
+    mirrorPreview: mirrorPreview,
+    mirrorClassifyBroad: mirrorClassifyBroad,
+    mirrorClassifierRelation: mirrorClassifierRelation
+  };
 })();
