@@ -641,6 +641,45 @@ class ShoppingQueryContextTests(unittest.TestCase):
             "Compare React, Vue, and Svelte for building a dashboard",
         ))
 
+    def test_headline_topic_keeps_subject_and_searches_its_entities(self) -> None:
+        """The screenshot bug: a trending headline ('No trailer for The
+        Paradise: Nani comments on director Srikanth Odela's lack of time')
+        collapsed to the search core 'no trailer' — the preposition clipper ate
+        everything after 'for The' — so the WORD 'trailer' drove relevance and
+        trucker slang plus an unrelated film platform became the answer.
+        Headlines are not questions: the topic stays whole, the search query is
+        the headline's proper-noun spine, and relevance anchors on the entities
+        (a page matching only 'trailer' cannot pass)."""
+        from novacontrol.explore.query import extract_search_topic, is_relevant
+        topic = "No trailer for The Paradise: Nani comments on director Srikanth Odela's lack of time"
+        core = extract_search_topic(topic)
+        self.assertEqual(core, "paradise nani srikanth odela")
+        # Junk: matches the generic word 'trailer' but names no entity.
+        for title, snippet, url in (
+            ("NO TRAILER", "An online film platform streaming fake trailers.", "https://fleetworks.ai/no-trailer"),
+            ("What is trucker slang for a truck without a trailer?", "It's called a bobtail.", "https://answers.com/trucker-slang"),
+            ("No Official Trailer #1 (2013) - Gael Garcia Bernal Movie HD", "Rotten Tomatoes Indie.", "https://youtube.com/watch?v=x"),
+            ("No Definition & Meaning - Merriam-Webster", "The word no.", "https://www.merriam-webster.com/dictionary/no"),
+        ):
+            with self.subTest(junk=title):
+                self.assertFalse(is_relevant(title, snippet, url, topic))
+        # Real coverage: names at least one headline entity.
+        for title, snippet, url in (
+            ("Nani Gives Shocking Clarity on The Paradise Trailer || Srikanth Odela", "Nani opened up about The Paradise and director Srikanth Odela.", "https://youtube.com/watch?v=nani"),
+            ("The Paradise Team Q&A With Media at Press Meet | Nani | Srikanth Odela", "Nani and the team addressed the media at the press meet.", "https://youtube.com/watch?v=qa"),
+            ("Nani (actor) - Wikipedia", "Nani is an Indian actor and film producer who works in Telugu films.", "https://en.wikipedia.org/wiki/Nani_(actor)"),
+        ):
+            with self.subTest(good=title):
+                self.assertTrue(is_relevant(title, snippet, url, topic))
+
+    def test_short_headline_stays_whole(self) -> None:
+        """A short non-question topic has no filler to strip and no drowning
+        risk: it must pass through intact (minus punctuation), keeping words
+        the question machinery would delete ('no' is the subject here)."""
+        from novacontrol.explore.query import extract_search_topic
+        self.assertEqual(extract_search_topic("brics summit 2026"), "brics summit 2026")
+        self.assertEqual(extract_search_topic("quantum computing"), "quantum computing")
+
 
 if __name__ == "__main__":
     unittest.main()

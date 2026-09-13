@@ -447,6 +447,54 @@ def _percent_rewrite(match: re.Match[str]) -> str:
     return f"({_fmt_number(percent)}/100)*{_fmt_number(base)}"
 
 
+def _halve_rewrite(match: re.Match[str]) -> str:
+    """'half of X' -> (X/2)."""
+    value = _operand_value(match.group(1))
+    if value is None:
+        return match.group(0)
+    return f"({_fmt_number(value)}/2)"
+
+
+def _double_rewrite(match: re.Match[str]) -> str:
+    """'double X' -> (X*2)."""
+    value = _operand_value(match.group(1))
+    if value is None:
+        return match.group(0)
+    return f"({_fmt_number(value)}*2)"
+
+
+# Variable assignment in natural math: "if x is 5, what is x times 3".
+# One grammar consumed by BOTH routing (is_arithmetic_query) and the answer
+# builder (_math_answer) via substitute_math_variables, so recognition and
+# evaluation can never disagree about what counts as an assignment.
+_VAR_ASSIGNMENT = re.compile(
+    r"\b(?:if\s+|let\s+)?([a-z])\s*(?:=|\bis\b|\bbe\b)\s*(-?\d+(?:\.\d+)?)\b",
+    re.IGNORECASE,
+)
+
+
+def substitute_math_variables(text: str) -> str:
+    """Replace assigned single-letter variables with their values.
+
+    'if x is 5, what is x times 3' -> 'if 5 is 5, what is 5 times 3'. Only a
+    standalone assigned letter is replaced (never a word's inner letters), and
+    only when at least one assignment exists — so ordinary prose with the
+    letters 'a' or 'i' passes through untouched.
+    """
+    assignments = {
+        m.group(1).lower(): m.group(2)
+        for m in _VAR_ASSIGNMENT.finditer(text)
+    }
+    if not assignments:
+        return text
+
+    def repl(match: re.Match[str]) -> str:
+        value = assignments.get(match.group(0).lower())
+        return value if value is not None else match.group(0)
+
+    return re.sub(r"\b[a-z]\b", repl, text, flags=re.IGNORECASE)
+
+
 def _log_base_rewrite(match: re.Match[str]) -> str:
     """Rewrite 'log base B of V' -> log(V, B) — the exam phrasing for log_B(V)."""
     base = _operand_value(match.group(1))
@@ -623,6 +671,13 @@ _MATH_WORD_RULES: tuple[tuple[re.Pattern[str], Rewrite], ...] = (
     # Percentage of: "15 percent of 200" -> (15/100)*200 (words work: "ten percent of 300").
     (re.compile(r"\b(" + _OPERAND_SEQ + r")\s+percent\s+of\s+(" + _OPERAND_SEQ + r")\b", re.IGNORECASE),
      lambda m: _percent_rewrite(m)),
+    # Natural fraction/doubling phrasings ("half of 10", "double 7"), words
+    # included ("half of twenty", "double nine"). Registered with the other
+    # unary rows: they claim their single operand before any binary row can.
+    (re.compile(r"\bhalf\s+of\s+(" + _OPERAND_SEQ + r")\b", re.IGNORECASE),
+     _halve_rewrite),
+    (re.compile(r"\bdouble\s+(" + _OPERAND_SEQ + r")\b", re.IGNORECASE),
+     _double_rewrite),
     # ── JEE / exam forms ─────────────────────────────────────────────
     # log base B of V ("log base 2 of 8") — registered BEFORE the log-of row so
     # both orderings of base/value stay unambiguous.
@@ -674,8 +729,19 @@ def is_arithmetic_query(lower: str) -> bool:
     ("2+2"), the "add 5 and 7" form, function calls ("sqrt(144)"), and every
     worded phrase declared in the _MATH_WORD_RULES registry (spelled-out
     operators like "15 times 3" and worded functions like "square root of 256"
-    or "5 squared") all count.
+    or "5 squared") all count — plus variable math, where assigned letters
+    become numbers first ("if x is 5, what is x times 3").
     """
+    substituted = substitute_math_variables(lower)
+    if substituted != lower:
+        # Variable math: an assignment made the phrase concrete. The bare
+        # assignment alone ("if x is 5") must NOT route here — the substituted
+        # text still has to look like an expression.
+        return bool(
+            _MATH_EXPR.search(substituted)
+            or _FUNC_CALL_MATH.search(substituted)
+            or any(pattern.search(substituted) for pattern, _ in _MATH_WORD_RULES)
+        )
     return bool(
         _MATH_EXPR.search(lower)
         or _ADD_FORM.search(lower)
@@ -851,16 +917,37 @@ def _math_answer(text: str) -> dict[str, Any]:
         add_match = _ADD_FORM.match(expr)
         if add_match:
             expr = f"{add_match.group(1)} and {add_match.group(2)}"
-    for prefix in ("calculate ", "compute ", "what is ", "what's ", "solve ", "add "):
+    for prefix in ("calculate ", "compute ", "what is ", "what's ", "what does ", "solve ", "add "):
         if expr.startswith(prefix):
             expr = expr[len(prefix):]
+    # 'what does 3 times 4 equal(s)' — the trailing verb is filler.
+    expr = re.sub(r"\s+equals?\s*\??$", "", expr).strip()
     # What the user typed (minus leading question words) — shown back in the answer.
-    display = re.sub(r'\bwhat is\b', '', expr).strip().rstrip('?.!,;:')
+    display = re.sub(r"\s+", " ", re.sub(r"\bwhat(?:'s| is| does)\b", "", expr)).strip().rstrip('?.!,;:')
     # Apply the declarative worded-arithmetic registry (spelled-out operators ->
     # symbols, worded functions -> calls) to a fixed point: replacing one
     # spelled-out operator can expose a neighboring operand to a later rule
     # ("5 squared times 2" -> "5**2 times 2" -> "5**2*2"). Same table that
-    # routing uses, so translation can never drift from recognition.
+    # routing uses, so translation can never drift from recognition. Assigned
+    # variables become their numbers first ("x times 3" -> "5 times 3"), and
+    # the assignment scaffolding ("if 5 is 5," / "let 9 be 9,") drops out —
+    # otherwise the residue would poison the evaluator.
+    if _VAR_ASSIGNMENT.search(expr):
+        values = {
+            m.group(1).lower(): m.group(2)
+            for m in _VAR_ASSIGNMENT.finditer(expr)
+        }
+
+        def _replace_var(match: re.Match[str]) -> str:
+            value = values.get(match.group(0).lower())
+            return value if value is not None else match.group(0)
+
+        expr = re.sub(r"\b[a-z]\b", _replace_var, expr, flags=re.IGNORECASE)
+        expr = re.sub(
+            r"\b(?:(?:if|and|let)\s+)?-?\d+(?:\.\d+)?\s*(?:=|\bis\b|\bbe\b)\s*-?\d+(?:\.\d+)?\s*(?:,|\band\b)?\s*",
+            " ", expr, flags=re.IGNORECASE,
+        ).strip()
+    expr = substitute_math_variables(expr)
     expr = rewrite_worded_math(expr)
     if add_form:
         expr = re.sub(r'\band\b', '+', expr)

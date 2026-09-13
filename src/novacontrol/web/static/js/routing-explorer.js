@@ -29,8 +29,9 @@
     var cleaned = lower.trim().replace(/\s+/g, " ");
     if (MIRROR_GREETINGS.indexOf(cleaned) !== -1) return "greeting";
     // Worded math: an operator word + a digit (approximate — the real scratch
-    // brain parses spelled-out numbers too).
-    if (/\d/.test(lower) && contains(lower, "plus", "minus", "times", "divided by", "percent of", "squared", "cubed", "sqrt", "square root", "+", "-", "*", "/")) {
+    // brain parses spelled-out numbers, variable assignment, and 'half of'/'double'
+    // unary rows too).
+    if (/\d/.test(lower) && contains(lower, "plus", "minus", "times", "divided by", "percent of", "squared", "cubed", "sqrt", "square root", "half of", "double", "+", "-", "*", "/")) {
       return "math";
     }
     // Other narrow (routing_safe) canned kinds, so match/breadth relations

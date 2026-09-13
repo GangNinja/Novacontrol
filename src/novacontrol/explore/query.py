@@ -282,12 +282,31 @@ def _find_price_phrase(topic: str) -> str:
 # Search query generation
 # ────────────────────────────────────────────────────────────
 
+# A topic that STARTS like a question or command goes through the question-
+# stripping machinery below. Anything else is a headline, a trending-chip
+# title, or a pasted phrase — every word carries topical signal, so stripping
+# "filler" destroys the subject: 'No trailer for The Paradise: Nani comments…'
+# collapsed to 'no trailer' (the preposition clipper ate everything after
+# 'for The'), searched for the WORD 'trailer', and surfaced trucker slang and
+# an unrelated film platform. Headlines return whole.
+_QUESTION_START = re.compile(
+    r"^(?:what|whats|why|how|who|where|when|which|is|are|was|were|am|do|does|did|"
+    r"can|could|would|should|shall|"
+    r"explain|compare|research|tell|give|teach|recommend|suggest|find|pick|choose|"
+    r"learn|plan|create|build|make|set\s+up|start|organize|get|pros)\b",
+    re.IGNORECASE,
+)
+
 def extract_search_topic(topic: str) -> str:
     """Extract the core searchable topic from a user question.
 
     Removes question prefixes, action verbs, and filler words.
     'Plan a fun scavenger hunt in my area' -> 'scavenger hunt'
     'How does quantum computing work?' -> 'quantum computing'
+
+    A topic that is not shaped like a question or command (a news headline, a
+    trending-chip title, a pasted phrase) is returned whole: question-stripping
+    machinery assumes filler, and a headline has none.
     """
     text = topic.lower().strip(" ?.")
     # Casual scaffold anchor first (same markers as _clean_topic): the topic
@@ -298,6 +317,15 @@ def extract_search_topic(topic: str) -> str:
         anchor = _scaffold_anchor(re.sub(r"^what(?:'s|s|\s+(?:is|are))\s+", "", text, flags=re.IGNORECASE))
     if anchor is not None:
         text = anchor
+    elif not _QUESTION_START.match(text):
+        # Headline / chip / pasted phrase: whole when short, otherwise trimmed
+        # to its proper-noun spine (a full 13-word headline as a search query
+        # drowns; the names carry the story).
+        text = re.sub(r"\s+", " ", text).strip(" .,:;!?" )
+        spine = _headline_core(text) or _headline_core(topic)
+        if spine:
+            return spine
+        return text or topic.strip()
     for prefix in (
         r"^(please\s+)?(can|could|would)\s+you\s+",
         r"^(please\s+)?explain\s+(how\s+)?",
@@ -438,17 +466,30 @@ def is_relevant(title: str, snippet: str, url: str, topic: str) -> bool:
             return sum(1 for w in product_words if w in combined) >= 1
     # Function words ('and', 'the', 'for') are too common to carry relevance
     # alone; only fall back to them when the topic has no real content tokens.
-    # Multi-word topics need TWO content-word matches: a single-word match lets
-    # polysemous nouns through — 'container garden' matched Docker's "A script
-    # that builds a container image" and shipping-container sales on "container"
-    # alone, and those off-topic facts then became the answer. Exception: a
+    # The required content-word match count scales with topic length: a short
+    # topic needs TWO matches (a single-word match lets polysemous nouns
+    # through — 'container garden' matched Docker's "A script that builds a
+    # container image" on "container" alone). A HEADLINE topic (trending chip,
+    # pasted title — not question-shaped) anchors on its proper nouns instead:
+    # junk pages match the headline's generic words ('trailer', 'returns'),
+    # while real sources name its entities ('Paradise', 'Nani'). Exception: a
     # COMPARISON topic ("compare X, Y, Z ...") is a set of sub-topics, and a
     # source covering any single item is legitimately relevant.
     content_words = topic_words - _FUNCTION_WORDS
     if content_words:
         topic_lower = topic.lower()
         is_comparison = topic_lower.startswith("compare") or re.search(r"\bvs\.?\b|\bversus\b", topic_lower) is not None
-        needed = 1 if is_comparison else min(2, len(content_words))
+        if is_comparison:
+            needed = 1
+        elif not _QUESTION_START.match(topic.strip()):
+            proper = [w for w in _proper_tokens(topic) if w in topic_words]
+            if proper:
+                return any(w in combined for w in proper)
+            count = len(content_words)
+            needed = min(count, 2 if count <= 4 else 3)
+        else:
+            count = len(content_words)
+            needed = min(count, 2)
         return sum(1 for w in content_words if w in combined) >= needed
     return sum(1 for w in topic_words if w in combined) >= 1
 
@@ -472,6 +513,48 @@ _FUNCTION_WORDS = frozenset({
     "not", "all", "can", "has", "have", "who", "when", "where", "which",
     "should", "would", "could", "does", "did", "than", "them", "they",
 })
+
+
+# Words that never count as proper-noun anchors even when capitalized
+# ("The Paradise" — only 'Paradise' carries the entity).
+_PROPER_STOP = _FUNCTION_WORDS | {"i", "no", "not", "yes", "new", "amid", "after", "before"}
+
+
+def _proper_tokens(topic: str) -> tuple[str, ...]:
+    """Capitalized, non-initial words of a topic, lowercased, order kept.
+
+    'No trailer for The Paradise: Nani comments…' -> ('paradise', 'nani',
+    'srikanth', 'odela'). These are the entities that define a headline; junk
+    pages match the sentence's generic words instead.
+    """
+    words = topic.strip().split()
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for word in words[1:]:  # skip sentence-initial position
+        stripped = _token(word)
+        # Possessives carry the name without the clutter: "Odela's" -> "odela".
+        stripped = re.sub(r"'s$", "", stripped, flags=re.IGNORECASE)
+        if not stripped or not stripped[0].isupper():
+            continue
+        lower = stripped.lower()
+        if lower in _PROPER_STOP or len(lower) <= 2 or lower in seen:
+            continue
+        seen.add(lower)
+        tokens.append(lower)
+    return tuple(tokens)
+
+
+def _headline_core(topic: str) -> str | None:
+    """Search core for a long headline: its proper-noun spine.
+
+    Search engines drown a 13-word headline (results for the full string were
+    dictionary pages for the word 'no'); the capitalized names carry the
+    story. Returns None when the headline is short or has no proper nouns.
+    """
+    if len(topic.strip().split()) <= 6:
+        return None
+    spine = " ".join(_proper_tokens(topic))
+    return spine or None
 
 
 # ────────────────────────────────────────────────────────────

@@ -1,10 +1,10 @@
 # Explore
 
-Explore is the research and learning workflow requested by the user. It is designed to become a visible GUI tab named `Explore`.
+Explore is the research and learning workflow requested by the user. It ships as the visible `Explore` tab in both the web platform and the desktop GUI, backed by the same `ExploreService`.
 
 ## Purpose
 
-Explore should let the user ask about any topic and receive:
+Explore lets the user ask about any topic and receive:
 
 - Online research through the user's internet connection
 - Understandable explanations
@@ -22,8 +22,11 @@ Explore should let the user ask about any topic and receive:
 - `ExploreReport`: complete explanation package
 - `SearchProvider`: online search adapter interface
 - `VideoProvider`: video search adapter interface
-- `DuckDuckGoLiteSearchProvider`: standard-library web search provider
+- `DuckDuckGoLiteSearchProvider`, `BingSearchProvider`, `GoogleSearchProvider`: standard-library web search providers
+- `ResilientSearchProvider`: the default provider — tries the engines in order and never raises
+- `WikipediaSearchProvider`: fallback used when web results come back too thin
 - `YouTubeSearchVideoProvider`: related video link provider
+- `TrendingTopicsProvider`: live top-story news headlines that feed the Explore panel's suggestion chips (see below)
 - `ResearchExplainer`: creates clear explanations from sources
 - `ExploreService`: orchestrates research, videos, and explanation
 - `ExploreModule`: event-driven runtime module
@@ -72,6 +75,20 @@ python -m novacontrol explore "machine learning" --sources 4 --videos 3
 - `explore.topic_requested`: request online research
 - `explore.report_created`: emitted with the complete research report
 
+## Topic suggestions: trending daily updates
+
+The Explore panel's example chips are not a fixed list. `TrendingTopicsProvider`
+fetches top-story headlines from Google News RSS (standard library, no API
+key), trims each headline into a research topic (publisher suffix stripped,
+LIVE blogs and opinion pieces skipped), caches for 30 minutes, invalidates the
+pool per day, and rotates the visible window hourly so repeat visits offer
+different topics. When the feed is unreachable the endpoint reports
+`source: "unavailable"` and the panel keeps static help chips. The surface is
+`GET /explore/trending`, pinned by `tests/test_explore_trending.py`.
+
 ## GUI
 
-The GUI phase must expose this as a tab named `Explore`.
+The `Explore` tab ships in both interfaces: the web platform's `Explore` nav
+destination (serving `#explorePanel`) and the desktop Qt app's Explore tab
+(`DashboardTab.EXPLORE`). Both call the same service, so behavior matches
+across surfaces.

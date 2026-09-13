@@ -213,8 +213,8 @@ Verify the UI end to end:
 ```powershell
 $env:PYTHONPATH='src'
 python -m pytest tests/ -q            # includes the UI contract + focus-ring + reduced-motion suites
-python scripts/ui_audit.py --url http://127.0.0.1:8001/                  # every panel fits at every breakpoint
-python scripts/ui_audit.py --url http://127.0.0.1:8001/ --baseline old.css  # zero computed-style drift
+python scripts/ui_audit.py --url http://127.0.0.1:8000/                  # every panel fits at every breakpoint
+python scripts/ui_audit.py --url http://127.0.0.1:8000/ --baseline old.css  # zero computed-style drift
 ```
 
 ### Voice input
@@ -332,8 +332,8 @@ The suite is hermetic: phone and desktop tests use fake runners (`NoopPhoneRunne
 UI and rendered-output quality have their own harnesses:
 
 ```powershell
-python scripts/ui_audit.py --url http://127.0.0.1:8001/        # fit audit: 11 panels x 11 widths
-python scripts/ui_audit.py --url http://127.0.0.1:8001/ --baseline old.css   # computed-style A/B
+python scripts/ui_audit.py --url http://127.0.0.1:8000/        # fit audit: 11 panels x 11 widths
+python scripts/ui_audit.py --url http://127.0.0.1:8000/ --baseline old.css   # computed-style A/B
 ```
 
 For a browser-driven smoke of the real page (guided-click result card, reduced motion), install the browser extra: `pip install -e ".[browser]"` then `python -m playwright install chromium`.
@@ -364,8 +364,8 @@ For a browser-driven smoke of the real page (guided-click result card, reduced m
 | Voice | ⚠️ OS-native STT/TTS with graceful fallback; quality depends on platform speech services |
 | GUI dashboard | ⚠️ PySide6 app present, secondary to the web UI |
 | Vision tab | ✅ Working — guided clicks + pixel-diff verification (OpenCV fast path); optional multimodal vision model (Ollama/OpenAI/Gemini/OpenRouter) upgrades location to semantic |
-| Scratch brain math | ✅ Worded arithmetic, conversions, percentages, and JEE-style logs/trig/combinatorics/quadratics/AP — all offline, regression-pinned |
-| Research answer quality | ✅ Site-chrome filter (consent banners, footers, trademark lines) applied before synthesis; scaffold-anchored topic extraction ("things to know about brics summit 2026" researches BRICS, not dictionary pages for "important"); topical-relevance guard rejects single-word hijacks on compound topics ("container garden" ≠ Docker) — pinned by `tests/test_synthesizer.py` + `tests/test_explore.py` |
+| Scratch brain math | ✅ Worded arithmetic (incl. "what does 3 times 4 equal", "half of 10", "double 7", variable assignment like "if x is 5, what is x times 3"), conversions, percentages, and JEE-style logs/trig/combinatorics/quadratics/AP — all offline, regression-pinned |
+| Research answer quality | ✅ Site-chrome filter (consent banners, footers, trademark lines) applied before synthesis; scaffold-anchored topic extraction ("things to know about brics summit 2026" researches BRICS, not dictionary pages for "important"); topical-relevance guard rejects single-word hijacks on compound topics ("container garden" ≠ Docker); headline topics (trending chips, pasted titles) stay whole, search their proper-noun spine, and anchor relevance on those entities — a page matching only the headline's generic words cannot pass — pinned by `tests/test_synthesizer.py` + `tests/test_explore.py` |
 | Trending topic suggestions | ✅ `GET /explore/trending` — live Google News RSS headlines (no API key, no hardcoded lists), cached 30 min, invalidated daily, rotated hourly; offline degrades to static help chips — pinned by `tests/test_explore_trending.py` |
 | Web UI / responsive | ✅ Command-center redesign with fluid auto-fit — 11 panels verified overflow-free from 390px to 1920px, plus a computed-style A/B guard for stylesheet cleanups |
 | Self-improvement | ⚠️ Telemetry + sandboxed previews implemented; fully autonomous improvement is *not* enabled |

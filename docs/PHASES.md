@@ -98,7 +98,7 @@ Complete in this repository state.
 - Understandable explanations
 - Source links
 - Related video links
-- Future GUI tab named `Explore`
+- GUI tab named `Explore` (web platform and desktop GUI)
 
 ## Phase 10: Voice
 

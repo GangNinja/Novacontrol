@@ -49,6 +49,9 @@ _ROW_SAMPLES: list[tuple[str, list[str]]] = [
     ("compound divided by", ["the square root of 81 divided by 3", "5 squared divided by 4"]),
     ("compound over", ["2 to the power of 4 over 2", "the square root of 16 over 2"]),
     ("percent of", ["15 percent of 200", "what is 15 percent of 200", "ten percent of 300", "12.5 percent of 80"]),
+    # Natural fraction/doubling phrasings.
+    ("half of", ["half of 10", "what is half of 50", "half of twenty"]),
+    ("double", ["double 7", "double 15", "double nine"]),
     # ── JEE / exam rows ─────────────────────────────────────────
     ("log base of", ["log base 2 of 8", "log base 10 of 1000"]),
     ("log of base", ["log of 100 base 10", "log 27 base 3"]),
@@ -154,6 +157,39 @@ class MathWordRulesDriftGuardTests(unittest.TestCase):
         """Duplicate patterns or a non-tuple row would silently break the walk."""
         patterns = [pattern.pattern for pattern, _ in _MATH_WORD_RULES]
         self.assertEqual(len(patterns), len(set(patterns)), "duplicate rule patterns in registry")
+
+    def test_natural_phrasing_answers(self) -> None:
+        """Natural phrasings beyond the operator rows: 'what does 3 times 4
+        equal' (question verb), 'half of 10' / 'double 7' (fraction/doubling
+        rows), and variable assignment ('if x is 5, what is x times 3'). Each
+        pins BOTH surfaces — routing and the numeric answer."""
+        cases = [
+            ("what does 3 times 4 equal", "12"),
+            ("what does fifteen times three equal", "45"),
+            ("half of 10", "5"),
+            ("what is half of 50", "25"),
+            ("double 7", "14"),
+            ("double fifteen", "30"),
+            ("if x is 5, what is x times 3", "15"),
+            ("if x = 4 and y = 6, what is x plus y", "10"),
+            ("let x be 9, what is x squared", "81"),
+        ]
+        for phrase, expected in cases:
+            with self.subTest(phrase=phrase):
+                lower = phrase.lower()
+                # Routing: the narrow classifier must claim it as math.
+                self.assertEqual(scratchable_intent(lower), "math", f"{phrase!r} not routed to math")
+                # Answer: the numeric result is in the message.
+                answer = self.engine.answer(phrase, {})
+                message = str(answer.get("message", ""))
+                self.assertIn(expected, message, f"{phrase!r} answered {message!r}, expected {expected}")
+
+    def test_bare_assignment_does_not_route_to_math(self) -> None:
+        """An assignment with no question attached ('if x is 5') is not an
+        arithmetic request — routing must not claim it."""
+        from novacontrol.brain.scratch import is_arithmetic_query
+        self.assertFalse(is_arithmetic_query("if x is 5"))
+        self.assertIsNone(scratchable_intent("if x is 5"))
 
 
 
