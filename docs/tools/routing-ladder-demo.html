@@ -1,0 +1,809 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>NovaControl — Architecture Restructure, Explained</title>
+<style>
+  :root {
+    --bg: #070d18;
+    --bg2: #0a1426;
+    --panel: #0d1a2e;
+    --panel2: #111f36;
+    --line: rgba(96, 190, 255, .16);
+    --line2: rgba(96, 190, 255, .30);
+    --cyan: #22d3ee;
+    --cyan-dim: rgba(34, 211, 238, .12);
+    --purple: #a78bfa;
+    --purple-dim: rgba(167, 139, 250, .12);
+    --amber: #fbbf24;
+    --amber-dim: rgba(251, 191, 36, .10);
+    --pink: #f472b6;
+    --green: #4ade80;
+    --text: #dbe7ff;
+    --muted: #8fa3c4;
+    --faint: #5b6f92;
+    --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.6 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background-image:
+      radial-gradient(900px 420px at 12% -8%, rgba(34,211,238,.08), transparent 60%),
+      radial-gradient(800px 420px at 95% 0%, rgba(167,139,250,.07), transparent 60%);
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 8px 22px 90px; }
+
+  /* Header */
+  header.hero { padding: 46px 0 10px; }
+  .kicker { font-family: var(--mono); font-size: 12px; letter-spacing: 3px; color: var(--cyan); text-transform: uppercase; }
+  h1 { font-size: clamp(26px, 4.4vw, 42px); line-height: 1.12; margin: 10px 0 8px; font-weight: 800; letter-spacing: .3px; }
+  h1 em { color: var(--cyan); font-style: normal; }
+  .sub { color: var(--muted); max-width: 760px; font-size: 15.5px; }
+  .stat-row { display: flex; flex-wrap: wrap; gap: 10px; margin: 22px 0 6px; }
+  .stat {
+    border: 1px solid var(--line); background: var(--panel); border-radius: 12px;
+    padding: 10px 16px; min-width: 150px;
+  }
+  .stat b { display: block; font-size: 21px; font-family: var(--mono); color: var(--cyan); }
+  .stat span { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+  .stat.warn b { color: var(--amber); } .stat.bad b { color: var(--pink); }
+
+  /* Sections */
+  section { margin-top: 52px; }
+  .sec-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 6px; }
+  .sec-num {
+    font-family: var(--mono); font-size: 13px; color: var(--bg); background: var(--cyan);
+    border-radius: 7px; padding: 2px 9px; font-weight: 700;
+  }
+  h2 { font-size: 23px; margin: 0; letter-spacing: .2px; }
+  .sec-sub { color: var(--muted); margin: 4px 0 20px; max-width: 820px; }
+
+  /* Generic panels */
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; margin: 14px 0; }
+  .panel h3 { margin: 0 0 10px; font-size: 15px; color: var(--cyan); text-transform: uppercase; letter-spacing: 1.5px; }
+  .callout {
+    border-left: 3px solid var(--cyan); background: var(--cyan-dim); border-radius: 0 12px 12px 0;
+    padding: 12px 16px; margin: 14px 0;
+  }
+  .callout.amber { border-color: var(--amber); background: var(--amber-dim); }
+  .callout.pink { border-color: var(--pink); background: rgba(244,114,182,.08); }
+  .callout.purple { border-color: var(--purple); background: var(--purple-dim); }
+  .callout b.tag { font-family: var(--mono); font-size: 11px; letter-spacing: 2px; text-transform: uppercase; display: block; margin-bottom: 4px; }
+  .callout.cyan b.tag { color: var(--cyan); } .callout.amber b.tag { color: var(--amber); }
+  .callout.pink b.tag { color: var(--pink); } .callout.purple b.tag { color: var(--purple); }
+  .mono { font-family: var(--mono); }
+
+  /* Code sketch */
+  pre.code {
+    background: #060b14; border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px 16px; font-family: var(--mono); font-size: 12px; line-height: 1.55;
+    overflow: auto; color: #b9d2ee; margin: 8px 0 0;
+  }
+  pre.code .c { color: var(--faint); }
+  pre.code .k { color: var(--purple); }
+  pre.code .s { color: var(--green); }
+  .twocol { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .col h4 { font-size: 12.5px; text-transform: uppercase; letter-spacing: 1.5px; color: var(--muted); margin: 0 0 8px; }
+  @media (max-width: 860px) { .twocol { grid-template-columns: 1fr; } }
+
+  /* Flow diagram (CSS boxes) */
+  .flow { display: flex; flex-direction: column; gap: 0; margin: 10px 0 4px; }
+  .fbox {
+    border: 1px solid var(--line2); border-radius: 12px; padding: 10px 14px;
+    background: var(--panel2); position: relative; display: flex; align-items: center; gap: 12px;
+  }
+  .fbox .tag {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 1px; text-transform: uppercase;
+    padding: 3px 8px; border-radius: 6px; white-space: nowrap;
+  }
+  .tag.t-cyan { background: var(--cyan-dim); color: var(--cyan); border: 1px solid rgba(34,211,238,.35); }
+  .tag.t-purple { background: var(--purple-dim); color: var(--purple); border: 1px solid rgba(167,139,250,.35); }
+  .tag.t-amber { background: var(--amber-dim); color: var(--amber); border: 1px solid rgba(251,191,36,.35); }
+  .fbox .who { font-weight: 700; font-size: 13.5px; min-width: 148px; }
+  .fbox .what { color: var(--muted); font-size: 13px; }
+  .fbox .what b { color: var(--text); font-weight: 600; }
+  .farrow { text-align: center; color: var(--cyan); font-size: 13px; line-height: 1.4; padding: 2px 0; font-family: var(--mono); }
+  .farrow .step { color: var(--faint); }
+
+  /* Ladder */
+  .ladder { display: grid; grid-template-columns: 34px 1fr; gap: 0 10px; margin: 14px 0 4px; }
+  .rung {
+    border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; margin-bottom: 6px;
+    background: var(--panel2); display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  }
+  .rung .cond { font-family: var(--mono); font-size: 12.5px; flex: 1 1 260px; }
+  .rung .go { font-family: var(--mono); font-size: 12px; font-weight: 700; padding: 2px 9px; border-radius: 6px; }
+  .ladder .idx { text-align: center; font-family: var(--mono); color: var(--faint); font-size: 12px; padding-top: 10px; }
+  .go.g-chat { background: rgba(74,222,128,.12); color: var(--green); }
+  .go.g-explore { background: var(--cyan-dim); color: var(--cyan); }
+  .go.g-sys { background: var(--purple-dim); color: var(--purple); }
+  .go.g-control { background: var(--amber-dim); color: var(--amber); }
+  .rung.hl { border-color: var(--cyan); background: linear-gradient(90deg, rgba(34,211,238,.10), transparent 55%); }
+  .rung.dim { opacity: .55; }
+  .ex-utter { font-family: var(--mono); font-size: 11.5px; color: var(--muted); background: #0a1322; border: 1px solid var(--line); border-radius: 5px; padding: 1px 7px; }
+
+  /* Routing explorer */
+  .r-bar { display: flex; gap: 10px; margin: 4px 0 12px; flex-wrap: wrap; }
+  .r-input {
+    flex: 1 1 340px; font: 14px var(--mono); color: var(--text);
+    background: #060b14; border: 1px solid var(--line2); border-radius: 10px; padding: 10px 14px;
+  }
+  .r-input:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
+  .r-input::placeholder { color: var(--faint); }
+  .r-go {
+    font: 700 13px inherit; cursor: pointer;
+    border: 1px solid var(--cyan); background: var(--cyan-dim); color: var(--cyan);
+    border-radius: 10px; padding: 10px 24px;
+  }
+  .r-go:hover { background: rgba(34, 211, 238, .22); }
+  .r-go:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .rung.land { border-color: var(--green); background: linear-gradient(90deg, rgba(74, 222, 128, .12), transparent 60%); }
+  .rung.land .go { background: rgba(74, 222, 128, .16); color: var(--green); box-shadow: 0 0 0 1px rgba(74, 222, 128, .35); }
+  .rung.land .marker { color: var(--green); font-family: var(--mono); font-size: 12px; font-weight: 700; }
+  .rung.passed .cond { color: var(--faint); }
+  .hit { color: var(--green); font-weight: 700; }
+  .walk { font-family: var(--mono); font-size: 12px; line-height: 2; margin: 10px 0 0; color: #b9d2ee; }
+  .walk .ok { color: var(--green); } .walk .no { color: var(--pink); } .walk .q { color: var(--faint); }
+  #liveLadder .rung { transition: opacity .25s, border-color .25s, background .25s; }
+  #liveLadder .rung .go { transition: box-shadow .25s, color .25s, background .25s; }
+
+  /* Formula */
+  .eq { font-family: var(--mono); font-size: 14px; background: #060b14; border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; overflow-x: auto; white-space: nowrap; }
+  .eq .o { color: var(--cyan); } .eq .n { color: var(--purple); } .eq .dim { color: var(--faint); }
+
+  /* Tables */
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th { text-align: left; color: var(--muted); text-transform: uppercase; font-size: 11px; letter-spacing: 1.5px; padding: 8px 10px; border-bottom: 1px solid var(--line2); }
+  td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  .chip { display: inline-block; font-family: var(--mono); font-size: 11px; padding: 1px 8px; border-radius: 20px; border: 1px solid var(--line2); }
+  .chip.c-green { color: var(--green); border-color: rgba(74,222,128,.4); }
+  .chip.c-cyan { color: var(--cyan); border-color: rgba(34,211,238,.4); }
+  .chip.c-purple { color: var(--purple); border-color: rgba(167,139,250,.4); }
+  .chip.c-amber { color: var(--amber); border-color: rgba(251,191,36,.4); }
+  .chip.c-pink { color: var(--pink); border-color: rgba(244,114,182,.4); }
+  .filters { display: flex; gap: 8px; flex-wrap: wrap; margin: 6px 0 14px; }
+  button.f {
+    font: 600 12px inherit; padding: 5px 13px; border-radius: 20px; cursor: pointer;
+    border: 1px solid var(--line2); background: var(--panel); color: var(--muted);
+  }
+  button.f:hover, button.f[aria-pressed="true"] { border-color: var(--cyan); color: var(--cyan); background: var(--cyan-dim); }
+  button.f:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+
+  /* Trace line */
+  .trace { font-family: var(--mono); font-size: 12.5px; line-height: 2; }
+  .trace .ok { color: var(--green); } .trace .no { color: var(--pink); } .trace .q { color: var(--faint); }
+
+  /* Timeline */
+  .timeline { display: grid; grid-template-columns: 60px 1fr; gap: 6px 14px; margin: 12px 0 4px; }
+  .tl-t { font-family: var(--mono); color: var(--faint); font-size: 11.5px; text-align: right; padding-top: 6px; }
+  .tl-ev { border: 1px solid var(--line); background: var(--panel2); border-radius: 9px; padding: 6px 12px; font-size: 13px; margin-bottom: 2px; }
+  .tl-ev.bad { border-color: rgba(244,114,182,.45); }
+  .tl-ev.good { border-color: rgba(74,222,128,.45); }
+  .tl-ev b { color: var(--cyan); }
+
+  /* Risk */
+  .risk { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; margin-top: 12px; }
+  .risk-card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .risk-card .sev { font-family: var(--mono); font-size: 10.5px; letter-spacing: 1.5px; padding: 2px 9px; border-radius: 20px; }
+  .sev.s-block { background: rgba(244,114,182,.12); color: var(--pink); border: 1px solid rgba(244,114,182,.4); }
+  .sev.s-hard { background: var(--amber-dim); color: var(--amber); border: 1px solid rgba(251,191,36,.4); }
+  .sev.s-opt { background: var(--cyan-dim); color: var(--cyan); border: 1px solid rgba(34,211,238,.35); }
+  .risk-card h4 { margin: 8px 0 4px; font-size: 14.5px; }
+  .risk-card p { margin: 0; color: var(--muted); font-size: 13px; }
+  .risk-card p b { color: var(--text); }
+
+  .filelist { display: flex; flex-wrap: wrap; gap: 8px; }
+  .filelist .f { font-family: var(--mono); font-size: 11.5px; background: #0a1322; border: 1px solid var(--line); border-radius: 6px; padding: 3px 10px; color: var(--muted); }
+  .filelist .f.own { color: var(--cyan); border-color: rgba(34,211,238,.35); }
+
+  ul.tight { margin: 6px 0; padding-left: 20px; } ul.tight li { margin: 4px 0; color: var(--muted); }
+  ul.tight li b { color: var(--text); }
+
+  footer { margin-top: 60px; color: var(--faint); font-size: 12.5px; border-top: 1px solid var(--line); padding-top: 18px; }
+  .animate { animation: fadeUp .5s ease both; }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    .animate, .dot, .pulse { animation: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- ══ HERO ══ -->
+  <header class="hero animate">
+    <p class="kicker">NovaControl · change explained</p>
+    <!-- Versioned teaching snapshot (docs/tools/), copied verbatim from the
+         original workspace-only explainer. It mirrors brain.py + scratch.py AS
+         OF ITS WRITING (pre-overhaul): the rung triggers, confidences, and the
+         "can_answer_directly()" gate shown here have since been superseded by
+         the INTENT registry in scratch.py and the live POST /brain/decide
+         trace. For the current behavior use the app's Routing panel; this page
+         remains a self-contained walkthrough of the ladder's DESIGN. -->
+    <h1>One pipeline, <em>one owner per decision.</em></h1>
+    <p class="sub">A shape-only restructure of how NovaControl <b>routes a request to an intent</b> (backend) and <b>renders the answer</b> (frontend). No features were added; behavior was preserved and then adversarially re-verified. This page walks the design, the proof, the one regression found, and the merge risks that remain — plus the overhaul addendum that closed the worded-math gap.</p>
+    <div class="stat-row">
+      <div class="stat"><b>2</b><span>duplicate classifiers<br>→ collapsed to 1 owner</span></div>
+      <div class="stat"><b>3→1</b><span>request wrappers<br>→ one run() + options</span></div>
+      <div class="stat"><b>234+120</b><span>tests + subtests green</span></div>
+      <div class="stat"><b>14</b><span>case routing contract re-verified</span></div>
+      <div class="stat warn"><b>0</b><span>git commits (no rollback)</span></div>
+      <div class="stat bad"><b>0</b><span>automated JS tests</span></div>
+    </div>
+  </header>
+
+  <!-- ══ 1 · PIPELINE MAP ══ -->
+  <section class="animate">
+    <div class="sec-head"><span class="sec-num">1</span><h2>The whole pipeline in one picture</h2></div>
+    <p class="sec-sub">Two entry surfaces — the Chat/Explore UI and the JSON APIs — feed the same routing core. The restructure moved <em>decisions</em> to the module that owns the underlying data, and made the frontend render what the server says instead of re-sniffing shapes in three places.</p>
+
+    <div class="panel">
+      <h3>Frontend · user → pixels</h3>
+      <div class="flow">
+        <div class="fbox"><span class="tag t-cyan">click</span><span class="who">Chat / Explore / actions</span><span class="what"><b>submitChat</b>, Explore handler, 12 action buttons</span></div>
+        <div class="farrow">▼ <span class="step">all funnel through</span></div>
+        <div class="fbox"><span class="tag t-cyan">shared</span><span class="who">run() · render-utils.js</span><span class="what">double-click guard → loading → fetch → error card → toast → button reset <b>(+ per-flow options)</b></span></div>
+        <div class="farrow">▼ <span class="step">dispatch by type</span></div>
+        <div class="fbox"><span class="tag t-cyan">gate</span><span class="who">render()</span><span class="what"><b>tryRenderResearch?</b> → explore page : chat/command/general page</span></div>
+        <div class="farrow">▲ <span class="step">200 JSON</span> ── <span class="step">POST /ask · /explore · /command/plan …</span></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Backend · request → intent → payload</h3>
+      <div class="flow">
+        <div class="fbox"><span class="tag t-purple">API</span><span class="who">api/app.py</span><span class="what">routes → <b>NovaBrain.decide()</b> (keyword ladder, §2)</span></div>
+        <div class="farrow">▼ <span class="step">consults one classifier</span></div>
+        <div class="fbox"><span class="tag t-purple">policy</span><span class="who">scratch.py</span><span class="what"><b>can_answer_directly()</b> — the single owner of “answer locally?” · sibling of <b>_classify()</b> (§3)</span></div>
+        <div class="farrow">▼ <span class="step">intent chosen</span></div>
+        <div class="fbox"><span class="tag t-amber">handlers</span><span class="who">application.py</span><span class="what">dispatch table → chat / explore / desktop / plan / agent … → <b>payload</b></span></div>
+        <div class="farrow">▼ <span class="step">+ shape_response()</span></div>
+        <div class="fbox"><span class="tag t-purple">out</span><span class="who">Nested payload</span><span class="what"><span class="mono">{route, payload:{decision, payload, summary}}</span> — the shape the frontend renders</span></div>
+      </div>
+    </div>
+    <div class="callout"><b class="tag">Read this first</b>The response is <b>polymorphic</b>: a Chat panel answer can legally be a full research report (<span class="mono">route: explore</span>). That is why one render gate must own “is this a report?” — previously Chat re-implemented the sniffing Explore already did.</div>
+  </section>
+
+  <!-- ══ 2 · ROUTING LADDER ══ -->
+  <section class="animate">
+    <div class="sec-head"><span class="sec-num">2</span><h2>The routing ladder, top to bottom</h2></div>
+    <p class="sec-sub"><span class="mono">brain.py decide()</span> tries intents in a fixed order. Rung 4 is the one that was rebuilt: it is the only place that decides “explain/research this” vs “answer this locally”.</p>
+
+    <div class="ladder">
+      <div class="idx">0</div><div class="rung"><span class="cond">empty / whitespace</span><span class="go g-chat">CLARIFY</span></div>
+      <div class="idx">1</div><div class="rung"><span class="cond">“hi”, “hello”…</span><span class="go g-chat">CHAT · .90</span></div>
+      <div class="idx">2</div><div class="rung"><span class="cond">“make it intelligent”, “code itself”…</span><span class="go g-control">SELF-IMPROVEMENT · .90</span></div>
+      <div class="idx">3</div><div class="rung hl">
+        <span class="cond">(<span class="mono">“what is” ∨ “what are”</span> ∨ research words) <b>∧ ¬</b> can_answer_directly()</span>
+        <span class="go g-explore">EXPLORE · .86</span>
+      </div>
+      <div class="idx">4</div><div class="rung"><span class="cond">“plan”, “roadmap”, “break down”…</span><span class="go g-sys">PLAN · .84</span></div>
+      <div class="idx">5</div><div class="rung"><span class="cond">phone / desktop / browser triggers</span><span class="go g-control">PHONE · DESKTOP · BROWSER</span></div>
+      <div class="idx">6</div><div class="rung"><span class="cond">“remember”, memory verbs</span><span class="go g-sys">MEMORY · .72</span></div>
+      <div class="idx">7</div><div class="rung"><span class="cond">“code”, “test”, “fix”…</span><span class="go g-sys">AGENT · .78</span></div>
+      <div class="idx">8</div><div class="rung"><span class="cond">“project”, “task”, “bug”…</span><span class="go g-sys">PROJECT · .72</span></div>
+      <div class="idx">9</div><div class="rung dim"><span class="cond">anything left over → scratch brain answers, else defers to Explore</span><span class="go g-chat">CHAT · .55</span></div>
+    </div>
+    <p class="sec-sub" style="margin-top:8px">Examples that reach rung 3: <span class="ex-utter">explain transformers in AI</span> <span class="ex-utter">why do birds migrate</span> <span class="ex-utter">compare React vs Vue</span> <span class="ex-utter">what is deep learning</span> — but NOT <span class="ex-utter">what is 2+2</span> or <span class="ex-utter">what is 15 times 3</span> (rung 3 skipped: scratchable → falls to CHAT → scratch computes the answer locally).</p>
+
+    <div class="callout cyan"><b class="tag">The merge, proven equivalent</b>
+      <p>Before: two separate checks at rung 3 — <span class="mono">research-words ∧ ¬scratchable</span>, then <span class="mono">“what is” ∧ ¬knowledge-key ∧ ¬scratchable</span>. The knowledge-key test was <b>redundant</b> (it is a subset of the scratchable test’s own key loop), so the second check was really just <span class="mono">“what is” ∧ ¬scratchable</span>.</p>
+      <p class="eq"><span class="dim">old</span>&nbsp; (E ∧ ¬S) &nbsp;∨&nbsp; (W ∧ ¬S) &nbsp;<span class="o">≡</span>&nbsp; (E ∨ W) ∧ ¬S &nbsp;<span class="o">=</span>&nbsp; <span class="n">new</span></p>
+      <p style="margin:6px 0 0">Same trigger words, same confidence, same position in the ladder → identical outputs on every input; <span class="mono">brain.py</span> now holds <b>zero</b> knowledge of math/time/units/knowledge-keys.</p>
+    </div>
+
+    <div class="panel">
+      <h3>Try it — the ladder, live</h3>
+      <p class="sec-sub" style="margin:0 0 12px">Type an utterance and the explorer walks <span class="mono">decide()</span> in source order, evaluating every rung with the real trigger tables — including the <span class="mono">can_answer_directly()</span> gate that decides whether the EXPLORE rung fires at all. Rung numbers below are <span class="mono">decide()</span>’s source order (the static ladder above collapses the arithmetic gate and the three control intents, so the indices differ). Each rung is mirrored verbatim from <span class="mono">src/novacontrol/brain/brain.py</span> + <span class="mono">scratch.py</span> as of this snapshot; the repo’s <span class="mono">INTENT_ROUTING</span> test tables pin those rules, so this demo is a teaching mirror, not a second owner.</p>
+      <div class="r-bar">
+        <label class="sr" for="routeInput">Utterance to route</label>
+        <input id="routeInput" class="r-input" type="text" spellcheck="false" placeholder="e.g. explain deep learning · what is 15 times 3 · open notepad">
+        <button id="routeGo" class="r-go" type="button">Route it</button>
+      </div>
+      <div class="filters" id="routeChips" role="group" aria-label="Example utterances"></div>
+      <div id="routeVerdict" class="callout cyan" hidden></div>
+      <div id="liveLadder" class="ladder" aria-live="polite"></div>
+      <pre id="routeWalk" class="walk" hidden></pre>
+    </div>
+  </section>
+
+  <!-- ══ 3 · TWO CLASSIFIERS + GAP ══ -->
+  <section class="animate">
+    <div class="sec-head"><span class="sec-num">3</span><h2>Two classifiers, one policy owner — on purpose</h2></div>
+    <p class="sec-sub">scratch.py now owns every “can I answer this without a model or the web?” decision. There are two of them, and they are <b>deliberately different widths</b>. Confusing them is the trap a future session could fall into.</p>
+
+    <div class="twocol">
+      <div class="panel">
+        <h3>can_answer_directly() · narrow</h3>
+        <p style="margin:0 0 6px; color:var(--muted); font-size:13px">Used by <b>routing</b>. Only counts queries with a <em>canned</em> local answer:</p>
+        <ul class="tight">
+          <li>math — symbolic <span class="mono">15*3</span> <b>or</b> worded <span class="mono">15 times 3</span></li>
+          <li>time/date · unit &amp; currency conversion</li>
+          <li>exact knowledge-key hit — <span class="mono">how many planets</span></li>
+          <li>recommendation / movie / book / food prefixes</li>
+        </ul>
+        <p style="margin:8px 0 0; color:var(--muted); font-size:13px"><b>“what is quantum computing” → NOT answerable</b> → correctly goes to <b>EXPLORE</b> for a real web answer.</p>
+      </div>
+      <div class="panel">
+        <h3>_classify() · broad</h3>
+        <p style="margin:0 0 6px; color:var(--muted); font-size:13px">Used by <b>scratch.answer()</b> when a request already landed in CHAT. Best-effort local:</p>
+        <ul class="tight">
+          <li>adds greetings, capabilities, phone/desktop stubs</li>
+          <li>treats any <span class="mono">“what is X”</span> as <span class="mono">knowledge</span></li>
+          <li>if no fact matches → generic reply that <b>points to Explore</b></li>
+        </ul>
+        <p style="margin:8px 0 0; color:var(--muted); font-size:13px">Broad is fine <em>here</em> — this only runs after routing already decided CHAT.</p>
+      </div>
+    </div>
+    <div class="callout amber"><b class="tag">Constraint — do not unify them</b>
+      If routing used the broad classifier, “what is quantum computing” would classify as <i>knowledge</i> → routed to CHAT → answered with a generic “use Explore” line instead of real research. The two widths are the design, not debt.</div>
+
+    <div class="callout cyan"><b class="tag">Addendum — worded math closed by the overhaul</b>
+      One shared math detector in <span class="mono">scratch.py</span> powers both classifiers: symbolic <span class="mono">15*3</span>, spelled-out operators (<span class="mono">times · plus · minus · over · multiplied by · divided by</span>) and the <span class="mono">“add 5 and 7”</span> form, plus trailing-punctuation handling. Live check: <span class="mono">“what is 15 times 3”</span> → route <span class="mono">chat</span>, message “The result of `15 times 3` is <b>45</b>.” — where it previously ran an Explore web search that never said 45. Routing still delegates to scratch; brain.py holds no math knowledge.</div>
+  </section>
+
+  <!-- ══ 4 · FRONTEND ══ -->
+  <section class="animate">
+    <div class="sec-head"><span class="sec-num">4</span><h2>Frontend: three wrappers → one, and one render gate</h2></div>
+    <p class="sec-sub">Chat submit, Explore research, and every action button each hand-rolled the same loading/error/toast/button-state dance. Now <span class="mono">run()</span> owns it and flows pass per-flow options. And “is this a research report?” is answered in exactly one file.</p>
+
+    <div class="twocol">
+      <div class="panel">
+        <h4 style="color:var(--pink)">before · submitChat (~20 lines)</h4>
+        <pre class="code"><span class="c">// duplicate of what run() already did…</span>
+guard; read input; empty-check
+state.lastQuery = request
+setButtonLoading(<span class="s">"askButton"</span>, true)
+renderLoading(<span class="s">"chatStream"</span>, <span class="s">"Thinking…"</span>)
+clearInput()
+requestJson(<span class="s">"/ask"</span>)
+  .then(render + toast <span class="s">"Response ready"</span>)
+  .catch(renderError; reset voice)
+  .finally(unload)      <span class="c">← Explore handler &amp; 12 buttons copied this shape</span></pre>
+      </div>
+      <div class="panel">
+        <h4 style="color:var(--green)">after · submitChat delegates</h4>
+        <pre class="code">guard <span class="k">before</span> clearing input   <span class="c">// ← the fix, §4b</span>
+read input; empty-check
+state.lastQuery = request; clearInput()
+run(<span class="s">"chatStream"</span>, <span class="s">"chat"</span>, fetch, <span class="s">"askButton"</span>, {
+  loadingText: <span class="s">"Thinking…"</span>,
+  successToast: <span class="s">"Response ready"</span>,
+  onError: resetVoice,      <span class="c">// flow-specific bits stay here</span>
+})</pre>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>The render gate — who may draw an Explore page</h3>
+      <table>
+        <thead><tr><th>Caller</th><th>Path</th><th>Owner of “is this a report?”</th></tr></thead>
+        <tbody>
+          <tr><td><span class="mono">render(type=“explore”)</span></td><td>renderExplore → <b>tryRenderResearch</b> → fallback page</td><td rowspan="2"><span class="mono">render-explore.js</span> — the unwrap chain inside <span class="mono">tryRenderResearch</span>: <span class="mono">data → .report → .payload → .payload.payload → .response.payload</span></td></tr>
+          <tr><td><span class="mono">renderChatResult</span> (a Chat answer that is really a report)</td><td>tryRenderResearch → <b>return early</b> : command/approval? : general page</td></tr>
+        </tbody>
+      </table>
+      <p style="color:var(--muted); font-size:13px; margin:10px 0 0">Before: <span class="mono">renderChatResult</span> re-derived the report shape itself. Now the sniffing lives in one file and Chat simply delegates — if the shape logic changes, it changes in one place. (The former one-use <span class="mono">extractResearchReport</span> helper was inlined here by the prune pass.)</p>
+    </div>
+
+    <div class="panel">
+      <h3>The one regression the adversarial pass found · double-click ordering</h3>
+      <div class="timeline">
+        <div class="tl-t">click 1</div><div class="tl-ev">guard passes → reads text → <b>clears the input</b> → run() sets <span class="mono">loading</span> → fetch starts</div>
+        <div class="tl-t">click 2</div><div class="tl-ev bad">no handler guard anymore → reads input = <b>“”</b> → toast <b>“Type a message first”</b> while request 1 is in flight — misleading feedback</div>
+        <div class="tl-t">fix</div><div class="tl-ev good">restore the 1-line guard <b>before</b> clearing: click 2 now returns silently · exactly one /ask (verified in network log) · Explore needs no guard because it never clears its input</div>
+      </div>
+      <p style="color:var(--muted); font-size:13px; margin:10px 0 0"><b>Rule that falls out:</b> <span class="mono">run()</span>’s guard runs <i>after</i> the caller’s synchronous prelude — any flow that mutates its input before calling <span class="mono">run()</span> needs its own guard first. That ordering hazard is why this class of bug ships silently: no test can see it, only an ordering read.</p>
+    </div>
+  </section>
+
+  <!-- ══ 5 · VALIDATION & RISK ══ -->
+  <section class="animate">
+    <div class="sec-head"><span class="sec-num">5</span><h2>Validation evidence &amp; the real merge risks</h2></div>
+    <p class="sec-sub">What actually proves the change, and what still needs doing before this is safe to ship — calibrated to this restructure, not a generic checklist.</p>
+
+    <div class="panel">
+      <h3>Evidence gathered</h3>
+      <ul class="tight">
+        <li><b>234 tests + 120 subtests green</b> — including the tables pinning scratchable → CHAT and research → EXPLORE (the exact contract this change touched), plus new worded-math routing rows and engine-answer cases.</li>
+        <li><b>mypy strict clean</b> (configured <span class="mono">strict = true</span> in pyproject) · <b>node --check</b> clean on all touched JS.</li>
+        <li><b>14-case routing contract re-verified live</b> + API edge inputs (<span class="mono">""</span>, whitespace → CLARIFY, no crash).</li>
+        <li><b>Live UI:</b> chat math (incl. worded), chat→research report, explore research, system health, double-clicks (single request each), empty inputs — on the dev server.</li>
+      </ul>
+    </div>
+
+    <div class="risk">
+      <div class="risk-card"><span class="sev s-block">BLOCKER · process</span><h4>No git baseline exists</h4><p>The repo has <b>zero commits</b> — everything is untracked. Nothing can be diffed, reverted, or bisected. <b>Act:</b> initial commit now, then commit this change separately so it is one reviewable unit with a rollback point.</p></div>
+      <div class="risk-card"><span class="sev s-block">BLOCKER · validation</span><h4>Frontend has no automated tests</h4><p><span class="mono">run()</span> is now a shared choke point for 12+ bindings; only <span class="mono">node --check</span> + manual probing guard it. <b>Act:</b> run the smoke list against the <b>Docker-built image</b> (chat math, chat→research, explore, command plan, health, settings, double-clicks, reload-mid-research) before merge.</p></div>
+      <div class="risk-card"><span class="sev s-hard">HARDENING</span><h4>Routing proof rests on reasoning + ~26 pinned utterances</h4><p>Equivalence is exact, but no table row pins cross-intent boundaries. <b>Act:</b> add rows like <span class="mono">“compare the plan”</span>, <span class="mono">“what is the plan”</span> (must stay EXPLORE, before PLAN) to freeze the merged rung against future drift.</p></div>
+      <div class="risk-card"><span class="sev s-hard">HARDENING</span><h4>Unpinned FastAPI + private StaticFiles override</h4><p><span class="mono">fastapi&gt;=0.115</span> resolves “latest” at Docker build; a future Starlette change could silently break the <span class="mono">no-cache</span> override. <b>Act:</b> pin resolved versions + a deploy-time curl assertion that <span class="mono">/</span> and <span class="mono">/static/*</span> return <span class="mono">cache-control: no-cache</span>.</p></div>
+      <div class="risk-card"><span class="sev s-opt">ROLLOUT NOTE</span><h4>Open tabs keep the old UI</h4><p>Embedded webviews restore the last DOM without refetching — deploy won’t visibly change already-open tabs; users must <b>close and reopen</b>. Data/schema untouched; API routes &amp; payloads unchanged, so no consumer-compat or migration work.</p></div>
+    </div>
+
+    <div class="panel">
+      <h3>Files touched by this change</h3>
+      <div class="filelist">
+        <span class="f own">brain/brain.py</span><span class="f own">brain/scratch.py</span>
+        <span class="f own">web/static/js/render-utils.js</span><span class="f own">web/static/js/render-explore.js</span>
+        <span class="f own">web/static/js/render-panels.js</span><span class="f own">web/static/app.js</span>
+        <span class="f own">web/static/styles.css</span><span class="f">tests/test_brain_scratch.py</span><span class="f">AGENTS.md (new)</span>
+      </div>
+      <p style="color:var(--muted); font-size:13px; margin:12px 0 0"><b>Ownership map:</b> routing <i>policy</i> → scratch.py · routing <i>decisions</i> → brain.py · loading/error/run → render-utils.js · report detection/rendering → render-explore.js · panel renderers → render-panels.js · DOM + the single Markdown renderer → dom.js · state + HTTP → state.js · event binding → app.js.</p>
+    </div>
+
+    <div class="callout purple"><b class="tag">Honest uncertainty</b>
+      <ul class="tight" style="margin-top:6px">
+        <li>Routing equivalence is argued from code and pinned by tables — not by a full corpus diff (the repo has no baseline to diff against).</li>
+        <li>All live checks ran on the <b>dev server</b>, not the Docker image; packaging could differ (static copying, dependency resolution).</li>
+        <li>The double-click and dispatch behavior is verified by live probes and ordering analysis — no automated JS harness exists to make it durable.</li>
+      </ul></div>
+  </section>
+
+  <footer>
+    NovaControl · visual explanation of the architecture restructure + overhaul addendum · generated from this session’s change · dark theme matches the product · no external assets, no build step · <span class="mono">.freebuff/explain-architecture.html</span>
+  </footer>
+</div>
+
+<script>
+/* ── Routing explorer · mirror of brain.py decide() + scratch.py scratchable_intent() ──
+   Transcribed from the real sources at generation time. The repo's INTENT_ROUTING /
+   BrainScratchRoutingTests tables pin the server-side behavior; this page only teaches it. */
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* ----- scratch.py tables (mirrored) ----- */
+  const GREETINGS = new Set(["hi", "hello", "hey", "hai", "good morning", "good afternoon", "good evening"]);
+  const KNOWLEDGE_KEYS = [
+    "how many planets", "speed of light", "speed of sound", "boiling point of water",
+    "freezing point of water", "distance to the moon", "distance to the sun",
+    "age of the earth", "age of the universe", "diameter of earth", "gravity on earth",
+    "avogadro's number", "speed of internet", "who invented the lightbulb",
+    "who invented the telephone", "who invented the internet", "who invented the airplane",
+    "capital of france", "capital of japan", "capital of india", "capital of china",
+    "capital of germany", "capital of united states", "capital of usa", "capital of uk",
+    "capital of england", "capital of brazil", "capital of australia", "capital of canada",
+    "capital of russia", "largest country", "most populated country", "longest river",
+    "tallest mountain", "what is dna", "what is evolution", "what is gravity",
+    "what is photosynthesis", "what is climate change", "what is ai",
+    "what is machine learning", "what is quantum computing", "what is blockchain",
+    "what is html", "what is pi", "what is euler's number",
+    "what is the pythagorean theorem", "what is a prime number",
+  ];
+  const RE_ADD = /\badd\s+(\d+(?:\.\d+)?)\s+and\s+(\d+(?:\.\d+)?)/i;
+  const RE_EXPR = /[\d]\s*[+\-*/^]\s*[\d]/;
+  const RE_FUNC = /\b(?:sqrt|sin|cos|tan|log|log10|log2|abs|floor|ceil|round)\s*\(/i;
+  // Mirrors scratch.py's _MATH_WORD_RULES detection: operands may be digits OR
+  // spelled-out number words ("fifteen times three", "2 to the power of 8").
+  const NUM_TOKEN = "zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|" +
+    "thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|" +
+    "fifty|sixty|seventy|eighty|ninety|hundred|thousand|million";
+  const OPERAND = `(?:\\d+(?:\\.\\d+)?|${NUM_TOKEN})(?:[\\s-]+(?:and[\\s-]+)?(?:\\d+(?:\\.\\d+)?|${NUM_TOKEN}))*`;
+  const WORD_RULES = [
+    new RegExp(`\\b(${OPERAND})\\s+plus\\s+(${OPERAND})\\b`, "i"),
+    new RegExp(`\\b(${OPERAND})\\s+minus\\s+(${OPERAND})\\b`, "i"),
+    new RegExp(`\\b(${OPERAND})\\s+times\\s+(${OPERAND})\\b`, "i"),
+    new RegExp(`\\b(${OPERAND})\\s+over\\s+(${OPERAND})\\b`, "i"),
+    new RegExp(`\\b(${OPERAND})\\s+multiplied by\\s+(${OPERAND})\\b`, "i"),
+    new RegExp(`\\b(${OPERAND})\\s+divided by\\s+(${OPERAND})\\b`, "i"),
+    new RegExp(`\\b(${OPERAND})\\s+to the power of\\s+(${OPERAND})\\b`, "i"),
+    new RegExp(`\\b(?:the\\s+)?square root of\\s+(${OPERAND})\\b`, "i"),
+    new RegExp(`\\bsqrt of\\s+(${OPERAND})\\b`, "i"),
+    new RegExp(`\\b(${OPERAND})\\s+squared\\b`, "i"),
+    new RegExp(`\\b(${OPERAND})\\s+cubed\\b`, "i"),
+  ];
+
+  function isArithmetic(lower) {
+    return RE_EXPR.test(lower) || RE_ADD.test(lower) || RE_FUNC.test(lower) ||
+      WORD_RULES.some((re) => re.test(lower));
+  }
+
+  /* Narrow gate: which canned local answer does scratch have? Returns the intent name
+     or null. brain.py imports ONLY this; EXPLORE fires only when it returns null. */
+  function scratchableIntent(lower) {
+    const cleaned = lower.replace(/^[\s.,!?'"\t\r\n]+|[\s.,!?'"\t\r\n]+$/g, "");
+    if (GREETINGS.has(cleaned)) return "greeting";
+    if (isArithmetic(lower)) return "math";
+    if (["calculate ", "compute ", "sqrt", "sin ", "cos ", "log"].some((p) => lower.startsWith(p))) return "math";
+    if (/what time|current time|what day|what date|today|time now|date now/.test(lower)) return "time";
+    if (/[\d.]+\s*[a-zA-Z/°]+\s+(?:in|to|into|=)\s+[a-zA-Z/°]+/.test(lower)) return "conversion";
+    if (/[\d.]+\s*(?:usd|eur|gbp|inr|jpy)\s+(?:in|to)/.test(lower)) return "conversion";
+    if (/[\d.]+\s*(?:second|minute|hour|day|week)s?\s+(?:in|to|=)/.test(lower)) return "conversion";
+    for (const key of KNOWLEDGE_KEYS) if (lower.includes(key) || lower.startsWith(key)) return "knowledge";
+    if (["recommend", "suggest", "what should i", "what can i eat"].some((w) => lower.includes(w))) return "recommendation";
+    if (["movie", "book", "food", "i want to watch", "i want to read"].some((p) => lower.startsWith(p))) return "recommendation";
+    return null;
+  }
+
+  /* ----- brain.py trigger tables (mirrored) ----- */
+  const SELF_IMPROVE = ["self improve", "self-improve", "improve yourself", "improve itself",
+    "code itself", "code yourself", "upgrade yourself", "improve your code",
+    "make it intelligent", "make yourself intelligent"];
+  const EXPLORE_WORDS = ["research", "explain", "why", "compare", "teach me",
+    "is it true", "true or false", "verify", "fact check", "latest", "online"];
+  const PHONE_TRIGGERS = ["phone", "android", "mobile", "whatsapp", "sms", "call "];
+  const PHONE_ACTIONS = ["open ", "launch ", "control", "send", "call ", "text ", "message"];
+  const DESKTOP_KNOWN = ["open app", "desktop", "organize files", "run script", "launch app",
+    "open notepad", "open chrome", "open code", "open vscode", "open vs code",
+    "open calculator", "open calc"];
+  const BROWSER_WORDS = ["browser", "website", "navigate", "fill form", "fill the form", "download"];
+
+  const hits = (lower, words) => words.filter((w) => lower.includes(w));
+  function looksPhone(lower) {
+    return PHONE_TRIGGERS.some((w) => lower.includes(w)) && PHONE_ACTIONS.some((w) => lower.includes(w));
+  }
+  function looksDesktop(lower) {
+    if ([" website", " web page", " url", " http://", " https://"].some((t) => lower.includes(t))) return false;
+    if (DESKTOP_KNOWN.some((t) => lower.includes(t))) return true;
+    return lower.startsWith("open ") || lower.startsWith("launch ") || lower.startsWith("run app ");
+  }
+
+  /* ----- Ladder rows, in exact decide() order ----- */
+  const ROWS = [
+    { id: 1, label: "greeting",  cls: "g-chat",    go: "CHAT",               conf: 0.90,
+      cond: "greeting words — “hi”, “hello”, “hey”, “good morning”…",
+      skip: "cleaned text is not in _GREETINGS",
+      fire: (l) => scratchableIntent(l) === "greeting" },
+    { id: 2, label: "self-improve", cls: "g-control", go: "SELF-IMPROVEMENT", conf: 0.90,
+      cond: "“self improve”, “code itself”, “make it intelligent”, “upgrade yourself”…",
+      skip: "no self-improvement phrase", fire: (l) => hits(l, SELF_IMPROVE).length > 0 },
+    { id: 3, label: "arithmetic", cls: "g-chat", go: "CHAT", conf: 0.88,
+      cond: "any symbolic / worded / function math — “2+2”, “15 times 3”, “sqrt(144)”",
+      skip: "not arithmetic (no operator, worded operator, or function call)",
+      fire: (l) => scratchableIntent(l) === "math" },
+    { id: 4, label: "explore", cls: "g-explore", go: "EXPLORE", conf: 0.86,
+      cond: "(“what is” ∨ “what are” ∨ research words) <b>∧</b> can_answer_directly() = null",
+      skip: "no research word — or scratch has a canned local answer (gate blocked)",
+      fire: (l) => (l.includes("what is") || l.includes("what are") || hits(l, EXPLORE_WORDS).length) && scratchableIntent(l) === null },
+    { id: 5, label: "plan", cls: "g-sys", go: "PLAN", conf: 0.84,
+      cond: "“plan”, “roadmap”, “milestone”, “break down”, “steps”…",
+      skip: "no plan word (\bplan\b / roadmap / milestone / break down / steps)",
+      fire: (l) => ["roadmap", "milestone", "break down", "steps"].some((w) => l.includes(w)) || /\bplan\b/.test(l) },
+    { id: 6, label: "phone", cls: "g-control", go: "PHONE_CONTROL", conf: 0.82,
+      cond: "phone / android / whatsapp / sms token <b>+</b> control verb",
+      skip: "no phone token with a control verb (open/send/call/text/message)", fire: looksPhone },
+    { id: 7, label: "desktop", cls: "g-control", go: "DESKTOP_AUTOMATION", conf: 0.80,
+      cond: "“open/launch/run <app>” — skipped when the target is a URL/website",
+      skip: "not an open/launch/run command (or target looked like a website)", fire: looksDesktop },
+    { id: 8, label: "browser", cls: "g-control", go: "BROWSER_AUTOMATION", conf: 0.80,
+      cond: "“browser”, “website”, “navigate”, “fill form”, “download”…",
+      skip: "no browser trigger word", fire: (l) => hits(l, BROWSER_WORDS).length > 0 },
+    { id: 9, label: "memory", cls: "g-sys", go: "MEMORY", conf: 0.72,
+      cond: "“remember”, “recall”, “memory”…",
+      skip: "no memory verb", fire: (l) => ["remember", "recall", "memory"].some((w) => l.includes(w)) },
+    { id: 10, label: "agent", cls: "g-sys", go: "AGENT", conf: 0.78,
+      cond: "“code”, “test”, “debug”, “review”, “fix”, “implement”…",
+      skip: "no code/agent verb", fire: (l) => ["code", "test", "debug", "review", "implement", "fix", "document"].some((w) => l.includes(w)) },
+    { id: 11, label: "project", cls: "g-sys", go: "PROJECT", conf: 0.72,
+      cond: "“project”, “task”, “bug”, “progress”…",
+      skip: "no project/task token", fire: (l) => ["project", "task", "bug", "progress"].some((w) => l.includes(w)) },
+    { id: 12, label: "fallback", cls: "g-chat", go: "CHAT", conf: 0.55,
+      cond: "nothing above matched → scratch brain answers what it can, else defers to Explore",
+      skip: null, fire: () => true },
+  ];
+
+  /* ----- Rendering helpers ----- */
+  const goClass = (row) => row.cls;
+  const esc = (s) => s.replace(/[&<>“”]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c] || c));
+
+  function describe(scratchable, lower) {
+    if (scratchable === null) return "no canned local answer";
+    const notes = {
+      greeting: "cleaned text is in _GREETINGS",
+      math: "local evaluator — no web needed",
+      time: "time/date phrase",
+      conversion: "unit/currency/duration conversion",
+      knowledge: "exact key in the local knowledge table",
+      recommendation: "recommend/suggest/movie/book/food request",
+    };
+    return `<span class="v-scratch">can_answer_directly() → “${scratchable}”</span> &nbsp;(${notes[scratchable] || scratchable})`;
+  }
+
+  function caughtNarration(row, lower, scratchable) {
+    if (row.id === 1) return "cleaned text is exactly in _GREETINGS — routed to a greeting reply.";
+    if (row.id === 2) return `matched “${hits(lower, SELF_IMPROVE).join("”, “")}” — routed to Build/self-improvement.`;
+    if (row.id === 3) return "the arithmetic gate fires <b>before</b> EXPLORE: “what is 15 times 3” computes 45 locally instead of researching.";
+    if (row.id === 4) {
+      const who = lower.includes("what is") || lower.includes("what are")
+        ? "“what is/what are”" : hits(lower, EXPLORE_WORDS).join("”, “");
+      return `matched ${who} and ${describe(scratchable, lower)} — the merged gate. The Chat panel renders a full research report.`;
+    }
+    if (row.id === 5) return "a plan word matched — routed to planning.";
+    if (row.id === 6) return "phone token + control verb both present.";
+    if (row.id === 7) return "an open/launch/run command with an app target.";
+    if (row.id === 8) return `matched “${hits(lower, BROWSER_WORDS).join("”, “")}”.`;
+    if (row.id === 9) return "a memory verb matched — routed to memory recall.";
+    if (row.id === 10) return "a code/agent verb matched — delegated to a specialized agent.";
+    if (row.id === 11) return "a project/task token matched.";
+    return scratchable
+      ? `every earlier rung skipped, and ${describe(scratchable, lower)} — so rung 4 was blocked from EXPLORE; the scratch brain answers locally (e.g. “capital of france”).`
+      : "the whole ladder fell through — scratch brain answers, and defers to Explore for anything it cannot.";
+  }
+
+  const LAND_META = {
+    CHAT: { class: "g-chat", word: "answered locally by the scratch brain" },
+    EXPLORE: { class: "g-explore", word: "sent to web research (Explore)" },
+    PLAN: { class: "g-sys", word: "turned into a step-by-step plan" },
+    "SELF-IMPROVEMENT": { class: "g-control", word: "sent to the Build/self-improvement flow" },
+    PHONE_CONTROL: { class: "g-control", word: "planned as a phone action (approval-gated)" },
+    DESKTOP_AUTOMATION: { class: "g-control", word: "planned as a desktop action (approval-gated)" },
+    BROWSER_AUTOMATION: { class: "g-control", word: "planned as a browser action (approval-gated)" },
+    MEMORY: { class: "g-sys", word: "handled by the memory store" },
+    AGENT: { class: "g-sys", word: "delegated to a specialized agent" },
+    PROJECT: { class: "g-sys", word: "tracked as project work" },
+    CLARIFY: { class: "g-chat", word: "asking for more detail" },
+  };
+
+  /* ----- Walk one utterance ----- */
+  function evaluate(raw) {
+    const text = raw.trim();
+    const lower = text.toLowerCase();
+    if (!lower) {
+      return { clarify: true, scratchable: null, row: null, log: [] };
+    }
+    const scratchable = scratchableIntent(lower);
+    const log = [{ raw: raw.trim(), scratchable }];
+    let caughtRow = null;
+    for (const row of ROWS) {
+      const fired = row.fire(lower);
+      log.push({ row, fired });
+      if (fired) { caughtRow = row; break; }
+    }
+    return { clarify: false, scratchable, row: caughtRow, log };
+  }
+
+  const rungHtml = (row, state) => {
+    const mark = state === "land" ? "<span class=\"marker\">◀ lands here</span>" : "";
+    const cls = state === "land" ? "rung land" : state === "passed" ? "rung passed" : "rung";
+    return `<div class="idx">${row.id}</div><div class="${cls}"><span class="cond">${row.cond}${mark}</span>` +
+      `<span class="go ${goClass(row)}">${row.go} · ${row.conf.toFixed(2)}</span></div>`;
+  };
+
+  function renderLadder(result) {
+    const host = $("liveLadder");
+    host.innerHTML = "";
+    if (result.clarify) {
+      host.insertAdjacentHTML("beforeend",
+        `<div class="idx">0</div><div class="rung land"><span class="cond">empty / whitespace — the first check in decide(), before the ladder starts <span class="marker">◀ lands here</span></span>` +
+        `<span class="go g-chat">CLARIFY · 1.00</span></div>`);
+      return;
+    }
+    const caughtId = result.row.id;
+    for (const row of ROWS) {
+      const state = row.id < caughtId ? "passed" : row.id === caughtId ? "land" : "";
+      host.insertAdjacentHTML("beforeend", rungHtml(row, state));
+    }
+  }
+
+  function renderVerdict(result, raw) {
+    const card = $("routeVerdict");
+    if (result.clarify) {
+      card.innerHTML = `<b class="tag">Rung 0 · CLARIFY</b>` +
+        `<p style="margin:0"><b>${esc(raw) || "(empty)"}</b> → decide() bails on whitespace before the ladder starts. Nothing was routed.</p>`;
+    } else {
+      const r = result.row;
+      const meta = LAND_META[r.go];
+      const goLabel = `${r.go}${r.go === "CHAT" ? (r.id === 1 ? " · greeting" : r.id === 3 ? " · arithmetic" : " · fallback") : ""}`;
+      card.innerHTML = `<b class="tag">Lands on rung ${r.id} · ${goLabel} · confidence ${r.conf.toFixed(2)}</b>` +
+        `<p style="margin:0 0 6px"><b>${esc(raw)}</b> → ${caughtNarration(r, raw.toLowerCase(), result.scratchable)}</p>` +
+        `<p style="margin:0">Next: request is ${meta.word}. ${result.scratchable && r.id === 12 ? "" : `Scratch gate: ${describe(result.scratchable, raw.toLowerCase())}.`}</p>`;
+    }
+    card.hidden = false;
+  }
+
+  function renderWalk(result) {
+    const pre = $("routeWalk");
+    if (result.clarify) {
+      pre.innerHTML = "<span class=\"q\">0.</span> <span class=\"no\">empty input</span> → <span class=\"ok\">CLARIFY</span> before the ladder starts";
+    } else {
+      // log[0] is the pre-ladder gate context (no row); walk only the rung steps.
+      const steps = result.log.slice(1);
+      const lines = steps.map((s, i) => {
+        const row = s.row;
+        const last = i === steps.length - 1;
+        const sym = s.fired ? "<span class=\"ok\">✓</span>" : "<span class=\"no\">✗</span>";
+        const why = s.fired ? "<span class=\"ok\">catches it</span>" : `no — ${esc(row.skip)}`;
+        return `<span class="q">${row.id}.</span> ${sym} <b>${row.go}</b> ${why}${last ? "  ← route lands here" : ""}`;
+      });
+      const gate = result.scratchable
+        ? `gate blocked EXPLORE: scratch answers “${result.scratchable}” locally`
+        : "gate open — no canned local answer, so EXPLORE can fire";
+      lines.unshift(`<span class="q">gate.</span> can_answer_directly() → ${result.scratchable === null ? "null" : `“${result.scratchable}”`} (${gate})`);
+      pre.innerHTML = lines.join("\n");
+    }
+    pre.hidden = false;
+  }
+
+  let busy = false;
+  function route(raw) {
+    if (busy) return;
+    busy = true;
+    try {
+      routeInner(raw);
+    } catch (err) {
+      busy = false; // never leave the explorer dead after an unexpected error
+      throw err;
+    }
+  }
+  function routeInner(raw) {
+    const result = evaluate(raw);
+    renderVerdict(result, raw);
+    if (reduceMotion) {
+      renderLadder(result);
+      renderWalk(result);
+      busy = false;
+      return;
+    }
+    $("liveLadder").innerHTML = "";
+    $("routeWalk").hidden = true;
+    const host = $("liveLadder");
+    if (result.clarify) {
+      renderLadder(result);
+      renderWalk(result);
+      busy = false;
+      return;
+    }
+    // log[0] is the pre-ladder gate context (no row) — animate only the rung steps.
+    const seq = result.log.slice(1).map((s) => s.row);
+    let i = 0;
+    const step = () => {
+      if (i >= seq.length) {
+        const caughtId = seq[seq.length - 1].id;
+        for (const row of ROWS) {
+          if (row.id > caughtId) host.insertAdjacentHTML("beforeend", rungHtml(row, ""));
+        }
+        renderWalk(result);
+        const landEl = host.querySelector(".rung.land");
+        if (landEl) landEl.scrollIntoView({ block: "nearest" });
+        busy = false;
+        return;
+      }
+      const row = seq[i];
+      host.insertAdjacentHTML("beforeend", rungHtml(row, ""));
+      // insertAdjacentHTML adds the .idx then the .rung — the rung is lastElementChild.
+      const node = host.lastElementChild;
+      if (i < seq.length - 1) node.classList.add("passed");
+      else node.classList.add("land");
+      i += 1;
+      setTimeout(step, 110);
+    };
+    step();
+  }
+
+  /* ----- Chips ----- */
+  const EXAMPLES = [
+    ["hi", "greeting → CHAT"],
+    ["make yourself intelligent", "self-improvement rung"],
+    ["what is 15 times 3", "math gate before EXPLORE"],
+    ["what is fifteen times three", "spelled-out numbers"],
+    ["what is 2 to the power of 8", "powers → local CHAT"],
+    ["explain deep learning", "rung 4 · EXPLORE"],
+    ["compare the plan", "EXPLORE wins over “plan”"],
+    ["roadmap for a side project", "rung 5 · PLAN"],
+    ["open notepad", "desktop action"],
+    ["capital of france", "knowledge → scratch answers"],
+  ];
+  const chipHost = $("routeChips");
+  EXAMPLES.forEach(([text, hint]) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "f";
+    b.textContent = text;
+    b.title = hint;
+    b.addEventListener("click", () => { $("routeInput").value = text; route(text); });
+    chipHost.appendChild(b);
+  });
+  $("routeGo").addEventListener("click", () => route($("routeInput").value));
+  $("routeInput").addEventListener("keydown", (e) => { if (e.key === "Enter") route(e.target.value); });
+  $("routeInput").focus();
+})();
+</script>
+</body>
+</html>

@@ -32,3 +32,9 @@ The default approval gateway denies sensitive actions, which keeps the system se
 - `boolean`
 - `object`
 - `array`
+
+## Routing Ladder Demo (docs/tools/routing-ladder-demo.html)
+
+A self-contained, dependency-free HTML page that walks NovaBrain's routing ladder interactively: type an utterance and it evaluates every gate in source order — including the math/scratch gate that decides whether a phrase is answered locally or falls through to research.
+
+Open it directly in any browser (no server, no build step). It is a **teaching snapshot**: the rung triggers and confidences are mirrored verbatim from `brain.py`/`scratch.py` as of its writing and are pinned upstream by the `INTENT_ROUTING` test tables. For live behavior on the current code, use the app's **Routing panel** (which traces `POST /brain/decide` against the running server), not this page.
