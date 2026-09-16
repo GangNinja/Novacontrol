@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 import importlib.util
 from typing import Any, Protocol, runtime_checkable
+from urllib.parse import parse_qs, unquote, urlparse
+import base64
 
 from novacontrol.browser.models import (
     BrowserAction,
@@ -104,6 +106,9 @@ class PlaywrightBrowserRunner:
 
     async def _extract(self, action: BrowserAction) -> Mapping[str, Any]:
         page = await self._ensure_page()
+        if action.parameters.get("mode") == "search_results":
+            limit = int(action.parameters.get("limit", 6))
+            return await self._extract_search_results(page, limit)
         if action.target != "current_page" and action.target.startswith(("http://", "https://")):
             await page.goto(action.target, wait_until="domcontentloaded", timeout=self.timeout_ms)
         selector = str(action.parameters.get("selector", "body"))
@@ -113,6 +118,66 @@ class PlaywrightBrowserRunner:
             "selector": selector,
             "url": page.url,
             "matches": [value.strip() for value in values if value.strip()],
+        }
+
+    async def _extract_search_results(self, page: Any, limit: int) -> Mapping[str, Any]:
+        """Pull top result titles + links off a search-engine results page.
+
+        One evaluate pass over the DOM (the browser already parsed the HTML).
+        Supported result-page markups, matched in priority order:
+          * Bing: rows are ``li.b_algo`` — the first ``a`` inside is the title
+            link and the ``p`` is the snippet,
+          * DuckDuckGo lite: ``a.result-link`` + ``td.result-snippet``,
+          * DuckDuckGo html: ``a.result__a`` + ``.result__snippet``.
+        Snippets pair to their result row by document order, so a result with
+        no snippet yields "" instead of stealing its neighbour's. Hrefs are
+        unwrapped to real targets (uddg= and Bing /ck/a?u= forms).
+        """
+        raw = await page.evaluate(
+            """(limit) => {
+              const bingRows = [...document.querySelectorAll('li.b_algo')].slice(0, limit).map((row) => {
+                // Bing rows carry a site-attribution anchor before the real
+                // title link; the title lives in the h2.
+                const link = row.querySelector('h2 a[href]') || row.querySelector('a[href]');
+                const snippet = row.querySelector('p');
+                return link ? {
+                  title: (link.textContent || '').trim(),
+                  href: link.getAttribute('href') || '',
+                  snippet: snippet ? (snippet.textContent || '').trim() : '',
+                } : null;
+              }).filter(Boolean);
+              if (bingRows.length) return bingRows;
+              const LINK = 'a.result-link, a.result__a';
+              const SNIPPET = 'td.result-snippet, .result__snippet';
+              const FOLLOWING = Node.DOCUMENT_POSITION_FOLLOWING;
+              const links = [...document.querySelectorAll(LINK)];
+              const snippets = [...document.querySelectorAll(SNIPPET)];
+              return links.slice(0, limit).map((link, index) => {
+                const nextLink = links[index + 1] || null;
+                const after = (node) => !!(node && (link.compareDocumentPosition(node) & FOLLOWING));
+                const inRange = (node) =>
+                  after(node) && (!nextLink || (node.compareDocumentPosition(nextLink) & FOLLOWING));
+                const snippet = snippets.find(inRange);
+                return {
+                  title: (link.textContent || '').trim(),
+                  href: link.getAttribute('href') || '',
+                  snippet: snippet ? (snippet.textContent || '').trim() : '',
+                };
+              });
+            }""",
+            max(limit, 0),
+        )
+        results = [
+            {"title": row["title"], "url": _unwrap_result_url(row["href"]), "snippet": row["snippet"]}
+            for row in (raw or [])
+            if isinstance(row, dict) and (row.get("title") or row.get("href"))
+        ]
+        return {
+            "adapter": "playwright",
+            "action": "extract_search_results",
+            "url": page.url,
+            "search_results": results,
+            "count": len(results),
         }
 
     async def _fill_form(self, action: BrowserAction) -> Mapping[str, Any]:
@@ -251,6 +316,22 @@ class BrowserAutomationController:
                     target=source,
                     description=f"Extract data using selector {selector}",
                     parameters={"selector": selector},
+                ),
+            ),
+        )
+
+    def plan_search_results(self, *, limit: int = 6, source: str = "current_page") -> BrowserWorkflow:
+        """Plan extracting the top search-result titles/links from the page a
+        search navigation just landed on, so a planned web search RETURNS AN
+        ANSWER (result cards) instead of only reporting a page load."""
+        return BrowserWorkflow(
+            name="Extract search results",
+            actions=(
+                BrowserAction(
+                    type=BrowserActionType.EXTRACT,
+                    target=source,
+                    description="Extract top search results (titles + links)",
+                    parameters={"mode": "search_results", "limit": int(limit)},
                 ),
             ),
         )
@@ -401,3 +482,33 @@ def _browser_assertion_passed(assertion: str, *, title: str, url: str, content: 
         expected = assertion.split(":", 1)[1].strip()
         return expected.lower() in content.lower()
     return assertion.lower() in content.lower()
+
+
+def _unwrap_result_url(href: str) -> str:
+    """Resolve a search-engine result href to the real target URL.
+
+    Handles the redirect forms the supported engines actually serve:
+      * DuckDuckGo /l/?uddg=<url-encoded-target>&rut=... — the uddg parameter
+        carries the destination,
+      * Bing /ck/a?u=a1<base64url-target> — the u parameter is base64url
+        (occasionally 'a1'-prefixed) and may ride on an 'amp;u' key because
+        Bing HTML-encodes its ampersands. Direct http(s) links pass through.
+    """
+    if not href:
+        return ""
+    parsed = urlparse(href)
+    query = parse_qs(parsed.query)
+    if "uddg" in query:
+        return unquote(query["uddg"][0])
+    u_value = query.get("u") or query.get("amp;u")
+    if u_value:
+        payload = u_value[0]
+        payload = payload[2:] if payload.startswith("a1") else payload
+        payload += "=" * (-len(payload) % 4)
+        try:
+            decoded = base64.urlsafe_b64decode(payload).decode("utf-8", errors="replace")
+        except Exception:
+            return href
+        if decoded.startswith(("http://", "https://")):
+            return decoded
+    return href

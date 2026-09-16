@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import unittest
 
 STATIC = Path("src/novacontrol/web/static")
 RENDER_UTILS = STATIC / "js" / "render-utils.js"
+
+NODE = shutil.which("node")
 
 # JS shim: enough DOM for appendLiveStep's reveal path inside Node.
 SHIM = r'''
@@ -46,6 +49,8 @@ eval(fs.readFileSync("src/novacontrol/web/static/js/render-utils.js", "utf8"));
 
 
 def run_node(script: str) -> subprocess.CompletedProcess[str]:
+    if NODE is None:
+        raise unittest.SkipTest("node is not installed")
     return subprocess.run(
         ["node", "-e", script], capture_output=True, text=True, timeout=60
     )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from collections.abc import MutableMapping
 from os import PathLike
 from pathlib import Path
@@ -27,6 +28,12 @@ _ASSET_VERSION_MARKER = "__NC_ASSET_VERSION__"
 # Visible UI build stamp in the sidebar footer; same content-derived version,
 # shortened, so a stale cached page is instantly distinguishable from current UI.
 _UI_VERSION_MARKER = "__NC_UI_VERSION__"
+
+# "Delete All Tasks" undo: wiped records held in memory behind one-shot tokens.
+# Process-scoped (an undo cannot reach across a restart) and time-boxed; the
+# token store is bounded by the expiry sweep on every undo look-up.
+_TASK_UNDO_WINDOW_SECONDS = 30.0
+_task_clear_snapshots: dict[str, dict[str, Any]] = {}
 
 
 def _static_asset_version(static_dir: Path) -> str:
@@ -97,7 +104,7 @@ def _routing_preview(nova: NovaControlApplication, text: str, intent: str) -> di
         if intent == "explore":
             return {
                 "kind": "explore",
-                "headline": overview_headline(text, (), provider_status="offline")[:200],
+                "headline": overview_headline(text, ())[:200],
                 "note": "Running Explore adds sources, key points, and a detailed explanation.",
             }
         if intent == "plan":
@@ -283,11 +290,72 @@ def create_app() -> Any:
         """Remove the stored cloud LLM config and its API key."""
         return nova.clear_cloud_llm()
 
+    @app.post("/brain/cloud/test")
+    async def brain_cloud_test(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Ping a cloud provider with the pasted key BEFORE saving anything.
+
+        One tiny completion through the exact provider construction the real
+        connect would use. Nothing is persisted; the key is validated (or its
+        rejection explained) and discarded.
+        """
+        try:
+            return await nova.test_cloud_llm(
+                str(payload.get("provider", "")),
+                str(payload.get("api_key", "")),
+                model=str(payload.get("model", "")),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/brain/ollama/models")
+    async def brain_ollama_models(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Models available on the local Ollama for the brain model picker.
+
+        Always a fresh probe (models pulled after boot appear), never the
+        boot-time snapshot.
+        """
+        return nova.local_models()
+
+    @app.post("/brain/local/model")
+    async def brain_local_model(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Pin the LOCAL brain to a specific Ollama model (hot swap, no restart).
+
+        Empty model clears the pick (auto-pick returns). The choice persists
+        locally and re-arms at boot; only the local provider is touched — a
+        configured cloud LLM stays exactly where it is.
+        """
+        try:
+            return nova.set_local_model(str(payload.get("model", "")))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.post("/chat/clear")
     async def chat_clear(_principal: str = Depends(require_auth)) -> dict[str, Any]:
-        """Wipe the server-side conversation memory (multi-turn context)."""
+        """Wipe the conversation: server memory AND the shared transcript."""
         nova.brain.conversation.clear()
-        return {"status": "cleared", "conversation_turns": 0}
+        transcript_dropped = nova.chat_transcript.clear()
+        nova.persist()
+        return {"status": "cleared", "conversation_turns": 0, "transcript_dropped": transcript_dropped}
+
+    @app.get("/chat/history")
+    async def chat_history_get(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """The shared chat thread (server-persisted, same for every browser)."""
+        return nova.chat_history()
+
+    @app.post("/chat/history")
+    async def chat_history_post(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Append one client turn to the shared thread, or (action=migrate)
+        one-time import a browser's old localStorage thread. The import is
+        idempotent per (role, text, at) so re-running it never duplicates."""
+        if str(payload.get("action", "")) == "migrate":
+            raw_turns = payload.get("turns")
+            turns = [t for t in raw_turns if isinstance(t, dict)] if isinstance(raw_turns, list) else []
+            return nova.import_chat_history(turns)
+        return nova.record_chat_turn(
+            str(payload.get("role", "")),
+            str(payload.get("text", "")),
+            route=str(payload.get("route", "")),
+        )
 
     @app.get("/tasks")
     async def tasks_list(_principal: str = Depends(require_auth)) -> dict[str, Any]:
@@ -323,10 +391,39 @@ def create_app() -> Any:
 
     @app.post("/tasks/clear")
     async def tasks_clear(_principal: str = Depends(require_auth)) -> dict[str, Any]:
-        """Delete every tracked task record."""
-        count = nova.tasks.clear()
+        """Delete every tracked task record — undoable for a short window.
+
+        The wiped records are held (in memory only) behind a one-shot undo
+        token so a misclicked "Delete All" can be taken back. The snapshot
+        dies with the token: after the window (or process exit) the wipe is
+        permanent, exactly like before.
+        """
+        records = nova.tasks.clear_snapshot()
         nova.persist()
-        return {"status": "cleared", "deleted": count}
+        if not records:
+            return {"status": "cleared", "deleted": 0}
+        token = uuid4().hex
+        _task_clear_snapshots[token] = {
+            "records": records,
+            "expires": time.time() + _TASK_UNDO_WINDOW_SECONDS,
+        }
+        return {
+            "status": "cleared",
+            "deleted": len(records),
+            "undo": {"token": token, "window_seconds": _TASK_UNDO_WINDOW_SECONDS},
+        }
+
+    @app.post("/tasks/clear/undo")
+    async def tasks_clear_undo(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Undo a recent /tasks/clear by token (one-shot; unknown/expired → 409)."""
+        token = str(payload.get("token", ""))
+        snapshot = _task_clear_snapshots.pop(token, None)
+        if snapshot is None or time.time() > float(snapshot["expires"]):
+            _task_clear_snapshots.pop(token, None)  # expired leftover: sweep it
+            raise HTTPException(status_code=409, detail="Undo window has closed.")
+        restored = nova.tasks.restore(snapshot["records"])
+        nova.persist()
+        return {"status": "restored", "restored": restored}
 
     @app.post("/improve")
     async def improve(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
@@ -354,6 +451,22 @@ def create_app() -> Any:
             feedback=str(payload.get("feedback", "")),
         )
 
+    @app.post("/knowledge/teach")
+    async def knowledge_teach(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Teach: persist a typed fact as durable, recallable knowledge."""
+        try:
+            return await nova.teach_knowledge(str(payload["fact"]))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/knowledge")
+    async def knowledge_list(query: str = "", _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return await nova.list_knowledge(query)
+
+    @app.post("/knowledge/recall")
+    async def knowledge_recall(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return await nova.list_knowledge(str(payload.get("query", "")), limit=int(payload.get("limit", 20)))
+
     @app.post("/train")
     async def train(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
         return await nova.autonomous_learning_loop(
@@ -369,6 +482,38 @@ def create_app() -> Any:
         if payload.get("execute"):
             response["workflow"] = (await WorkflowExecutor().execute(workflow_plan)).to_dict()
         return response
+
+    @app.post("/plan/code")
+    async def plan_code(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Code-aware planning: language-aware steps + a drafted code artifact.
+
+        Uses the configured LLM when one is wired; otherwise returns the
+        deterministic language-aware plan so the Build tab always plans real
+        coding work.
+        """
+        try:
+            return await nova.build_code_plan(
+                str(payload["goal"]), language=str(payload.get("language", "python"))
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/build/save")
+    async def build_save(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Save a drafted Build artifact to the workspace on disk.
+
+        Closes the Build loop: draft (LLM or plan) → edit in the panel → save
+        to build_workspace/<name> (gitignored). Returns the absolute path.
+        """
+        try:
+            return nova.save_build_artifact(
+                filename=str(payload.get("filename", "")),
+                content=str(payload.get("content", "")),
+                language=str(payload.get("language", "python")),
+                goal=str(payload.get("goal", "")),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post("/command/plan")
     async def command_plan(payload: CommandPlanRequest, _principal: str = Depends(require_auth)) -> dict[str, Any]:
@@ -393,6 +538,26 @@ def create_app() -> Any:
         token = str(payload.get("approval_token", "") or "") or None
         try:
             return await nova.execute_desktop_command(
+                str(payload["command"]), approval_token=token, correlation_id=str(payload.get("correlation_id", "") or "")
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    @app.post("/browser/plan")
+    async def browser_plan(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Plan an approval-gated browser action (navigate / search + extract).
+
+        Dedicated device endpoint — same contract as /desktop/plan: a plan with
+        an approval token, so a browser phrase can never land on the desktop
+        controller (and vice versa) regardless of intent classification.
+        """
+        return nova.plan_browser_command(str(payload["command"]))
+
+    @app.post("/browser/execute")
+    async def browser_execute(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        token = str(payload.get("approval_token", "") or "") or None
+        try:
+            return await nova.execute_browser_command(
                 str(payload["command"]), approval_token=token, correlation_id=str(payload.get("correlation_id", "") or "")
             )
         except ValueError as exc:

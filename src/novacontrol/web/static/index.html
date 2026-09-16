@@ -134,6 +134,12 @@
                   <option value="cloud">Cloud LLM</option>
                 </select>
               </label>
+              <label class="brain-switch" title="Pick WHICH local Ollama model the brain uses. Empty = auto-pick. The choice survives restarts; a configured cloud LLM is never touched.">
+                <span class="brain-switch-label">Model</span>
+                <select id="brainModelSwitch" class="cyber-input brain-switch-select" aria-label="Local brain model">
+                  <option value="">Auto-pick</option>
+                </select>
+              </label>
               <button id="clearChatButton" type="button" class="cyber-btn danger" aria-label="Clear chat history">Clear Chat</button>
               <button id="voiceButton" type="button" class="cyber-btn" aria-label="Start voice input">Voice Input</button>
               <button id="voiceChatButton" type="button" class="cyber-btn" aria-label="Start voice chat mode">Voice Chat</button>
@@ -196,7 +202,28 @@
               <h2>Build And Improve</h2>
             </div>
           </div>
+          <div id="buildModelHint"></div>
           <div class="split-tools">
+            <article class="surface">
+              <h3>Plan Code</h3>
+              <label for="codePlanInput" class="sr-only">Coding goal</label>
+              <textarea id="codePlanInput" rows="3" placeholder="Describe what to code — e.g. 'a python script that renames photos by date'" class="cyber-input" aria-label="Coding goal"></textarea>
+              <label for="codeLanguage" class="sr-only">Programming language</label>
+              <select id="codeLanguage" class="cyber-input" aria-label="Programming language">
+                <option value="python">Python</option>
+                <option value="javascript">JavaScript</option>
+                <option value="typescript">TypeScript</option>
+                <option value="go">Go</option>
+                <option value="rust">Rust</option>
+                <option value="java">Java</option>
+                <option value="csharp">C#</option>
+                <option value="cpp">C++</option>
+                <option value="ruby">Ruby</option>
+                <option value="shell">Shell</option>
+                <option value="sql">SQL</option>
+              </select>
+              <button id="codePlanButton" type="button" class="cyber-btn">Plan The Code</button>
+            </article>
             <article class="surface">
               <h3>Plan Work</h3>
               <label for="planInput" class="sr-only">Planning goal</label>
@@ -228,12 +255,18 @@
           </div>
           <div class="split-tools">
             <article class="surface">
+              <h3>Teach Me Something</h3>
+              <label for="teachInput" class="sr-only">Fact to learn</label>
+              <textarea id="teachInput" rows="3" placeholder="Type a fact to learn — e.g. 'my project code name is Aurora'" class="cyber-input" aria-label="Fact to learn"></textarea>
+              <div class="button-row">
+                <button id="teachButton" type="button" class="cyber-btn primary">Teach</button>
+                <button id="knowledgeListButton" type="button" class="cyber-btn">Show What I Taught</button>
+              </div>
+            </article>
+            <article class="surface">
               <h3>Learning Goal</h3>
               <label for="learnGoal" class="sr-only">Learning goal</label>
               <textarea id="learnGoal" rows="3" placeholder="What should improve?" class="cyber-input" aria-label="Learning goal"></textarea>
-            </article>
-            <article class="surface">
-              <h3>Your Feedback</h3>
               <label for="learnFeedback" class="sr-only">Learning feedback</label>
               <textarea id="learnFeedback" rows="3" placeholder="Feedback for the next cycle" class="cyber-input" aria-label="Learning feedback"></textarea>
             </article>
@@ -263,7 +296,7 @@
           <article class="surface">
             <div class="surface-head-row">
               <h3>Tracked Tasks</h3>
-              <button id="clearTasksButton" type="button" class="cyber-btn danger small" aria-label="Delete all tasks">Delete All Tasks</button>
+              <button id="clearTasksButton" type="button" class="cyber-btn danger small" aria-label="Delete all tasks (click again to confirm)">Delete All Tasks</button>
             </div>
             <div id="taskList" class="task-list" aria-live="polite"></div>
           </article>
@@ -319,6 +352,7 @@
               </label>
             </div>
             <div class="button-row">
+              <button id="cloudTestButton" type="button" class="cyber-btn" title="Ping the provider with the pasted key — nothing is saved">Test Connection</button>
               <button id="cloudConnectButton" type="button" class="cyber-btn primary">Connect Cloud LLM</button>
               <button id="cloudClearButton" type="button" class="cyber-btn danger">Remove Cloud LLM</button>
               <span id="cloudStatus" class="cloud-status" aria-live="polite"></span>
@@ -337,6 +371,7 @@
               <div class="jarvis-device-switch" role="tablist" aria-label="JARVIS device">
                 <button id="jarvisDeviceDesktop" type="button" class="jarvis-device-btn active" role="tab" aria-selected="true" aria-label="Desktop control">Desktop</button>
                 <button id="jarvisDevicePhone" type="button" class="jarvis-device-btn" role="tab" aria-selected="false" aria-label="Phone control">Phone</button>
+                <button id="jarvisDeviceBrowser" type="button" class="jarvis-device-btn" role="tab" aria-selected="false" aria-label="Browser control">Browser</button>
               </div>
               <button id="jarvisVoiceButton" type="button" class="cyber-btn" aria-label="Speak a JARVIS command">Voice</button>
               <button id="jarvisPhoneConnectButton" type="button" class="cyber-btn phone-only">Connect Phone</button>
@@ -365,12 +400,15 @@
             </div>
           </article>
           <div class="suggestion-row">
-            <button class="suggestion-chip" type="button" data-jarvis-desktop="open notepad">open notepad</button>
-            <button class="suggestion-chip" type="button" data-jarvis-desktop="open chrome and search for cats">open chrome and search for cats</button>
-            <button class="suggestion-chip" type="button" data-jarvis-desktop="open steam and go to library and launch gta v">steam → library → game</button>
-            <button class="suggestion-chip" type="button" data-jarvis-desktop="open notepad and type hello world">dictate to notepad</button>
-            <button class="suggestion-chip" type="button" data-jarvis-desktop="open downloads">open downloads</button>
-            <button class="suggestion-chip" type="button" data-jarvis-desktop="stop that">stop that</button>
+            <button class="suggestion-chip desktop-only" type="button" data-jarvis-desktop="open notepad">open notepad</button>
+            <button class="suggestion-chip desktop-only" type="button" data-jarvis-desktop="open chrome and search for cats">open chrome and search for cats</button>
+            <button class="suggestion-chip desktop-only" type="button" data-jarvis-desktop="open steam and go to library and launch gta v">steam → library → game</button>
+            <button class="suggestion-chip desktop-only" type="button" data-jarvis-desktop="open notepad and type hello world">dictate to notepad</button>
+            <button class="suggestion-chip desktop-only" type="button" data-jarvis-desktop="open downloads">open downloads</button>
+            <button class="suggestion-chip desktop-only" type="button" data-jarvis-desktop="stop that">stop that</button>
+            <button class="suggestion-chip browser-only" type="button" data-jarvis-browser="search the web for quantum computing">search the web</button>
+            <button class="suggestion-chip browser-only" type="button" data-jarvis-browser="google mars rover news">google mars rover news</button>
+            <button class="suggestion-chip browser-only" type="button" data-jarvis-browser="navigate to wikipedia.org">navigate to wikipedia.org</button>
             <button class="suggestion-chip phone-only" type="button" data-jarvis-phone="open whatsapp on my phone">open whatsapp</button>
             <button class="suggestion-chip phone-only" type="button" data-jarvis-phone="text mom on my phone saying running late">text mom</button>
             <button class="suggestion-chip phone-only" type="button" data-jarvis-phone="take a screenshot on my phone">screenshot</button>

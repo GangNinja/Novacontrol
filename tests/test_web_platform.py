@@ -165,33 +165,48 @@ class WebPlatformTests(unittest.TestCase):
         """JS motion must read the same prefers-reduced-motion signal the CSS uses.
 
         effects.js owns all JS-driven motion (3D background canvas loop + card
-        tilt). Each effect must START with the matchMedia guard (count == 2) and
-        the guard must precede the motion it gates — background guard before its
-        requestAnimationFrame loop, tilt guard before its transform writes — so
-        no animation can start before the reduced-motion check runs. The static
-        file is the served output (no build step), so this pin is the check that
-        reduced-motion users get no canvas redraw or tilt either.
+        tilt). Each effect must bind the media query into a shared
+        ``motionQuery`` const, gate its motion on it at startup (background
+        gate before its requestAnimationFrame loop, tilt gate before its
+        transform writes), AND register a "change" listener so the policy also
+        reacts when the OS toggles reduced motion MID-SESSION — the stop
+        machinery (cancelAnimationFrame + canvas blank; tilt unbind + transform
+        clear) must exist for the ON direction. The static file is the served
+        output (no build step), so this pin is the check that reduced-motion
+        users get no canvas redraw or tilt, at boot or after a live toggle.
         """
         static = Path("src/novacontrol/web/static")
         effects = (static / "js" / "effects.js").read_text(encoding="utf-8")
         render_utils = (static / "js" / "render-utils.js").read_text(encoding="utf-8")
-        guard = (
-            "  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {"
-            "\n    return;\n  }"
+
+        # One media-query binding per effect (background + tilt), hoisted so
+        # both the boot gate and the live change listener share it.
+        self.assertEqual(
+            effects.count('matchMedia("(prefers-reduced-motion: reduce)")'), 2,
+            "each JS motion effect (background canvas + card tilt) must bind "
+            "the reduced-motion media query exactly once",
+        )
+        # Each effect must own its live policy and wire the OS toggle to it
+        # (standard addEventListener + legacy addListener fallback).
+        self.assertEqual(
+            effects.count("function applyMotionPolicy"), 2,
+            "each effect must own an applyMotionPolicy applied at boot AND on change",
         )
         self.assertEqual(
-            effects.count(guard), 2,
-            "each JS motion effect (background canvas + card tilt) must start "
-            "with the reduced-motion guard",
+            effects.count('addEventListener("change", applyMotionPolicy)'), 2,
+            "each effect must listen for matchMedia change events so a live OS "
+            "toggle stops (or restarts) the motion mid-session",
         )
-        # Guard ordering: background guard -> its rAF loop -> tilt guard -> its writes.
-        first_guard = effects.find(guard)
-        self.assertNotEqual(first_guard, -1)
-        tilt_guard = effects.find(guard, first_guard + 1)
+
+        # Ordering: the media query is bound before ANY motion code exists
+        # (first requestAnimationFrame reference, first tilt transform write),
+        # so the policy owns the signal from the top of the file. Startup and
+        # live-toggle behavior are proven in the browser by the e2e spec.
         positions = {
-            "background canvas guard": first_guard,
+            "reduced-motion media query": effects.find(
+                'matchMedia("(prefers-reduced-motion: reduce)")'
+            ),
             "canvas loop (requestAnimationFrame)": effects.find("requestAnimationFrame("),
-            "card tilt guard": tilt_guard,
             "tilt rotate write": effects.find("perspective(800px)"),
         }
         keys = list(positions)
@@ -199,8 +214,20 @@ class WebPlatformTests(unittest.TestCase):
             prev, nxt = keys[i], keys[i + 1]
             self.assertLess(
                 positions[prev], positions[nxt],
-                f"{prev} must precede {nxt} so motion never starts before its reduced-motion guard",
+                f"{prev} must precede {nxt} so motion never starts before its reduced-motion gate",
             )
+
+        # The ON-direction stop machinery must exist: the loop is cancellable
+        # and the canvas blankable; tilt listeners are detachable and their
+        # transforms clearable.
+        for needle in (
+            "function stopLoop",
+            "cancelAnimationFrame(rafId)",
+            "function clearTilt",
+            "function unbindTilt",
+        ):
+            self.assertIn(needle, effects, f"missing live-stop machinery: {needle}")
+
         # render-utils.js owns no animation of its own; keep it loop-free so it
         # can never start unguarded motion (no rAF, no transform writes).
         self.assertNotIn("requestAnimationFrame", render_utils)
@@ -310,6 +337,8 @@ class ExtractAnswerTextTests(unittest.TestCase):
     # The inner-data scan must hit data.content BEFORE the envelope summary, so
     # the chat bubble shows the agent's real text, not the generic fallback.
     def test_agent_fallback_payload_is_content_only_and_reachable(self) -> None:
+        if self.NODE is None:
+            self.skipTest("node is not installed")
         agent_payload = {
             "task_id": "t1", "agent_name": "TestAgent", "role": "testing",
             "status": "completed", "content": "Agent prepared the test plan.",
@@ -975,6 +1004,88 @@ class BackendFrontendContractTests(unittest.TestCase):
         # General branch: renderGeneralAiPage with its neutral explicit fallback.
         self.assertIn("function renderGeneralAiPage(", self.render_panels)
         self.assertIn("I prepared the result in the local runtime.", self.render_panels)
+
+    def test_destructive_clear_all_tasks_is_double_guarded(self) -> None:
+        """Delete All Tasks needs arm-to-confirm AND a toast Undo path.
+
+        A misclick must never wipe history: the first click only arms (nothing
+        is deleted), and the actual wipe returns a server undo token that the
+        toast action consumes within the window.
+        """
+        # Guard 1 — arm-to-confirm on the button.
+        self.assertIn('classList.contains("armed")', self.render_panels)
+        self.assertIn('classList.add("armed")', self.render_panels)
+        self.assertIn("Click again to delete ALL", self.render_panels)
+        self.assertIn("disarmClearTasksButton", self.render_panels)
+        # Guard 2 — the undo contract: the clear handler must read the token
+        # and the action primitive must exist with a one-shot settle.
+        self.assertIn('requestJson("/tasks/clear"', self.render_panels)
+        self.assertIn('requestJson("/tasks/clear/undo"', self.render_panels)
+        self.assertIn("showToastWithAction", self.render_panels)
+        self.assertIn("function showToastWithAction(", self.js)
+        self.assertIn("_pendingAction", self.js)
+        # The undo endpoint is a declared, authenticated surface.
+        routes = {(route.method, route.path) for route in ApiSurface.default().routes}
+        self.assertIn(("POST", "/tasks/clear/undo"), routes)
+
+    def test_chat_history_is_server_fed_not_localstorage_fed(self) -> None:
+        """The chat thread is the SHARED server transcript: the panel seeds
+        from GET /chat/history, appends via POST /chat/history, and any
+        localStorage use is limited to the one-time migration marker — a
+        browser must never own the only copy of the conversation."""
+        # The seed and append paths both hit the server surface.
+        self.assertIn('requestJson("/chat/history")', self.js)
+        self.assertIn('requestJson("/chat/history", { action: "migrate"', self.js)
+        self.assertIn('requestJson("/chat/history", { role', self.js)
+        # The old per-browser WRITE path is gone (reads for migration only).
+        self.assertNotIn('localStorage.setItem("novacontrol.chatHistory"', self.js)
+        # The migration is once-per-browser and idempotent server-side.
+        self.assertIn("CHAT_MIGRATION_KEY", self.js)
+        # The endpoints are declared, authenticated surfaces.
+        routes = {(route.method, route.path) for route in ApiSurface.default().routes}
+        self.assertIn(("GET", "/chat/history"), routes)
+        self.assertIn(("POST", "/chat/history"), routes)
+
+    def test_build_artifact_is_editable_and_savable(self) -> None:
+        """The Build tab closes the loop: the drafted artifact renders as an
+        EDITOR pane with Copy + Save-to-disk actions wired to /build/save —
+        not a dead <pre> the user can only stare at."""
+        self.assertIn("function renderEditableArtifact(", self.render_panels)
+        self.assertIn('requestJson("/build/save"', self.render_panels)
+        self.assertIn("artifact-code-editor", self.render_panels)
+        self.assertIn("navigator.clipboard.writeText", self.render_panels)
+        # The endpoint is a declared, authenticated surface.
+        routes = {(route.method, route.path) for route in ApiSurface.default().routes}
+        self.assertIn(("POST", "/build/save"), routes)
+
+    def test_build_coding_agent_trace_is_rendered_and_model_hint_shown(self) -> None:
+        """The coding agent (draft → run → fix loop) is visible: the Build tab
+        renders the agent's real step trace, and the panel states UPFRONT
+        whether a coding-capable model is configured (agent) or only the
+        scaffold fallback is possible."""
+        self.assertIn("function renderAgentTrace(", self.render_panels)
+        self.assertIn("agent-trace", self.render_panels)
+        self.assertIn("agent.fix_rounds", self.render_panels)
+        # The no-model hint: server-fed from /status app.brain.model_configured.
+        self.assertIn("renderBuildModelHint(", self.js)
+        self.assertIn('id="buildModelHint"', (Path("src/novacontrol/web/static") / "index.html").read_text(encoding="utf-8"))
+        self.assertIn("brain.model_configured", self.js)
+
+    def test_cloud_test_connection_button_wired_before_connect(self) -> None:
+        """Settings: a Test Connection button pings the provider with the
+        PASTED key (nothing saved) BEFORE the user commits via Connect."""
+        html = (Path("src/novacontrol/web/static") / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="cloudTestButton"', html)
+        self.assertIn("function testCloudLlm(", self.js)
+        self.assertIn('requestJson("/brain/cloud/test"', self.js)
+        # The button sits BEFORE Connect in the row (test-first order).
+        self.assertLess(
+            html.index('id="cloudTestButton"'),
+            html.index('id="cloudConnectButton"'),
+        )
+        # The endpoint is a declared, authenticated surface.
+        routes = {(route.method, route.path) for route in ApiSurface.default().routes}
+        self.assertIn(("POST", "/brain/cloud/test"), routes)
 
 
 class BackendIntentRendererContractTests(unittest.TestCase):

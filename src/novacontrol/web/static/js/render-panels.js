@@ -328,7 +328,32 @@ function renderPhoneStatus(target, data) {
 
 function renderBuild(target, data) {
   // /plan returns a flat {plan} / {actions} body — no envelope, no payload key.
-  if (data.plan?.steps) {
+  if (data.mode === "code_plan") {
+    // Code-aware plan: language pill, artifact card, then the plan steps.
+    target.appendChild(el("p", "summary", data.summary || "Code plan ready."));
+    const meta = el("div", "card-grid");
+    const langCard = el("article", "info-card");
+    langCard.appendChild(el("h4", "", "Language"));
+    langCard.appendChild(el("span", "pill ok", data.language || "python"));
+    meta.appendChild(langCard);
+    if (data.artifact?.path) {
+      const art = el("article", "info-card");
+      art.appendChild(el("h4", "", "Artifact"));
+      art.appendChild(el("p", "", data.artifact.path));
+      art.appendChild(el("span", "pill", data.artifact.generated_by === "agent" ? "agent + verified" : data.artifact.generated_by === "llm" ? "drafted by LLM" : data.artifact.generated_by === "scaffold" ? "runnable scaffold" : "planned scaffold"));
+      meta.appendChild(art);
+    }
+    target.appendChild(meta);
+    renderAgentTrace(target, data.agent);
+    if (data.artifact?.content) {
+      renderEditableArtifact(target, data.artifact, data.language || "python", data.plan?.goal || "");
+    } else if (data.artifact?.path) {
+      // Plan-only scaffold (no LLM): offer the editor empty so the user can
+      // write the code themselves and still save it to disk.
+      renderEditableArtifact(target, { path: data.artifact.path, content: "" }, data.language || "python", data.plan?.goal || "");
+    }
+    if (data.plan?.steps) renderActionCards(target, data.plan.steps, "description");
+  } else if (data.plan?.steps) {
     // Plan payloads identify themselves with `goal` (Plan.to_dict); the old
     // `name` read never matched, so the summary was always the fallback.
     target.appendChild(el("p", "summary", data.plan.name || data.plan.goal || "Plan created."));
@@ -340,6 +365,101 @@ function renderBuild(target, data) {
   } else {
     renderGeneric(target, data);
   }
+}
+
+/* ── Coding agent trace ─────────────────────────────────
+
+/* Shows what the agent actually did: draft → run → fix → re-run. Every step
+   is real (from the server's agent loop) — nothing is fabricated. */
+function renderAgentTrace(target, agent) {
+  if (!agent || !Array.isArray(agent.steps) || !agent.steps.length) return;
+  const holder = el("section", "agent-trace");
+  const head = el("div", "agent-trace-head");
+  const ok = agent.ran_ok === true;
+  const pillClass = ok ? "pill ok" : agent.ran_ok === false && agent.steps.some(s => s.kind === "run") ? "pill error" : "pill";
+  const label = ok ? `verified · ${agent.fix_rounds || 0} fix round${agent.fix_rounds === 1 ? "" : "s"}` : agent.ran_ok === false ? "not verified" : "draft only";
+  head.appendChild(el("strong", "", "Agent trace"));
+  head.appendChild(el("span", pillClass, label));
+  holder.appendChild(head);
+  agent.steps.forEach((step) => {
+    const row = el("div", "agent-step agent-step-" + step.kind);
+    row.appendChild(el("span", "agent-step-kind", step.kind));
+    row.appendChild(el("span", "agent-step-detail", step.detail));
+    if (step.output) {
+      const out = el("pre", "agent-step-output", step.output);
+      row.appendChild(out);
+    }
+    holder.appendChild(row);
+  });
+  if (agent.final_output) {
+    const out = el("div", "agent-final");
+    out.appendChild(el("strong", "", "Program output"));
+    out.appendChild(el("pre", "agent-step-output", agent.final_output));
+    holder.appendChild(out);
+  }
+  target.appendChild(holder);
+}
+
+/* ── Editable Build artifact ───────────────────────────────
+
+/* The drafted code renders as a live editor pane (not a dead <pre>): edit it,
+   copy it, or save it to build_workspace/ on the server. This closes the
+   Build loop — typed goal → real code → file on disk. */
+function renderEditableArtifact(target, artifact, language, goal) {
+  const holder = el("section", "artifact-editor");
+  const head = el("div", "artifact-editor-head");
+  head.appendChild(el("strong", "", artifact.path || `artifact.${language === "python" ? "py" : "txt"}`));
+  const actions = el("div", "artifact-editor-actions");
+
+  const copy = el("button", "cyber-btn small", "Copy");
+  copy.type = "button";
+  copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(editor.value);
+      showToast("Code copied to clipboard");
+    } catch (_) {
+      // Clipboard API can be blocked: select-all fallback so Ctrl+C works.
+      editor.focus();
+      editor.select();
+      showToast("Press Ctrl+C to copy");
+    }
+  });
+
+  const save = el("button", "cyber-btn ok small", "Save to disk");
+  save.type = "button";
+  save.addEventListener("click", async () => {
+    if (!editor.value.trim()) { showToast("Nothing to save — write or generate code first"); return; }
+    save.disabled = true;
+    try {
+      const result = await requestJson("/build/save", {
+        filename: artifact.path || "",
+        content: editor.value,
+        language,
+        goal,
+      });
+      showToast(`Saved → ${result.filename} (${result.bytes} bytes)`);
+      const note = el("p", "summary", `Saved to ${result.path}`);
+      holder.appendChild(note);
+    } catch (error) {
+      showToast(String(error.message || error));
+    } finally {
+      save.disabled = false;
+    }
+  });
+
+  actions.appendChild(copy);
+  actions.appendChild(save);
+  head.appendChild(actions);
+  holder.appendChild(head);
+
+  const editor = document.createElement("textarea");
+  editor.className = "artifact-code-editor";
+  editor.spellcheck = false;
+  editor.setAttribute("aria-label", "Generated code editor");
+  editor.value = artifact.content || "";
+  editor.rows = Math.min(30, Math.max(8, editor.value.split("\n").length + 2));
+  holder.appendChild(editor);
+  target.appendChild(holder);
 }
 
 /* ── Workflow Rendering ─────────────────────────────────────── */
@@ -427,6 +547,29 @@ function renderStepGroup(target, title, steps, status) {
 /* ── Learning Rendering ─────────────────────────────────────── */
 
 function renderLearning(target, data) {
+  if (data.mode === "knowledge_teach") {
+    // Teach result: confirm what was learned (or that it was already known).
+    target.appendChild(el("p", "summary", data.message || "Learned."));
+    if (data.duplicate) target.appendChild(el("span", "pill", "already known"));
+    if (data.memory?.key) target.appendChild(el("span", "pill ok", data.memory.key));
+    return;
+  }
+  if (data.mode === "knowledge_list") {
+    // Taught-knowledge listing: one card per fact.
+    const facts = data.facts || [];
+    target.appendChild(el("p", "summary", facts.length ? `${facts.length} thing${facts.length === 1 ? "" : "s"} I learned from you:` : "Nothing taught yet — type a fact above and press Teach."));
+    if (facts.length) {
+      const grid = el("div", "card-grid");
+      facts.forEach((fact) => {
+        const card = el("article", "info-card");
+        card.appendChild(el("p", "", fact.text || ""));
+        card.appendChild(el("span", "pill ok", fact.key));
+        grid.appendChild(card);
+      });
+      target.appendChild(grid);
+    }
+    return;
+  }
   target.appendChild(el("p", "summary", data.message || data.training_scope || "Learning cycle complete."));
   if (data.iterations) {
     const grid = el("div", "card-grid");
@@ -510,6 +653,7 @@ function renderBrainStatus(status) {
   const brain = status?.app?.brain || {};
   const active = Boolean(brain.model_configured);
   const effective = brain.effective_mode || (active ? "llm" : "scratch");
+  const cloud = brain.cloud || {};
   const card = el("article", "info-card brain-card");
   card.appendChild(el("h4", "", "AI Brain"));
   const row = el("p", "brain-line");
@@ -525,10 +669,38 @@ function renderBrainStatus(status) {
       effective === "scratch"
         ? "Answering locally with the built-in scratch brain. Switch back to Auto or Local LLM in the Chat panel to use Ollama."
         : active
-          ? "Chat and Explore synthesis use this local model."
+          ? brain.provider === "cloud"
+            ? "Chat and Explore synthesis use this cloud model."
+            : "Chat and Explore synthesis use this local model."
           : "Auto mode: answering locally until the Ollama server is detected."
     )
   );
+  // Cloud LLM telemetry: lifetime token usage (from the provider's own usage
+  // blocks) and the last error verbatim — so a failing key/connection is
+  // visible where the brain is monitored, not just at request time.
+  if (cloud.configured) {
+    const usage = cloud.usage;
+    if (usage && typeof usage.total_tokens === "number") {
+      card.appendChild(
+        el(
+          "p",
+          "brain-usage",
+          `Token usage — ${usage.total_tokens.toLocaleString()} total`
+            + (usage.prompt_tokens ? ` (in ${usage.prompt_tokens.toLocaleString()}` : "")
+            + (usage.completion_tokens ? `, out ${usage.completion_tokens.toLocaleString()})` : usage.prompt_tokens ? ")" : "")
+            + (usage.requests ? ` across ${usage.requests} request${usage.requests === 1 ? "" : "s"}` : "")
+        )
+      );
+    } else {
+      card.appendChild(el("p", "brain-usage", "Token usage — none recorded yet (usage appears after the first cloud answer)."));
+    }
+    if (cloud.last_error) {
+      const err = el("p", "brain-last-error");
+      err.appendChild(el("span", "pill error", "Last error"));
+      err.appendChild(el("span", "", ` ${cloud.last_error}`));
+      card.appendChild(err);
+    }
+  }
   clearNode(container);
   container.appendChild(card);
 }
@@ -566,9 +738,49 @@ async function deleteTask(id) {
   await refreshStatus();
 }
 
+// "Delete All Tasks" is protected twice: the button needs a second click to
+// confirm (a misclick just disarms it), and the wipe itself is undoable for a
+// short window via a toast Undo button backed by a server-side snapshot.
+let clearTasksArmedTimer = null;
+
+function disarmClearTasksButton() {
+  clearTimeout(clearTasksArmedTimer);
+  clearTasksArmedTimer = null;
+  const button = byId("clearTasksButton");
+  if (!button) return;
+  button.classList.remove("armed");
+  button.textContent = "Delete All Tasks";
+}
+
 async function clearAllTasks() {
+  const button = byId("clearTasksButton");
+  if (!button.classList.contains("armed")) {
+    // First click: arm only — nothing is deleted yet.
+    button.classList.add("armed");
+    button.textContent = "Click again to delete ALL";
+    clearTimeout(clearTasksArmedTimer);
+    clearTasksArmedTimer = setTimeout(disarmClearTasksButton, 4000);
+    return;
+  }
+  disarmClearTasksButton();
   const result = await requestJson("/tasks/clear", {});
-  showToast(`Deleted ${result.deleted ?? 0} task(s)`);
+  const deleted = result.deleted ?? 0;
+  const undo = result.undo;
+  if (!undo || !undo.token) {
+    showToast(`Deleted ${deleted} task(s)`);
+  } else {
+    showToastWithAction({
+      message: `Deleted ${deleted} task(s)`,
+      actionLabel: "Undo",
+      seconds: Number(undo.window_seconds) || 30,
+      onAction: async () => {
+        const restored = await requestJson("/tasks/clear/undo", { token: undo.token });
+        showToast(`Restored ${restored.restored ?? 0} task(s)`);
+        await refreshStatus();
+      },
+      onExpire: () => showToast("Undo window closed"),
+    });
+  }
   await refreshStatus();
 }
 

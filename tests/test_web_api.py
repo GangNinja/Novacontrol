@@ -517,9 +517,29 @@ class BrainModeAndTaskApiTests(_IsolatedApiTestCase):
         self.assertEqual(response.status_code, 200)
         presets = response.json()["presets"]
         self.assertTrue(any(row["id"] == "openai" for row in presets))
+        self.assertTrue(any(row["id"] == "claude" for row in presets), "Claude must be a listed cloud option")
         for row in presets:
             self.assertNotIn("base_url", row, "preset metadata stays lean, no endpoints")
             self.assertNotIn("api_key", json.dumps(row))
+
+    def test_brain_cloud_claude_connects_and_reports(self) -> None:
+        """Claude connects through the SAME /brain/cloud surface; the status
+        carries its label and model, the key never travels back."""
+        installed = self._client.post(
+            "/brain/cloud",
+            json={"provider": "claude", "api_key": "sk-ant-test-1234567890", "model": "claude-opus-4-1"},
+        )
+        self.assertEqual(installed.status_code, 200)
+        body = installed.json()
+        self.assertEqual(body["mode"], "cloud")
+        self.assertEqual(body["cloud"]["provider"], "claude")
+        self.assertEqual(body["cloud"]["model"], "claude-opus-4-1")
+        self.assertNotIn("sk-ant-test-1234567890", json.dumps(body))
+
+        # The stored config re-arms at boot (same namespace as other clouds).
+        stored = self._nova._cloud_llm_store.read("cloud_llm")
+        self.assertEqual(stored["provider"], "claude")
+        self.assertEqual(self._nova.brain.cloud_provider_name, "cloud:claude")
 
     def test_brain_cloud_roundtrip_and_key_redaction(self) -> None:
         # Invalid provider and empty key are both rejected before anything stores.
@@ -552,6 +572,64 @@ class BrainModeAndTaskApiTests(_IsolatedApiTestCase):
         self.assertEqual(cleared.json()["mode"], "auto")
         self.assertEqual(self._nova._cloud_llm_store.read("cloud_llm"), {})
 
+    def test_brain_cloud_test_pings_without_saving(self) -> None:
+        """The test-connection endpoint validates the pasted key with a real
+        provider construction + completion, but NOTHING may persist: the
+        stored config stays untouched, the brain stays untouched, and the
+        pasted key never survives the request."""
+        from unittest.mock import AsyncMock
+
+        # A working ping: the app's test path builds the provider through
+        # build_cloud_provider, so patch that to a fake that answers.
+        class _FakeProvider:
+            name = "cloud:openai"
+            model = "gpt-4o-mini"
+
+            async def complete(self, messages, **kwargs):
+                return "ok"
+
+        with mock.patch(
+            "novacontrol.application.build_cloud_provider", return_value=_FakeProvider()
+        ) as builder:
+            ok = self._client.post(
+                "/brain/cloud/test",
+                json={"provider": "openai", "api_key": "sk-paste-1234567890", "model": "gpt-4o-mini"},
+            )
+        self.assertEqual(ok.status_code, 200)
+        body = ok.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["sample"], "ok")
+        self.assertFalse(body["saved"], "a test ping must never claim it saved")
+        builder.assert_called_once_with("openai", "sk-paste-1234567890", model="gpt-4o-mini")
+
+        # Nothing persisted, nothing activated.
+        self.assertEqual(self._nova._cloud_llm_store.read("cloud_llm"), {})
+        self.assertFalse(self._nova.brain.cloud_provider_name)
+        self.assertNotIn("sk-paste-1234567890", json.dumps(self._client.get("/brain/mode").json()))
+
+        # A failing ping surfaces the provider's rejection as a 422 detail.
+        class _ExplodingProvider:
+            name = "cloud:openai"
+            model = "gpt-4o-mini"
+
+            async def complete(self, messages, **kwargs):
+                raise RuntimeError("401 invalid_api_key")
+
+        with mock.patch(
+            "novacontrol.application.build_cloud_provider", return_value=_ExplodingProvider()
+        ):
+            bad = self._client.post(
+                "/brain/cloud/test",
+                json={"provider": "openai", "api_key": "sk-bad-1234567890"},
+            )
+        self.assertEqual(bad.status_code, 422)
+        self.assertIn("401", bad.json()["detail"])
+        self.assertEqual(self._nova._cloud_llm_store.read("cloud_llm"), {}, "failed ping must not save either")
+
+        # Validation parity with the real connect: unknown provider + empty key.
+        self.assertEqual(self._client.post("/brain/cloud/test", json={"provider": "nope", "api_key": "k"}).status_code, 422)
+        self.assertEqual(self._client.post("/brain/cloud/test", json={"provider": "openai", "api_key": "  "}).status_code, 422)
+
     def test_chat_clear_wipes_server_conversation(self) -> None:
         self._client.post("/ask", json={"request": "hello there"})
         self.assertGreater(self._nova.brain.conversation.turn_count, 0)
@@ -561,6 +639,110 @@ class BrainModeAndTaskApiTests(_IsolatedApiTestCase):
         self.assertEqual(cleared.status_code, 200)
         self.assertEqual(cleared.json()["status"], "cleared")
         self.assertEqual(self._nova.brain.conversation.turn_count, 0)
+        # The shared transcript is wiped with the LLM memory (one /ask adds
+        # BOTH sides of the turn: user question + assistant answer).
+        self.assertEqual(cleared.json()["transcript_dropped"], 2)
+        self.assertEqual(self._client.get("/chat/history").json()["turns"], [])
+
+    def test_chat_history_is_shared_and_survives_restart(self) -> None:
+        """The thread lives on the server: /ask records it, another 'browser'
+        (a fresh client with no storage) reads the same turns, and a rebuilt
+        app instance re-loads the persisted thread."""
+        self._client.post("/ask", json={"request": "shared question"})
+
+        turns = self._client.get("/chat/history").json()["turns"]
+        self.assertEqual([t["role"] for t in turns], ["user", "assistant"])
+        self.assertEqual(turns[0]["text"], "shared question")
+
+        # A different client sees the SAME thread (the old per-browser
+        # localStorage behavior gave this second browser an empty panel).
+        other_browser = self._client.get("/chat/history")
+        self.assertEqual(other_browser.json(), turns and {"turns": turns})
+
+        # Persistence: a rebuilt app (same data dir) re-loads the thread.
+        rebuilt = NovaControlApplication(data_dir=self._nova.data_dir)
+        try:
+            self.assertEqual(
+                [t["text"] for t in rebuilt.chat_transcript.turns()],
+                [t["text"] for t in turns],
+            )
+        finally:
+            rebuilt.stop() if hasattr(rebuilt, "stop") else None
+
+    def test_chat_history_append_and_idempotent_migration(self) -> None:
+        # A client-reported turn (voice input, CLI, …) lands in the thread.
+        recorded = self._client.post(
+            "/chat/history", json={"role": "user", "text": "from voice", "route": ""}
+        )
+        self.assertEqual(recorded.status_code, 200)
+        self.assertTrue(recorded.json()["recorded"])
+
+        # One-time migration: the browser's old localStorage thread merges in.
+        local = [
+            {"role": "user", "text": "old local q", "route": "", "at": 111},
+            {"role": "assistant", "text": "old local a", "route": "chat", "at": 112},
+        ]
+        migrated = self._client.post("/chat/history", json={"action": "migrate", "turns": local})
+        self.assertEqual(migrated.status_code, 200)
+        self.assertEqual(migrated.json()["imported"], 2)
+
+        # Re-running the same migration imports NOTHING (idempotent).
+        again = self._client.post("/chat/history", json={"action": "migrate", "turns": local})
+        self.assertEqual(again.json()["imported"], 0)
+
+        # Turns already on the server are never duplicated by a migration.
+        self._client.post("/ask", json={"request": "already here"})
+        server_turns = self._client.get("/chat/history").json()["turns"]
+        signature = lambda t: (t["role"], t["text"], t["at"])
+        pre_clear = [signature(t) for t in self._client.get("/chat/history").json()["turns"]]
+        self._client.post("/chat/history", json={"action": "migrate", "turns": pre_clear})
+        post = self._client.get("/chat/history").json()["turns"]
+        self.assertEqual(len(post), len(server_turns))
+
+        # Invalid roles are rejected at the append path.
+        bad = self._client.post("/chat/history", json={"role": "system", "text": "nope"})
+        self.assertEqual(bad.status_code, 200)
+        self.assertFalse(bad.json()["recorded"])
+
+    def test_local_model_picker_listing_and_pinning(self) -> None:
+        # No Ollama reachable in tests: the listing is empty but well-formed,
+        # and reports the persisted pick.
+        listed = self._client.get("/brain/ollama/models")
+        self.assertEqual(listed.status_code, 200)
+        body = listed.json()
+        self.assertEqual(body["available"], [])
+        self.assertEqual(body["picked"], "")
+        self.assertIn("active_model", body)
+
+        # Pinning a model with no Ollama running persists the pick (it re-arms
+        # via the lazy re-probe when Ollama starts) and returns brain status.
+        pinned = self._client.post("/brain/local/model", json={"model": "qwen3:30b"})
+        self.assertEqual(pinned.status_code, 200)
+        stored = self._nova._cloud_llm_store.read("cloud_llm")
+        self.assertEqual(stored["local_model"], "qwen3:30b")
+        again = self._client.get("/brain/ollama/models").json()
+        self.assertEqual(again["picked"], "qwen3:30b")
+
+        # Empty body clears the pick back to auto.
+        cleared = self._client.post("/brain/local/model", json={"model": ""})
+        self.assertEqual(cleared.status_code, 200)
+        self.assertEqual(self._nova._cloud_llm_store.read("cloud_llm")["local_model"], "")
+
+    def test_local_model_pin_survives_reboot(self) -> None:
+        """The picked model persists and pins a rebuilt app's local provider."""
+        self._nova._cloud_llm_store.write("cloud_llm", {"local_model": "qwen3:30b"})
+        data_dir = self._nova.data_dir
+
+        rebuilt = NovaControlApplication(data_dir=data_dir)
+        try:
+            # Boot found no Ollama (no network in tests) so the local slot stays
+            # Echo, but the lazy re-probe must carry the pinned model.
+            self.assertIsNotNone(rebuilt._ollama_reprobe)
+            self.assertEqual(
+                rebuilt._cloud_llm_store.read("cloud_llm").get("local_model"), "qwen3:30b"
+            )
+        finally:
+            rebuilt.stop() if hasattr(rebuilt, "stop") else None
 
     def test_task_delete_and_clear_over_http(self) -> None:
         # A real /ask creates a tracked task record.
@@ -582,6 +764,39 @@ class BrainModeAndTaskApiTests(_IsolatedApiTestCase):
         cleared = self._client.post("/tasks/clear")
         self.assertEqual(cleared.status_code, 200)
         self.assertEqual(cleared.json()["deleted"], 0)
+
+    def test_task_clear_undo_round_trip(self) -> None:
+        # Two real tasks, then a wipe that must come back.
+        self._client.post("/ask", json={"request": "undo me one"})
+        self._client.post("/ask", json={"request": "undo me two"})
+        before = self._client.get("/tasks").json()["tasks"]
+        self.assertEqual(len(before), 2)
+
+        cleared = self._client.post("/tasks/clear")
+        self.assertEqual(cleared.status_code, 200)
+        body = cleared.json()
+        self.assertEqual(body["deleted"], 2)
+        self.assertEqual(self._client.get("/tasks").json()["tasks"], [])
+
+        token = body["undo"]["token"]
+        undone = self._client.post("/tasks/clear/undo", json={"token": token})
+        self.assertEqual(undone.status_code, 200)
+        self.assertEqual(undone.json()["restored"], 2)
+        after = self._client.get("/tasks").json()["tasks"]
+        self.assertEqual({t["id"] for t in after}, {t["id"] for t in before})
+
+        # One-shot: replaying the same token is rejected.
+        replay = self._client.post("/tasks/clear/undo", json={"token": token})
+        self.assertEqual(replay.status_code, 409)
+
+    def test_task_clear_undo_rejects_unknown_token(self) -> None:
+        response = self._client.post("/tasks/clear/undo", json={"token": "nope"})
+        self.assertEqual(response.status_code, 409)
+
+    def test_task_clear_of_empty_list_has_no_undo(self) -> None:
+        cleared = self._client.post("/tasks/clear")
+        self.assertEqual(cleared.status_code, 200)
+        self.assertNotIn("undo", cleared.json())
 
 
 if __name__ == "__main__":

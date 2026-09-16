@@ -25,7 +25,7 @@ def answer_highlights(frame: QueryFrame, sources: Sequence[ResearchSource]) -> t
         return _comparison_highlights(frame)
     if frame.kind == "ideas":
         return _ideas_highlights(frame, sources)
-    highlights = _extract_highlights_from_sources(frame.subject, sources)
+    highlights = _extract_highlights_from_sources(sources)
     return highlights or (
         f"Research {len(sources)} source(s) for information about {frame.subject}.",
         "Check the source links for detailed explanations and evidence.",
@@ -33,7 +33,7 @@ def answer_highlights(frame: QueryFrame, sources: Sequence[ResearchSource]) -> t
     )
 
 
-def _extract_highlights_from_sources(topic: str, sources: Sequence[ResearchSource]) -> tuple[str, ...]:
+def _extract_highlights_from_sources(sources: Sequence[ResearchSource]) -> tuple[str, ...]:
     highlights, seen = [], set()
     for source in sources:
         snippet = (source.snippet or "").strip()
@@ -65,7 +65,7 @@ def _comparison_highlights(frame: QueryFrame) -> tuple[str, ...]:
 
 def _ideas_highlights(frame: QueryFrame, sources: Sequence[ResearchSource]) -> tuple[str, ...]:
     if sources:
-        h = _extract_highlights_from_sources(frame.subject, sources)
+        h = _extract_highlights_from_sources(sources)
         if h:
             return h[:4]
     return (
@@ -84,7 +84,7 @@ def _comparison_clause(item: str) -> str:
 # Sections
 # ────────────────────────────────────────────────────────────
 
-def build_sections(frame: QueryFrame, sources: Sequence[ResearchSource], videos: Sequence[VideoResult], depth: str) -> tuple[dict[str, Any], ...]:
+def build_sections(frame: QueryFrame, sources: Sequence[ResearchSource]) -> tuple[dict[str, Any], ...]:
     if frame.kind == "comparison" and len(frame.items) >= 2:
         return _comparison_sections(frame, sources)
     if frame.kind == "ideas":
@@ -337,7 +337,7 @@ def next_questions(frame: QueryFrame) -> tuple[str, ...]:
             f"How is {topic} used in real-world applications?")
 
 
-def overview(topic: str, sources: Sequence[ResearchSource], *, provider_status: str) -> str:
+def overview(topic: str, sources: Sequence[ResearchSource]) -> str:
     display = display_subject(topic)
     if not sources:
         return (f"Here is a structured overview of {display}. "

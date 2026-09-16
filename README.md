@@ -14,7 +14,7 @@ One brain → many capabilities:
 | 👁 **Vision** | Screen understanding, guided clicks ("click the Library button"), pixel-diff verification, optional multimodal vision model |
 | 📱 **Phone control** | Android over adb: launch apps, verified screenshots, pre-filled texts/calls |
 | 🔎 **Research** | Multi-stage research pipeline that streams live progress into the UI; topics suggested from live daily news, answers synthesized from site-chrome-cleaned facts |
-| 💬 **Dual brain** | Fully local scratch brain — incl. worded & exam-grade (JEE) math — or a real LLM (Ollama / OpenAI-compatible / Gemini-style) |
+| 💬 **Dual brain** | Fully local scratch brain — incl. worded & exam-grade (JEE) math — or a real LLM: local **Ollama** (with a model picker) or a cloud key (**OpenAI-compatible, Gemini, Groq, and Claude** speaking its native `/v1/messages` protocol) |
 
 ---
 
@@ -30,13 +30,17 @@ One brain → many capabilities:
   | `open it` (after opening Chrome) | **OPEN_APPLICATION(chrome)** — resolved from context |
 
 - **Layered resolution** — deterministic fast path → fuzzy typo correction → learned variations → contextual/reference resolution → semantic LLM fallback → one precise clarification. Trivial punctuation differences never wake the model.
-- **Worded & exam-grade math, fully offline** — the scratch brain's declarative phrase registry computes compound worded arithmetic ("what is 2 cubed plus the square root of 9"), percentages ("15 percent of 200"), unit/time conversions, and JEE-style questions: logs (`log base 2 of 8`), degree trig (`sin 30 degrees`), combinatorics (`10C3`, `8 choose 2`, `factorial of 5`), full quadratic solving with discriminant and roots, and arithmetic-progression term/sum questions.
+- **Worded & exam-grade math, fully offline** — the scratch brain's declarative phrase registry computes compound worded arithmetic ("what is 2 cubed plus the square root of 9"), percentages ("15 percent of 200"), the natural fraction family ("half of 10", "one quarter of 8", "a third of 90", "three quarters of 200" — bare, article, and spelled numerators all work), large-scale operands ("3 million times 2", "2.5 billion divided by 4", "half of three million" — digits or words, through trillion), unit/time conversions, and JEE-style questions: logs (`log base 2 of 8`), degree trig (`sin 30 degrees`), combinatorics (`10C3`, `8 choose 2`, `factorial of 5`), full quadratic solving with discriminant and roots, and arithmetic-progression term/sum questions.
 - **Multi-intent decomposition** — *"open notepad and take a screenshot"* becomes two planned, ordered steps.
 - **Concurrent-activity safe** — every research and command execution is tagged with a run-scoped `correlation_id` that flows from the request through the event bus to the SSE channel; the web UI routes each progress frame to the run that owns it, so parallel activities never bleed into each other's panels.
 - **Learning loop** — fuzzy/contextual resolutions teach the phrase back to the registry, so the same typo takes the fast path next time.
+- **Teachable knowledge** — the Learn tab's *Teach* box and chat's "remember this: …" both persist typed facts as durable knowledge (SQLite-backed KNOWLEDGE namespace, duplicate detection included). Ask about a taught topic later — in chat or the Learn tab's recall — and it comes back: "remember this: the wifi password is hunter2" → "what is the wifi password?" → *"You taught me: the wifi password is hunter2"*.
+- **Code-aware Build planning + coding agent** — the Build tab's *Plan The Code* turns a goal plus a language (Python, JS, TS, Go, Rust, Java, C#, C++, Ruby, Shell, SQL) into a real coding plan: language-idiomatic step sequence, a derived artifact file name (goal words → `fibonacci_generator.py`, `todo_cli_go.go`, …), language-appropriate test-file naming, and a drafted code artifact. When a model is configured, **the coding agent** (`core/code_agent.py`) drafts the code, **executes it in a sandboxed subprocess** (fresh temp cwd, no network on POSIX, 15s wall-clock timeout), reads the real interpreter error, and asks the model to fix exactly that — up to 3 fix rounds — shipping only code that ran clean (or an honest failure trace). The agent's draft → run → fix steps render in the Build tab, which also states up front whether the agent is live or only the runnable scaffold fallback is possible. A math-detection **parity corpus** also runs every math phrasing through both scratch.py and the routing explorer's JS mirror in CI, so the two classifiers can never silently drift apart.
 - **Self-improvement telemetry** — resolutions, clarifications, unknown intents, and failed entity resolutions are recorded and exposed as human-readable improvement findings.
 - **Capability registry** — every subsystem declares its intents, required entities, risk level, executor, and *verification strategy*; the orchestrator derives execution and confirmation policy from that table.
 - **Safety-first execution** — device actions require a server-minted, single-use, expiring approval token; auto-approve is opt-in.
+- **One brain everywhere — Chat and Explore follow the same mode** — Explore's research synthesis uses whichever brain Chat uses (scratch templates, the local Ollama model, or the cloud provider), re-synced on every mode switch and boot; its report cache is keyed per synthesis brain, so switching modes never serves the previous brain's cached answer.
+- **Cloud LLM with honest diagnostics** — Settings → Cloud LLM covers every preset with a **Test Connection** button that pings the provider with the pasted key *before* saving it (nothing is persisted on failure; the response names the failing stage — timeout vs rejected key). While a cloud brain is active, the System panel shows lifetime **token usage** (prompt/completion/total per the provider's own usage block) and the **last transport error** verbatim, so a dead key is visible at a glance.
 - **Auto-resolving bug log** — open verification bugs are marked fixed automatically (with evidence) when a later pixel-diff proves the click actually changed the screen.
 - **Routing Explorer** — a dedicated panel that traces any utterance through NovaBrain's intent gates, showing which rung owns it and a live preview of what you would actually see (the scratch answer text, the research headline, or the plan outline). Traced by the live server (`POST /brain/decide`); an embedded JS mirror takes over when the server is unreachable. A **broad-classifier toggle** re-runs the same utterance through the scratch engine's wide `_classify()` view and highlights where the narrow gate and the broad engine deliberately disagree (order / engine-only / breadth / unknown / match) — including casual phrasings, which the mirror's research detector knows ("things to know about X", "wtf is X", …), drift-guarded against the Python keyword list.
 - **Full phone control over ADB** — the J.A.R.V.I.S phone mode opens any installed app (alias or package), runs in-app searches via deep links (YouTube/Google/Maps/Spotify…), texts saved contacts by name (resolved against the device contact book, never split by guesswork), and opens files/folders through the Files app or system chooser.
@@ -150,6 +154,8 @@ NovaControl is configured via environment variables — no `.env` file is requir
 | `NOVACONTROL_LLM_MODEL` | Model name | provider default |
 
 > 🔐 **Secret handling:** API keys are stored locally and never returned by any API endpoint. This includes the vision-model key (`POST /vision/model` accepts it once and only ever reports a redacted tail). Never commit `.env` files or tokens — local artifacts like `token.txt` should stay out of version control.
+>
+> 💡 **Key formats matter:** each preset expects the key from that provider's own console — the Gemini preset wants an AI Studio key (`AIza…`), not a Vertex/ADC credential (a mismatch shows up as HTTP 400/401 on first chat). Use **Test Connection** in Settings → Cloud LLM to verify a key before saving it.
 
 ## 🏃 Usage
 
@@ -194,6 +200,10 @@ how to start a container garden on a balcony → researches gardening (not Docke
 whats the deal with quantum computing    → researches quantum computing
 tell me stuff about the mariana trench   → researches the mariana trench
 remember this: facts about cats          → stores to memory (does NOT research cats)
+add five and seven                       → 12 (spelled-out add form)
+remember this: my wifi password is hunter2
+                                         → taught as durable knowledge (Learn tab / chat)
+what is the wifi password                → "You taught me: my wifi password is hunter2"
 ```
 
 ### How Explore understands what you type
@@ -263,12 +273,17 @@ FastAPI app factory with REST + SSE + WebSocket surfaces. The full route catalog
 | `POST` | `/vision/model` · `/vision/model/clear` | Configure/clear the multimodal vision model (hot swap) |
 | `GET` | `/intelligence` | GIL telemetry, improvement findings, capability registry |
 | `GET` | `/bugs` · `POST /bugs/{id}/fix` · `POST /bugs/clear-fixed` | Bug log review, resolution, and clearing resolved entries |
-| `GET` | `/tasks` · `POST /tasks/delete` · `/tasks/clear` | Task center |
+| `GET` | `/tasks` · `POST /tasks/delete` · `/tasks/clear` · `/tasks/clear/undo` | Task center (Clear All is undoable) |
 | `POST` | `/brain/mode` · `/brain/cloud` | Switch scratch/LLM brain and configure cloud providers |
-| `POST` | `/brain/decide` | Trace an utterance through the routing gates, with a per-rung preview |
+| `POST` | `/brain/cloud/test` | Ping a cloud provider with a pasted key before saving (one-shot, nothing persisted) |
+| `GET` | `/brain/ollama/models` · `POST /brain/local/model` | List installed Ollama models / pin which one the local brain uses |
+| `POST` | `/brain/decide` | Trace an utterance through the routing gates, with a per-rung preview and optional broad-classifier comparison |
+| `POST` | `/knowledge/teach` · `GET /knowledge` · `POST /knowledge/recall` | Teach durable facts, list them, recall by query |
+| `POST` | `/plan/code` | Coding agent: sandboxed draft → run → fix loop (bounded rounds) + plan, scaffold fallback when no model |
 | `POST` | `/explore` | Research pipeline |
 | `GET` | `/explore/trending` | Current daily research topics from live top-story news (rotating window; feeds the Explore panel's chips) |
 | `GET` | `/events/stream` | Live SSE activity channel — every frame carries a `correlation_id` |
+| `GET` | `/chat/history` · `POST /chat/history` | The server-side chat transcript shared by every browser/tab (and `POST /chat/clear` to wipe it) |
 | `GET` | `/health` · `/status` | Health and route metadata |
 
 Example with auth enabled:
@@ -329,6 +344,14 @@ python -m mypy src
 
 The suite is hermetic: phone and desktop tests use fake runners (`NoopPhoneRunner`, `NoopDesktopRunner`) — no real device or OS interaction during tests. Trending-topic tests inject fake headline fetchers, so the news feature is tested without network too (one live smoke is run manually, not in CI).
 
+**Cross-platform CI, same command everywhere** — the full suite runs on Linux and Windows (CI: `pytest tests/ -q` on Ubuntu, Python 3.12 + 3.13). Tests that need OS-specific behavior either isolate it behind a seam or skip honestly:
+
+- Desktop verification logic (window matching, clipboard-paste staging/focus checks) is exercised on every OS through the `ProbingRunner` stub and the `windows_type_paste` runner override — the *logic* is tested everywhere; only the actual Windows process spawning is platform-gated.
+- `_window_stem` uses `PureWindowsPath`, so Windows-style app paths parse identically on Linux CI.
+- Tests that shell out to `node` (JS parity mirrors, UI pacing) skip cleanly when Node isn't installed; `scripts/dead_code_hunt.py` is an AST-based dead-def/dead-param finder used to keep the core packages lean.
+- The coding agent's sandbox degrades gracefully: its POSIX network isolation (`unshare`) is best-effort — kernels that restrict unprivileged user namespaces fall back to fresh-cwd + timeout isolation instead of crashing the run.
+- Planning never performs device I/O: phone planning on a machine without `adb` still produces a reviewable plan (execution reports the real gap).
+
 UI and rendered-output quality have their own harnesses:
 
 ```powershell
@@ -364,10 +387,13 @@ For a browser-driven smoke of the real page (guided-click result card, reduced m
 | Voice | ⚠️ OS-native STT/TTS with graceful fallback; quality depends on platform speech services |
 | GUI dashboard | ⚠️ PySide6 app present, secondary to the web UI |
 | Vision tab | ✅ Working — guided clicks + pixel-diff verification (OpenCV fast path); optional multimodal vision model (Ollama/OpenAI/Gemini/OpenRouter) upgrades location to semantic |
-| Scratch brain math | ✅ Worded arithmetic (incl. "what does 3 times 4 equal", "half of 10", "double 7", variable assignment like "if x is 5, what is x times 3"), conversions, percentages, and JEE-style logs/trig/combinatorics/quadratics/AP — all offline, regression-pinned |
+| Scratch brain math | ✅ Worded arithmetic (incl. "what does 3 times 4 equal", "half of 10", "double 7", the fraction family — "two thirds of 300", "a fifth of 100" — spelled-out "add five and seven", scale operands "3 million times 2", variable assignment like "if x is 5, what is x times 3"), conversions, percentages, and JEE-style logs/trig/combinatorics/quadratics/AP — all offline, regression-pinned, with a Python↔JS parity corpus (`tests/test_math_parity.py`) that runs every phrasing through both the scratch engine and the routing explorer's mirror |
 | Research answer quality | ✅ Site-chrome filter (consent banners, footers, trademark lines) applied before synthesis; scaffold-anchored topic extraction ("things to know about brics summit 2026" researches BRICS, not dictionary pages for "important"); topical-relevance guard rejects single-word hijacks on compound topics ("container garden" ≠ Docker); headline topics (trending chips, pasted titles) stay whole, search their proper-noun spine, and anchor relevance on those entities — a page matching only the headline's generic words cannot pass — pinned by `tests/test_synthesizer.py` + `tests/test_explore.py` |
 | Trending topic suggestions | ✅ `GET /explore/trending` — live Google News RSS headlines (no API key, no hardcoded lists), cached 30 min, invalidated daily, rotated hourly; offline degrades to static help chips — pinned by `tests/test_explore_trending.py` |
 | Web UI / responsive | ✅ Command-center redesign with fluid auto-fit — 11 panels verified overflow-free from 390px to 1920px, plus a computed-style A/B guard for stylesheet cleanups |
+| Learn tab (teach & recall) | ✅ Typed facts persist as durable knowledge and are recallable in chat — pinned by `tests/test_build_learn.py` |
+| Build tab (code planning) | ✅ Coding agent (draft → run in sandbox → read real errors → fix, 3 rounds) with visible step trace; language-aware plans, derived artifact names, editor + Save-to-disk — pinned by `tests/test_code_agent.py`, `tests/test_build_learn.py` |
+| Cloud LLM | ✅ OpenAI-compatible / Gemini / Groq / **Claude (native `/v1/messages`)** presets; Test Connection (no-save ping), System-panel token usage + last-error surfacing, Explore synthesis follows the active brain; model picker for local Ollama — pinned by `tests/test_integrations_llm.py`, `tests/test_brain_mode_and_tasks.py`, `tests/test_vision_model_config.py` |
 | Self-improvement | ⚠️ Telemetry + sandboxed previews implemented; fully autonomous improvement is *not* enabled |
 
 See [docs/STATUS.md](docs/STATUS.md) for the phase-by-phase history.
@@ -389,7 +415,7 @@ See [docs/STATUS.md](docs/STATUS.md) for the phase-by-phase history.
 - [ ] Vision-verified Steam/library UI state (today only the launch is verified)
 - [ ] Non-Ollama local vision-model runtimes (llama.cpp / LM Studio); per-application learned UI maps
 - [ ] Packaged desktop distribution
-- [ ] Expanded cloud-LLM presets and model routing
+- [ ] Expanded cloud-LLM presets and model routing (Claude multimodal for Vision — the `/v1/messages` image-content shim)
 - [ ] Trending-chip shuffle (exclude seen topics on demand) and a user-selectable news edition in Settings
 - [ ] LLM-powered chat synthesis: flowing prose answers when a model is configured, template fallback otherwise
 

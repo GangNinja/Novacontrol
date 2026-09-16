@@ -23,15 +23,57 @@
 
   var MIRROR_GREETINGS = ["hi", "hello", "hey", "hai", "good morning", "good afternoon", "good evening"];
 
+  // Exact keys of novacontrol.brain.scratch._KNOWLEDGE — kept in sync by
+  // tests/test_math_parity.py, which regenerates this list from Python and
+  // fails the build on drift.
+  var MIRROR_KNOWLEDGE_KEYS = [
+    "how many planets", "speed of light", "speed of sound",
+    "boiling point of water", "freezing point of water", "distance to the moon",
+    "distance to the sun", "age of the earth", "age of the universe",
+    "diameter of earth", "gravity on earth", "avogadro's number",
+    "speed of internet", "who invented the lightbulb", "who invented the telephone",
+    "who invented the internet", "who invented the airplane", "capital of france",
+    "capital of japan", "capital of india", "capital of china",
+    "capital of germany", "capital of united states", "capital of usa",
+    "capital of uk", "capital of england", "capital of brazil",
+    "capital of australia", "capital of canada", "capital of russia",
+    "largest country", "most populated country", "longest river",
+    "tallest mountain", "what is dna", "what is evolution",
+    "what is gravity", "what is photosynthesis", "what is climate change",
+    "what is ai", "what is machine learning", "what is quantum computing",
+    "what is blockchain", "what is html", "what is pi",
+    "what is euler's number", "what is the pythagorean theorem", "what is a prime number",
+  ];;
+
   function mirrorScratchable(lower) {
     // The real scratch brain matches greetings on the WHOLE normalized text
     // ("hello" yes, "open notepad and type hello" no), so the mirror must too.
     var cleaned = lower.trim().replace(/\s+/g, " ");
     if (MIRROR_GREETINGS.indexOf(cleaned) !== -1) return "greeting";
-    // Worded math: an operator word + a digit (approximate — the real scratch
-    // brain parses spelled-out numbers, variable assignment, and 'half of'/'double'
-    // unary rows too).
-    if (/\d/.test(lower) && contains(lower, "plus", "minus", "times", "divided by", "percent of", "squared", "cubed", "sqrt", "square root", "half of", "double", "+", "-", "*", "/")) {
+    // Worded math: an operator word + a digit, or a unary row ('half of',
+    // 'double', the fraction family) over a digit OR a spelled-out number —
+    // mirroring the registry rows and _ADD_FORM grammar ('add five and seven'
+    // counts too). Scale words (million/billion/trillion) count as number
+    // words, so '3 million times 2' and 'half of three million' land here.
+    var NUM_WORD = "\\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|trillion";
+    var NUM_SEQ = NUM_WORD + "(?:[\\s-]+(?:and[\\s-]+)?(?:" + NUM_WORD + "))*";
+    if (/\d/.test(lower) && contains(lower, "plus", "minus", "times", "divided by", "multiplied by", "percent of", "squared", "cubed", "sqrt", "square root", "to the power of", "over", "+", "-", "*", "/")) {
+      return "math";
+    }
+    // Worded binary over spelled-out operands ('three billion minus seven',
+    // 'three million times two') — the digit gate above can't see these.
+    if (new RegExp("\\b(?:" + NUM_SEQ + ")\\s+(?:plus|minus|times|over|multiplied by|divided by)\\s+(?:" + NUM_SEQ + ")\\b").test(lower)) {
+      return "math";
+    }
+    // Unary rows: 'double 7', 'half of 10', 'one quarter of 8', 'a third of 90',
+    // 'three quarters of 200' — article or spelled numerator, plural denominators.
+    if (new RegExp("\\bdouble\\s+(?:" + NUM_SEQ + ")\\b").test(lower)) {
+      return "math";
+    }
+    if (new RegExp("\\b(?:(a|an|" + NUM_SEQ + ")\\s+)?(?:half|halves|third|thirds|quarter|quarters|fourth|fourths|fifth|fifths|sixth|sixths|seventh|sevenths|eighth|eighths|ninth|ninths|tenth|tenths)\\s+of\\s+(?:" + NUM_SEQ + ")\\b").test(lower)) {
+      return "math";
+    }
+    if (new RegExp("\\badd\\s+(?:" + NUM_SEQ + ")\\b").test(lower) && /\band\b/.test(lower)) {
       return "math";
     }
     // Other narrow (routing_safe) canned kinds, so match/breadth relations
@@ -42,8 +84,11 @@
     if (contains(lower, "convert ", " km", "km to", "miles", "celsius", "fahrenheit", "kg to", "pounds", "cm to", "inches", "usd", "euros", " inr")) {
       return "conversion";
     }
-    if (contains(lower, "capital of", "president of", "invented ", "discovered ", "population of") && contains(lower, "what is", "what are", "who is", "who was")) {
-      return "knowledge";
+    // Narrow knowledge gate mirrors _knowledge_routing: an exact knowledge-base
+    // key is the only thing that counts as a canned local answer. MIRROR_KNOWLEDGE
+    // KEYS is pinned against the Python dict by tests/test_math_parity.py.
+    for (var k = 0; k < MIRROR_KNOWLEDGE_KEYS.length; k++) {
+      if (lower.indexOf(MIRROR_KNOWLEDGE_KEYS[k]) !== -1) return "knowledge";
     }
     if (contains(lower, "recommend", "suggest")) {
       return "recommendation";
@@ -94,12 +139,15 @@
       pred: function (lower, s) { return mirrorWebSearch(lower); } },
     { gate: "research_question", intent: "explore", confidence: 0.86, reason: "Request asks for explanation or research.",
       pred: function (lower, s) { return mirrorResearch(lower) && s === null; } },
+    { gate: "memory_store", intent: "memory", confidence: 0.85, reason: "Request asks to store something in memory.",
+      // Explicit store phrasing sits ABOVE the plan/phone/desktop/browser
+      // blocks: content words inside the remembered text ("remember this:
+      // create a roadmap for the project") must never steal the routing.
+      pred: function (lower, s) { return contains(lower, "remember this", "remember that", "remember for me"); } },
     { gate: "plan", intent: "plan", confidence: 0.84, reason: "Request asks for planning.",
       pred: function (lower, s) { return contains(lower, "roadmap", "milestone", "break down", "steps") || /\bplan\b/.test(lower); } },
     { gate: "phone_command", intent: "phone_control", confidence: 0.82, reason: "Request asks for phone control.",
       pred: function (lower, s) { return mirrorPhoneCommand(lower); } },
-    { gate: "memory_store", intent: "memory", confidence: 0.85, reason: "Request asks to store something in memory.",
-      pred: function (lower, s) { return contains(lower, "remember this", "remember that", "remember for me"); } },
     { gate: "desktop_command", intent: "desktop_automation", confidence: 0.8, reason: "Request asks for desktop automation.",
       pred: function (lower, s) { return mirrorDesktop(lower); } },
     { gate: "browser", intent: "browser_automation", confidence: 0.8, reason: "Request asks for browser automation.",

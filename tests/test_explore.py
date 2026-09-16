@@ -681,5 +681,94 @@ class ShoppingQueryContextTests(unittest.TestCase):
         self.assertEqual(extract_search_topic("quantum computing"), "quantum computing")
 
 
+class FlakyThenWorkingSearchProvider:
+    """Search provider whose first attempt returns nothing (transient blip),
+    then serves real results — models DDG rate-limits / HTML shape drift."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def search(self, query: str, *, limit: int = 6) -> tuple[Any, ...]:
+        self.calls += 1
+        if self.calls == 1:
+            return ()
+        from novacontrol.explore import ResearchSource
+
+        return (
+            ResearchSource(
+                title="Composting basics: how home composting works",
+                url="https://example.com/composting",
+                snippet="Home composting turns kitchen scraps into soil.",
+                source_type="web",
+            ),
+        )
+
+
+class ExploreSearchRetryTests(unittest.IsolatedAsyncioTestCase):
+    """A transient empty search must not become the cached offline
+    non-answer: the service retries once, and a degraded report (search
+    failed → offline templates) is cached only briefly so a follow-up
+    click on the same suggestion gets a real attempt."""
+
+    async def test_empty_search_retries_once_and_succeeds(self) -> None:
+        flaky = FlakyThenWorkingSearchProvider()
+        service = ExploreService(
+            search_provider=flaky, video_provider=FakeVideoProvider(),
+            wiki_provider=FakeWikiProvider(),
+        )
+        report = await service.research(ExploreRequest("what is composting"))
+
+        self.assertGreaterEqual(flaky.calls, 2)
+        self.assertEqual(len(report.sources), 1)
+        self.assertEqual(report.warnings, ())
+        self.assertEqual(report.provider_status, "online")
+
+    async def test_permanent_failure_still_reports_offline(self) -> None:
+        service = ExploreService(
+            search_provider=FailingSearchProvider(), video_provider=FakeVideoProvider(),
+            wiki_provider=FakeWikiProvider(),
+        )
+        report = await service.research(ExploreRequest("what is composting"))
+
+        self.assertEqual(report.provider_status, "offline")
+        self.assertTrue(any("no usable web results" in w for w in report.warnings))
+
+    async def test_degraded_report_is_cached_briefly_not_for_full_ttl(self) -> None:
+        from novacontrol.performance import TtlCache
+
+        class RecordingCache(TtlCache):
+            def __init__(self) -> None:
+                super().__init__()
+                self.ttls: list[float | None] = []
+
+            def set(self, key, value, *, ttl_seconds=None):
+                self.ttls.append(ttl_seconds)
+                super().set(key, value, ttl_seconds=ttl_seconds)
+
+        cache = RecordingCache()
+        service = ExploreService(
+            search_provider=FailingSearchProvider(), video_provider=FakeVideoProvider(),
+            wiki_provider=FakeWikiProvider(), cache=cache, cache_ttl_seconds=900,
+        )
+        request = ExploreRequest("what is composting")
+
+        first = await service.research(request)  # search fails → degraded
+        self.assertEqual(first.provider_status, "offline")
+
+        # The degraded report was cached, but for a 30s window — not the full
+        # 15-minute TTL that used to pin the offline non-answer.
+        self.assertEqual(len(cache.ttls), 1)
+        self.assertEqual(cache.ttls[0], 30.0)
+
+        # And a healthy report earns the normal TTL. (Different topic: the
+        # degraded entry above is still inside its 30s window.)
+        healthy_service = ExploreService(
+            search_provider=FakeSearchProvider(), video_provider=FakeVideoProvider(),
+            cache=cache, cache_ttl_seconds=900,
+        )
+        await healthy_service.research(ExploreRequest("how does photosynthesis work"))
+        self.assertEqual(cache.ttls[-1], 900)
+
+
 if __name__ == "__main__":
     unittest.main()

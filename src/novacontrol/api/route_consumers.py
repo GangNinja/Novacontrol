@@ -34,7 +34,13 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("POST", "/desktop/execute"): "renderCommand",
     ("POST", "/phone/plan"): "renderCommand",
     ("POST", "/phone/execute"): "renderCommand",
+    ("POST", "/browser/plan"): "renderCommand",
+    ("POST", "/browser/execute"): "renderCommand",
     ("POST", "/plan"): "renderBuild",
+    ("POST", "/plan/code"): "renderBuild",
+    ("POST", "/knowledge/teach"): "renderLearning",
+    ("GET", "/knowledge"): "renderLearning",
+    ("POST", "/knowledge/recall"): "renderLearning",
     ("POST", "/improve/workflow"): "renderWorkflow",
     ("POST", "/improve/preview"): "renderWorkflow",
     ("POST", "/improve/approve"): "renderWorkflow",
@@ -50,11 +56,18 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("GET", "/brain/mode"): "no-render",  # syncBrainSwitch reads the persisted mode
     ("GET", "/brain/cloud/presets"): "no-render",  # cloud card provider picker
     ("POST", "/brain/cloud"): "no-render",  # connectCloudLlm + refreshStatus
+    ("POST", "/brain/cloud/test"): "no-render",  # testCloudLlm button + status line
     ("POST", "/brain/cloud/clear"): "no-render",  # removeCloudLlm + refreshStatus
-    ("POST", "/chat/clear"): "no-render",  # clearChatButton wipes the thread locally
+    ("GET", "/brain/ollama/models"): "no-render",  # brain model picker list
+    ("POST", "/brain/local/model"): "no-render",  # picker change handler; refreshStatus re-renders
+    ("POST", "/chat/clear"): "no-render",  # clearChatButton wipes the shared thread
+    ("GET", "/chat/history"): "no-render",  # renderChatHistory seeds the shared thread
+    ("POST", "/chat/history"): "no-render",  # recordChatTurn append + one-time migrate
+    ("POST", "/build/save"): "no-render",  # saveBuildArtifact button + toast
     ("GET", "/tasks"): "no-render",  # reserved for future explicit lists
     ("POST", "/tasks/delete"): "no-render",  # deleteTask row button + refreshStatus
-    ("POST", "/tasks/clear"): "no-render",  # clearTasksButton + refreshStatus
+    ("POST", "/tasks/clear"): "no-render",  # clearAllTasksButton + toast-undo
+    ("POST", "/tasks/clear/undo"): "no-render",  # toast Undo button + refreshStatus
     ("GET", "/settings"): "load-settings",
     ("GET", "/events/stream"): "no-render",  # EventSource activity channel
     ("GET", "/"): "no-render",  # served HTML (index.html)

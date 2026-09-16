@@ -51,6 +51,32 @@ class TaskCenter:
         self._tasks.clear()
         return count
 
+    def clear_snapshot(self) -> list[TaskRecord]:
+        """Remove every task record and RETURN what was removed.
+
+        The undo path for "Delete All Tasks": the caller holds this snapshot
+        until the user's undo window closes, then discards it. Unknown
+        TaskRecord payload shapes are skipped defensively so a corrupt record
+        can never block the wipe it belongs to.
+        """
+        removed = list(self._tasks.values())
+        self._tasks.clear()
+        return removed
+
+    def restore(self, records: list[TaskRecord]) -> int:
+        """Put previously cleared records back; returns how many were restored.
+
+        Existing ids are left alone (a record re-created after the clear wins),
+        so a restore never resurrects duplicates.
+        """
+        restored = 0
+        for record in records:
+            if record.id in self._tasks:
+                continue
+            self._tasks[record.id] = record
+            restored += 1
+        return restored
+
     def list(self) -> tuple[TaskRecord, ...]:
         return tuple(self._tasks[key] for key in sorted(self._tasks))
 

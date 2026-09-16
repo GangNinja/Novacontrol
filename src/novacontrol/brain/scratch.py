@@ -340,10 +340,28 @@ _TIME_PATTERNS = re.compile(
 
 # A bare expression of digits joined by an operator symbol ("2+3*4", "2^8").
 _MATH_EXPR = re.compile(r'[\d]\s*[+\-*/^]\s*[\d]')
+# An operand: a decimal literal or one or more number words ("fifteen", "two
+# hundred and five"), never an arbitrary letter run — "how many times a year"
+# cannot match because "how"/"a" are not number words.
+_NUM_TOKEN = (
+    r"zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|"
+    r"fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|"
+    r"sixty|seventy|eighty|ninety|hundred|thousand|million|billion|trillion"
+)
+# Greedy on purpose: a multi-word cardinal ("two hundred and five") must be
+# consumed whole; expansion stops at the first word that is not a number word,
+# so an operator keyword (or ordinary prose) always ends the operand.
+_OPERAND_SEQ = r"(?:\d+(?:\.\d+)?|" + _NUM_TOKEN + r")(?:[\s-]+(?:and[\s-]+)?(?:\d+(?:\.\d+)?|" + _NUM_TOKEN + r"))*"
+
 # The "add 5 and 7" form. Kept apart from _MATH_WORD_RULES because its answer
 # builder slices down to the two operands (trailing phrasing like "... and show
-# steps" must never reach the evaluator). Groups capture both operands.
-_ADD_FORM = re.compile(r'\badd\s+(\d+(?:\.\d+)?)\s+and\s+(\d+(?:\.\d+)?)', re.IGNORECASE)
+# steps" must never reach the evaluator). Groups capture both operands — digits
+# or spelled-out cardinals ("add five and seven"), via the same _OPERAND_SEQ
+# grammar the registry rows use; _resolve_side normalizes words to digits.
+_ADD_FORM = re.compile(
+    r"\badd\s+(" + _OPERAND_SEQ + r")\s+and\s+(" + _OPERAND_SEQ + r")",
+    re.IGNORECASE,
+)
 # Bare function calls the evaluator supports ("sqrt(144)", "log(1000)",
 # "ncr(10, 3)") — including the JEE/exam functions.
 _FUNC_CALL_MATH = re.compile(
@@ -380,7 +398,10 @@ _NUM_WORD_VALUES: dict[str, int] = {
     "eighteen": 18, "nineteen": 19, "twenty": 20, "thirty": 30, "forty": 40,
     "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
 }
-_SCALE_WORDS: dict[str, int] = {"hundred": 100, "thousand": 1_000, "million": 1_000_000}
+_SCALE_WORDS: dict[str, int] = {
+    "hundred": 100, "thousand": 1_000, "million": 1_000_000,
+    "billion": 1_000_000_000, "trillion": 1_000_000_000_000,
+}
 
 
 def _words_to_int(words: str) -> int | None:
@@ -409,11 +430,24 @@ def _fmt_number(value: float | int) -> str:
 
 
 def _operand_value(text: str) -> float | int | None:
-    """Resolve a captured operand to a number: digits pass through, words parse."""
+    """Resolve a captured operand to a number: digits pass through, words parse.
+
+    Mixed digit+scale operands ("3 million", "2.5 billion", "500 thousand")
+    resolve too — the scale word multiplies the numeric prefix — so a binary
+    row never strands an unevaluable "3 million*2" in the expression.
+    """
     token = text.strip()
     if re.fullmatch(r"\d+(?:\.\d+)?", token):
         return float(token)
-    return _words_to_int(token)
+    words = _words_to_int(token)
+    if words is not None:
+        return words
+    # Digit(s) followed by a scale word: "3 million", "2.5 billion". _words_to_int
+    # rejects the leading digits, so this is a distinct shape, not an overlap.
+    mixed = re.fullmatch(r"(\d+(?:\.\d+)?)\s+(hundred|thousand|million|billion|trillion)", token)
+    if mixed:
+        return float(mixed.group(1)) * _SCALE_WORDS[mixed.group(2)]
+    return None
 
 
 def _binary_rewrite(match: re.Match[str], op: str) -> str:
@@ -447,20 +481,54 @@ def _percent_rewrite(match: re.Match[str]) -> str:
     return f"({_fmt_number(percent)}/100)*{_fmt_number(base)}"
 
 
-def _halve_rewrite(match: re.Match[str]) -> str:
-    """'half of X' -> (X/2)."""
-    value = _operand_value(match.group(1))
-    if value is None:
-        return match.group(0)
-    return f"({_fmt_number(value)}/2)"
-
-
 def _double_rewrite(match: re.Match[str]) -> str:
     """'double X' -> (X*2)."""
     value = _operand_value(match.group(1))
     if value is None:
         return match.group(0)
     return f"({_fmt_number(value)}*2)"
+
+
+# Fraction words the registry's unary fraction row understands. The NUMERATOR
+# is optional ('a third of 90', 'three quarters of 200') and the denominator
+# may be plural when a numerator is present ('two thirds') — both spellings are
+# one row so routing and evaluation can never disagree about a fraction form.
+_FRACTION_DENOMINATORS: dict[str, str] = {
+    "half": "2", "halves": "2", "third": "3", "thirds": "3",
+    "quarter": "4", "quarters": "4", "fourth": "4", "fourths": "4",
+    "fifth": "5", "fifths": "5", "sixth": "6", "sixths": "6",
+    "seventh": "7", "sevenths": "7", "eighth": "8", "eighths": "8",
+    "ninth": "9", "ninths": "9", "tenth": "10", "tenths": "10",
+}
+_FRACTION_DENOM = "|".join(_FRACTION_DENOMINATORS)
+_FRACTION_NUM = r"(?:a|an|" + _OPERAND_SEQ + r")"
+# Group layout is a CONTRACT with _fraction_rewrite: 1 = optional numerator
+# (None for a bare 'half of X'), 2 = denominator word, 3 = the base operand.
+_FRACTION_PHRASE = re.compile(
+    r"\b(" + _FRACTION_NUM + r"\s+)?("
+    + _FRACTION_DENOM + r")\s+of\s+(" + _OPERAND_SEQ + r")\b",
+    re.IGNORECASE,
+)
+
+
+def _fraction_rewrite(match: re.Match[str]) -> str:
+    """'half of X' / 'a third of X' / 'three quarters of X' -> (num/den)*X."""
+    denominator = _FRACTION_DENOMINATORS[match.group(2).lower()]
+    numerator_text = match.group(1)
+    base = _operand_value(match.group(3))
+    if base is None:
+        return match.group(0)
+    if numerator_text is None or numerator_text.strip().lower() in ("a", "an"):
+        # Bare denominator ('half of X') and the article form ('a third of X')
+        # both mean numerator 1 — 'a'/'an' never reach _operand_value, which
+        # (rightly) refuses to parse articles as numbers.
+        numerator = "1"
+    else:
+        resolved = _operand_value(numerator_text)
+        if resolved is None:
+            return match.group(0)
+        numerator = _fmt_number(resolved)
+    return f"({numerator}/{denominator})*{_fmt_number(base)}"
 
 
 # Variable assignment in natural math: "if x is 5, what is x times 3".
@@ -570,20 +638,6 @@ def _np_symbolic_rewrite(match: re.Match[str]) -> str:
     return f"npr({match.group(1)}, {match.group(2)})"
 
 
-# An operand: a decimal literal or one or more number words ("fifteen", "two
-# hundred and five"), never an arbitrary letter run — "how many times a year"
-# cannot match because "how"/"a" are not number words.
-_NUM_TOKEN = (
-    r"zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|"
-    r"fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|"
-    r"sixty|seventy|eighty|ninety|hundred|thousand|million"
-)
-# Greedy on purpose: a multi-word cardinal ("two hundred and five") must be
-# consumed whole; expansion stops at the first word that is not a number word,
-# so an operator keyword (or ordinary prose) always ends the operand.
-_OPERAND_SEQ = r"(?:\d+(?:\.\d+)?|" + _NUM_TOKEN + r")(?:[\s-]+(?:and[\s-]+)?(?:\d+(?:\.\d+)?|" + _NUM_TOKEN + r"))*"
-
-
 def _binary_word_rule(operator: str, op: str) -> tuple[re.Pattern[str], Callable[[re.Match[str]], str]]:
     # (?<![*)]) — the left operand must start clean: a number glued onto an
     # already-rewritten power ("5**2 times 2") or function call belongs to the
@@ -671,13 +725,16 @@ _MATH_WORD_RULES: tuple[tuple[re.Pattern[str], Rewrite], ...] = (
     # Percentage of: "15 percent of 200" -> (15/100)*200 (words work: "ten percent of 300").
     (re.compile(r"\b(" + _OPERAND_SEQ + r")\s+percent\s+of\s+(" + _OPERAND_SEQ + r")\b", re.IGNORECASE),
      lambda m: _percent_rewrite(m)),
-    # Natural fraction/doubling phrasings ("half of 10", "double 7"), words
+    # Natural fraction/doubling phrasings. The FRACTION row covers the whole
+    # family — "half of 10", "a third of 90", "one quarter of 8", "three
+    # quarters of 200", "two thirds of 300", "half of three million" — words
     # included ("half of twenty", "double nine"). Registered with the other
-    # unary rows: they claim their single operand before any binary row can.
-    (re.compile(r"\bhalf\s+of\s+(" + _OPERAND_SEQ + r")\b", re.IGNORECASE),
-     _halve_rewrite),
+    # unary rows: fractions claim their operand before any binary row can.
+    # (_FRACTION_PHRASE carries the group layout _fraction_rewrite reads:
+    # 1 = optional numerator, 2 = denominator word, 3 = the base operand.)
     (re.compile(r"\bdouble\s+(" + _OPERAND_SEQ + r")\b", re.IGNORECASE),
      _double_rewrite),
+    (_FRACTION_PHRASE, _fraction_rewrite),
     # ── JEE / exam forms ─────────────────────────────────────────────
     # log base B of V ("log base 2 of 8") — registered BEFORE the log-of row so
     # both orderings of base/value stay unambiguous.
@@ -739,6 +796,7 @@ def is_arithmetic_query(lower: str) -> bool:
         # text still has to look like an expression.
         return bool(
             _MATH_EXPR.search(substituted)
+            or _ADD_FORM.search(substituted)
             or _FUNC_CALL_MATH.search(substituted)
             or any(pattern.search(substituted) for pattern, _ in _MATH_WORD_RULES)
         )
@@ -916,7 +974,11 @@ def _math_answer(text: str) -> dict[str, Any]:
     if add_form:
         add_match = _ADD_FORM.match(expr)
         if add_match:
-            expr = f"{add_match.group(1)} and {add_match.group(2)}"
+            # Spelled-out operands ("add five and seven") resolve to digits so
+            # the evaluator never sees words; the digit form passes through.
+            left = _resolve_side(add_match.group(1))
+            right = _resolve_side(add_match.group(2))
+            expr = f"{left} and {right}"
     for prefix in ("calculate ", "compute ", "what is ", "what's ", "what does ", "solve ", "add "):
         if expr.startswith(prefix):
             expr = expr[len(prefix):]

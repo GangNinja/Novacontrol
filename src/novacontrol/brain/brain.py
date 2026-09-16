@@ -100,6 +100,22 @@ class NovaBrain:
         elif self.mode == "cloud":
             self.set_mode("auto")
 
+    def set_local_provider(self, provider: object) -> None:
+        """Swap the LOCAL brain onto a new provider (the model picker's swap).
+
+        This replaces the boot/local slot (unlike set_cloud_provider, which
+        fills the cloud slot) and re-arms it: a later "llm"/"auto" restores
+        THIS provider, and a "scratch" detour remembers it for the way back.
+        The previous boot provider is kept on the provider object chain only if
+        the caller built it that way — here the picker's provider IS the local
+        truth.
+        """
+        self._boot_provider = provider
+        if self.mode in {"llm", "auto"}:
+            self.completion_provider = provider
+        # "cloud" stays on the cloud provider; "scratch" stays on Echo — both
+        # pick the new local provider up when the user switches back.
+
     @property
     def cloud_provider_name(self) -> str:
         """The installed cloud LLM's name ('cloud:openai'), or '' when none."""
@@ -309,6 +325,18 @@ class NovaBrain:
                 and not _contains(lower, "remember this", "remember that", "remember for me")
             ),
         ),
+        # Explicit store-into-memory phrasing ("remember this: …") must not be
+        # stolen by content words named inside the remembered text — apps
+        # ("remember this: open notepad is my favorite app"), plan nouns
+        # ("remember this: create a roadmap for the project"), or browser
+        # targets. It therefore sits ABOVE the plan/phone/desktop/browser
+        # blocks. Generic "memory" mentions stay below, so topic questions like
+        # "how does computer memory work" still reach research.
+        (
+            "memory_store", BrainIntent.MEMORY, 0.85,
+            "Request asks to store something in memory.",
+            lambda lower, scratchable: _contains(lower, "remember this", "remember that", "remember for me"),
+        ),
         (
             "plan", BrainIntent.PLAN, 0.84,
             "Request asks for planning.",
@@ -319,16 +347,6 @@ class NovaBrain:
             "phone_command", BrainIntent.PHONE_CONTROL, 0.82,
             "Request asks for phone control.",
             lambda lower, scratchable: _looks_like_phone_command(lower),
-        ),
-        # Explicit store-into-memory phrasing ("remember this: …") must not be
-        # stolen by device targets named inside the remembered content — the
-        # remembered text routinely mentions apps ("remember this: open notepad
-        # is my favorite app"). Generic "memory" mentions stay below, so topic
-        # questions like "how does computer memory work" still reach research.
-        (
-            "memory_store", BrainIntent.MEMORY, 0.85,
-            "Request asks to store something in memory.",
-            lambda lower, scratchable: _contains(lower, "remember this", "remember that", "remember for me"),
         ),
         (
             "desktop_command", BrainIntent.DESKTOP_AUTOMATION, 0.8,

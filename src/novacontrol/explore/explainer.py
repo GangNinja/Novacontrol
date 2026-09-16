@@ -69,14 +69,14 @@ class ResearchExplainer:
 
         return ExploreReport(
             topic=topic,
-            overview=overview(topic, clean_sources, provider_status=provider_status),
+            overview=overview(topic, clean_sources),
             key_points=key_points(frame, clean_sources),
             detailed_explanation=detailed_explanation(frame, clean_sources, request.depth),
             sources=clean_sources,
             videos=tuple(videos),
             answer=answer,
             answer_highlights=answer_highlights(frame, clean_sources),
-            sections=build_sections(frame, clean_sources, tuple(videos), request.depth),
+            sections=build_sections(frame, clean_sources),
             source_chips=source_chips(clean_sources),
             learning_path=learning_path(frame, request.depth),
             follow_up_questions=next_questions(frame),

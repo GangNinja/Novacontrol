@@ -31,3 +31,5 @@ AUDIT.md
 ROADMAP.md
 .freebuff/
 token.txt
+# Generated Build artifacts (Build tab "Save to disk")
+build_workspace/

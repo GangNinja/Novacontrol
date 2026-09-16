@@ -176,12 +176,16 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("plan", response.payload)
 
     async def test_application_routes_chat_requests(self) -> None:
-        app = NovaControlApplication()
-        await app.start()
-        try:
-            response = await app.handle_request("hi")
-        finally:
-            await app.stop()
+        # Isolated data dir: the honest pin here is "a fresh install with no
+        # configured model reports model_configured=False" — the host's real
+        # data/cloud_llm.json (a connected cloud key) must not decide it.
+        with TemporaryDirectory() as tmp:
+            app = NovaControlApplication(data_dir=tmp)
+            await app.start()
+            try:
+                response = await app.handle_request("hi")
+            finally:
+                await app.stop()
 
         self.assertEqual(response.route, "chat")
         self.assertEqual(response.intent, "chat")
@@ -389,31 +393,47 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(plan["route"], "browser_automation")
         self.assertEqual(plan["status"], "waiting_for_approval")
-        self.assertEqual(plan["steps"], ["Search the web for quantum computing"])
+        self.assertEqual(
+            plan["steps"],
+            ["Search the web for quantum computing and read the top results"],
+        )
         self.assertEqual(
             plan["target"],
-            "https://html.duckduckgo.com/html/?q=quantum+computing",
+            "https://www.bing.com/search?q=quantum+computing",
         )
+        # The search workflow is navigate -> extract (top results), so the
+        # execution RETURNS an answer instead of only a page load.
+        self.assertEqual(len(plan["workflow"]["actions"]), 2)
         action = plan["workflow"]["actions"][0]
         self.assertEqual(action["type"], "navigate")
-        self.assertEqual(action["target"], "https://html.duckduckgo.com/html/?q=quantum+computing")
+        self.assertEqual(action["target"], "https://www.bing.com/search?q=quantum+computing")
+        extract = plan["workflow"]["actions"][1]
+        self.assertEqual(extract["type"], "extract")
+        self.assertEqual(extract["parameters"]["mode"], "search_results")
         self.assertTrue(plan["approval"]["token"])
 
         # Google phrasing lands on the same plan shape (query → engine URL).
         google = app.plan_browser_command("google mars rover news")
         self.assertEqual(google["status"], "waiting_for_approval")
-        self.assertEqual(google["steps"], ["Search the web for mars rover news"])
+        self.assertEqual(
+            google["steps"], ["Search the web for mars rover news and read the top results"]
+        )
         self.assertEqual(
             google["workflow"]["actions"][0]["target"],
-            "https://html.duckduckgo.com/html/?q=mars+rover+news",
+            "https://www.bing.com/search?q=mars+rover+news",
         )
 
         # An approved search executes through the no-op runner like any navigation.
+        # The no-op runner yields no results payload, so the summary stays the
+        # generic execution line (no fabricated answer).
         executed = await app.execute_browser_command(
             "search the web for quantum computing",
             approval_token=plan["approval"]["token"],
         )
         self.assertEqual(executed["status"], "executed")
+        self.assertEqual(
+            executed["summary"], "Executed 2/2 browser action(s) successfully."
+        )
 
     async def test_browser_token_executes_once_and_cannot_be_reused(self) -> None:
         app = await self._browser_app()

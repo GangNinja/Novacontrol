@@ -33,6 +33,67 @@ function showToast(message) {
   toast._timer = setTimeout(() => toast.classList.remove("show"), 2500);
 }
 
+// Toast with a timed action button ("Undo"): the toast stays up for the whole
+// window (not the default 2.5s), the countdown shows in the button, and the
+// action can only fire once. A new toast (plain or actioned) supersedes an
+// older pending action — its onExpire still runs so callers can react.
+function showToastWithAction({ message, actionLabel = "Undo", seconds = 30, onAction, onExpire }) {
+  const toast = document.querySelector(".action-toast") || (() => {
+    const node = el("div", "action-toast");
+    node.setAttribute("role", "status");
+    node.setAttribute("aria-live", "polite");
+    document.body.appendChild(node);
+    return node;
+  })();
+  const prior = toast._pendingAction;
+  if (prior) prior.settle("superseded");
+
+  toast.textContent = message;
+  const action = el("button", "action-toast-btn", `${actionLabel} (${seconds}s)`);
+  action.type = "button";
+  toast.appendChild(action);
+  toast.classList.add("show", "has-action");
+
+  let done = false;
+  let countdown = seconds;
+  const tick = setInterval(() => {
+    countdown -= 1;
+    if (countdown > 0) action.textContent = `${actionLabel} (${countdown}s)`;
+  }, 1000);
+  const timer = setTimeout(() => finish("expired"), seconds * 1000);
+
+  function finish(reason) {
+    if (done) return;
+    done = true;
+    clearInterval(tick);
+    clearTimeout(timer);
+    toast.classList.remove("has-action");
+    action.remove();
+    toast._pendingAction = null;
+    if (reason === "action") {
+      toast.classList.remove("show");
+      if (onAction) onAction();
+    } else {
+      toast._timer = setTimeout(() => toast.classList.remove("show"), 2500);
+      if (reason === "expired" && onExpire) onExpire();
+    }
+  }
+
+  action.addEventListener("click", () => finish("action"));
+  toast._pendingAction = {
+    settle(reason) {
+      // Only expiry fires the caller's onExpire; superseded actions just die.
+      if (done) return;
+      done = true;
+      clearInterval(tick);
+      clearTimeout(timer);
+      action.remove();
+      if (reason === "expired" && onExpire) onExpire();
+    },
+  };
+  toast._pendingAction.finish = finish;
+}
+
 function setButtonLoading(buttonId, loading) {
   const button = byId(buttonId);
   if (!button) return;

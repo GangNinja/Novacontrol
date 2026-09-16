@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import shutil
 import subprocess
@@ -263,11 +263,33 @@ class VerificationError(RuntimeError):
 
 
 def _window_stem(target: str) -> str:
-    """Reduce an app target to a matchable name: 'notepad' or 'C:\\...\\notepad.exe' -> 'notepad'."""
+    """Reduce an app target to a matchable name: 'notepad' or 'C:\\...\\notepad.exe' -> 'notepad'.
+
+    PureWindowsPath (not Path) so Windows-style paths parse identically on
+    every platform — verification code must not silently change meaning when
+    the suite runs on CI's Linux runners.
+    """
     value = target.strip().lower()
     if "\\" in value or "/" in value or value.endswith((".exe", ".lnk", ".app", ".bat", ".cmd")):
-        value = Path(value).stem.lower()
+        value = PureWindowsPath(value).stem.lower()
     return value
+
+
+def _window_launch_command(resolved: str) -> list[str]:
+    r"""argv that launches a resolved target through the Windows shell.
+
+    UWP/Store targets (an AppsFolder AUMID like shell:AppsFolder\App_abc!App) go
+    through explorer — the
+    documented launcher for AppsFolder paths; `start` treats shell: as a
+    folder to open rather than the app to activate. Everything else (URI
+    schemes like steam:/ms-settings:/mailto:, exes, paths) goes through
+    `cmd /c start`, whose protocol-handler and file-association registries
+    resolve the target. Pure function so the routing decision stays testable
+    on platforms that cannot spawn these processes.
+    """
+    if resolved.startswith("shell:"):
+        return ["explorer", resolved]
+    return ["cmd", "/c", "start", "", resolved]
 
 
 def _window_matches(process_name: str, title: str, stem: str) -> bool:
@@ -547,10 +569,22 @@ class LocalDesktopRunner:
         *,
         command_timeout_seconds: float = 60,
         vision_provider: object | None = None,
+        windows_type_paste: bool | None = None,
     ) -> None:
         self.command_timeout_seconds = command_timeout_seconds
         # Multimodal LLM for vision-guided element location (None = OCR/landmarks only).
         self.vision_provider = vision_provider
+        # Whether typed text goes through the Windows clipboard-paste path.
+        # Defaults to the real platform; an override lets the verification
+        # logic (staging + focus checks) be tested on any OS without spawning
+        # PowerShell. Keep the default None distinct from False so tests can
+        # also pin "the default really follows the platform".
+        self._windows_type_paste = windows_type_paste
+
+    def _uses_windows_type_paste(self) -> bool:
+        if self._windows_type_paste is not None:
+            return self._windows_type_paste
+        return sys.platform.startswith("win")
 
     async def run(self, action: DesktopAction) -> Mapping[str, Any]:
         if action.type is DesktopActionType.OPEN_APPLICATION:
@@ -703,30 +737,11 @@ class LocalDesktopRunner:
     async def _launch_open(self, target: str) -> int:
         resolved = self._resolve_app_target(target)
         if sys.platform.startswith("win"):
-            if resolved.startswith("shell:"):
-                # UWP/Store app (shell:AppsFolder\<AUMID>): explorer is the
-                # documented launcher for these paths; `start` treats shell:
-                # as a folder to open rather than the app to activate.
-                process = subprocess.Popen(
-                    ["explorer", resolved],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            elif "://" in resolved or re.match(r"^[a-z0-9]+:(?!\\\\)", resolved, re.IGNORECASE):
-                # URI scheme (steam:, spotify:, ms-settings:, mailto:): the shell's
-                # protocol handler registry launches the right app.
-                process = subprocess.Popen(
-                    ["cmd", "/c", "start", "", resolved],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    shell=False,
-                )
-            else:
-                process = subprocess.Popen(
-                    ["cmd", "/c", "start", "", resolved],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
+            process = subprocess.Popen(
+                _window_launch_command(resolved),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         elif sys.platform == "darwin":
             process = subprocess.Popen(
                 ["open", resolved],
@@ -870,7 +885,7 @@ class LocalDesktopRunner:
         receive it before reporting success. Other platforms keep the raw keystroke
         behavior (unverified).
         """
-        if sys.platform.startswith("win"):
+        if self._uses_windows_type_paste():
             await self._stage_and_paste_windows(text)
             verification = await self._verify_type_windows(text)
             output: dict[str, Any] = {

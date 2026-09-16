@@ -426,7 +426,7 @@ class ProbingRunner(LocalDesktopRunner):
     """LocalDesktopRunner with the OS probes stubbed so tests never touch the desktop."""
 
     def __init__(self, window_lines=None, type_verification=None):
-        super().__init__()
+        super().__init__(windows_type_paste=True)
         self._probe_lines = window_lines
         self._type_verification = type_verification
         self.launched = False
@@ -680,6 +680,20 @@ class JarvisDesktopCommandTests(unittest.TestCase):
                     str(Path("no such folder xyz").resolve()),
                 )
 
+    def test_window_launch_command_routes_uwp_and_uri_targets(self) -> None:
+        """Pure routing contract, platform-independent: shell:AppsFolder targets
+        launch through explorer (cmd start opens them as folders); URI schemes
+        and plain exes go through `cmd /c start` so the OS registries resolve
+        protocol handlers and file associations."""
+        from novacontrol.desktop.controller import _window_launch_command
+
+        self.assertEqual(
+            _window_launch_command("shell:AppsFolder\\App_abc!App"),
+            ["explorer", "shell:AppsFolder\\App_abc!App"],
+        )
+        self.assertEqual(_window_launch_command("steam://open/main"), ["cmd", "/c", "start", "", "steam://open/main"])
+        self.assertEqual(_window_launch_command("notepad.exe"), ["cmd", "/c", "start", "", "notepad.exe"])
+
     def test_launch_open_uses_explorer_for_uwp_shell_targets(self) -> None:
         """shell:AppsFolder targets go through explorer, not cmd start."""
         import subprocess as sp
@@ -697,6 +711,8 @@ class JarvisDesktopCommandTests(unittest.TestCase):
             with unittest.mock.patch.object(
                 LocalDesktopRunner, "_resolve_app_target",
                 staticmethod(lambda t: "shell:AppsFolder\\App_abc!App"),
+            ), unittest.mock.patch(
+                "sys.platform", "win32"
             ), unittest.mock.patch(
                 "novacontrol.desktop.controller.subprocess.Popen", side_effect=fake_popen
             ):

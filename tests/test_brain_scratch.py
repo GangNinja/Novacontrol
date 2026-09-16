@@ -315,6 +315,7 @@ class ScratchableIntentSingleOwnerTests(unittest.TestCase):
             ("what is 2+2", "math"),
             ("what time is it", "time"),
             ("what is fifteen times three", "math"),
+            ("add five and seven", "math"),
             ("100 km in miles", "conversion"),
             ("what is the capital of france", "knowledge"),
             ("recommend a movie", "recommendation"),
@@ -343,6 +344,12 @@ class ScratchAnswerTests(unittest.TestCase):
             ("what is 10 divided by 4", "2.5"),
             ("add 5 and 7", "12"),
             ("add 5 and 7 and show steps", "12"),
+            # Spelled-out operands ride the same _ADD_FORM grammar as the digit
+            # twin; trailing phrasing is sliced off before evaluation.
+            ("add five and seven", "12"),
+            ("add five and seven and show steps", "12"),
+            ("add twenty and fifteen", "35"),
+            ("add one hundred and five and two", "107"),
             ("what is sqrt(144)", "12"),
             ("what is the square root of 256", "16"),
             ("what is 5 squared", "25"),

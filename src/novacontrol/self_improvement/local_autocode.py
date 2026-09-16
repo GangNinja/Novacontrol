@@ -6,7 +6,7 @@ This module is written only after the user approves a temporary preview.
 from __future__ import annotations
 
 
-APPROVED_GOAL = 'build a new tab for improve novacontrol'
+APPROVED_GOAL = 'improve error handling'
 
 
 def approved_goal() -> str:

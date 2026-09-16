@@ -243,12 +243,23 @@ class AdbPhoneRunner:
 
     def resolve_contact_prefix(self, text: str) -> str:
         """Return the longest leading word-sequence of ``text`` that matches a
-        saved contact name ("mom good night" -> "mom" when mom is saved)."""
-        words = text.split()
-        for size in range(min(len(words), 3), 0, -1):
-            candidate = " ".join(words[:size])
-            if self._resolve_contact(candidate):
-                return candidate
+        saved contact name ("mom good night" -> "mom" when mom is saved).
+
+        Planning must stay offline and crash-free: on a machine without adb
+        (or any probe failure) this reports "no known contact" — ``""`` — and
+        the plan still routes for approval. Executing the lookup still fails
+        loudly with the install instructions; only planning degrades.
+        """
+        try:
+            words = text.split()
+            for size in range(min(len(words), 3), 0, -1):
+                candidate = " ".join(words[:size])
+                if self._resolve_contact(candidate):
+                    return candidate
+        except RuntimeError:
+            # No adb on this machine (or probe unavailable): planning proceeds
+            # with an unknown recipient; execution reports the real gap.
+            return ""
         return ""
 
     def _screenshot_to_file(self) -> Mapping[str, Any]:

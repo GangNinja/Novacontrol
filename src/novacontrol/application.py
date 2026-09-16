@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import logging
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,22 +41,25 @@ from novacontrol.brain.scratch import scratchable_intent
 from novacontrol.browser import BrowserAutomationController, BrowserAutomationModule, PlaywrightBrowserRunner
 from novacontrol.core.activity import RecentActivityLog
 from novacontrol.core.buglog import BugLog
+from novacontrol.core.chat_transcript import ChatTranscriptStore
 from novacontrol.core.events import Event, EventBus
 from novacontrol.core.runtime import EventDrivenRuntime
 from novacontrol.core.security import ApprovalDecision, ApprovalRequest, DenyByDefaultApprovalGateway
 from novacontrol.desktop import DesktopAutomationController, DesktopAutomationModule, LocalDesktopRunner
 from novacontrol.desktop.vision import VisionController
-from novacontrol.explore import ExploreModule, ExploreRequest, ExploreService
+from novacontrol.explore import ExploreModule, ExploreRequest, ExploreService, set_explore_cache_provider
 from novacontrol.intelligence import GlobalInputIntelligence, UnderstandResult
 from novacontrol.intelligence.intent import IntentName, RiskLevel
 from novacontrol.integrations import (
     CLOUD_LLM_PRESETS,
     build_cloud_provider,
     build_llm_provider_from_environment,
+    build_ollama_provider,
     build_vision_provider,
     cloud_llm_presets,
     get_cloud_preset,
     make_ollama_reprobe,
+    ollama_models,
 )
 from novacontrol.integrations.llm import _redact_key
 from novacontrol.knowledge import KnowledgeBase
@@ -62,6 +67,7 @@ from novacontrol.memory import MemoryManager, MemoryModule, MemoryNamespace, Sql
 from novacontrol.persistence import JsonStateStore
 from novacontrol.phone import PhoneControlController, PhoneControlModule
 from novacontrol.planning import PlanningEngine, PlanningModule, WorkflowExecutor
+from novacontrol.planning.engine import steps_id
 from novacontrol.plugins import PluginMarketplaceModule
 from novacontrol.projects import ProjectManager
 from novacontrol.scheduler import InMemoryScheduler
@@ -128,6 +134,31 @@ def _workflow_classes_for_family(family: str) -> tuple[Any, Any, Any] | None:
     return None
 
 
+def _summarize_search_results(execution_results: list[dict[str, Any]]) -> str:
+    """Compose the web-search answer from an executed browser workflow.
+
+    The search plan's extract step (mode=search_results) returns top result
+    titles + links; this renders them as the summary so a search execution
+    RETURNS AN ANSWER, not just a page load. Empty when the workflow carried
+    no search-results payload (plain navigations, failed extracts, noop runs).
+    """
+    results: list[dict[str, Any]] = []
+    for entry in execution_results:
+        output = entry.get("output") or {}
+        found = output.get("search_results")
+        if isinstance(found, list):
+            results.extend(found)
+    results = [r for r in results if isinstance(r, dict) and (r.get("title") or r.get("url"))]
+    if not results:
+        return ""
+    lines = [f"Top {len(results)} web results:"]
+    for index, item in enumerate(results, start=1):
+        title = str(item.get("title") or item.get("url") or "Untitled").strip()
+        url = str(item.get("url") or "").strip()
+        lines.append(f"{index}. {title}" + (f" — {url}" if url else ""))
+    return "\n".join(lines)
+
+
 class NovaControlApplication:
     """Runnable local composition of NovaControl services."""
 
@@ -140,18 +171,29 @@ class NovaControlApplication:
         # run, and learning cycle lands here, so the web timeline can be seeded
         # once and then fed live from /events/stream — no localStorage, no polling.
         self.activity = RecentActivityLog(limit=50)
+        self.data_dir = Path(data_dir) if data_dir is not None else self._DEFAULT_DATA_DIR
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.state_store = JsonStateStore(self.data_dir)
+        # Persisted cloud LLM config (provider/model + the API key) and the
+        # picked LOCAL brain model. The store lives in the app's data dir
+        # (gitignored runtime state, same as tasks.json) — the key NEVER leaves
+        # this machine except to the provider itself, and no API endpoint ever
+        # returns it.
+        # _cloud_llm_store: JsonStateStore namespace name; read()/write() go
+        # through self.state_store.read("cloud_llm") / .write("cloud_llm", …).
+        self._cloud_llm_store = self.state_store
+        stored_cloud = self._cloud_llm_store.read("cloud_llm") if self._cloud_llm_store is not None else {}
         # Lazy Ollama upgrade: if boot found no LLM, each chat request probes for a
         # freshly started Ollama (rate-limited) and hot-swaps it in — for the brain
         # AND Explore synthesis — without a server restart. The callback resolves
         # self.explore lazily: it fires on a chat request, long after __init__.
-        self._ollama_reprobe = make_ollama_reprobe()
+        # A picked local model ("local_model") pins the upgrade to that model so
+        # the picker's choice survives a lazy Ollama startup.
+        self._ollama_reprobe = make_ollama_reprobe(model=str(stored_cloud.get("local_model", "")))
         # Read the persisted brain mode FIRST so the boot provider honors it: a
         # user who switched to scratch must not get one LLM answer before the UI
         # loads. The on_provider_upgrade callback resolves self.explore lazily —
         # it fires on a chat request, long after __init__.
-        self.data_dir = Path(data_dir) if data_dir is not None else self._DEFAULT_DATA_DIR
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.state_store = JsonStateStore(self.data_dir)
         # Configured vision model (None = OCR/landmarks only). Set BEFORE the
         # desktop runner, VisionController, and agentcore perception are built
         # so boot wiring picks it up; set_vision_llm/clear_vision_llm hot-swap
@@ -162,19 +204,19 @@ class NovaControlApplication:
             else SettingsManager()
         )
         boot_mode = self.settings.settings.brain_mode
-        # Persisted cloud LLM config (provider/model + the API key). The store
-        # lives in the app's data dir (gitignored runtime state, same as
-        # tasks.json) — the key NEVER leaves this machine except to the
-        # provider itself, and no API endpoint ever returns it.
-        # _cloud_llm_store: JsonStateStore namespace name; read()/write() go
-        # through self.state_store.read("cloud_llm") / .write("cloud_llm", …).
-        self._cloud_llm_store = self.state_store
-        stored_cloud = self._cloud_llm_store.read("cloud_llm") if self._cloud_llm_store is not None else {}
         boot_cloud = build_cloud_provider(
             str(stored_cloud.get("provider", "")),
             str(stored_cloud.get("api_key", "")),
             model=str(stored_cloud.get("model", "")),
         ) if stored_cloud.get("provider") and stored_cloud.get("api_key") else None
+        # A picked LOCAL brain model ("local_model") re-arms the boot provider
+        # pinned to that Ollama model; empty means auto-pick as before.
+        boot_local_model = str(stored_cloud.get("local_model", "")).strip()
+        boot_local = (
+            build_ollama_provider(model=boot_local_model)
+            if boot_local_model and not boot_cloud
+            else None
+        )
         self.brain = NovaBrain(
             completion_provider=build_llm_provider_from_environment(),
             ollama_reprobe=self._ollama_reprobe,
@@ -182,7 +224,13 @@ class NovaControlApplication:
         )
         if boot_cloud is not None:
             self.brain.set_cloud_provider(boot_cloud)
+        elif boot_local is not None:
+            self.brain.set_local_provider(boot_local)
         self.brain.set_mode(boot_mode)
+        # Server-persisted chat transcript: the SAME thread for every browser,
+        # tab, and client — not a per-browser localStorage copy. The UI reads
+        # it on load and appends via POST /chat/history; /chat/clear wipes it.
+        self.chat_transcript = ChatTranscriptStore(self.state_store)
         memory_store = SqliteMemoryStore(self.data_dir / "memory.sqlite3")
         self.memory = MemoryManager(memory_store)
         self.self_improvement = SelfImprovementEngine(Path.cwd())
@@ -379,8 +427,19 @@ class NovaControlApplication:
         return self.brain_status()
 
     def _sync_explore_provider(self) -> None:
-        """Point Explore's synthesizer at the brain's live provider."""
-        self.explore.explainer.set_completion_provider(self.brain.completion_provider)
+        """Point Explore's synthesizer at the brain's live provider.
+
+        Mirrors the brain mode EXACTLY: scratch (Echo) passes None so the
+        synthesizer uses its local template path rather than trying an LLM
+        call on Echo (which try_llm_synthesis would skip anyway — passing None
+        keeps the two layers in lockstep by construction). llm/auto/cloud pass
+        the brain's live provider as-is, so Chat and Explore always speak with
+        the same voice. Report caching is keyed on the synthesis provider, so
+        a mode switch never serves a report synthesized by the OLD brain.
+        """
+        provider = None if self.brain.provider_name == "scratch" else self.brain.completion_provider
+        self.explore.explainer.set_completion_provider(provider)
+        set_explore_cache_provider(self.explore, provider)
 
     def brain_status(self) -> dict[str, Any]:
         """What the UI's switch and AI Brain card render."""
@@ -392,6 +451,89 @@ class NovaControlApplication:
             "model_configured": self.brain.model_configured,
             "cloud": self.cloud_llm_status(),
         }
+
+    # --- Shared chat transcript (server-persisted, all clients) ---
+
+    def chat_history(self) -> dict[str, Any]:
+        """The persisted chat thread, oldest first (every client renders this)."""
+        return {"turns": self.chat_transcript.turns()}
+
+    def record_chat_turn(self, role: str, text: str, *, route: str = "") -> dict[str, Any]:
+        """Append a client-reported turn (voice, CLI, anything not /ask)."""
+        turn = self.chat_transcript.append(role, text, route=route)
+        return {"recorded": turn is not None, "turns": len(self.chat_transcript.turns())}
+
+    def import_chat_history(self, turns: list[dict[str, Any]]) -> dict[str, Any]:
+        """One-time migration: merge a browser's localStorage thread into the
+        shared transcript. Idempotent per (role, text, at) signature so a
+        re-running migration can never duplicate turns."""
+        existing = {
+            (str(t.get("role")), str(t.get("text")), int(t.get("at") or 0))
+            for t in self.chat_transcript.turns()
+        }
+        seen: set[tuple[str, str, int]] = set()
+        fresh: list[dict[str, Any]] = []
+        for turn in turns:
+            if not isinstance(turn, dict):
+                continue
+            signature = (str(turn.get("role", "")), str(turn.get("text", "")), int(turn.get("at") or 0))
+            if signature in existing or signature in seen:
+                continue
+            seen.add(signature)
+            fresh.append(turn)
+        if not fresh:
+            return {"imported": 0, "total": len(self.chat_transcript.turns())}
+        merged = self.chat_transcript.turns() + fresh
+        self.chat_transcript.replace_all(merged)
+        return {"imported": len(fresh), "total": len(self.chat_transcript.turns())}
+
+    # --- Local brain model picker (Ollama) ---
+
+    def local_models(self) -> dict[str, Any]:
+        """Models available on the local Ollama for the brain model picker.
+
+        Always a fresh probe (never the boot-time snapshot): models pulled
+        after boot must appear. ``picked`` is the persisted choice ("" =
+        auto-pick), not necessarily the currently active model.
+        """
+        stored = self._cloud_llm_store.read("cloud_llm") if self._cloud_llm_store is not None else {}
+        return {
+            "available": ollama_models(),
+            "picked": str(stored.get("local_model", "")),
+            "active_model": self.brain.model_name,
+        }
+
+    def set_local_model(self, model: str) -> dict[str, Any]:
+        """Pin the LOCAL brain to a specific Ollama model (hot swap, no restart).
+
+        Empty string clears the pick (back to auto-picking the best detected
+        model). The choice persists in the same gitignored store as the cloud
+        LLM config and re-arms at boot. Only a local provider is touched: a
+        configured cloud LLM stays exactly where it is, and the current mode
+        decides whether the swap takes effect immediately (auto/llm) or when
+        the user switches back (cloud/scratch).
+        """
+        model = model.strip()
+        available = ollama_models()
+        if model and available and model not in available:
+            # Membership is only enforced when Ollama ANSWERS: unreachable
+            # Ollama must not block a pick (it re-arms via the lazy re-probe
+            # when Ollama starts), but a live probe catching a typo should.
+            raise ValueError(
+                f"Model {model!r} is not available on the local Ollama. "
+                "Pull it first, e.g. `ollama pull " + model + "`."
+            )
+        stored = self._cloud_llm_store.read("cloud_llm") if self._cloud_llm_store is not None else {}
+        self._cloud_llm_store.write("cloud_llm", {**stored, "local_model": model})
+        provider = build_ollama_provider(model=model)
+        if provider is None:
+            # Persisted anyway: the pick re-arms via the lazy re-probe when
+            # Ollama starts. With no Ollama now there is nothing to swap onto.
+            return self.brain_status()
+        self.brain.set_local_provider(provider)
+        self._sync_explore_provider()
+        self.persist()
+        return self.brain_status()
 
     # --- Cloud LLM (ChatGPT / Gemini / Groq / …) ---
 
@@ -406,12 +548,19 @@ class NovaControlApplication:
         if not provider:
             return {"configured": False}
         preset = get_cloud_preset(provider.split(":", 1)[-1])
+        # Lifetime telemetry from the live provider object (usage accumulates
+        # on every completion; last_error holds the most recent failure).
+        live = self.brain._cloud_provider
+        usage = getattr(live, "usage", None)
+        last_error = str(getattr(live, "last_error", "") or "")
         return {
             "configured": True,
             "provider": provider.split(":", 1)[-1],
             "label": preset["label"] if preset else provider,
             "model": self.brain.model_name if self.brain.mode == "cloud" else "",
             "api_key_hint": self._redacted_cloud_key(),
+            "usage": dict(usage) if isinstance(usage, dict) else None,
+            "last_error": last_error,
         }
 
     def _redacted_cloud_key(self) -> str:
@@ -451,6 +600,45 @@ class NovaControlApplication:
         self._sync_explore_provider()
         self.persist()
         return self.brain_status()
+
+    async def test_cloud_llm(self, provider_id: str, api_key: str, *, model: str = "") -> dict[str, Any]:
+        """Ping a cloud provider with the PASTED key — before saving anything.
+
+        Builds a throwaway provider (same construction path the real connect
+        uses, so what is tested is exactly what would be stored) and sends one
+        tiny completion. NOTHING is persisted and the brain is untouched: a
+        failed test must not leave half-configured state behind. The response
+        is honest about which stage failed: unreachable, auth rejected, or
+        model unknown.
+        """
+        preset = get_cloud_preset(provider_id)
+        if preset is None:
+            raise ValueError(
+                f"Unknown cloud LLM provider: {provider_id!r}. "
+                f"Valid providers: {', '.join(row['id'] for row in CLOUD_LLM_PRESETS)}"
+            )
+        if not api_key.strip():
+            raise ValueError("Paste an API key to test first.")
+        provider = build_cloud_provider(provider_id, api_key, model=model)
+        assert provider is not None  # preset + non-empty key are validated above
+        try:
+            answer = await asyncio.wait_for(
+                provider.complete([{"role": "user", "content": "Reply with the single word: ok"}], max_tokens=8),
+                timeout=20.0,
+            )
+        except asyncio.TimeoutError as exc:
+            raise ValueError(f"{preset['label']} did not respond within 20s — check your network or try later.") from exc
+        except Exception as exc:  # noqa: BLE001 - every provider error is user-facing here
+            raise ValueError(f"{preset['label']} rejected the connection: {type(exc).__name__}: {exc}") from exc
+        answer = (answer or "").strip()
+        return {
+            "ok": True,
+            "provider": provider_id,
+            "label": preset["label"],
+            "model": getattr(provider, "model", ""),
+            "sample": answer[:80],
+            "saved": False,
+        }
 
     # -- Vision model configuration -----------------------------------
 
@@ -664,6 +852,14 @@ class NovaControlApplication:
 
         response = await self.brain.shape_response(request, decision, payload)
         self.tasks.update(task.id, TaskRecordStatus.COMPLETED, progress=1.0, result=response.to_dict())
+        # Record the turn in the SHARED transcript so every client renders the
+        # same thread (the UI used to keep its own per-browser copy).
+        self.chat_transcript.append("user", text)
+        self.chat_transcript.append(
+            "assistant",
+            response.summary,
+            route=route or decision.intent.value,
+        )
         # Downstream resolution ("open it", "do the same thing") needs this
         # history; remember only when the GIL actually understood the input.
         if gil_intent is not None:
@@ -716,8 +912,40 @@ class NovaControlApplication:
         return "browser_automation", self.plan_browser_command(text)
 
     async def _handle_memory(self, request: BrainRequest, text: str) -> tuple[str, dict[str, Any]]:
-        results = await self.memory.retrieve(MemoryNamespace.CONVERSATION, text, limit=5)
-        return "memory", {"results": [r.record.to_dict() | {"score": r.score} for r in results]}
+        # Teach path: "remember this/that: …" stores the fact as durable
+        # KNOWLEDGE, not just conversation history — so the Learn tab's
+        # "what did I teach you" recall works across sessions.
+        for marker in ("remember this:", "remember that:", "remember:"):
+            if marker in text.lower():
+                fact = text.split(marker, 1)[-1].strip()
+                if fact:
+                    taught = await self.teach_knowledge(fact, source="chat")
+                    return "memory", {
+                        "mode": "memory_store",
+                        "message": taught["message"],
+                        "memory": taught["memory"],
+                        "results": [],
+                    }
+        # Recall path: search taught knowledge first, then conversation memory.
+        taught = await self.list_knowledge(text, limit=3)
+        conversation = await self.memory.retrieve(MemoryNamespace.CONVERSATION, text, limit=5)
+        results = [r.record.to_dict() | {"score": r.score} for r in conversation]
+        if taught["facts"]:
+            # Surface the best taught fact directly when it clearly matches.
+            best = taught["facts"][0]
+            if best["score"] >= 3.0:
+                return "memory", {
+                    "mode": "memory_recall",
+                    "message": f"You taught me: {best['text']}",
+                    "facts": taught["facts"],
+                    "results": results,
+                }
+        return "memory", {
+            "mode": "memory_recall",
+            "message": "I don't have taught knowledge matching that yet — use the Learn tab or say 'remember this: …'.",
+            "facts": [],
+            "results": results,
+        }
 
     async def _handle_project(self, request: BrainRequest, text: str) -> tuple[str, dict[str, Any]]:
         project = self.projects.create_project(text[:60], description=text)
@@ -741,6 +969,189 @@ class NovaControlApplication:
     }
 
     # --- Learning ---
+
+    _TEACH_PREFIXES = ("remember that ", "learn that ", "remember: ", "learn: ")
+
+    def _teach_fact(self, text: str) -> str | None:
+        """Strip teach phrasing ('remember that …', 'learn: …') -> the fact.
+
+        Returns None when the text is a generic learning goal rather than a
+        storable fact ("improve NovaControl", "write more tests").
+        """
+        lower = text.lower().strip()
+        for prefix in self._TEACH_PREFIXES:
+            if lower.startswith(prefix):
+                fact = text[len(prefix):].strip()
+                if fact:
+                    return fact
+        return None
+
+    async def teach_knowledge(self, fact: str, *, source: str = "learn_tab") -> dict[str, Any]:
+        """Persist a typed fact as recallable knowledge (KNOWLEDGE namespace).
+
+        This is the Learn tab's real 'learn' path: what the user types becomes
+        durable knowledge that chat and memory recall can retrieve later.
+        """
+        fact = fact.strip()
+        if not fact:
+            raise ValueError("Nothing to learn: the fact is empty.")
+        existing = await self.memory.retrieve(MemoryNamespace.KNOWLEDGE, fact, limit=5)
+        for result in existing:
+            if result.record.text == fact:
+                return {
+                    "mode": "knowledge_teach",
+                    "message": "I already know this.",
+                    "memory": result.record.to_dict(),
+                    "duplicate": True,
+                }
+        key = f"fact-{uuid4().hex[:12]}"
+        record = await self.memory.remember(
+            MemoryNamespace.KNOWLEDGE, key,
+            {"fact": fact, "source": source},
+            text=fact,
+            importance=0.9,
+        )
+        self._record_activity("learn", "Knowledge learned", fact[:60])
+        return {
+            "mode": "knowledge_teach",
+            "message": f"Learned: {fact[:80]}{'…' if len(fact) > 80 else ''}",
+            "memory": record.to_dict(),
+            "duplicate": False,
+        }
+
+    async def list_knowledge(self, query: str = "", *, limit: int = 20) -> dict[str, Any]:
+        """List taught knowledge, optionally filtered by a search query."""
+        results = await self.memory.retrieve(MemoryNamespace.KNOWLEDGE, query, limit=limit)
+        facts = [result.record.to_dict() | {"score": result.score} for result in results]
+        return {"mode": "knowledge_list", "facts": facts, "count": len(facts)}
+
+    async def build_code_plan(self, goal: str, *, language: str = "python") -> dict[str, Any]:
+        """Plan a coding task with language awareness and a concrete artifact.
+
+        Uses the configured LLM to draft the code artifact when available, and
+        always falls back to a deterministic plan (the engine knows language
+        conventions: module docstrings, test scaffolds, language-appropriate
+        file names) so the Build tab plans real coding work, not a generic
+        three-step wrapper.
+        """
+        goal = goal.strip()
+        if not goal:
+            raise ValueError("Describe what to build first.")
+        language = _CODE_LANGUAGES.get(language.lower().strip(), language.lower().strip() or "python")
+        artifact_name = _code_artifact_name(goal, language)
+
+        llm_code = ""
+        completion = getattr(self.brain, "completion_provider", None)
+        configured = bool(getattr(self.brain, "model_configured", False))
+        agent_trace: list[dict[str, str]] = []
+        agent_meta: dict[str, Any] = {}
+        if completion is not None and configured:
+            # Real coding agent: draft → run → read the actual error → fix →
+            # re-run, bounded rounds. Code that merely parses isn't enough; the
+            # artifact shipped is one that RAN clean (or the honest failure).
+            from novacontrol.core.code_agent import run_coding_agent
+
+            try:
+                result = await run_coding_agent(goal, language, completion, filename=artifact_name)
+                llm_code = result.content
+                agent_trace = [s.to_dict() for s in result.steps]
+                agent_meta = {
+                    "ran_ok": result.ran_ok,
+                    "fix_rounds": result.fix_rounds,
+                    "final_output": result.final_output,
+                    "model": result.model_name,
+                    "generated_by": result.generated_by,
+                }
+            except Exception as exc:  # noqa: BLE001 - fallback plan must survive provider errors
+                logger.warning("build_code_plan agent loop failed (%s); using deterministic plan", exc)
+                llm_code = ""
+                agent_trace = [{"kind": "gave_up", "detail": f"Agent loop failed: {exc}", "output": ""}]
+
+        if llm_code:
+            generated_by = str(agent_meta.get("generated_by", "llm"))
+            verify = agent_meta.get("ran_ok")
+            if verify is True:
+                verified = " — verified: ran clean"
+            elif verify is False:
+                verified = " — ran with issues (see agent trace)"
+            else:
+                verified = ""
+            artifact = {"path": artifact_name, "language": language, "content": llm_code, "generated_by": generated_by}
+            summary = (
+                f"Agent-drafted a {language} implementation for: {goal[:70]}{'…' if len(goal) > 70 else ''}"
+                f"{verified}"
+            )
+        else:
+            # No model wired: still return REAL, runnable starter code — an
+            # empty editor made "Plan The Code" feel like nothing gets coded.
+            # The hint tells the user exactly how to unlock full LLM drafting.
+            steps = _code_plan_steps(goal, language)
+            artifact = {
+                "path": artifact_name,
+                "language": language,
+                "content": _scaffold_code(goal, language, artifact_name),
+                "generated_by": "scaffold",
+            }
+            summary = (
+                f"Scaffolded a {language} starter for: {goal[:70]}{'…' if len(goal) > 70 else ''}"
+                " — connect an LLM (Ollama or a cloud key in Settings) for full auto-drafting"
+            )
+
+        steps = _code_plan_steps(goal, language)
+        from novacontrol.planning.models import Plan, PlanStep
+
+        plan = Plan(goal=goal, steps=tuple(
+            PlanStep(title=title, description=description, id=steps_id(i))
+            for i, (title, description) in enumerate(steps)
+        ))
+        self._record_activity("build", "Code plan", f"{language}: {goal[:50]}")
+        return {
+            "mode": "code_plan",
+            "summary": summary,
+            "language": language,
+            "plan": plan.to_dict(),
+            "artifact": artifact,
+            "agent": {"steps": agent_trace, **agent_meta},
+        }
+
+    # Workspace root for saved Build artifacts: inside the checkout, gitignored
+    # (never touches project code), sibling of the app's data dir.
+    BUILD_WORKSPACE_DIRNAME = "build_workspace"
+
+    def save_build_artifact(
+        self,
+        *,
+        filename: str,
+        content: str,
+        language: str = "python",
+        goal: str = "",
+    ) -> dict[str, Any]:
+        """Write a generated code artifact to the Build workspace on disk.
+
+        This is the missing half of the Build tab: /plan/code can DRAFT code,
+        but nothing ever wrote it to disk, so "nothing is getting coded". The
+        artifact lands in build_workspace/ (gitignored, sibling of data/) and
+        the response carries the absolute path so the UI can show it.
+        Filenames are sanitized to a bare name — no paths, no traversal.
+        """
+        from novacontrol.core.build_workspace import safe_artifact_name
+
+        safe_name = safe_artifact_name(filename, language)
+        if not content.strip():
+            raise ValueError("Nothing to save — the artifact is empty. Generate code first.")
+        workspace = Path.cwd() / self.BUILD_WORKSPACE_DIRNAME
+        workspace.mkdir(parents=True, exist_ok=True)
+        target = workspace / safe_name
+        target.write_text(content, encoding="utf-8")
+        self._record_activity("build", "Artifact saved", f"{safe_name} ({language})")
+        return {
+            "mode": "artifact_saved",
+            "path": str(target),
+            "filename": safe_name,
+            "language": language,
+            "bytes": len(content.encode("utf-8")),
+            "goal": goal[:120],
+        }
 
     async def learning_cycle(self, goal: str, *, feedback: str = "") -> dict[str, Any]:
         plan = self.self_improvement.plan(goal)
@@ -962,8 +1373,14 @@ class NovaControlApplication:
                 # The parser already resolved the query into a search-engine URL.
                 wf = self.browser.plan_navigation(step["target"])
                 browser_actions.extend(wf.actions)
+                # Follow the navigation with an extract step so execution
+                # RETURNS the top results (an answer), not just a page load.
+                extract_wf = self.browser.plan_search_results(limit=6)
+                browser_actions.extend(extract_wf.actions)
                 query = step.get("query") or step["target"]
-                action_descriptions.append(f"Search the web for {query}")
+                action_descriptions.append(
+                    f"Search the web for {query} and read the top results"
+                )
         if not browser_actions:
             return {
                 "route": "browser_automation",
@@ -1074,6 +1491,14 @@ class NovaControlApplication:
         plan["execution_results"] = [r.to_dict() for r in results]
         succeeded = sum(1 for r in results if r.status.value == "completed")
         plan["summary"] = f"Executed {succeeded}/{len(results)} {result_label}(s) successfully."
+        # A search workflow carries an extract step AFTER its navigation; when
+        # it ran, turn its results into the answer the user actually asked
+        # for (top titles + links), not just a successful page load.
+        if command.strip().lower().startswith(("search the web", "google ", "look up ", "web search")):
+            answer = _summarize_search_results(plan["execution_results"])
+            if answer:
+                plan["summary"] = answer
+                plan["search_answer"] = answer
         if succeeded:
             self._record_activity("command", "Command executed", command)
         return plan
@@ -1286,3 +1711,112 @@ class NovaControlApplication:
                 "capabilities": self.intelligence.capabilities.to_dict(),
             },
         }
+
+
+# --- Coding-plan helpers (Build tab) -----------------------------------------
+
+logger = logging.getLogger(__name__)
+
+_CODE_LANGUAGES: dict[str, str] = {
+    "py": "python", "python": "python",
+    "js": "javascript", "javascript": "javascript", "node": "javascript",
+    "ts": "typescript", "typescript": "typescript",
+    "java": "java", "c": "c", "cpp": "cpp", "c++": "cpp", "c#": "csharp", "cs": "csharp",
+    "go": "go", "golang": "go", "rust": "rust", "rs": "rust",
+    "rb": "ruby", "ruby": "ruby", "php": "php", "swift": "swift", "kotlin": "kotlin",
+    "sh": "shell", "bash": "shell", "shell": "shell", "sql": "sql", "html": "html", "css": "css",
+}
+
+_CODE_EXT: dict[str, str] = {
+    "python": "py", "javascript": "js", "typescript": "ts", "java": "java",
+    "c": "c", "cpp": "cpp", "csharp": "cs", "go": "go", "rust": "rs",
+    "ruby": "rb", "php": "php", "swift": "swift", "kotlin": "kt",
+    "shell": "sh", "sql": "sql", "html": "html", "css": "css",
+}
+
+_CODE_TEST_NAMES: dict[str, str] = {
+    "python": "test_{name}.py",
+    "javascript": "{name}.test.js",
+    "typescript": "{name}.test.ts",
+    "java": "{name}Test.java",
+    "go": "{name}_test.go",
+    "rust": "{name}.rs",  # tests live in the same file behind #[cfg(test)]
+    "ruby": "{name}_spec.rb",
+    "shell": "test_{name}.sh",
+}
+
+
+def _code_artifact_name(goal: str, language: str) -> str:
+    """Derive a kebab/snake artifact file name from the goal words."""
+    words = [w for w in re.findall(r"[a-zA-Z0-9]+", goal.lower()) if w not in {
+        "a", "an", "the", "write", "create", "build", "make", "implement", "code",
+        "program", "function", "class", "script", "in", "for", "that", "with", "to",
+        "of", "and", "me", "my", "please", "can", "you",
+    }][:4]
+    stem = "_".join(words) or "artifact"
+    return f"{stem}.{_CODE_EXT.get(language, 'txt')}"
+
+
+def _scaffold_code(goal: str, language: str, artifact_name: str) -> str:
+    """Language-appropriate, RUNNABLE starter code for the typed goal.
+
+    Deterministic by design (no model needed): a correct docstringed entry
+    point, a working example implementation for the common "function/util"
+    shape, and a main guard. The user edits from something that already runs —
+    not from an empty file. Falls back to a commented header for languages
+    without a dedicated template.
+    """
+    title = goal.strip().rstrip(".") or "the task"
+    func = re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_")[:40] or "solution"
+    if func[0].isdigit():
+        func = f"task_{func}"
+    templates: dict[str, str] = {
+        "python": (
+            f'"""{title}.\n\nGenerated by NovaControl Build — edit freely, then Save to disk.\n"""\n\n'
+            f"\ndef {func}(text: str = '') -> str:\n"
+            f'    """Solve: {title}.\n\n'
+            '    Replace this body with the real implementation; the shape\n'
+            '    below already runs and is trivially testable.\n'
+            '    """\n'
+            '    if not text:\n'
+            '        return ""\n'
+            '    return text.strip()\n\n\n'
+            'def _self_check() -> None:\n'
+            '    """Quick smoke check: `python ' + artifact_name + '` runs it."""\n'
+            f'    assert {func}("  hi ") == "hi"\n'
+            '    print("self-check passed")\n\n\n'
+            'if __name__ == "__main__":\n'
+            '    _self_check()\n'
+        ),
+        "javascript": (
+            f"/**\n * {title}.\n * Generated by NovaControl Build — edit freely, then Save to disk.\n */\n\n"
+            f"export function {func}(input) {{\n"
+            '  if (input == null) return "";\n'
+            '  return String(input).trim();\n'
+            '}\n\n'
+            'if (import.meta.url === `file://${process.argv[1]}`) {\n'
+            '  console.log("self-check", {func}("  hi ") === "hi");\n'
+            '}\n'
+        ),
+    }
+    if language in templates:
+        return templates[language]
+    return (
+        f"// {title}\n"
+        f"// Generated by NovaControl Build — edit freely, then Save to disk.\n\n"
+        f"// TODO: implement {func}\n"
+    )
+
+
+def _code_plan_steps(goal: str, language: str) -> list[tuple[str, str]]:
+    """Language-aware coding plan steps (deterministic, no fake data)."""
+    test_name = _CODE_TEST_NAMES.get(language, "test_{name}").format(
+        name=re.sub(r"\.[a-z]+$", "", _code_artifact_name(goal, language))
+    )
+    return [
+        ("Clarify requirements", f"Pin down inputs, outputs, and edge cases for: {goal}"),
+        (f"Design the {language} module", f"Choose functions/classes and data flow for {_code_artifact_name(goal, language)}"),
+        (f"Implement in {language}", f"Write the core logic in {_code_artifact_name(goal, language)} following {language} conventions"),
+        ("Write tests", f"Add {test_name} covering happy path and edge cases"),
+        ("Verify", f"Run the {language} toolchain (lint + tests) and fix findings"),
+    ]

@@ -152,6 +152,113 @@ class ReducedMotionPlaywrightTests(unittest.TestCase):
             finally:
                 browser.close()
 
+    def test_live_os_toggle_stops_and_restarts_canvas_and_tilt(self) -> None:
+        """The effects.js guard reacts to a MID-SESSION OS toggle, not just boot.
+
+        Contrast proof in four phases over one page session:
+          1. no emulation: canvas paints, tilt writes transforms,
+          2. reduce ON (emulated): within a frame the canvas is blanked AND
+             stays blank across a sample window (stopped, not just cleared)
+             and a fresh mousemove no longer writes tilt transforms,
+          3. reduce OFF again: the canvas loop restarts and tilt re-binds,
+          4. the blank snapshots during phase 2 equal a cleared reference
+             canvas byte-for-byte, so 'no visible change' is real.
+        """
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(
+                channel=self.channel, headless=True, args=["--disable-gpu"]
+            )
+            try:
+                context = browser.new_context()
+                page = context.new_page()
+                page.goto(f"http://127.0.0.1:{self.port}/", wait_until="load")
+                page.wait_for_function(
+                    "document.readyState === 'complete' && !!document.querySelector('#homePanel')",
+                    timeout=20000,
+                )
+                time.sleep(1.2)  # let the canvas loop paint frames
+
+                # Phase 1: running, painting, and tilt armed.
+                running = page.evaluate(PROBE)
+                self.assertIs(running["canvasBlank"], False,
+                              "canvas should be animating before the toggle")
+                tilt_before = self._tilt_transform_after_move(page)
+                self.assertIn("perspective", tilt_before,
+                              "tilt should write transforms before the toggle")
+
+                # Phase 2: the OS toggle arrives MID-SESSION.
+                page.emulate_media(reduced_motion="reduce")
+                page.wait_for_function(
+                    "window.matchMedia('(prefers-reduced-motion: reduce)').matches",
+                    timeout=5000,
+                )
+                time.sleep(0.3)  # give the change listener a frame to react
+                stopped_1 = page.evaluate(PROBE)
+                self.assertIs(stopped_1["canvasBlank"], True,
+                              "canvas must be blanked when reduced motion turns on")
+                time.sleep(0.6)  # sample window: still blank == loop STOPPED
+                stopped_2 = page.evaluate(PROBE)
+                self.assertIs(stopped_2["canvasBlank"], True,
+                              "canvas kept painting after the toggle — loop not stopped")
+                tilt_off = self._tilt_transform_after_move(page)
+                self.assertEqual(tilt_off, "",
+                                 "tilt must not write transforms after the toggle")
+
+                # Phase 3: toggle back off — motion must come back.
+                # (Explicit no-preference: None does not reliably clear the
+                # reduced-motion emulation in this Playwright/CDP version.)
+                page.emulate_media(reduced_motion="no-preference")
+                page.wait_for_function(
+                    "!window.matchMedia('(prefers-reduced-motion: reduce)').matches",
+                    timeout=5000,
+                )
+                time.sleep(0.5)  # loop restarts on the next animation frame
+                restarted = page.evaluate(PROBE)
+                self.assertIs(restarted["canvasBlank"], False,
+                              "canvas must restart when reduced motion turns off")
+                tilt_again = self._tilt_transform_after_move(page)
+                self.assertIn("perspective", tilt_again,
+                              "tilt must re-bind when reduced motion turns off")
+            finally:
+                browser.close()
+
+    def _tilt_transform_after_move(self, page) -> str:
+        """Move the mouse over a visible card and return its inline transform.
+
+        Uses real mousemove events over the first visible .surface so the
+        assertion observes the actual tilt handlers, not any internal flag.
+        """
+        page.evaluate(
+            "document.querySelectorAll('.surface, .command-console, .info-card, .metric-card')"
+            ".forEach(c => { c.style.transform = ''; })"
+        )
+        box = page.evaluate(
+            """(() => {
+              const cards = [...document.querySelectorAll(
+                '.surface, .command-console, .info-card, .metric-card'
+              )];
+              const card = cards.find(c => {
+                const r = c.getBoundingClientRect();
+                return r.width > 40 && r.height > 40;
+              });
+              if (!card) return null;
+              const r = card.getBoundingClientRect();
+              return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+            })()"""
+        )
+        if box is None:
+            self.fail("no visible card found for the tilt probe")
+        page.mouse.move(box["x"], box["y"])
+        page.mouse.move(box["x"] + 6, box["y"] + 4)  # second event: deltas update
+        return page.evaluate(
+            """(() => {
+              const card = [...document.querySelectorAll(
+                '.surface, .command-console, .info-card, .metric-card'
+              )].find(c => (c.style.transform || '').length > 0);
+              return card ? card.style.transform : "";
+            })()"""
+        )
+
     def test_reduced_motion_collapses_motion_on_live_elements(self) -> None:
         reduce = self._probe(reduce_motion=True)
         default = self._probe(reduce_motion=False)

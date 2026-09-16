@@ -48,9 +48,18 @@ INTENT_ROUTING: list[tuple[str, BrainIntent]] = [
     ("explain the plan", BrainIntent.EXPLORE),
     ("what is the plan for the project", BrainIntent.EXPLORE),
     ("what is the roadmap", BrainIntent.EXPLORE),
+    ("explain the roadmap", BrainIntent.EXPLORE),
+    ("compare the roadmap", BrainIntent.EXPLORE),
+    ("explain the milestones", BrainIntent.EXPLORE),
+    ("what is the milestones", BrainIntent.EXPLORE),
+    ("compare milestones", BrainIntent.EXPLORE),
+    ("what is the roadmap for the project", BrainIntent.EXPLORE),
+    ("what is the roadmap and the milestones", BrainIntent.EXPLORE),
     # ...but with no research verb, plan nouns still route PLAN, not EXPLORE.
     ("break down the plan", BrainIntent.PLAN),
+    ("break down the milestones", BrainIntent.PLAN),
     ("plan the project", BrainIntent.PLAN),
+    ("plan the roadmap", BrainIntent.PLAN),
     # Cross-intent boundary: research verbs beat DEVICE TARGETS. A question
     # ABOUT an app/browser/phone topic deserves a researched answer, not an
     # action against it. Do not let the desktop/browser/phone keyword blocks
@@ -90,11 +99,17 @@ INTENT_ROUTING: list[tuple[str, BrainIntent]] = [
     ("how to open spotify on my phone", BrainIntent.PHONE_CONTROL),
     # Cross-intent boundary: memory-topic questions route EXPLORE even though
     # they contain the "memory" keyword; only explicit store phrasing routes
-    # MEMORY — even when the remembered content names a device target.
+    # MEMORY — even when the remembered content names a device target, plan
+    # nouns, or anything else actionable.
     ("explain how human memory works", BrainIntent.EXPLORE),
     ("what is muscle memory", BrainIntent.EXPLORE),
     ("how does computer memory work", BrainIntent.EXPLORE),
     ("remember this: open notepad is my favorite app", BrainIntent.MEMORY),
+    ("remember this: create a roadmap for the project", BrainIntent.MEMORY),
+    ("remember this: the milestones are due friday", BrainIntent.MEMORY),
+    ("remember that: plan the project for monday", BrainIntent.MEMORY),
+    ("remember for me: open chrome and search flights", BrainIntent.MEMORY),
+    ("compare the milestones in my memory", BrainIntent.EXPLORE),
     # Worded arithmetic, including spelled-out numbers and powers -> local CHAT.
     ("what is fifteen times three", BrainIntent.CHAT),
     ("what is 2 to the power of 8", BrainIntent.CHAT),
@@ -166,7 +181,41 @@ BOUNDARY_PROBES: list[tuple[str, BrainIntent, str]] = [
     # blocks it lexically overlaps.
     ("make it intelligent and create a roadmap", BrainIntent.SELF_IMPROVEMENT, "selfimprovement<plan"),
     ("improve your code and implement a feature", BrainIntent.SELF_IMPROVEMENT, "selfimprovement<agent"),
+    # explore + plan: research verbs claim planning nouns as a TOPIC (the same
+    # boundary the INTENT_ROUTING table pins, here with compound two-clause
+    # shapes where the plan noun sits in its own clause).
+    ("compare the roadmap", BrainIntent.EXPLORE, "explore<plan"),
+    ("explain the milestones", BrainIntent.EXPLORE, "explore<plan"),
+    ("what is the roadmap for the project", BrainIntent.EXPLORE, "explore<plan"),
+    ("compare the roadmap and plan the project", BrainIntent.EXPLORE, "explore<plan"),
+    ("explain the milestones then break them down into steps", BrainIntent.EXPLORE, "explore<plan"),
+    ("explain the plan and create a roadmap", BrainIntent.EXPLORE, "explore<plan"),
+    # memory_store + plan: explicit store phrasing outranks plan nouns inside
+    # the remembered content — memory_store sits ABOVE the plan block (same
+    # precedence it already had over desktop/browser targets).
+    ("remember this: create a roadmap for the project", BrainIntent.MEMORY, "memorystore<plan"),
+    ("remember this: the milestones are due friday", BrainIntent.MEMORY, "memorystore<plan"),
+    ("remember that: plan the project for monday", BrainIntent.MEMORY, "memorystore<plan"),
+    # ...but without the store marker, the plan-noun block still owns it.
+    ("create a roadmap for the project", BrainIntent.PLAN, "plan>explore"),
+    ("break down the milestones", BrainIntent.PLAN, "plan>explore"),
 ]
+
+
+class BrainIntentRoutingTests(unittest.TestCase):
+    """Table-driven: every (text, expected_intent) pair is one subTest.
+
+    Restored: a refactor dropped this class, leaving INTENT_ROUTING without a
+    consumer — the table grew (every boundary variant below) while nothing
+    executed it. This test IS the teeth for the routing tables.
+    """
+
+    def test_intent_routing(self) -> None:
+        brain = NovaBrain()
+        for text, expected in INTENT_ROUTING:
+            with self.subTest(text=text):
+                decision = brain.decide(BrainRequest(text))
+                self.assertEqual(decision.intent, expected, f"Failed for '{text}'")
 
 
 class GateBoundaryProbeTests(unittest.TestCase):
@@ -418,6 +467,52 @@ class LazyOllamaUpgradeTests(unittest.IsolatedAsyncioTestCase):
         response = await brain.chat(BrainRequest(text="hello"))
         self.assertEqual(brain.provider_name, "scratch")
         self.assertTrue(response.payload["message"])
+
+
+class SetLocalProviderTests(unittest.TestCase):
+    """The brain model picker's swap: replaces the LOCAL slot (boot provider),
+    not the cloud slot — mode decides whether the swap applies right now."""
+
+    def test_swap_applies_immediately_in_auto_and_llm(self) -> None:
+        for mode in ("auto", "llm"):
+            with self.subTest(mode=mode):
+                brain = NovaBrain(completion_provider=FakeOllamaProvider("old"))
+                brain.set_mode(mode)
+                replacement = FakeOllamaProvider("new")
+                brain.set_local_provider(replacement)
+                self.assertIs(brain.completion_provider, replacement)
+                # The local slot re-arms: a scratch detour comes back to the
+                # PICKED model, not the old one.
+                brain.set_mode("scratch")
+                self.assertEqual(brain.provider_name, "scratch")
+                brain.set_mode("llm")
+                self.assertIs(brain.completion_provider, replacement)
+
+    def test_swap_defers_in_cloud_and_scratch(self) -> None:
+        for mode in ("cloud", "scratch"):
+            with self.subTest(mode=mode):
+                brain = NovaBrain(completion_provider=FakeOllamaProvider("old"))
+                brain.set_mode("cloud") if mode == "cloud" else brain.set_mode("scratch")
+                replacement = FakeOllamaProvider("new")
+                brain.set_local_provider(replacement)
+                # Unchanged now...
+                self.assertIsNot(brain.completion_provider, replacement)
+                # ...but armed for when the user switches back.
+                brain.set_mode("llm")
+                self.assertIs(brain.completion_provider, replacement)
+
+    def test_swap_never_touches_the_cloud_slot(self) -> None:
+        cloud = FakeOllamaProvider("cloud")
+        brain = NovaBrain(completion_provider=FakeOllamaProvider("old"))
+        brain.set_cloud_provider(cloud)
+        self.assertIs(brain.completion_provider, cloud)
+        brain.set_local_provider(FakeOllamaProvider("local"))
+        # Cloud stays active; the local pick is stored for later.
+        self.assertIs(brain.completion_provider, cloud)
+        self.assertIs(brain._boot_provider, brain._boot_provider)  # identity sanity
+        brain.set_mode("auto")
+        self.assertEqual(brain.provider_name, "ollama")
+        self.assertEqual(brain.model_name, "")  # FakeOllamaProvider has no model attr
 
 
 if __name__ == "__main__":

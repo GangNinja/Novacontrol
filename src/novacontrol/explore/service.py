@@ -48,6 +48,11 @@ class ExploreService:
         self.explainer = explainer or ResearchExplainer(completion_provider=completion_provider)
         self.cache = cache or TtlCache()
         self.cache_ttl_seconds = cache_ttl_seconds
+        # The synthesis brain behind the current cache namespace (set via
+        # set_explore_cache_provider when the chat brain mode changes). Its
+        # name rides on every cache key so a mode switch never serves a report
+        # synthesized by the OLD brain.
+        self._cache_provider: object | None = None
         self._event_bus = event_bus
         self._recent_topics: deque[str] = deque(maxlen=5)
 
@@ -92,7 +97,7 @@ class ExploreService:
         if resolved != request.topic:
             request = replace(request, topic=resolved)
 
-        cache_key = _cache_key(request)
+        cache_key = self._cache_key(request)
         cached = self.cache.get(cache_key)
         if cached is not None:
             await self._emit("cached", f"Returning cached result for '{request.topic}'", correlation_id=request.id)
@@ -100,7 +105,7 @@ class ExploreService:
             return cached
 
         await self._emit("searching", f"Searching for '{request.topic}'...", correlation_id=request.id, topic=request.topic)
-        sources, search_warnings = await self._safe_search(request)
+        sources, search_warnings = await self._search_with_retry(request)
         await self._emit("sources_found", f"Found {len(sources)} source(s)", correlation_id=request.id, count=len(sources))
 
         if request.include_videos:
@@ -119,7 +124,12 @@ class ExploreService:
             warnings=warnings,
             provider_status="offline" if search_warnings else "online",
         )
-        self.cache.set(cache_key, report, ttl_seconds=self.cache_ttl_seconds)
+        # A degraded report (search failed → offline templates, no sources) is
+        # cached only briefly so a transient blip doesn't pin the non-answer
+        # for the full TTL; a healthy report earns the normal 15-minute TTL.
+        degraded = bool(search_warnings)
+        ttl = min(self.cache_ttl_seconds, 30.0) if degraded else self.cache_ttl_seconds
+        self.cache.set(cache_key, report, ttl_seconds=ttl)
 
         # Track the original user input for conversation context
         # If it was a vague follow-up, keep tracking the real topic it referred to
@@ -134,6 +144,23 @@ class ExploreService:
         await self._emit("complete", f"Research complete: {len(sources)} sources, {len(videos)} videos", correlation_id=request.id, topic=request.topic)
         await self._announce_completion(request.topic)
         return report
+
+    async def _search_with_retry(
+        self, request: ExploreRequest
+    ) -> tuple[tuple[ResearchSource, ...], tuple[str, ...]]:
+        """Search once and retry once when it returns nothing usable.
+
+        Web search providers fail transiently (rate limits, HTML shape drift,
+        a dropped connection) far more often than they fail permanently — a
+        retry seconds later usually succeeds. Without it, one blip produced
+        the offline 'multiple dimensions' non-answer; with it, that answer
+        only appears when search genuinely cannot serve the topic.
+        """
+        sources, warnings = await self._safe_search(request)
+        if sources or not warnings:
+            return sources, warnings
+        await self._emit("retrying", "Search came back empty — retrying once...", correlation_id=request.id)
+        return await self._safe_search(request)
 
     async def _safe_search(self, request: ExploreRequest) -> tuple[tuple[ResearchSource, ...], tuple[str, ...]]:
         try:
@@ -173,12 +200,18 @@ class ExploreService:
                         continue
             except Exception:
                 pass
+        if not sources:
             return (
                 (),
                 (
                     "Online search returned no usable web results. I used the local explanation workflow instead.",
                 ),
             )
+        # Web search delivered something real — even a single source beats the
+        # offline templates. (The old code returned () whenever Wikipedia
+        # couldn't pad a 1-source result set to 2, discarding live evidence
+        # and reporting 'no usable web results' for a topic search HAD just
+        # answered.)
         return (sources, ())
 
     async def _multi_platform_search(self, request: ExploreRequest) -> tuple[ResearchSource, ...]:
@@ -220,17 +253,32 @@ class ExploreService:
             )
 
 
-def _cache_key(request: ExploreRequest) -> str:
-    parts = [
-        request.topic.strip().lower(),
-        request.depth,
-        str(request.include_videos),
-        str(request.max_sources),
-        str(request.max_videos),
-    ]
-    if request.prior_topics:
-        parts.append("|".join(request.prior_topics))
-    return "|".join(parts)
+    def _cache_key(self, request: ExploreRequest) -> str:
+        """Request identity PLUS the synthesis brain: switching the chat brain
+        (scratch <-> llm <-> cloud) must never serve a report synthesized by
+        the OLD mode."""
+        parts = [
+            request.topic.strip().lower(),
+            request.depth,
+            str(request.include_videos),
+            str(request.max_sources),
+            str(request.max_videos),
+        ]
+        if request.prior_topics:
+            parts.append("|".join(request.prior_topics))
+        parts.append(str(getattr(getattr(self, "_cache_provider", None), "name", "templates")))
+        return "|".join(parts)
+
+
+def set_explore_cache_provider(service: ExploreService, provider: object | None) -> None:
+    """Stamp the service's cache namespace with the synthesis provider.
+
+    Called by the application whenever the brain mode changes; the provider
+    name rides on every cache key (via ExploreService._cache_key) so reports
+    synthesized by different brains never collide. ``templates`` = local
+    no-LLM synthesis.
+    """
+    service._cache_provider = provider
 
 
 def _source_key(url: str) -> str:

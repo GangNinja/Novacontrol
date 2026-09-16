@@ -61,6 +61,19 @@ class ApplicationCompletionRecordingTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.app = NovaControlApplication(data_dir=tmp.name)
+        # Stub the desktop runner so executing a command exercises the app's
+        # real plan → approve → execute → record path without launching a real
+        # process — "open notepad" must not open a window (or silently fail on
+        # an OS without notepad) for the recording logic to be tested.
+        launched: list[Any] = []
+
+        class StubRunner:
+            async def run(self, action: Any) -> dict[str, Any]:
+                launched.append(action)
+                return {"adapter": "stub-desktop", "action": action.type.value, "verified": True}
+
+        self.launched = launched
+        self.app.desktop.runner = StubRunner()
 
     def test_executed_command_is_recorded_and_announced(self) -> None:
         seen: list[Event] = []

@@ -114,11 +114,14 @@ _WEB_SEARCH_PATTERNS = (
 def web_search_url(query: str) -> str:
     """Build the search-engine results URL for a query.
 
-    DuckDuckGo's HTML endpoint serves a minimal, JS-free results page that is
-    reliable to drive and inspect under automation (a JS-heavy engine page can
-    hang or bot-gate a headless browser).
+    Bing serves a plain HTML results page to automated browsers on typical
+    networks; DuckDuckGo's endpoints bot-gate headless browsers on many of
+    them (both /html/ and /lite/ anomaly-gate with a 202 challenge page).
+    This is the same engine Explore falls back to for the same reason. The
+    extractor understands this page's markup AND DuckDuckGo's, so the engine
+    can be swapped without touching the extract step.
     """
-    return "https://html.duckduckgo.com/html/?q=" + quote_plus(query.strip())
+    return "https://www.bing.com/search?q=" + quote_plus(query.strip())
 
 
 def resolve_browser_url(target: str) -> str:
@@ -153,7 +156,7 @@ def parse_browser_command(command: str) -> list[dict[str, Any]]:
             -> [{"action": "fill_form", "target": "https://example.com/login",
                 "fields": {"username": "admin", "password": "secret"}}]
         "search the web for quantum computing"
-            -> [{"action": "search", "target": "https://html.duckduckgo.com/html/?q=quantum+computing",
+            -> [{"action": "search", "target": "https://www.bing.com/search?q=quantum+computing",
                 "query": "quantum computing"}]
     """
     lower = command.lower().strip()

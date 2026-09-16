@@ -233,7 +233,7 @@ class SiteChromeFilterTests(unittest.TestCase):
             *answer_highlights(frame, sources),
             detailed_explanation(frame, sources, "standard"),
         ]
-        for section in build_sections(frame, sources, (), "standard"):
+        for section in build_sections(frame, sources):
             rendered.append(str(section.get("title", "")))
             rendered.extend(str(item.get("text", "")) for item in section.get("items", ()))
         blob = "\n".join(rendered).lower()

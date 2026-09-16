@@ -75,6 +75,10 @@ class OpenAICompatibleLLMProvider:
         self.model = model
         self.chat_path = chat_path
         self.transport = transport or _default_transport
+        # Lifetime telemetry for the System panel: cumulative token usage from
+        # every usage block the API returned, and the last failure verbatim.
+        self.usage = {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        self.last_error: str = ""
 
     @property
     def name(self) -> str:
@@ -88,20 +92,135 @@ class OpenAICompatibleLLMProvider:
         payload.update(kwargs)
         # The sync transport blocks on the socket; run it off the event loop so a
         # slow LLM response never freezes the rest of the local app.
-        response = await asyncio.to_thread(
-            self.transport,
-            f"{self.base_url}{self.chat_path}",
-            {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            payload,
-        )
+        try:
+            response = await asyncio.to_thread(
+                self.transport,
+                f"{self.base_url}{self.chat_path}",
+                {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                payload,
+            )
+        except Exception as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            raise
+        self.usage["requests"] += 1
+        usage = response.get("usage") or {}
+        for field in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            value = usage.get(field)
+            if isinstance(value, int):
+                self.usage[field] += value
         choices = response.get("choices", [])
         if not choices:
             return ""
         message = choices[0].get("message", {})
         return str(message.get("content", ""))
+
+
+class AnthropicMessagesProvider:
+    """Native Anthropic provider for ``/v1/messages`` — NOT OpenAI-compatible.
+
+    Claude's wire format differs from /chat/completions in every dimension
+    that matters:
+
+    - auth: ``x-api-key`` header (not ``Authorization: Bearer``);
+    - a required ``anthropic-version`` header (``2023-06-01``);
+    - the system prompt is a TOP-LEVEL ``system`` field, not a message;
+    - response shape: ``content[0].text`` (not ``choices[0].message.content``);
+    - max token budget is a REQUIRED ``max_tokens`` argument.
+
+    A prior comment here dismissed Claude as "intentionally absent" because of
+    this — but the differences are all shallow, so this class absorbs them and
+    exposes the SAME ``complete(messages, **kwargs)`` surface every other
+    provider has, so the brain, Explore synthesis, and the code planner can
+    use Claude with zero call-site changes. ``system`` and ``temperature``
+    kwargs pass through like the OpenAI path; a caller-supplied ``system``
+    kwarg wins over a message-role system prompt.
+    """
+
+    ANTHROPIC_VERSION = "2023-06-01"
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        api_key: str,
+        model: str,
+        base_url: str = "https://api.anthropic.com",
+        messages_path: str = "/v1/messages",
+        transport: LLMTransport | None = None,
+    ) -> None:
+        self._name = name
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.model = model
+        self.messages_path = messages_path
+        self.transport = transport or _default_transport
+        # Lifetime telemetry for the System panel — same shape as the
+        # OpenAI-compatible class (Claude reports input/output_tokens).
+        self.usage = {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        self.last_error: str = ""
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    async def complete(self, messages: Sequence[Mapping[str, str]], **kwargs: object) -> str:
+        # Split the OpenAI-style message list into Claude's shape: system text
+        # hoists to the top-level `system` field; everything else maps 1:1.
+        system_parts: list[str] = []
+        claude_messages: list[dict[str, str]] = []
+        for message in messages:
+            if str(message.get("role", "")) == "system":
+                system_parts.append(str(message.get("content", "")))
+            else:
+                claude_messages.append({"role": str(message.get("role", "user")), "content": str(message.get("content", ""))})
+        kw: dict[str, Any] = dict(kwargs)  # temperature, max_tokens, …
+        explicit_system = kw.pop("system", None)
+        if explicit_system:
+            # A caller-supplied system WINS (documented contract): it replaces
+            # any message-role system prompts rather than concatenating.
+            system_parts = [str(explicit_system)]
+
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": claude_messages,
+            "max_tokens": kw.pop("max_tokens", 1024),  # REQUIRED by /v1/messages
+        }
+        if system_parts:
+            payload["system"] = "\n".join(system_parts)
+        payload.update(kw)
+
+        try:
+            response = await asyncio.to_thread(
+                self.transport,
+                f"{self.base_url}{self.messages_path}",
+                {
+                    "x-api-key": self.api_key,
+                    "anthropic-version": self.ANTHROPIC_VERSION,
+                    "Content-Type": "application/json",
+                },
+                payload,
+            )
+        except Exception as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            raise
+        self.usage["requests"] += 1
+        usage = response.get("usage") or {}
+        prompt_tokens = usage.get("input_tokens")
+        completion_tokens = usage.get("output_tokens")
+        if isinstance(prompt_tokens, int):
+            self.usage["prompt_tokens"] += prompt_tokens
+        if isinstance(completion_tokens, int):
+            self.usage["completion_tokens"] += completion_tokens
+        if isinstance(prompt_tokens, int) and isinstance(completion_tokens, int):
+            self.usage["total_tokens"] += prompt_tokens + completion_tokens
+        content = response.get("content", [])
+        if not content:
+            return ""
+        # Concatenate text blocks (tool-use blocks are ignored by this text-only surface).
+        return "".join(str(block.get("text", "")) for block in content if isinstance(block, dict) and block.get("type") == "text")
 
 
 def _default_transport(url: str, headers: dict[str, str], payload: dict[str, Any]) -> dict[str, Any]:
@@ -121,14 +240,17 @@ _OLLAMA_DEFAULT_URL = "http://127.0.0.1:11434"
 _ollama_cache: dict[str, Any] | None = None
 
 
-def detect_ollama(base_url: str = _OLLAMA_DEFAULT_URL) -> dict[str, Any] | None:
+def detect_ollama(base_url: str = _OLLAMA_DEFAULT_URL, *, refresh: bool = False) -> dict[str, Any] | None:
     """Probe a running Ollama instance and return available models.
 
     Returns a dict with ``url`` and ``models`` (list of model names) on
-    success, or ``None`` if Ollama is not reachable.
+    success, or ``None`` if Ollama is not reachable. The result is cached for
+    the process lifetime (boot + the lazy re-probe never need a second hit);
+    ``refresh=True`` bypasses the cache — the model picker must show models
+    pulled AFTER boot, not the boot-time snapshot.
     """
     global _ollama_cache  # noqa: PLW0603
-    if _ollama_cache is not None:
+    if _ollama_cache is not None and not refresh:
         return _ollama_cache
     try:
         request = Request(f"{base_url.rstrip('/')}/api/tags", method="GET")
@@ -143,6 +265,16 @@ def detect_ollama(base_url: str = _OLLAMA_DEFAULT_URL) -> dict[str, Any] | None:
         return result
     except (URLError, OSError, json.JSONDecodeError, KeyError, TypeError):
         return None
+
+
+def ollama_models(base_url: str = _OLLAMA_DEFAULT_URL, *, refresh: bool = True) -> list[str]:
+    """Model names available on the local Ollama ([] when unreachable).
+
+    Refresh is the default here: callers are pickers/listers, not the boot
+    resolution path — they want today's list, not the boot-time snapshot.
+    """
+    info = detect_ollama(base_url, refresh=refresh)
+    return list(info["models"]) if info else []
 
 
 def _pick_ollama_model(models: list[str]) -> str:
@@ -162,12 +294,22 @@ def _pick_ollama_model(models: list[str]) -> str:
     return models[0]
 
 
-def build_ollama_provider(base_url: str = _OLLAMA_DEFAULT_URL) -> OpenAICompatibleLLMProvider | None:
-    """Build an Ollama provider if a running instance is detected."""
+def build_ollama_provider(
+    base_url: str = _OLLAMA_DEFAULT_URL,
+    *,
+    model: str = "",
+) -> OpenAICompatibleLLMProvider | None:
+    """Build an Ollama provider if a running instance is detected.
+
+    An explicit ``model`` pins the provider to that Ollama model (the brain
+    model picker's choice); empty means auto-pick the best detected model.
+    A pinned model that is not on the instance still builds (Ollama 404s at
+    request time) — callers validate membership against ollama_models first.
+    """
     info = detect_ollama(base_url)
     if info is None:
         return None
-    model = _pick_ollama_model(info["models"])
+    model = model.strip() or _pick_ollama_model(info["models"])
     return OpenAICompatibleLLMProvider(
         # OpenAICompatibleLLMProvider appends /v1/chat/completions itself, so the
         # base URL must be the Ollama root — a ".../v1" suffix here doubled to
@@ -181,13 +323,14 @@ def build_ollama_provider(base_url: str = _OLLAMA_DEFAULT_URL) -> OpenAICompatib
 
 # ── Cloud LLM providers (ChatGPT, Gemini, Groq, …) ────────
 
-# One row per OpenAI-compatible cloud endpoint. All of them speak the same
-# /chat/completions shape, differing only in base URL, chat path, default
-# model, and where the key comes from. Gemini exposes an OpenAI-compatible
-# surface under /v1beta/openai (its native generateContent API is a different
-# wire format entirely). Anthropic Claude is intentionally absent: its
-# /v1/messages endpoint is NOT OpenAI-compatible (different payload and a
-# required anthropic-version header) — it needs its own provider class.
+# One row per cloud endpoint. Most speak the OpenAI /chat/completions shape,
+# differing only in base URL, chat path, default model, and where the key
+# comes from. Two exceptions:
+# - Gemini exposes an OpenAI-compatible surface under /v1beta/openai (its
+#   native generateContent API is a different wire format entirely).
+# - Anthropic Claude speaks its own /v1/messages wire format (x-api-key,
+#   anthropic-version header, top-level system, content[0].text response) and
+#   is served by the dedicated AnthropicMessagesProvider class.
 CLOUD_LLM_PRESETS: tuple[dict[str, str], ...] = (
     {"id": "openai", "label": "ChatGPT (OpenAI)", "base_url": "https://api.openai.com",
      "chat_path": "/v1/chat/completions", "default_model": "gpt-4o-mini",
@@ -204,6 +347,9 @@ CLOUD_LLM_PRESETS: tuple[dict[str, str], ...] = (
     {"id": "mistral", "label": "Mistral", "base_url": "https://api.mistral.ai",
      "chat_path": "/v1/chat/completions", "default_model": "mistral-small-latest",
      "models": "mistral-small-latest, mistral-large-latest", "key_hint": "MISTRAL_API_KEY"},
+    {"id": "claude", "label": "Claude (Anthropic)", "base_url": "https://api.anthropic.com",
+     "chat_path": "/v1/messages", "default_model": "claude-sonnet-4-5",
+     "models": "claude-sonnet-4-5, claude-opus-4-1, claude-3-5-haiku-latest", "key_hint": "ANTHROPIC_API_KEY"},
     {"id": "deepseek", "label": "DeepSeek", "base_url": "https://api.deepseek.com",
      "chat_path": "/v1/chat/completions", "default_model": "deepseek-chat",
      "models": "deepseek-chat, deepseek-reasoner", "key_hint": "DEEPSEEK_API_KEY"},
@@ -253,6 +399,10 @@ OLLAMA_VISION_MODEL_PREFIXES: tuple[str, ...] = (
 
 # Cloud presets whose default/current models accept image_url content. Keys
 # reuse CLOUD_LLM_PRESETS ids so the same stored key configures both brains.
+# Claude is deliberately NOT here: /v1/messages embeds images as base64
+# `source` blocks, not the OpenAI image_url shape the vision layer sends —
+# wiring it up needs an image-content shim in AnthropicMessagesProvider, not a
+# preset row. Add it there (and to this tuple) when multimodal Claude lands.
 VISION_CAPABLE_CLOUD_PRESETS: tuple[str, ...] = ("openai", "gemini", "openrouter")
 
 
@@ -347,8 +497,13 @@ def build_cloud_provider(
     *,
     model: str = "",
     environ: Mapping[str, str] | None = None,
-) -> OpenAICompatibleLLMProvider | None:
+) -> OpenAICompatibleLLMProvider | AnthropicMessagesProvider | None:
     """Build a cloud provider for a preset id + key (None for unknown presets).
+
+    Claude dispatches to the native AnthropicMessagesProvider (its /v1/messages
+    wire format is not OpenAI-compatible); every other preset builds the
+    generic OpenAICompatibleLLMProvider. Both expose the same
+    complete(messages, **kwargs) surface.
 
     An explicitly passed environ wins over the host env, matching every other
     factory in this module (an empty dict is authoritative, never falsy).
@@ -359,6 +514,13 @@ def build_cloud_provider(
     values = os.environ if environ is None else environ
     # A model from the UI wins; otherwise env; otherwise the preset default.
     chosen_model = (model or values.get("NOVACONTROL_LLM_MODEL", "")).strip() or preset["default_model"]
+    if provider_id == "claude":
+        return AnthropicMessagesProvider(
+            name=f"cloud:{preset['id']}",
+            base_url=preset["base_url"],
+            api_key=api_key.strip(),
+            model=chosen_model,
+        )
     return OpenAICompatibleLLMProvider(
         name=f"cloud:{preset['id']}",
         base_url=preset["base_url"],
@@ -423,7 +585,11 @@ def build_llm_provider_from_environment(environ: Mapping[str, str] | None = None
 _REPROBE_MIN_INTERVAL_SECONDS = 60.0
 
 
-def make_ollama_reprobe(environ: Mapping[str, str] | None = None) -> Callable[[], Awaitable[object | None]]:
+def make_ollama_reprobe(
+    environ: Mapping[str, str] | None = None,
+    *,
+    model: str = "",
+) -> Callable[[], Awaitable[object | None]]:
     """Build a rate-limited async probe that returns an upgraded provider or None.
 
     The app resolves its LLM once at boot; if that yielded the Echo fallback
@@ -438,6 +604,8 @@ def make_ollama_reprobe(environ: Mapping[str, str] | None = None) -> Callable[[]
       provider object without touching the network again.
     - The blocking urlopen probe runs in a worker thread (asyncio.to_thread),
       matching how provider completions keep the event loop free.
+    - An explicit ``model`` pins the upgraded provider to that Ollama model,
+      so the brain model picker's choice survives a lazy Ollama startup.
     """
     # Explicit (possibly empty) mapping wins; only None falls back to the real env.
     values = os.environ if environ is None else environ
@@ -467,7 +635,7 @@ def make_ollama_reprobe(environ: Mapping[str, str] | None = None) -> Callable[[]
             name="ollama",
             base_url=info["url"],
             api_key="ollama",
-            model=_pick_ollama_model(info["models"]),
+            model=model.strip() or _pick_ollama_model(info["models"]),
         )
         state["provider"] = provider
         return provider

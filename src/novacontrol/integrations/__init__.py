@@ -2,6 +2,7 @@
 
 from novacontrol.integrations.llm import (
     CLOUD_LLM_PRESETS,
+    AnthropicMessagesProvider,
     EchoLLMProvider,
     LLMProviderRegistry,
     OpenAICompatibleLLMProvider,
@@ -14,6 +15,7 @@ from novacontrol.integrations.llm import (
     get_cloud_preset,
     is_ollama_vision_model,
     make_ollama_reprobe,
+    ollama_models,
 )
 from novacontrol.integrations.redis import (
     RedisEventBus,
@@ -26,6 +28,7 @@ from novacontrol.integrations.resilient_llm import ResilientLLMProvider
 
 __all__ = [
     "CLOUD_LLM_PRESETS",
+    "AnthropicMessagesProvider",
     "EchoLLMProvider",
     "IntegrationDefinition",
     "IntegrationRegistry",
@@ -45,4 +48,5 @@ __all__ = [
     "detect_ollama",
     "get_cloud_preset",
     "is_ollama_vision_model",
+    "ollama_models",
 ]

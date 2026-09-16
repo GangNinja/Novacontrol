@@ -91,10 +91,15 @@ function setupActions() {
   // execute would just bounce back the pairing plan); any token-bearing plan,
   // executed result, or available bridge report re-enables it.
   let jarvisDevice = "desktop";
-  try { jarvisDevice = localStorage.getItem("novacontrol.jarvisDevice") === "phone" ? "phone" : "desktop"; } catch (_) { /* storage unavailable */ }
+  try {
+    const storedDevice = localStorage.getItem("novacontrol.jarvisDevice");
+    jarvisDevice = storedDevice === "phone" || storedDevice === "browser" ? storedDevice : "desktop";
+  } catch (_) { /* storage unavailable */ }
 
-  const jarvisPlanEndpoint = () => (jarvisDevice === "phone" ? "/phone/plan" : "/desktop/plan");
-  const jarvisExecuteEndpoint = () => (jarvisDevice === "phone" ? "/phone/execute" : "/desktop/execute");
+  const jarvisPlanEndpoint = () =>
+    jarvisDevice === "phone" ? "/phone/plan" : jarvisDevice === "browser" ? "/browser/plan" : "/desktop/plan";
+  const jarvisExecuteEndpoint = () =>
+    jarvisDevice === "phone" ? "/phone/execute" : jarvisDevice === "browser" ? "/browser/execute" : "/desktop/execute";
 
   const setJarvisRunAvailability = (data) => {
     const button = byId("jarvisRunButton");
@@ -111,7 +116,9 @@ function setupActions() {
     recordJarvisHistory(command, "planned", jarvisDevice);
     // Auto-approve & run: register the execute flow so renderCommand can fire it
     // the moment the planned (tokened) result renders — one click saved.
-    if (state.autoApproveRun && jarvisDevice === "desktop") {
+    // Desktop and browser plans always carry an approval token when runnable;
+    // phone plans may be bridge-blocked with no token, so stay manual there.
+    if (state.autoApproveRun && jarvisDevice !== "phone") {
       window.runAutoApproved = window.runAutoApproved || {};
       window.runAutoApproved[command] = jarvisRun;
     }
@@ -149,20 +156,29 @@ function setupActions() {
   };
 
   function setJarvisDevice(device) {
-    jarvisDevice = device === "phone" ? "phone" : "desktop";
+    jarvisDevice = device === "phone" ? "phone" : device === "browser" ? "browser" : "desktop";
     try { localStorage.setItem("novacontrol.jarvisDevice", jarvisDevice); } catch (_) { /* storage unavailable */ }
     const phone = jarvisDevice === "phone";
-    byId("jarvisDeviceDesktop").classList.toggle("active", !phone);
-    byId("jarvisDeviceDesktop").setAttribute("aria-selected", String(!phone));
+    const browser = jarvisDevice === "browser";
+    byId("jarvisDeviceDesktop").classList.toggle("active", jarvisDevice === "desktop");
+    byId("jarvisDeviceDesktop").setAttribute("aria-selected", String(jarvisDevice === "desktop"));
     byId("jarvisDevicePhone").classList.toggle("active", phone);
     byId("jarvisDevicePhone").setAttribute("aria-selected", String(phone));
+    byId("jarvisDeviceBrowser").classList.toggle("active", browser);
+    byId("jarvisDeviceBrowser").setAttribute("aria-selected", String(browser));
     document.querySelectorAll(".phone-only").forEach((node) => { node.hidden = !phone; });
+    document.querySelectorAll(".browser-only").forEach((node) => { node.hidden = !browser; });
+    document.querySelectorAll(".desktop-only").forEach((node) => { node.hidden = jarvisDevice !== "desktop"; });
     byId("jarvisInput").placeholder = phone
       ? "e.g. open whatsapp on my phone, or text mom saying running late"
-      : "e.g. open notepad and type hello world";
+      : browser
+        ? "e.g. search the web for quantum computing, or navigate to wikipedia.org"
+        : "e.g. open notepad and type hello world";
     byId("jarvisHint").textContent = phone
       ? "To connect: install Android platform-tools, enable USB debugging on the phone (Settings → About → tap Build number 7× → Developer options → USB debugging), plug it in over USB, then press Connect Phone and accept the prompt on the phone."
-      : "Drive this PC: open apps/folders, chain steps (\"open steam and go to library and launch gta v\"), dictate into apps (\"open notepad and type hello\"), or say \"stop that\". Commands are planned first — nothing runs until you approve it (or enable auto-run in Settings).";
+      : browser
+        ? "Drive a real browser: \"search the web for quantum computing\" plans a search AND reads the top result titles + links back as the answer, or navigate to a site (\"navigate to wikipedia.org\"). Commands are planned first — nothing runs until you approve it (or enable auto-run in Settings)."
+        : "Drive this PC: open apps/folders, chain steps (\"open steam and go to library and launch gta v\"), dictate into apps (\"open notepad and type hello\"), or say \"stop that\". Commands are planned first — nothing runs until you approve it (or enable auto-run in Settings).";
     byId("jarvisOutput").className = "friendly-output empty-state";
     byId("jarvisOutput").innerHTML =
       '<div class="empty-hint"><span class="empty-hint-icon">&#9654;</span> Preview an action to see exactly what will run before you approve it</div>';
@@ -171,6 +187,7 @@ function setupActions() {
 
   byId("jarvisDeviceDesktop").addEventListener("click", () => setJarvisDevice("desktop"));
   byId("jarvisDevicePhone").addEventListener("click", () => setJarvisDevice("phone"));
+  byId("jarvisDeviceBrowser").addEventListener("click", () => setJarvisDevice("browser"));
   byId("jarvisPlanButton").addEventListener("click", jarvisPlan);
   byId("jarvisRunButton").addEventListener("click", jarvisRun);
   byId("jarvisInput").addEventListener("keydown", (event) => {
@@ -201,6 +218,12 @@ function setupActions() {
   document.querySelectorAll("[data-jarvis-phone]").forEach((chip) => {
     chip.addEventListener("click", () => {
       byId("jarvisInput").value = chip.dataset.jarvisPhone;
+      jarvisPlan();
+    });
+  });
+  document.querySelectorAll("[data-jarvis-browser]").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      byId("jarvisInput").value = chip.dataset.jarvisBrowser;
       jarvisPlan();
     });
   });
@@ -267,11 +290,27 @@ function setupActions() {
     }
   });
 
-  // Clear Chat: wipe the visible thread + saved history AND the server-side
-  // conversation memory, so the LLM loses the old context too.
+  // Brain model picker (Chat panel): picks WHICH local Ollama model the brain
+  // uses — not just on/off. Empty = auto-pick. The pick persists server-side
+  // and never touches a configured cloud LLM.
+  byId("brainModelSwitch").addEventListener("change", async () => {
+    const model = byId("brainModelSwitch").value;
+    try {
+      const result = await requestJson("/brain/local/model", { model });
+      showToast(localModelToast(result, model));
+      await refreshStatus();
+    } catch (error) {
+      showToast(String(error.message || error));
+      await syncBrainSwitch();
+    }
+  });
+
+  // Clear Chat: wipe the visible thread, the server-side conversation memory
+  // (the LLM's multi-turn context), AND the shared persisted transcript, so
+  // every browser starts fresh — not just this one.
   byId("clearChatButton").addEventListener("click", async () => {
     try {
-      localStorage.removeItem(CHAT_KEY);
+      localStorage.removeItem("novacontrol.chatHistory"); // pre-server copy, if any
     } catch (_) { /* storage unavailable */ }
     const stream = byId("chatStream");
     clearNode(stream);
@@ -311,6 +350,13 @@ function setupActions() {
     run("buildOutput", "build", () => requestJson("/plan", { goal }), "planButton");
   });
 
+  byId("codePlanButton").addEventListener("click", () => {
+    const goal = byId("codePlanInput").value.trim();
+    if (!goal) { showToast("Describe what to code"); return; }
+    const language = byId("codeLanguage").value || "python";
+    run("buildOutput", "build", () => requestJson("/plan/code", { goal, language }), "codePlanButton");
+  });
+
   byId("improveButton").addEventListener("click", () => {
     const goal = byId("improveInput").value.trim() || "make NovaControl code itself and improve";
     state.lastBuildGoal = goal;
@@ -348,6 +394,18 @@ function setupActions() {
     run("learnOutput", "learn", () => requestJson("/train", { goal, feedback, iterations: 3 }), "trainButton");
   });
 
+  byId("teachButton").addEventListener("click", () => {
+    const fact = byId("teachInput").value.trim();
+    if (!fact) { showToast("Type a fact for me to learn"); return; }
+    run("learnOutput", "learn", () => requestJson("/knowledge/teach", { fact }), "teachButton", {
+      onSuccess: () => { byId("teachInput").value = ""; },
+    });
+  });
+
+  byId("knowledgeListButton").addEventListener("click", () =>
+    run("learnOutput", "learn", () => requestJson("/knowledge"), "knowledgeListButton")
+  );
+
   byId("systemHealthButton").addEventListener("click", () =>
     run("systemOutput", "health", () => requestJson("/system/health"), "systemHealthButton")
   );
@@ -363,6 +421,7 @@ function setupActions() {
 
   // Cloud LLM card: populate the provider picker, wire connect/remove.
   setupCloudLlmCard();
+  byId("cloudTestButton").addEventListener("click", () => testCloudLlm());
   byId("cloudConnectButton").addEventListener("click", () => connectCloudLlm());
   byId("cloudClearButton").addEventListener("click", () => removeCloudLlm());
 
@@ -377,46 +436,76 @@ function setupActions() {
 // so actions from every client (CLI, GUI, any tab) appear and nothing is
 // duplicated per-browser.
 
-/* ── Chat History (survives reloads) ──────────────────────── */
+/* ── Chat History (SERVER-persisted, shared by every browser) ── */
 
-const CHAT_KEY = "novacontrol.chatHistory";
-const CHAT_LIMIT = 30;
+// The thread lives on the server (data/chat_transcript.json): GET /chat/history
+// seeds the panel, POST /chat/history appends turns, /chat/clear wipes it. Any
+// tab, browser, or client (CLI) sees the same conversation. A browser's old
+// localStorage copy is migrated into the server thread exactly once.
+const CHAT_MIGRATION_KEY = "novacontrol.chatHistoryMigrated";
 const CHAT_TEXT_LIMIT = 1500;
-
-function loadChatHistory() {
-  try {
-    const raw = JSON.parse(localStorage.getItem(CHAT_KEY) || "[]");
-    return Array.isArray(raw) ? raw : [];
-  } catch {
-    return [];
-  }
-}
 
 // Extract the assistant's plain-text answer from any response shape.
 function chatTextForHistory(data) {
   return extractAnswerText(data).slice(0, CHAT_TEXT_LIMIT);
 }
 
-// Append one turn to the persisted conversation (newest last, capped).
+// Append one turn to the shared server thread (fire-and-forget: the turn is
+// already visible in this tab via the normal render path).
 function recordChatTurn(text, role, route) {
   const clean = String(text || "").trim();
   if (!clean) return;
-  const entries = loadChatHistory();
-  entries.push({ role, text: clean.slice(0, CHAT_TEXT_LIMIT), route: route || "", at: Date.now() });
-  try {
-    localStorage.setItem(CHAT_KEY, JSON.stringify(entries.slice(-CHAT_LIMIT)));
-  } catch (_) { /* storage unavailable — conversation lives for this session */ }
+  requestJson("/chat/history", { role, text: clean.slice(0, CHAT_TEXT_LIMIT), route: route || "" })
+    .catch(() => { /* transcript write is best-effort; the answer still renders */ });
 }
 
-// Re-render the saved conversation into the chat panel on load.
-function renderChatHistory() {
+// Seed the chat panel from the SERVER thread, then (once per browser) merge in
+// this browser's old localStorage copy so an upgrade does not lose history.
+async function renderChatHistory() {
   const stream = byId("chatStream");
-  const entries = loadChatHistory();
-  if (!stream || !entries.length) return;
-  stream.classList.remove("empty-state");
-  entries.forEach((entry) =>
-    appendMessage(entry.role === "user" ? "user" : "assistant", entry.text, entry.route ? { route: entry.route } : undefined)
-  );
+  if (!stream) return;
+  let entries = [];
+  try {
+    const data = await requestJson("/chat/history");
+    entries = Array.isArray(data.turns) ? data.turns : [];
+  } catch (_) { /* unreachable server: nothing to seed */ }
+  if (entries.length) {
+    stream.classList.remove("empty-state");
+    entries.forEach((entry) =>
+      appendMessage(entry.role === "user" ? "user" : "assistant", entry.text, entry.route ? { route: entry.route } : undefined)
+    );
+  }
+  await migrateLocalChatHistory(entries.length);
+}
+
+// One-time migration of this browser's localStorage thread into the server
+// transcript (idempotent server-side per (role, text, at); the marker flag
+// makes the common path free).
+async function migrateLocalChatHistory(serverCount) {
+  let migrated = null;
+  try { migrated = localStorage.getItem(CHAT_MIGRATION_KEY); } catch (_) { /* no storage */ }
+  if (migrated) return;
+  let local = [];
+  try {
+    local = JSON.parse(localStorage.getItem("novacontrol.chatHistory") || "[]");
+    if (!Array.isArray(local)) local = [];
+  } catch (_) { local = []; }
+  try {
+    if (local.length) {
+      const result = await requestJson("/chat/history", { action: "migrate", turns: local });
+      // Rows the server did not already have now need rendering too.
+      if (serverCount === 0 && result.imported > 0) {
+        const stream = byId("chatStream");
+        if (stream) {
+          stream.classList.remove("empty-state");
+          local.forEach((entry) =>
+            appendMessage(entry.role === "user" ? "user" : "assistant", entry.text, entry.route ? { route: entry.route } : undefined)
+          );
+        }
+      }
+    }
+    localStorage.setItem(CHAT_MIGRATION_KEY, "1");
+  } catch (_) { /* no marker: migration retries next load (server-side dedupe keeps it safe) */ }
 }
 
 /* ── J.A.R.V.I.S command history ─────────────────────────── */
@@ -553,6 +642,7 @@ async function refreshStatus() {
     setStatus(`Ready | ${status.app.modules.length} modules`);
     updateMetrics(status);
     renderBrainStatus(status); // always-visible LLM provider/model card on the System panel
+    renderBuildModelHint(status.app.brain); // Build tab: is a coding-capable model live?
     render("homeResult", status, "generic");
     renderActivityFeed();
     renderTaskList(status.app.tasks || []);
@@ -561,6 +651,25 @@ async function refreshStatus() {
   } catch (error) {
     setStatus(String(error.message || error));
   }
+}
+
+/* Build tab model hint: tell the user BEFORE typing whether the coding agent
+   is live (real model → draft-run-fix loop) or scaffolding only. */
+function renderBuildModelHint(brain) {
+  const container = byId("buildModelHint");
+  if (!container) return;
+  clearNode(container);
+  const configured = !!(brain && brain.model_configured);
+  const hint = el("p", "build-model-hint");
+  if (configured) {
+    const model = (brain && brain.model) || (brain && brain.provider) || "model";
+    hint.appendChild(el("span", "pill ok", "Coding agent live"));
+    hint.appendChild(el("span", "", ` Drafts with ${model}, runs the code, reads real errors, and fixes itself (up to 3 rounds).`));
+  } else {
+    hint.appendChild(el("span", "pill warn", "No coding model"));
+    hint.appendChild(el("span", "", " Currently only a starter scaffold is possible. Connect Ollama or a cloud key in Settings → Cloud LLM to unlock the full coding agent."));
+  }
+  container.appendChild(hint);
 }
 
 /* ── Brain mode switch (Chat panel) ───────────────────────── */
@@ -572,6 +681,49 @@ async function syncBrainSwitch() {
     const select = byId("brainModeSwitch");
     if (select && brain.mode) select.value = brain.mode;
   } catch (_) { /* switch just keeps its last value */ }
+  await syncBrainModelPicker();
+}
+
+// Populate the local-model picker with a FRESH probe every refresh, so models
+// pulled after boot appear. Unreachable Ollama leaves one disabled hint row.
+async function syncBrainModelPicker() {
+  const picker = byId("brainModelSwitch");
+  if (!picker) return;
+  let models = [];
+  let picked = "";
+  try {
+    const data = await requestJson("/brain/ollama/models");
+    models = data.available || [];
+    picked = data.picked || "";
+  } catch (_) { /* picker falls back to the hint row */ }
+  clearNode(picker);
+  const auto = el("option", "", "Auto-pick");
+  auto.value = "";
+  picker.appendChild(auto);
+  if (!models.length) {
+    const none = el("option", "", "Ollama not running");
+    none.value = "";
+    none.disabled = true;
+    picker.appendChild(none);
+    picker.value = "";
+    return;
+  }
+  for (const model of models) {
+    const option = el("option", "", model);
+    option.value = model;
+    picker.appendChild(option);
+  }
+  picker.value = models.includes(picked) ? picked : "";
+}
+
+// Short, human confirmation for a local-model pick, honest about whether the
+// swap took effect NOW (auto/llm with a live provider) or on the next switch.
+function localModelToast(result, picked) {
+  const label = picked ? picked : "auto-pick";
+  if (result?.mode === "cloud") return `Local model saved (${label}) — cloud LLM stays active`;
+  if (result?.mode === "scratch") return `Local model saved (${label}) — active when you leave Scratch`;
+  if (result?.model) return `Local brain now on ${result.model}`;
+  return `Local model saved (${label}) — starts with Ollama`;
 }
 
 // Short, human confirmation for the mode change based on the server's answer.
@@ -631,6 +783,35 @@ async function refreshCloudStatus() {
       status.textContent = "No cloud LLM configured";
     }
   } catch (_) { /* keep the last status line */ }
+}
+
+// Ping the picked provider with the PASTED key — one tiny completion through
+// the exact construction the real connect uses, nothing persisted. The result
+// lands in the cloud status line (and a toast), so a bad key never reaches
+// the Connect button unchallenged.
+async function testCloudLlm() {
+  const provider = byId("cloudProvider").value;
+  const apiKey = byId("cloudApiKey").value.trim();
+  const model = byId("cloudModel").value.trim();
+  const status = byId("cloudStatus");
+  if (!provider) { showToast("Pick a cloud provider first"); return; }
+  if (!apiKey) { showToast("Paste the API key you want to test first"); return; }
+  const button = byId("cloudTestButton");
+  button.disabled = true;
+  const previous = button.textContent;
+  button.textContent = "Testing...";
+  status.textContent = `Pinging ${provider}...`;
+  try {
+    const result = await requestJson("/brain/cloud/test", { provider, api_key: apiKey, model });
+    status.textContent = `Connection OK — ${result.label}${result.model ? ` (${result.model})` : ""}${result.sample ? ` — replied: “${result.sample}”` : ""}`;
+    showToast("Connection OK — key works (not saved yet)");
+  } catch (error) {
+    status.textContent = String(error.message || error);
+    showToast("Connection failed — see the status line");
+  } finally {
+    button.disabled = false;
+    button.textContent = previous;
+  }
 }
 
 async function connectCloudLlm() {

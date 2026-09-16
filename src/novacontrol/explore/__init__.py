@@ -9,11 +9,12 @@ from novacontrol.explore.providers import (
     YouTubeSearchVideoProvider,
 )
 from novacontrol.explore.runtime import ExploreModule
-from novacontrol.explore.service import ExploreService
+from novacontrol.explore.service import ExploreService, set_explore_cache_provider
 
 __all__ = [
     "DuckDuckGoLiteSearchProvider",
     "ExploreModule",
+    "set_explore_cache_provider",
     "ExploreReport",
     "ExploreRequest",
     "ExploreService",

@@ -71,6 +71,38 @@ def _focus_rules(css: str) -> list[tuple[str, str]]:
     return re.findall(r"([^{}]+)\{([^{}]*)\}", css)
 
 
+def _class_exists_in(html: str, js: str, cls: str) -> bool:
+    """Does `cls` name a class the frontend actually creates?
+
+    Two creation paths are recognized: a class attribute in index.html, and a
+    hyphen-bounded token anywhere in the JS corpus (covers whole-string tokens
+    like "cyber-checkbox" AND modifier tokens inside el() base strings like
+    "cyber-btn danger small task-delete"). Hyphen-bounded so `task-delete`
+    cannot be satisfied by an unrelated `task-delete-x`.
+    """
+    token = rf"(?<![\w-]){re.escape(cls)}(?![\w-])"
+    if re.search(rf'class="[^"]*{token}', html):
+        return True
+    return re.search(token, js) is not None
+
+
+def _dead_focus_ring_classes(css: str, html: str, js: str) -> list[tuple[str, str]]:
+    """(selector, class) pairs where a :focus-visible ring rule names a class
+    that exists nowhere in index.html or the JS renderers — i.e. a dead rule.
+    Only ring rules count (rules declaring an outline, none of them none).
+    """
+    dead: list[tuple[str, str]] = []
+    for selector, body in _focus_rules(css):
+        if ":focus-visible" not in selector:
+            continue
+        if "outline" not in body or "outline: none" in body:
+            continue
+        for cls in re.findall(r"\.([A-Za-z_][\w-]*)", selector):
+            if not _class_exists_in(html, js, cls):
+                dead.append((selector.strip(), cls))
+    return dead
+
+
 class FocusRingCssContractTests(unittest.TestCase):
     """Fast, always-on pins for the ring policy in the committed CSS."""
 
@@ -126,6 +158,56 @@ class FocusRingCssContractTests(unittest.TestCase):
                     restored,
                     f"{base} sets outline: none but has no :focus rule restoring a ring",
                 )
+
+
+class FocusRingReverseContractTests(unittest.TestCase):
+    """Reverse contract: a :focus-visible rule may not name a ghost class.
+
+    The forward contract (every interactive class has a ring rule) stops
+    missing styles; this one stops DEAD styles: when a component is deleted or
+    renamed, its focus rule lingers in styles.css silently. The rule must name
+    a class that actually exists in index.html or the JS renderers.
+    """
+
+    def setUp(self) -> None:
+        self.html, self.css, self.js = _read_static()
+
+    def test_every_focus_visible_class_exists_in_html_or_renderers(self) -> None:
+        rules = [s for s, b in _focus_rules(self.css) if ":focus-visible" in s]
+        self.assertTrue(rules, "no :focus-visible rules found to check")
+        dead = _dead_focus_ring_classes(self.css, self.html, self.js)
+        self.assertEqual(
+            dead, [],
+            "dead :focus-visible rule(s) — no element in index.html or the JS "
+            "renderers ever carries these class(es): "
+            + ", ".join(f".{cls} (from '{sel[:60]}…')" if len(sel) > 60 else f".{cls} (from '{sel}')"
+                        for sel, cls in dead),
+        )
+
+    def test_reverse_contract_has_teeth(self) -> None:
+        """Negative control: a fabricated class must be reported dead, a real
+        class must resolve, and a lookalike prefix must not satisfy a token."""
+        # A fabricated class does not exist in the live corpus.
+        self.assertFalse(
+            _class_exists_in(self.html, self.js, "focus-ring-ghost-nine"),
+            "fabricated class unexpectedly resolved — the contract has no teeth",
+        )
+        # Sanity: real classes from both creation paths resolve.
+        self.assertTrue(_class_exists_in(self.html, self.js, "cyber-btn"))
+        self.assertTrue(_class_exists_in(self.html, self.js, "task-delete"))
+        # Hyphen-boundary: `task-delete` must not be satisfied by `task-delete-x`.
+        self.assertFalse(
+            _class_exists_in('', 'el("button", "task-delete-x", "x")', "task-delete"),
+        )
+        # The collector reports exactly the ghost rule.
+        css = (
+            ".cyber-btn:focus-visible { outline: var(--focus-ring); }\n"
+            ".focus-ring-ghost-nine:focus-visible { outline: 2px solid red; }\n"
+            "/* outline-less rules are not ring rules and stay out of scope */\n"
+            ".focus-ring-ghost-ten:focus-visible { color: red; }\n"
+        )
+        dead = _dead_focus_ring_classes(css, self.html, self.js)
+        self.assertEqual([cls for _, cls in dead], ["focus-ring-ghost-nine"])
 
 
 def _free_port() -> int:

@@ -678,6 +678,16 @@ body {
   box-shadow: var(--danger-glow);
 }
 
+.cyber-btn.ok {
+  border-color: var(--neon-cyan);
+  color: var(--neon-cyan);
+}
+
+.cyber-btn.ok:hover {
+  background: rgba(0, 229, 255, 0.12);
+  box-shadow: 0 0 12px rgba(0, 229, 255, 0.35);
+}
+
 .cyber-btn.small { padding: 6px 14px; font-size: 0.78rem; }
 
 /* ---- Cyber Input ---- */
@@ -1368,6 +1378,163 @@ select.cyber-input:focus-visible {
   color: var(--text-secondary);
 }
 
+/* LLM-drafted code artifact in the Build panel */
+pre.code-block {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  padding: 14px;
+  background: var(--code-block-bg);
+  border: 1px solid var(--border-glow);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  margin: 10px 0;
+  color: var(--text-secondary);
+  max-height: 420px;
+  overflow-y: auto;
+  white-space: pre;
+}
+
+/* Build tab: live coding-agent status hint under the panel heading. */
+.build-model-hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 0 0 12px;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+/* Coding agent trace: draft → run → fix steps, each with real output. */
+.agent-trace {
+  margin: 12px 0;
+  border: 1px solid var(--border-glow);
+  border-radius: var(--radius-sm);
+  background: var(--code-block-bg);
+  overflow: hidden;
+}
+
+.agent-trace-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-glow);
+}
+
+.agent-trace-head strong {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--neon-cyan);
+}
+
+.agent-step {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 4px 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-glow);
+}
+
+.agent-step:last-child { border-bottom: 0; }
+
+.agent-step-kind {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--neon-cyan);
+}
+
+.agent-step-fixed .agent-step-kind { color: var(--neon-amber); }
+.agent-step-gave_up .agent-step-kind,
+.agent-step-run-failed .agent-step-kind { color: var(--neon-pink); }
+
+.agent-step-detail {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.agent-step-output {
+  grid-column: 1 / -1;
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.agent-final strong {
+  display: block;
+  padding: 8px 12px 0;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--neon-cyan);
+}
+
+.agent-final .agent-step-output { margin: 6px 12px 12px; }
+
+/* Editable Build artifact: the drafted code is a working editor pane with
+   Copy + Save-to-disk actions, not a dead code block. */
+.artifact-editor {
+  margin: 12px 0;
+  border: 1px solid var(--border-glow);
+  border-radius: var(--radius-sm);
+  background: var(--code-block-bg);
+  overflow: hidden;
+}
+
+.artifact-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-glow);
+}
+
+.artifact-editor-head strong {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--neon-cyan);
+}
+
+.artifact-editor-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.artifact-code-editor {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  padding: 14px;
+  background: transparent;
+  border: 0;
+  outline: none;
+  resize: vertical;
+  color: var(--text-secondary);
+  white-space: pre;
+  tab-size: 4;
+}
+
+.artifact-code-editor:focus-visible {
+  outline: 2px solid var(--neon-cyan);
+  outline-offset: -2px;
+}
+
 /* ---- Workflow Steps ---- */
 .workflow { margin: 16px 0; }
 
@@ -1738,6 +1905,49 @@ select.cyber-input:focus-visible {
 .action-toast.show {
   opacity: 1;
   transform: translateX(-50%) translateY(0);
+}
+
+/* Toast action button (Undo): inside the toast, spaced from the message. */
+.action-toast.has-action {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.action-toast-btn {
+  padding: 4px 12px;
+  background: transparent;
+  border: 1px solid var(--neon-cyan);
+  border-radius: var(--radius);
+  color: var(--neon-cyan);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.action-toast-btn:hover {
+  background: var(--neon-cyan);
+  color: var(--bg-card);
+}
+
+.action-toast-btn:focus-visible {
+  outline: 2px solid var(--neon-cyan);
+  outline-offset: 2px;
+}
+
+/* Armed "Delete All Tasks": louder border + pulse so the second click's
+   meaning is unmissable. Pure presentation — the guard lives in JS. */
+.cyber-btn.danger.armed {
+  border-color: var(--error-border, #ff5555);
+  color: var(--error-border, #ff5555);
+  animation: armPulse 0.9s ease-in-out infinite;
+}
+
+@keyframes armPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 85, 85, 0.35); }
+  50% { box-shadow: 0 0 0 6px rgba(255, 85, 85, 0); }
 }
 
 /* ---- Result Entrance Motion ---- */

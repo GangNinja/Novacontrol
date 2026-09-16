@@ -98,47 +98,6 @@ class BrainModeTests(unittest.IsolatedAsyncioTestCase):
     def test_brain_modes_vocabulary(self) -> None:
         self.assertEqual(BRAIN_MODES, ("auto", "llm", "scratch", "cloud"))
 
-    async def test_cloud_provider_activates_and_survives_mode_detours(self) -> None:
-        provider = _FakeLLM()
-        brain = self._brain(EchoLLMProvider())
-        brain.set_cloud_provider(provider)
-
-        self.assertEqual(brain.mode, "cloud")
-        self.assertIs(brain.completion_provider, provider)
-        self.assertEqual(brain.cloud_provider_name, "fake-ollama")
-
-        # A scratch detour then "cloud" again re-arms the SAME cloud provider.
-        brain.set_mode("scratch")
-        self.assertEqual(brain.effective_mode, "scratch")
-        brain.set_mode("cloud")
-        self.assertIs(brain.completion_provider, provider)
-        response = await brain.chat(BrainRequest(text="hello", context={}))
-        self.assertEqual(provider.calls, 1)
-        self.assertEqual(response.payload["brain_mode"], "llm")  # derived from the live provider
-
-    async def test_cloud_mode_without_a_configured_cloud_falls_back_like_llm(self) -> None:
-        brain = self._brain(EchoLLMProvider())
-        brain.set_mode("cloud")
-        self.assertEqual(brain.effective_mode, "scratch")
-
-    def test_clearing_the_cloud_provider_returns_to_auto(self) -> None:
-        provider = _FakeLLM()
-        brain = self._brain(EchoLLMProvider())
-        brain.set_cloud_provider(provider)
-        brain.set_cloud_provider(None)
-        self.assertEqual(brain.mode, "auto")
-        self.assertEqual(brain.cloud_provider_name, "")
-        self.assertEqual(str(brain.completion_provider.name), "echo")
-
-    def test_settings_manager_persists_and_validates_brain_mode(self) -> None:
-        manager = SettingsManager()
-        manager.update(brain_mode="scratch")
-        self.assertEqual(manager.settings.brain_mode, "scratch")
-        restored = SettingsManager.from_dict(manager.to_dict())
-        self.assertEqual(restored.settings.brain_mode, "scratch")
-        manager.update(brain_mode="bogus")
-        self.assertEqual(manager.settings.brain_mode, "auto")
-
 
 class ChatCloudRoundTripTests(unittest.IsolatedAsyncioTestCase):
     """A real chat request against a fake OpenAI-compatible cloud endpoint.
@@ -240,6 +199,206 @@ class TaskDeletionTests(unittest.TestCase):
 
         self.assertEqual([t.id for t in restored.list()], [keep.id])
 
+    def test_clear_snapshot_returns_removed_and_empties(self) -> None:
+        center = TaskCenter()
+        a, b = center.create("a"), center.create("b")
+        center.update(b.id, TaskRecordStatus.COMPLETED)
+
+        snapshot = center.clear_snapshot()
+
+        self.assertEqual([r.id for r in snapshot], [a.id, b.id])
+        self.assertEqual(center.list(), ())
+        # Clearing an empty center snapshots nothing.
+        self.assertEqual(center.clear_snapshot(), [])
+
+    def test_restore_puts_records_back_and_skips_existing_ids(self) -> None:
+        center = TaskCenter()
+        a, b = center.create("a"), center.create("b")
+        snapshot = center.clear_snapshot()
+
+        # While the snapshot was held, a NEW task appeared.
+        fresh = center.create("fresh")
+        restored = center.restore(snapshot)
+
+        self.assertEqual(restored, 2)
+        self.assertEqual({t.id for t in center.list()}, {a.id, b.id, fresh.id})
+        # Restoring again (double-undo) resurrects nothing new.
+        self.assertEqual(center.restore(snapshot), 0)
+
+    def test_restored_records_round_trip(self) -> None:
+        center = TaskCenter()
+        center.create("a")
+        snapshot = center.clear_snapshot()
+        center.restore(snapshot)
+
+        revived = TaskCenter.from_dict(center.to_dict())
+
+        self.assertEqual([t.title for t in revived.list()], ["a"])
+
+
+class ExploreFollowsBrainModeTests(unittest.IsolatedAsyncioTestCase):
+    """Explore synthesis must mirror the Chat brain in EVERY mode: scratch
+    means local templates (no provider), cloud means the cloud provider, and
+    the mode switch must invalidate the report cache (no stale synthesis)."""
+
+    def _app(self):
+        import os
+        import tempfile
+        from unittest import mock as _mock
+
+        from novacontrol.application import NovaControlApplication
+        from novacontrol.integrations.llm import EchoLLMProvider
+
+        tmp = tempfile.TemporaryDirectory()
+        os.environ.setdefault("NOVACONTROL_DISABLE_OLLAMA", "1")
+        with _mock.patch(
+            "novacontrol.application.build_llm_provider_from_environment",
+            return_value=EchoLLMProvider(),
+        ):
+            app = NovaControlApplication(data_dir=tmp.name)
+        return app, tmp
+
+    def _explore_provider(self, app):
+        return getattr(app.explore.explainer._completion_provider, "name", None)
+
+    async def test_explore_provider_mirrors_every_mode(self) -> None:
+        app, tmp = self._app()
+        try:
+            # Boot with Echo (no model): effective scratch -> templates (None).
+            self.assertIsNone(self._explore_provider(app))
+
+            # A real model appears (lazy upgrade simulation): the reprobe swaps
+            # the provider AND fires on_provider_upgrade -> _sync_explore_provider.
+            class _Fake:
+                name = "fake-local"
+                model = "m"
+
+                async def complete(self, messages, **kwargs):
+                    return "ok"
+
+            fake = _Fake()
+            app.brain.completion_provider = fake
+            app._sync_explore_provider()
+            self.assertEqual(self._explore_provider(app), "fake-local")
+
+            # Scratch -> llm must come back to the SAME model (the local slot
+            # re-arms through the brain's set_local_provider swap path).
+            app.brain.set_local_provider(fake)
+            app.set_brain_mode("scratch")
+            app.set_brain_mode("llm")
+            self.assertEqual(self._explore_provider(app), "fake-local")
+
+            # Scratch: local templates everywhere, Chat AND Explore.
+            app.set_brain_mode("scratch")
+            self.assertIsNone(self._explore_provider(app))
+
+            # llm: the local model again.
+            app.set_brain_mode("llm")
+            self.assertEqual(self._explore_provider(app), "fake-local")
+
+            # cloud: the cloud provider takes over BOTH surfaces.
+            app.set_cloud_llm("openai", "sk-test-12345678", model="gpt-4o-mini")
+            self.assertEqual(self._explore_provider(app), "cloud:openai")
+
+            # scratch with cloud configured: STILL templates — scratch wins.
+            app.set_brain_mode("scratch")
+            self.assertIsNone(self._explore_provider(app))
+
+            # Back to cloud: Explore returns to the cloud voice.
+            app.set_brain_mode("cloud")
+            self.assertEqual(self._explore_provider(app), "cloud:openai")
+        finally:
+            tmp.cleanup()
+
+    async def test_report_cache_is_keyed_per_synthesis_brain(self) -> None:
+        """A mode switch must not serve a report synthesized by the OLD brain:
+        the same request after switching is a fresh synthesis (fresh report id)."""
+        from novacontrol.explore import ExploreRequest
+        from conftest import FakeSearchProvider, FakeVideoProvider
+
+        app, tmp = self._app()
+        try:
+            app.explore.search_provider = FakeSearchProvider()
+            app.explore.video_provider = FakeVideoProvider()
+            request = ExploreRequest("brain cache key topic")
+
+            class _Fake:
+                name = "fake-local"
+                model = "m"
+
+                async def complete(self, messages, **kwargs):
+                    return "ok"
+
+            app.brain.completion_provider = _Fake()
+            app._sync_explore_provider()
+            first = await app.explore.research(request)
+
+            # Same request, same brain -> cached (same id).
+            second = await app.explore.research(request)
+            self.assertEqual(first.id, second.id)
+
+            # Switch to scratch -> different synthesis brain -> fresh report.
+            app.set_brain_mode("scratch")
+            third = await app.explore.research(request)
+            self.assertNotEqual(first.id, third.id, "mode switch must not serve the old brain's cached report")
+        finally:
+            tmp.cleanup()
+
+    def _brain(self, provider: object | None = None) -> NovaBrain:
+        brain = NovaBrain(completion_provider=provider or EchoLLMProvider())
+        # Detach the lazy re-probe: mode switching alone is what's under test.
+        brain._ollama_reprobe = None
+        return brain
+
+
+class BrainModeCloudTests(unittest.IsolatedAsyncioTestCase):
+    """Cloud-slot behaviors split out of BrainModeTests (same helpers)."""
+
+    def _brain(self, provider: object | None = None) -> NovaBrain:
+        brain = NovaBrain(completion_provider=provider or EchoLLMProvider())
+        brain._ollama_reprobe = None
+        return brain
+
+    async def test_cloud_provider_activates_and_survives_mode_detours(self) -> None:
+        provider = _FakeLLM()
+        brain = self._brain(EchoLLMProvider())
+        brain.set_cloud_provider(provider)
+
+        self.assertEqual(brain.mode, "cloud")
+        self.assertIs(brain.completion_provider, provider)
+        self.assertEqual(brain.cloud_provider_name, "fake-ollama")
+
+        # A scratch detour then "cloud" again re-arms the SAME cloud provider.
+        brain.set_mode("scratch")
+        self.assertEqual(brain.effective_mode, "scratch")
+        brain.set_mode("cloud")
+        self.assertIs(brain.completion_provider, provider)
+        response = await brain.chat(BrainRequest(text="hello", context={}))
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(response.payload["brain_mode"], "llm")  # derived from the live provider
+
+    async def test_cloud_mode_without_a_configured_cloud_falls_back_like_llm(self) -> None:
+        brain = self._brain(EchoLLMProvider())
+        brain.set_mode("cloud")
+        self.assertEqual(brain.effective_mode, "scratch")
+
+    def test_clearing_the_cloud_provider_returns_to_auto(self) -> None:
+        provider = _FakeLLM()
+        brain = self._brain(EchoLLMProvider())
+        brain.set_cloud_provider(provider)
+        brain.set_cloud_provider(None)
+        self.assertEqual(brain.mode, "auto")
+        self.assertEqual(brain.cloud_provider_name, "")
+        self.assertEqual(str(brain.completion_provider.name), "echo")
+
+    def test_settings_manager_persists_and_validates_brain_mode(self) -> None:
+        manager = SettingsManager()
+        manager.update(brain_mode="scratch")
+        self.assertEqual(manager.settings.brain_mode, "scratch")
+        restored = SettingsManager.from_dict(manager.to_dict())
+        self.assertEqual(restored.settings.brain_mode, "scratch")
+        manager.update(brain_mode="bogus")
+        self.assertEqual(manager.settings.brain_mode, "auto")
 
 if __name__ == "__main__":
     unittest.main()

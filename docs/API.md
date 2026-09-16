@@ -17,23 +17,36 @@ The Phase 12 API subsystem provides REST and WebSocket entrypoints through FastA
 - `GET /brain/mode`: Inspect the active brain mode and provider. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /brain/cloud/presets`: List cloud LLM provider presets (no secrets). *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /brain/cloud`: Install a cloud LLM (ChatGPT/Gemini/Groq) with a local API key. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /brain/cloud/test`: Ping a cloud provider with the pasted key (one tiny completion; nothing is saved). *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /brain/cloud/clear`: Remove the cloud LLM config and its API key. *(frontend: no web panel - API/CLI or infrastructure)*
-- `POST /chat/clear`: Clear the server-side chat conversation memory. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /brain/ollama/models`: List local Ollama models for the brain model picker (fresh probe). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /brain/local/model`: Pin the local brain to a specific Ollama model (empty clears the pick). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /chat/clear`: Clear the server-side chat conversation memory and the shared transcript. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /chat/history`: Read the shared server-persisted chat thread (same for every browser). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /chat/history`: Append a chat turn to the shared thread (action=migrate imports a browser's old history once). *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /tasks`: List tracked task records. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /tasks/delete`: Delete one tracked task record by id. *(frontend: no web panel - API/CLI or infrastructure)*
-- `POST /tasks/clear`: Delete all tracked task records. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /tasks/clear`: Delete all tracked task records (undoable for a short window). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /tasks/clear/undo`: Restore the tasks wiped by a recent /tasks/clear (one-shot token). *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /improve`: Create a self-improvement plan. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /improve/workflow`: Create a friendly self-improvement workflow. *(frontend: web panel `renderWorkflow`)*
 - `POST /improve/preview`: Run a temporary self-improvement preview. *(frontend: web panel `renderWorkflow`)*
 - `POST /improve/approve`: Approve a preview for code changes. *(frontend: web panel `renderWorkflow`)*
 - `POST /learn`: Run a local feedback learning cycle. *(frontend: web panel `renderLearning`)*
+- `POST /knowledge/teach`: Teach: persist a typed fact as durable recallable knowledge. *(frontend: web panel `renderLearning`)*
+- `GET /knowledge`: List taught knowledge, optionally filtered by a query. *(frontend: web panel `renderLearning`)*
+- `POST /knowledge/recall`: Recall taught knowledge matching a query. *(frontend: web panel `renderLearning`)*
 - `POST /train`: Run bounded autonomous local learning iterations. *(frontend: web panel `renderLearning`)*
 - `POST /brain/decide`: Trace an utterance through the routing gates with a rung preview. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /plan`: Create and optionally execute a plan. *(frontend: web panel `renderBuild`)*
+- `POST /plan/code`: Plan a coding task: language-aware steps plus a drafted code artifact. *(frontend: web panel `renderBuild`)*
+- `POST /build/save`: Save a drafted Build artifact to the build_workspace folder on disk. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /command/plan`: Plan a natural desktop or phone command. *(frontend: web panel `renderCommand`)*
 - `POST /command/execute`: Execute an approved natural desktop or phone command. *(frontend: web panel `renderCommand`)*
 - `POST /desktop/plan`: Plan an approval-gated desktop action. *(frontend: web panel `renderCommand`)*
 - `POST /desktop/execute`: Execute an approved desktop action. *(frontend: web panel `renderCommand`)*
+- `POST /browser/plan`: Plan an approval-gated browser action (navigate, search + extract). *(frontend: web panel `renderCommand`)*
+- `POST /browser/execute`: Execute an approved browser action (search returns the top results). *(frontend: web panel `renderCommand`)*
 - `GET /phone/status`: Inspect phone bridge status. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /phone/connect`: Run the phone bridge pairing flow. *(frontend: web panel `renderPhoneStatus`)*
 - `GET /vision/status`: Vision capability report: model availability and open bug count. *(frontend: no web panel - API/CLI or infrastructure)*
