@@ -251,11 +251,17 @@ class FocusRingBrowserWalkTests(unittest.TestCase):
         )
         self.addCleanup(self._cleanup)
         self._wait_healthy()
+        self.browser_err = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
+        browser_args = [self.browser, "--headless", "--disable-gpu", "--no-first-run",
+                        f"--remote-debugging-port={self.dbg_port}",
+                        f"--user-data-dir={self.tmpdir}", "about:blank"]
+        if sys.platform != "win32":
+            # CI Linux images: the Chrome sandbox can fail to initialize under
+            # containers/root; both flags are standard headless-CI hygiene.
+            browser_args[1:1] = ["--no-sandbox", "--disable-dev-shm-usage"]
         self.browser_proc = subprocess.Popen(
-            [self.browser, "--headless=new", "--disable-gpu", "--no-first-run",
-             f"--remote-debugging-port={self.dbg_port}",
-             f"--user-data-dir={self.tmpdir}", "about:blank"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags,
+            browser_args,
+            stdout=subprocess.DEVNULL, stderr=self.browser_err, creationflags=flags,
         )
         self._wait_debugger()
 
@@ -267,6 +273,12 @@ class FocusRingBrowserWalkTests(unittest.TestCase):
                     proc.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     proc.kill()
+        err = getattr(self, "browser_err", None)
+        if err is not None:
+            try:
+                err.close()
+            except OSError:
+                pass
 
     def _wait_healthy(self) -> None:
         url = f"http://127.0.0.1:{self.app_port}/health"
@@ -281,7 +293,15 @@ class FocusRingBrowserWalkTests(unittest.TestCase):
         self.fail("test server did not become healthy")
 
     def _wait_debugger(self) -> None:
-        for _ in range(80):
+        # 120 x 0.25s (+ up to 1s per urlopen) gives slow CI runners ~30s of
+        # grace, and a browser that DIED fails fast with its stderr instead
+        # of silently burning the whole window.
+        for _ in range(120):
+            if self.browser_proc.poll() is not None:
+                self.fail(
+                    f"headless browser exited (code {self.browser_proc.returncode}) "
+                    f"before its debugging endpoint came up: {self._browser_err_tail()}"
+                )
             try:
                 with urllib.request.urlopen(
                     f"http://127.0.0.1:{self.dbg_port}/json/list", timeout=1
@@ -292,7 +312,17 @@ class FocusRingBrowserWalkTests(unittest.TestCase):
                 return
             except (OSError, StopIteration, KeyError, ValueError):
                 time.sleep(0.25)
-        self.fail("headless browser debugging endpoint never came up")
+        self.fail(
+            "headless browser debugging endpoint never came up: "
+            + self._browser_err_tail()
+        )
+
+    def _browser_err_tail(self) -> str:
+        try:
+            self.browser_err.seek(0)
+            return self.browser_err.read().strip()[-500:] or "<stderr empty>"
+        except (OSError, ValueError):
+            return "<stderr unavailable>"
 
     def test_tab_walk_shows_2px_solid_focus_ring_everywhere(self) -> None:
         result = subprocess.run(
