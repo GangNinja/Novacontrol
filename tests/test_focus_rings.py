@@ -293,30 +293,41 @@ class FocusRingBrowserWalkTests(unittest.TestCase):
         self.fail("test server did not become healthy")
 
     def _wait_debugger(self) -> None:
-        # 120 x 0.25s (+ up to 1s per urlopen) gives slow CI runners ~30s of
-        # grace, and a browser that DIED fails fast with its stderr instead
-        # of silently burning the whole window.
-        for _ in range(120):
+        # ~30s ceiling for a browser that never serves CDP. The connect_ex
+        # pre-probe keeps the loop cheap when the port refuses (a refused
+        # loopback connect is instant, while a full urlopen can cost ~0.5s
+        # per attempt and triple the ceiling on Windows).
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
             if self.browser_proc.poll() is not None:
                 self.fail(
                     f"headless browser exited (code {self.browser_proc.returncode}) "
                     f"before its debugging endpoint came up: {self._browser_err_tail()}"
                 )
+            probe = socket.socket()
             try:
-                with urllib.request.urlopen(
-                    f"http://127.0.0.1:{self.dbg_port}/json/list", timeout=1
-                ) as resp:
-                    targets = json.loads(resp.read().decode())
-                page = next(t for t in targets if t.get("type") == "page")
-                self.ws_url = page["webSocketDebuggerUrl"]
-                return
-            except (OSError, StopIteration, KeyError, ValueError):
-                time.sleep(0.25)
+                probe.settimeout(0.5)
+                accepted = (
+                    probe.connect_ex(("127.0.0.1", self.dbg_port)) == 0
+                )
+            finally:
+                probe.close()
+            if accepted:
+                try:
+                    with urllib.request.urlopen(
+                        f"http://127.0.0.1:{self.dbg_port}/json/list", timeout=1
+                    ) as resp:
+                        targets = json.loads(resp.read().decode())
+                    page = next(t for t in targets if t.get("type") == "page")
+                    self.ws_url = page["webSocketDebuggerUrl"]
+                    return
+                except (OSError, StopIteration, KeyError, ValueError):
+                    pass
+            time.sleep(0.25)
         self.fail(
             "headless browser debugging endpoint never came up: "
             + self._browser_err_tail()
         )
-
     def _browser_err_tail(self) -> str:
         try:
             self.browser_err.seek(0)
