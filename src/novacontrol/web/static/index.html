@@ -8,7 +8,10 @@
     <title>NovaControl</title>
     <link rel="icon" href="/static/nova-mark.svg">
     <link rel="stylesheet" href="/static/styles.css?v=__NC_ASSET_VERSION__">
-    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700;800;900&family=Rajdhani:wght@300;400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <!-- Perf: only weights the stylesheet actually uses (12 woff2 → 8). -->
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700&family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
   </head>
   <body>
     <a href="#mainContent" class="skip-link">Skip to main content</a>
@@ -225,6 +228,12 @@
               <button id="codePlanButton" type="button" class="cyber-btn">Plan The Code</button>
             </article>
             <article class="surface">
+              <h3>Plan Project</h3>
+              <label for="codeProjectInput" class="sr-only">Project goal</label>
+              <textarea id="codeProjectInput" rows="3" placeholder="Describe a PROJECT — the agent drafts multiple files, runs the entry point, and fixes real errors. Needs a coding model." class="cyber-input" aria-label="Project goal"></textarea>
+              <button id="codeProjectButton" type="button" class="cyber-btn primary">Plan The Project</button>
+            </article>
+            <article class="surface">
               <h3>Plan Work</h3>
               <label for="planInput" class="sr-only">Planning goal</label>
               <textarea id="planInput" rows="3" placeholder="Describe your goal —NovaControl will break it into steps" class="cyber-input" aria-label="Planning goal"></textarea>
@@ -244,6 +253,7 @@
           <div id="buildOutput" class="friendly-output empty-state">
             <div class="empty-hint"><span class="empty-hint-icon">&#9881;</span> Describe a goal in either panel and click the action button</div>
           </div>
+          <div id="workspaceArtifacts" class="workspace-artifacts" hidden></div>
         </section>
 
         <section id="learnPanel" class="panel">
@@ -528,15 +538,19 @@
         </section>
       </main>
     </div>
-    <script src="/static/js/dom.js?v=__NC_ASSET_VERSION__"></script>
-    <script src="/static/js/state.js?v=__NC_ASSET_VERSION__"></script>
-    <script src="/static/js/render-utils.js?v=__NC_ASSET_VERSION__"></script>
-    <script src="/static/js/render-explore.js?v=__NC_ASSET_VERSION__"></script>
-    <script src="/static/js/render-panels.js?v=__NC_ASSET_VERSION__"></script>
-    <script src="/static/js/activity.js?v=__NC_ASSET_VERSION__"></script>
-    <script src="/static/js/routing-explorer.js?v=__NC_ASSET_VERSION__"></script>
-    <script src="/static/js/voice.js?v=__NC_ASSET_VERSION__"></script>
-    <script src="/static/js/effects.js?v=__NC_ASSET_VERSION__"></script>
-    <script src="/static/app.js?v=__NC_ASSET_VERSION__"></script>
+    <!-- Perf: all scripts are deferred — they only run init on DOMContentLoaded,
+         and no inline script reads their globals (verified). Execution order is
+         still document order, so app.js's DOMContentLoaded listeners register
+         exactly as before. -->
+    <script defer src="/static/js/dom.js?v=__NC_ASSET_VERSION__"></script>
+    <script defer src="/static/js/state.js?v=__NC_ASSET_VERSION__"></script>
+    <script defer src="/static/js/render-utils.js?v=__NC_ASSET_VERSION__"></script>
+    <script defer src="/static/js/render-explore.js?v=__NC_ASSET_VERSION__"></script>
+    <script defer src="/static/js/render-panels.js?v=__NC_ASSET_VERSION__"></script>
+    <script defer src="/static/js/activity.js?v=__NC_ASSET_VERSION__"></script>
+    <script defer src="/static/js/routing-explorer.js?v=__NC_ASSET_VERSION__"></script>
+    <script defer src="/static/js/voice.js?v=__NC_ASSET_VERSION__"></script>
+    <script defer src="/static/js/effects.js?v=__NC_ASSET_VERSION__"></script>
+    <script defer src="/static/app.js?v=__NC_ASSET_VERSION__"></script>
   </body>
 </html>

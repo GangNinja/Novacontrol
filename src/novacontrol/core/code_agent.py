@@ -73,6 +73,34 @@ class CodeAgentResult:
         }
 
 
+@dataclass
+class ProjectAgentResult:
+    """Everything the Build UI needs to show a multi-file agent run."""
+
+    project: str
+    entry: str
+    files: list[dict[str, str]]  # [{path, content}]
+    language: str
+    ran_ok: bool
+    steps: list[AgentStep] = field(default_factory=list)
+    final_output: str = ""
+    fix_rounds: int = 0
+    model_name: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "project": self.project,
+            "entry": self.entry,
+            "files": self.files,
+            "language": self.language,
+            "ran_ok": self.ran_ok,
+            "steps": [s.to_dict() for s in self.steps],
+            "final_output": self.final_output,
+            "fix_rounds": self.fix_rounds,
+            "model_name": self.model_name,
+        }
+
+
 def extract_code_block(text: str) -> str:
     """Pull code out of an LLM reply: fenced block if present, else raw text.
 
@@ -103,6 +131,119 @@ def _trim(text: str, limit: int = 1200) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "…"
+
+
+def parse_project_files(reply: str) -> list[dict[str, str]]:
+    """Parse a model reply into a file map; raise when nothing usable remains.
+
+    Accepts raw JSON, JSON fenced in a code block, or a fenced JSON object
+    wrapped in prose. Per-file content may itself arrive fenced — stripped.
+    File paths are sanitized to safe relative names (no traversal).
+    """
+    import json
+
+    text = (reply or "").strip()
+    # Prefer the outermost {...} in the reply (fenced or not).
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end <= start:
+        raise ValueError("model reply contained no JSON file map")
+    payload = json.loads(text[start:end + 1])
+    raw_files = payload.get("files")
+    if not isinstance(raw_files, list) or not raw_files:
+        raise ValueError("file map has no files")
+    files: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in raw_files:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path", "")).strip()
+        content = str(item.get("content", ""))
+        # Strip a fenced block if the model wrapped file content in one.
+        fence = re.search(r"```[a-zA-Z0-9+#-]*\n(.*?)```", content, re.DOTALL)
+        if fence and fence.group(1).strip():
+            content = fence.group(1)
+        if not path or not content.strip():
+            continue
+        # Safe relative path: no drive, no traversal, sane characters.
+        # The traversal check runs on the sanitized-but-unstripped path so a
+        # leading "../" is DROPPED, not silently renamed into a bare file.
+        path = re.sub(r"[^A-Za-z0-9_./-]+", "_", path)
+        if ".." in path or not path.strip("./"):
+            continue
+        path = path.strip("./")
+        if path in seen:
+            continue
+        seen.add(path)
+        files.append({"path": path, "content": content.strip() + "\n"})
+    if not files:
+        raise ValueError("file map parsed to zero usable files")
+    return files
+
+
+async def run_sandboxed(
+    language: str,
+    files: list[tuple[str, str]],
+    entry: str,
+    *,
+    timeout: float = _RUN_TIMEOUT_SECONDS,
+) -> tuple[bool, str]:
+    """Write files into a fresh temp dir and run the entry point sandboxed.
+
+    Shared by the single-file agent and Run-saved-artifact. Guards: dedicated
+    temp cwd, no network on *nix (net namespace, best-effort), hard wall-clock
+    timeout, output captured. Raises RuntimeUnavailable when the language has
+    no runtime here.
+    """
+    import shutil
+    import tempfile
+
+    # Resolve by PATH, falling back to this interpreter so a Linux/CI box
+    # without a bare `python` shim still executes Python artifacts.
+    python_exe = shutil.which("python") or sys.executable
+    node_exe = shutil.which("node")
+    runners: dict[str, list[str]] = {
+        "python": [python_exe],
+        "javascript": [node_exe] if node_exe else [],
+    }
+    exe = runners.get(language)
+    if not exe:
+        raise RuntimeUnavailable(
+            f"no {language} runtime installed — code drafted but not executed"
+            if language == "javascript"
+            else f"{language} artifacts are drafted but not executed here"
+        )
+
+    tmpdir = Path(tempfile.mkdtemp(prefix="nova_agent_"))
+    try:
+        for name, code in files:
+            safe = re.sub(r"[^A-Za-z0-9_./-]+", "_", name)
+            target = (tmpdir / safe).resolve()
+            if not str(target).startswith(str(tmpdir.resolve())):
+                continue  # traversal guard; sanitized names never trigger it
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(code, encoding="utf-8")
+        preexec = _disable_network if _POSIX else None
+        proc = await asyncio.create_subprocess_exec(
+            *exe, entry,
+            cwd=str(tmpdir),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            preexec_fn=preexec,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return False, f"Timed out after {timeout:g}s — the program ran too long."
+        output = stdout.decode("utf-8", errors="replace") if stdout else ""
+        return proc.returncode == 0, _trim(output)
+    except FileNotFoundError as exc:
+        raise RuntimeUnavailable(
+            f"no {language} runtime installed — code drafted but not executed"
+        ) from exc
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 class CodingAgent:
@@ -155,63 +296,80 @@ class CodingAgent:
     # ── execution ─────────────────────────────────────────────
 
     async def _run_code(self, language: str, code: str, filename: str) -> tuple[bool, str]:
-        """Run the artifact in a sandboxed subprocess. Returns (ok, output).
+        """Run one artifact via the shared sandbox (see run_sandboxed).
 
-        - dedicated temp dir (fresh cwd, auto-cleanup)
-        - no network (Windows: no simple toggle pre-Python 3.13 — the fresh
-          cwd + timeout + no-credentials model are the practical guards;
-          *nix: preexec_fn disables networking via a new net namespace)
-        - hard wall-clock timeout
+        The single-file test seam keeps the historical (language, code,
+        filename) shape; the project runner gets the file-map seam instead.
         """
-        import shutil
-        import tempfile
-
-        # Resolve by PATH, falling back to this interpreter so a Linux/CI box
-        # without a bare `python` shim still executes Python artifacts.
-        python_exe = shutil.which("python") or sys.executable
-        node_exe = shutil.which("node")
-        runners: dict[str, list[str]] = {
-            "python": [python_exe],
-            "javascript": [node_exe] if node_exe else [],
-        }
-        exe = runners.get(language)
-        if not exe:
-            raise RuntimeUnavailable(
-                f"no {language} runtime installed — code drafted but not executed"
-                if language == "javascript"
-                else f"{language} artifacts are drafted but not executed here"
-            )
-
-        if self._runner is not None:  # test seam
+        if self._runner is not None:  # test seam (single-file shape)
             ok, out = await self._runner(language, code, filename)
             return bool(ok), str(out)
+        return await run_sandboxed(language, [(filename, code)], filename,
+                                   timeout=self._run_timeout)
 
-        tmpdir = Path(tempfile.mkdtemp(prefix="nova_agent_"))
-        try:
-            path = tmpdir / filename
-            path.write_text(code, encoding="utf-8")
-            preexec = _disable_network if _POSIX else None
-            proc = await asyncio.create_subprocess_exec(
-                *exe, path.name,
-                cwd=str(tmpdir),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                preexec_fn=preexec,
-            )
-            try:
-                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=self._run_timeout)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-                return False, f"Timed out after {self._run_timeout:g}s — the program ran too long."
-            output = stdout.decode("utf-8", errors="replace") if stdout else ""
-            return proc.returncode == 0, _trim(output)
-        except FileNotFoundError as exc:
-            raise RuntimeUnavailable(
-                f"no {language} runtime installed — code drafted but not executed"
-            ) from exc
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
+    async def _run_files(
+        self, language: str, files: list[tuple[str, str]], entry: str
+    ) -> tuple[bool, str]:
+        """Run a file map via the shared sandbox (project test seam)."""
+        if self._runner is not None:  # test seam (project shape)
+            ok, out = await self._runner(language, files, entry)
+            return bool(ok), str(out)
+        return await run_sandboxed(language, files, entry, timeout=self._run_timeout)
+
+    async def draft_project(self, goal: str, language: str) -> list[dict[str, str]]:
+        """Draft a MULTI-FILE project: the model returns a JSON file map.
+
+        The strict JSON contract keeps parsing deterministic; per-file fences
+        are still accepted and stripped because models love them anyway.
+        """
+        reply = await self._ask(
+            f"You are a senior {language} engineer. Task: {goal}\n"
+            "Design a SMALL multi-file project (2-5 files, each under 120 lines) "
+            "with clear separation of concerns and a single entry point.\n"
+            "Respond with ONLY a JSON object, no prose:\n"
+            '{"entry": "main.py", "files": [{"path": "main.py", "content": "...code..."}, '
+            '{"path": "other.py", "content": "..."}]}\n'
+            "Every file must be complete and runnable in context (imports match the "
+            "file names you chose). The entry point demonstrates the whole project "
+            "works and prints a result."
+        )
+        return parse_project_files(reply)
+
+    async def fix_project(
+        self, goal: str, language: str, files: list[dict[str, str]], error: str
+    ) -> list[dict[str, str]]:
+        listing = "\n".join(
+            f"--- {f['path']} ---\n{f['content']}" for f in files
+        )
+        reply = await self._ask(
+            f"You are a senior {language} engineer. Task: {goal}\n\n"
+            f"The project has these files:\n{listing}\n\n"
+            f"When the entry point runs it fails with:\n```\n{error}\n```\n\n"
+            "Fix the bug. Return ONLY the JSON file map (same shape, complete "
+            "corrected files — include every file, changed or not)."
+        )
+        return parse_project_files(reply)
+
+
+_RUNTIMES: dict[str, str | None] = {
+    # Language -> executable name (None = never executable here). Resolved
+    # lazily via PATH at call time so CI boxes without a bare `python` shim
+    # still work (sys.executable fallback).
+    "python": "python",
+    "javascript": "node",
+}
+
+
+def runtime_available(language: str) -> bool:
+    """True when this machine can execute the language in the sandbox."""
+    import shutil
+
+    exe = _RUNTIMES.get(language)
+    if exe is None:
+        return False
+    if language == "python":
+        return True  # shutil.which("python") or sys.executable always resolves
+    return shutil.which(exe) is not None
 
 
 _POSIX = False
@@ -310,4 +468,90 @@ async def run_coding_agent(
         content=code, language=language, generated_by="agent", ran_ok=False,
         steps=steps, final_output=output, fix_rounds=fix_rounds,
         model_name=str(getattr(completion_provider, "name", "")),
+    )
+
+
+async def run_project_agent(
+    goal: str,
+    language: str,
+    completion_provider: Any,
+    *,
+    max_fix_rounds: int = AGENT_MAX_FIX_ROUNDS,
+    runner: Any = None,
+) -> ProjectAgentResult:
+    """Multi-file agent run: draft a file map → run the entry point →
+    feed the real error back → fix the affected files → re-run.
+
+    Same contract as run_coding_agent, scoped to a project: failures live in
+    the trace, only provider-level hard errors propagate.
+    """
+    steps: list[AgentStep] = []
+    agent = CodingAgent(
+        completion_provider,
+        max_fix_rounds=max_fix_rounds,
+        runner=runner,
+    )
+    model_name = str(getattr(completion_provider, "name", ""))
+
+    try:
+        files = await agent.draft_project(goal, language)
+    except Exception as exc:  # noqa: BLE001 - caller falls back on provider errors
+        raise RuntimeError(f"LLM project draft failed: {exc}") from exc
+    entry = files[0]["path"] if files else "main.py"
+    # Prefer an explicit main-ish entry when the model listed one first.
+    for candidate in ("main.py", "main.js", "index.js", "app.py", "app.js"):
+        if any(f["path"] == candidate for f in files):
+            entry = candidate
+            break
+    steps.append(AgentStep(
+        "draft",
+        f"Drafted {len(files)} files ({', '.join(f['path'] for f in files)}) with {model_name}",
+        _trim(files[0]["content"], 300),
+    ))
+
+    def write_map() -> list[tuple[str, str]]:
+        return [(f["path"], f["content"]) for f in files]
+
+    fix_rounds = 0
+    try:
+        if not runtime_available(language):
+            raise RuntimeUnavailable(
+                f"{language} artifacts are drafted but not executed here"
+            )
+        ran_ok, output = await agent._run_files(language, write_map(), entry)
+    except RuntimeUnavailable:
+        steps.append(AgentStep("skipped", f"No {language} runtime available — project drafted but not executed", ""))
+        return ProjectAgentResult(
+            project=goal, entry=entry, files=files, language=language,
+            ran_ok=False, steps=steps, model_name=model_name,
+        )
+
+    for round_index in range(max_fix_rounds + 1):
+        if ran_ok:
+            steps.append(AgentStep("run", f"Run {round_index + 1}: passed", output))
+            return ProjectAgentResult(
+                project=goal, entry=entry, files=files, language=language,
+                ran_ok=True, steps=steps, final_output=output,
+                fix_rounds=fix_rounds, model_name=model_name,
+            )
+        steps.append(AgentStep("run", f"Run {round_index + 1}: failed", output))
+        if round_index == max_fix_rounds:
+            break
+        fix_rounds += 1
+        steps.append(AgentStep("fixed", f"Fix round {fix_rounds}: asked model to fix the failure", ""))
+        try:
+            files = await agent.fix_project(goal, language, files, output)
+        except Exception as exc:  # noqa: BLE001
+            steps.append(AgentStep("gave_up", f"Fix round {fix_rounds} failed: {exc}", ""))
+            break
+        try:
+            ran_ok, output = await agent._run_files(language, write_map(), entry)
+        except RuntimeUnavailable:
+            steps.append(AgentStep("gave_up", f"{language} runtime disappeared mid-run", ""))
+            break
+
+    return ProjectAgentResult(
+        project=goal, entry=entry, files=files, language=language,
+        ran_ok=False, steps=steps, final_output=output,
+        fix_rounds=fix_rounds, model_name=model_name,
     )

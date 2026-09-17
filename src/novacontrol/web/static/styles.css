@@ -1485,6 +1485,37 @@ pre.code-block {
 
 /* Editable Build artifact: the drafted code is a working editor pane with
    Copy + Save-to-disk actions, not a dead code block. */
+/* Saved-artifacts strip (Build panel): Run buttons for workspace files */
+.workspace-artifacts {
+  margin-top: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-glow);
+  border-radius: var(--radius-sm);
+  background: var(--panel-bg);
+}
+
+.workspace-artifacts h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+
+.workspace-artifact-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border-faint, rgba(255, 255, 255, 0.06));
+}
+
+.workspace-artifact-row .artifact-name {
+  flex: 1;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
 .artifact-editor {
   margin: 12px 0;
   border: 1px solid var(--border-glow);

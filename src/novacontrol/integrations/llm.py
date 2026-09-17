@@ -240,7 +240,12 @@ _OLLAMA_DEFAULT_URL = "http://127.0.0.1:11434"
 _ollama_cache: dict[str, Any] | None = None
 
 
-def detect_ollama(base_url: str = _OLLAMA_DEFAULT_URL, *, refresh: bool = False) -> dict[str, Any] | None:
+def detect_ollama(
+    base_url: str = _OLLAMA_DEFAULT_URL,
+    *,
+    refresh: bool = False,
+    timeout: float = 2.0,
+) -> dict[str, Any] | None:
     """Probe a running Ollama instance and return available models.
 
     Returns a dict with ``url`` and ``models`` (list of model names) on
@@ -248,13 +253,17 @@ def detect_ollama(base_url: str = _OLLAMA_DEFAULT_URL, *, refresh: bool = False)
     the process lifetime (boot + the lazy re-probe never need a second hit);
     ``refresh=True`` bypasses the cache — the model picker must show models
     pulled AFTER boot, not the boot-time snapshot.
+
+    ``timeout`` caps the blocking socket wait. The model-picker route passes
+    a short value and runs the probe off the event loop, so a dead Ollama
+    costs one quick miss instead of freezing every SSE stream and API route.
     """
     global _ollama_cache  # noqa: PLW0603
     if _ollama_cache is not None and not refresh:
         return _ollama_cache
     try:
         request = Request(f"{base_url.rstrip('/')}/api/tags", method="GET")
-        with urlopen(request, timeout=2) as response:
+        with urlopen(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
         models = [m["name"] for m in data.get("models", []) if "name" in m]
         if not models:
@@ -267,13 +276,18 @@ def detect_ollama(base_url: str = _OLLAMA_DEFAULT_URL, *, refresh: bool = False)
         return None
 
 
-def ollama_models(base_url: str = _OLLAMA_DEFAULT_URL, *, refresh: bool = True) -> list[str]:
+def ollama_models(
+    base_url: str = _OLLAMA_DEFAULT_URL,
+    *,
+    refresh: bool = True,
+    timeout: float = 2.0,
+) -> list[str]:
     """Model names available on the local Ollama ([] when unreachable).
 
     Refresh is the default here: callers are pickers/listers, not the boot
     resolution path — they want today's list, not the boot-time snapshot.
     """
-    info = detect_ollama(base_url, refresh=refresh)
+    info = detect_ollama(base_url, refresh=refresh, timeout=timeout)
     return list(info["models"]) if info else []
 
 

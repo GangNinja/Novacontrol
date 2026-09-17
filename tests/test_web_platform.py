@@ -1071,6 +1071,25 @@ class BackendFrontendContractTests(unittest.TestCase):
         self.assertIn('id="buildModelHint"', (Path("src/novacontrol/web/static") / "index.html").read_text(encoding="utf-8"))
         self.assertIn("brain.model_configured", self.js)
 
+    def test_build_project_mode_and_saved_artifact_runner(self) -> None:
+        """Project mode: a Plan Project surface POSTs /build/project, the
+        renderer shows the file map + entry + trace + per-file editors, and
+        the saved-artifacts strip offers Run buttons for runnable files."""
+        html = (Path("src/novacontrol/web/static") / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="codeProjectButton"', html)
+        self.assertIn('id="codeProjectInput"', html)
+        self.assertIn('id="workspaceArtifacts"', html)
+        self.assertIn('requestJson("/build/project"', self.js)
+        self.assertIn('requestJson("/build/run"', self.js)
+        self.assertIn('requestJson("/build/artifacts"', self.js)
+        self.assertIn('data.mode === "code_project"', self.render_panels)
+        self.assertIn("refreshWorkspaceArtifacts", self.render_panels)
+        # Backend contract: the project route exists and requires a model.
+        app_py = (Path("src/novacontrol/api") / "app.py").read_text(encoding="utf-8")
+        self.assertIn('"/build/project"', app_py)
+        self.assertIn('"/build/artifacts"', app_py)
+        self.assertIn('"/build/run"', app_py)
+
     def test_cloud_test_connection_button_wired_before_connect(self) -> None:
         """Settings: a Test Connection button pings the provider with the
         PASTED key (nothing saved) BEFORE the user commits via Connect."""

@@ -328,7 +328,26 @@ function renderPhoneStatus(target, data) {
 
 function renderBuild(target, data) {
   // /plan returns a flat {plan} / {actions} body — no envelope, no payload key.
-  if (data.mode === "code_plan") {
+  if (data.mode === "code_project") {
+    // Multi-file project: summary pill row, agent trace, then one editor per file.
+    target.appendChild(el("p", "summary", data.summary || "Project ready."));
+    const meta = el("div", "card-grid");
+    const entry = el("article", "info-card");
+    entry.appendChild(el("h4", "", "Entry point"));
+    entry.appendChild(el("p", "", data.entry || "main.py"));
+    entry.appendChild(el("span", "pill ok", data.ran_ok ? `verified · ${data.fix_rounds || 0} fix rounds` : "not verified"));
+    meta.appendChild(entry);
+    const filesCard = el("article", "info-card");
+    filesCard.appendChild(el("h4", "", "Files"));
+    filesCard.appendChild(el("p", "", (data.files || []).map((f) => f.path).join(", ")));
+    filesCard.appendChild(el("span", "pill", `${(data.files || []).length} files · ${data.language || "python"}`));
+    meta.appendChild(filesCard);
+    target.appendChild(meta);
+    renderAgentTrace(target, { steps: data.steps || [], final_output: data.final_output || "" });
+    for (const file of data.files || []) {
+      renderEditableArtifact(target, file, data.language || "python", data.goal || "");
+    }
+  } else if (data.mode === "code_plan") {
     // Code-aware plan: language pill, artifact card, then the plan steps.
     target.appendChild(el("p", "summary", data.summary || "Code plan ready."));
     const meta = el("div", "card-grid");
@@ -460,6 +479,60 @@ function renderEditableArtifact(target, artifact, language, goal) {
   editor.rows = Math.min(30, Math.max(8, editor.value.split("\n").length + 2));
   holder.appendChild(editor);
   target.appendChild(holder);
+}
+
+/* ── Workspace artifacts strip (Run saved code) ───────────── */
+
+async function refreshWorkspaceArtifacts() {
+  const holder = document.getElementById("workspaceArtifacts");
+  if (!holder) return;
+  let data;
+  try {
+    data = await requestJson("/build/artifacts");
+  } catch (_) {
+    holder.hidden = true; // panel not authenticated yet; silent
+    return;
+  }
+  const items = (data && data.artifacts) || [];
+  holder.hidden = items.length === 0;
+  clearNode(holder);
+  if (!items.length) return;
+  const title = el("h3", "", "Saved Artifacts");
+  title.appendChild(el("span", "pill", `${items.length}`));
+  holder.appendChild(title);
+  for (const item of items) {
+    const row = el("div", "workspace-artifact-row");
+    row.appendChild(el("span", "artifact-name", item.filename));
+    row.appendChild(el("span", "pill", `${Math.max(1, Math.round(item.bytes / 1024))} KB`));
+    if (item.runnable) {
+      const runBtn = el("button", "cyber-btn small", "Run");
+      runBtn.type = "button";
+      runBtn.addEventListener("click", async () => {
+        runBtn.disabled = true;
+        runBtn.textContent = "Running…";
+        try {
+          const result = await requestJson("/build/run", { filename: item.filename });
+          renderBuild(byId("buildOutput"), {
+            mode: "code_plan",
+            summary: `${result.filename} → ${result.ran_ok ? "ran clean" : "FAILED"}`,
+            language: result.language,
+            artifact: { path: result.filename, content: "", generated_by: "saved" },
+            agent: { steps: [{ kind: result.ran_ok ? "run" : "gave_up", detail: `Run of saved ${result.filename}`, output: result.output || "(no output)" }], final_output: result.output || "" },
+          }, "build");
+          showToast(result.ran_ok ? `${result.filename} ran clean` : `${result.filename} failed — see output`);
+          const out = byId("buildOutput");
+          if (out) out.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        } catch (error) {
+          showToast(String(error.message || error));
+        } finally {
+          runBtn.disabled = false;
+          runBtn.textContent = "Run";
+        }
+      });
+      row.appendChild(runBtn);
+    }
+    holder.appendChild(row);
+  }
 }
 
 /* ── Workflow Rendering ─────────────────────────────────────── */

@@ -357,6 +357,38 @@ function setupActions() {
     run("buildOutput", "build", () => requestJson("/plan/code", { goal, language }), "codePlanButton");
   });
 
+  byId("codeProjectButton").addEventListener("click", async () => {
+    const goal = byId("codeProjectInput").value.trim();
+    if (!goal) { showToast("Describe the project to build"); return; }
+    const language = byId("codeLanguage").value || "python";
+    const button = byId("codeProjectButton");
+    button.disabled = true;
+    button.textContent = "Drafting project…";
+    try {
+      const data = await requestJson("/build/project", { goal, language });
+      renderBuild(byId("buildOutput"), data);
+      byId("buildOutput").classList.remove("empty-state");
+      showToast(data.ran_ok ? "Project verified — entry point ran clean" : "Project drafted (ran with issues — see trace)");
+      refreshWorkspaceArtifacts();
+    } catch (error) {
+      renderError("buildOutput", error);
+      showToast(String(error.message || error));
+    } finally {
+      button.disabled = false;
+      button.textContent = "Plan The Project";
+    }
+  });
+
+  // Workspace artifacts: load when the Build panel opens; the container also
+  // refreshes after each save/project so the Run list stays live.
+  const buildPanel = document.getElementById("buildPanel");
+  if (buildPanel) {
+    const observer = new MutationObserver(() => {
+      if (buildPanel.classList.contains("active")) refreshWorkspaceArtifacts();
+    });
+    observer.observe(buildPanel, { attributes: true, attributeFilter: ["class"] });
+  }
+
   byId("improveButton").addEventListener("click", () => {
     const goal = byId("improveInput").value.trim() || "make NovaControl code itself and improve";
     state.lastBuildGoal = goal;

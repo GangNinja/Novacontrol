@@ -489,16 +489,21 @@ class NovaControlApplication:
 
     # --- Local brain model picker (Ollama) ---
 
-    def local_models(self) -> dict[str, Any]:
+    async def local_models(self) -> dict[str, Any]:
         """Models available on the local Ollama for the brain model picker.
 
         Always a fresh probe (never the boot-time snapshot): models pulled
         after boot must appear. ``picked`` is the persisted choice ("" =
         auto-pick), not necessarily the currently active model.
+
+        The probe is a BLOCKING urlopen, so it runs in a worker thread with
+        a short timeout — a dead Ollama costs the picker ~300ms and never
+        freezes the event loop (SSE streams and every other route stay live).
         """
         stored = self._cloud_llm_store.read("cloud_llm") if self._cloud_llm_store is not None else {}
+        available = await asyncio.to_thread(ollama_models, timeout=0.5)
         return {
-            "available": ollama_models(),
+            "available": available,
             "picked": str(stored.get("local_model", "")),
             "active_model": self.brain.model_name,
         }
@@ -1152,6 +1157,108 @@ class NovaControlApplication:
             "bytes": len(content.encode("utf-8")),
             "goal": goal[:120],
         }
+
+    async def build_code_project(
+        self, goal: str, *, language: str = "python"
+    ) -> dict[str, Any]:
+        """Plan AND draft a small multi-file project with the coding agent.
+
+        The agent drafts a file map (2-5 files + entry point), runs the entry
+        in the sandbox, feeds real errors back, and fixes until it runs clean
+        or the budget is spent. Every file is returned so the UI can show the
+        whole project; each file can then be saved to the workspace.
+        """
+        goal = goal.strip()
+        if not goal:
+            raise ValueError("Describe what to build first.")
+        language = _CODE_LANGUAGES.get(language.lower().strip(), language.lower().strip() or "python")
+        completion = getattr(self.brain, "completion_provider", None)
+        configured = bool(getattr(self.brain, "model_configured", False))
+        if completion is None or not configured:
+            raise ValueError(
+                "Multi-file projects need a coding model. Connect Ollama or a "
+                "cloud key in Settings (single-file drafting works without one)."
+            )
+
+        from novacontrol.core.code_agent import run_project_agent
+
+        try:
+            result = await run_project_agent(goal, language, completion)
+        except Exception as exc:  # noqa: BLE001 - surface as an honest failure
+            raise ValueError(f"The coding agent could not draft the project: {exc}") from exc
+
+        project_name = _code_artifact_name(goal, language).rsplit(".", 1)[0]
+        self._record_activity("build", "Project drafted", f"{language}: {goal[:50]}")
+        return {
+            "mode": "code_project",
+            "project": project_name,
+            "goal": goal,
+            "language": language,
+            "entry": result.entry,
+            "files": result.files,
+            "ran_ok": result.ran_ok,
+            "steps": [s.to_dict() for s in result.steps],
+            "final_output": result.final_output,
+            "fix_rounds": result.fix_rounds,
+            "model": result.model_name,
+            "summary": (
+                f"Agent-drafted a {len(result.files)}-file {language} project "
+                f"(entry {result.entry})"
+                + (" — verified: ran clean" if result.ran_ok
+                   else " — ran with issues (see trace)")
+            ),
+        }
+
+    async def run_saved_artifact(self, filename: str) -> dict[str, Any]:
+        """Re-execute a saved workspace artifact in the same sandbox.
+
+        The Run button for build_workspace/ files: runs the saved code through
+        run_sandboxed (fresh temp cwd, timeout, *nix network isolation) and
+        reports the real output — no drafting, no model needed.
+        """
+        from novacontrol.core.build_workspace import safe_artifact_name
+        from novacontrol.core.code_agent import RuntimeUnavailable, run_sandboxed
+
+        safe_name = safe_artifact_name(filename, "python")
+        path = Path.cwd() / self.BUILD_WORKSPACE_DIRNAME / safe_name
+        if not path.is_file():
+            raise ValueError(f"{safe_name} is not in the Build workspace — save it first.")
+        language = {
+            ".py": "python", ".js": "javascript",
+        }.get(path.suffix.lower(), "")
+        if not language:
+            raise ValueError(
+                f"{safe_name} is {path.suffix or 'unknown'} — only Python and "
+                "JavaScript artifacts can be executed here."
+            )
+        code = path.read_text(encoding="utf-8")
+        try:
+            ran_ok, output = await run_sandboxed(language, [(safe_name, code)], safe_name)
+        except RuntimeUnavailable as exc:
+            raise ValueError(str(exc)) from exc
+        self._record_activity("build", "Artifact run", safe_name)
+        return {
+            "mode": "artifact_run",
+            "filename": safe_name,
+            "language": language,
+            "ran_ok": ran_ok,
+            "output": output,
+        }
+
+    def list_workspace_artifacts(self) -> dict[str, Any]:
+        """Saved artifacts in the Build workspace, newest first."""
+        workspace = Path.cwd() / self.BUILD_WORKSPACE_DIRNAME
+        if not workspace.is_dir():
+            return {"artifacts": []}
+        artifacts = []
+        for path in sorted(workspace.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+            if path.is_file() and not path.name.startswith("."):
+                artifacts.append({
+                    "filename": path.name,
+                    "bytes": path.stat().st_size,
+                    "runnable": path.suffix.lower() in {".py", ".js"},
+                })
+        return {"artifacts": artifacts[:30]}
 
     async def learning_cycle(self, goal: str, *, feedback: str = "") -> dict[str, Any]:
         plan = self.self_improvement.plan(goal)

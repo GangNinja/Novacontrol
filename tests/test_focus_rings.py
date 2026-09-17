@@ -216,6 +216,108 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
+def _resume_process_threads(pid: int) -> None:
+    """Resume every thread of a CREATE_SUSPENDED process (Windows-only use)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _ThreadEntry32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ThreadID", wintypes.DWORD),
+            ("th32OwnerProcessID", wintypes.DWORD),
+            ("tpBasePri", wintypes.LONG),
+            ("tpDeltaPri", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+        ]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.ResumeThread.restype = wintypes.DWORD
+    TH32CS_SNAPTHREAD, THREAD_SUSPEND_RESUME = 0x4, 0x0002
+    snap = k32.CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
+    if snap == -1:
+        return
+    try:
+        entry = _ThreadEntry32()
+        entry.dwSize = ctypes.sizeof(_ThreadEntry32)
+        has = k32.Thread32First(snap, ctypes.byref(entry))
+        while has:
+            if entry.th32OwnerProcessID == pid:
+                handle = k32.OpenThread(THREAD_SUSPEND_RESUME, False, entry.th32ThreadID)
+                if handle:
+                    k32.ResumeThread(handle)
+                    k32.CloseHandle(handle)
+            has = k32.Thread32Next(snap, ctypes.byref(entry))
+    finally:
+        k32.CloseHandle(snap)
+
+
+def _win_job_kill_on_close() -> int | None:
+    """Windows: create a Job object whose processes die when the handle closes.
+
+    Edge re-execs through a short-lived launcher process; terminating the
+    launcher's pid orphans the real browser tree (observed as zombie headless
+    Edge processes interfering with later runs). Assigning the launcher to a
+    kill-on-close job pins the whole tree — children inherit the job — so
+    closing the handle in cleanup is deterministic. Returns a raw HANDLE or
+    None off-Windows / on any failure (best effort by contract).
+    """
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class _BasicLimits(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class _IoCounters(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_uint64) for name in (
+            "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+            "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
+        )]
+
+    class _ExtendedLimits(ctypes.Structure):
+        _fields_ = [
+            ("Basic", _BasicLimits),
+            ("IoInfo", _IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateJobObjectW.restype = wintypes.HANDLE
+    k32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+    k32.SetInformationJobObject.restype = wintypes.BOOL
+    k32.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+    ]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    job = k32.CreateJobObjectW(None, None)
+    if not job:
+        return None
+    info = _ExtendedLimits()
+    info.Basic.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    # JobObjectExtendedLimitInformation == 9 (the basic class rejects the
+    # extended-sized buffer this struct family exposes reliably).
+    if not k32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+        k32.CloseHandle(job)
+        return None
+    return job
+
+
 class FocusRingBrowserWalkTests(unittest.TestCase):
     """Live keyboard walk: real Tab key events, real :focus-visible state."""
 
@@ -259,10 +361,33 @@ class FocusRingBrowserWalkTests(unittest.TestCase):
             # CI Linux images: the Chrome sandbox can fail to initialize under
             # containers/root; both flags are standard headless-CI hygiene.
             browser_args[1:1] = ["--no-sandbox", "--disable-dev-shm-usage"]
+        self._job = _win_job_kill_on_close()
+        suspended = 0x4  # CREATE_SUSPENDED: assign to the job before any re-exec
         self.browser_proc = subprocess.Popen(
             browser_args,
-            stdout=subprocess.DEVNULL, stderr=self.browser_err, creationflags=flags,
+            stdout=subprocess.DEVNULL, stderr=self.browser_err,
+            creationflags=flags | suspended,
         )
+        assigned = False
+        if self._job is not None:
+            import ctypes
+            from ctypes import wintypes
+
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            k32.AssignProcessToJobObject.restype = wintypes.BOOL
+            k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+            k32.OpenProcess.restype = wintypes.HANDLE
+            k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            k32.CloseHandle.argtypes = [wintypes.HANDLE]
+            # PROCESS_SET_QUOTA | PROCESS_TERMINATE — the access the job API
+            # documents for assignment.
+            proc = k32.OpenProcess(0x0100 | 0x0001, False, self.browser_proc.pid)
+            if proc:
+                assigned = bool(k32.AssignProcessToJobObject(self._job, proc))
+                k32.CloseHandle(proc)
+        _resume_process_threads(self.browser_proc.pid)
+        if not assigned:
+            self._job = None  # best effort: cleanup falls back to terminate()
         self._wait_debugger()
 
     def _cleanup(self) -> None:
@@ -273,6 +398,13 @@ class FocusRingBrowserWalkTests(unittest.TestCase):
                     proc.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     proc.kill()
+        # Closing the job handle kills the whole browser tree even when the
+        # launcher already exited (kill-on-close); None = off-Windows/fallback.
+        job = getattr(self, "_job", None)
+        if job:
+            import ctypes
+
+            ctypes.windll.kernel32.CloseHandle(job)
         err = getattr(self, "browser_err", None)
         if err is not None:
             try:
@@ -293,17 +425,26 @@ class FocusRingBrowserWalkTests(unittest.TestCase):
         self.fail("test server did not become healthy")
 
     def _wait_debugger(self) -> None:
-        # ~30s ceiling for a browser that never serves CDP. The connect_ex
-        # pre-probe keeps the loop cheap when the port refuses (a refused
-        # loopback connect is instant, while a full urlopen can cost ~0.5s
-        # per attempt and triple the ceiling on Windows).
+        # The CDP port is the only truth. Some Edge builds re-exec through a
+        # launcher process that exits code 0 within the first second while the
+        # real browser (a separate tree member) keeps serving — so a launcher
+        # exit is NOT fatal by itself. It only accelerates failure: if the
+        # port stays dead for a grace period after the exit, the browser is
+        # genuinely gone and we fail fast with its stderr. The connect_ex
+        # pre-probe keeps refused-port iterations cheap on Windows.
         deadline = time.monotonic() + 30.0
+        exited_at: float | None = None
+        grace_after_exit = 4.0
         while time.monotonic() < deadline:
             if self.browser_proc.poll() is not None:
-                self.fail(
-                    f"headless browser exited (code {self.browser_proc.returncode}) "
-                    f"before its debugging endpoint came up: {self._browser_err_tail()}"
-                )
+                if exited_at is None:
+                    exited_at = time.monotonic()
+                elif time.monotonic() - exited_at > grace_after_exit:
+                    self.fail(
+                        f"headless browser exited (code {self.browser_proc.returncode}) "
+                        f"and its debugging endpoint never came up: "
+                        f"{self._browser_err_tail()}"
+                    )
             probe = socket.socket()
             try:
                 probe.settimeout(0.5)

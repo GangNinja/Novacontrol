@@ -136,6 +136,7 @@ def create_app() -> Any:
     trending = TrendingTopicsProvider()
     try:
         from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+        from fastapi.middleware.gzip import GZipMiddleware
         from fastapi.responses import HTMLResponse
         from fastapi.staticfiles import StaticFiles
     except ModuleNotFoundError as exc:  # pragma: no cover - depends on optional install
@@ -161,6 +162,7 @@ def create_app() -> Any:
     app = FastAPI(title="NovaControl", version="0.1.0")
 
     # Middleware (order matters: last added = first executed)
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(RequestLoggingMiddleware)
     app.add_middleware(RateLimitMiddleware, max_requests=120, window_seconds=60.0)
@@ -312,9 +314,10 @@ def create_app() -> Any:
         """Models available on the local Ollama for the brain model picker.
 
         Always a fresh probe (models pulled after boot appear), never the
-        boot-time snapshot.
+        boot-time snapshot. Awaited (not inline): the Ollama probe blocks a
+        worker thread briefly; the event loop never stalls.
         """
-        return nova.local_models()
+        return await nova.local_models()
 
     @app.post("/brain/local/model")
     async def brain_local_model(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
@@ -495,6 +498,33 @@ def create_app() -> Any:
             return await nova.build_code_plan(
                 str(payload["goal"]), language=str(payload.get("language", "python"))
             )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/build/project")
+    async def build_project(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Draft a small multi-file project with the coding agent.
+
+        Requires a configured model (single-file /plan/code still works
+        without one). Returns the whole file map + agent trace.
+        """
+        try:
+            return await nova.build_code_project(
+                str(payload["goal"]), language=str(payload.get("language", "python"))
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/build/artifacts")
+    async def build_artifacts(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Saved workspace artifacts (newest first) for the Run list."""
+        return nova.list_workspace_artifacts()
+
+    @app.post("/build/run")
+    async def build_run(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Re-execute a saved workspace artifact in the sandbox."""
+        try:
+            return await nova.run_saved_artifact(str(payload.get("filename", "")))
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 

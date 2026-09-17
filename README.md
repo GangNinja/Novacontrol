@@ -36,6 +36,7 @@ One brain → many capabilities:
 - **Learning loop** — fuzzy/contextual resolutions teach the phrase back to the registry, so the same typo takes the fast path next time.
 - **Teachable knowledge** — the Learn tab's *Teach* box and chat's "remember this: …" both persist typed facts as durable knowledge (SQLite-backed KNOWLEDGE namespace, duplicate detection included). Ask about a taught topic later — in chat or the Learn tab's recall — and it comes back: "remember this: the wifi password is hunter2" → "what is the wifi password?" → *"You taught me: the wifi password is hunter2"*.
 - **Code-aware Build planning + coding agent** — the Build tab's *Plan The Code* turns a goal plus a language (Python, JS, TS, Go, Rust, Java, C#, C++, Ruby, Shell, SQL) into a real coding plan: language-idiomatic step sequence, a derived artifact file name (goal words → `fibonacci_generator.py`, `todo_cli_go.go`, …), language-appropriate test-file naming, and a drafted code artifact. When a model is configured, **the coding agent** (`core/code_agent.py`) drafts the code, **executes it in a sandboxed subprocess** (fresh temp cwd, no network on POSIX, 15s wall-clock timeout), reads the real interpreter error, and asks the model to fix exactly that — up to 3 fix rounds — shipping only code that ran clean (or an honest failure trace). The agent's draft → run → fix steps render in the Build tab, which also states up front whether the agent is live or only the runnable scaffold fallback is possible. A math-detection **parity corpus** also runs every math phrasing through both scratch.py and the routing explorer's JS mirror in CI, so the two classifiers can never silently drift apart.
+  **Plan The Project** extends the same agent to multi-file work: the model returns a JSON file map (2–5 files + an entry point), the entry runs in the same sandbox, and real errors drive fixes to the affected files (same 3-round budget, whole-project re-runs). Every drafted file renders with a per-file Copy/Save, saved artifacts list in a **Saved Artifacts** strip, and **Run** re-executes any saved file through the same sandbox (`POST /build/artifacts`, `/build/run`, `/build/save`).
 - **Self-improvement telemetry** — resolutions, clarifications, unknown intents, and failed entity resolutions are recorded and exposed as human-readable improvement findings.
 - **Capability registry** — every subsystem declares its intents, required entities, risk level, executor, and *verification strategy*; the orchestrator derives execution and confirmation policy from that table.
 - **Safety-first execution** — device actions require a server-minted, single-use, expiring approval token; auto-approve is opt-in.
@@ -239,6 +240,8 @@ The J.A.R.V.I.S tab has a **VOICE** button using OS-native speech recognition an
 
 Once paired, phone mode can: **open any installed app** (by alias or package name, discovered from the device), **search inside apps** via deep links (`search cats on youtube on my phone` opens YouTube pre-loaded with the query — nothing is typed), **text a saved contact by name** (the leading words are resolved against the on-device contact book first, so free text is never split by guesswork; the messaging app is pre-filled and *you* press send), **call by saved name** (dialer pre-filled), and **open files/folders** (a named file opens through the system chooser; folders land in the Files app). Bridge status and next steps are surfaced in the J.A.R.V.I.S phone tab, and every executed action lands in the Recent Activity timeline.
 
+> 🔮 **Beyond USB: a no-cable future.** Android 11+ wireless debugging (pair once over Wi-Fi, no cable) is the cheap path and needs zero code rewrites. For control **without USB debugging at all**, [docs/PHONE_COMPANION_APP.md](docs/PHONE_COMPANION_APP.md) sketches a companion Android app built on an AccessibilityService — the phone dials out to NovaControl over WebSocket and becomes a third `PhoneCommandRunner`, unlocking semantic-tree element location for vision-guided phone flows. Sketch only; nothing implemented yet.
+
 ### Routing Explorer
 
 The **Routing** panel answers *"where does my utterance land?"*. Type any phrase and it shows the full gate walk — every intent gate NovaBrain evaluates in order, which one matched (and why), the landing intent with confidence, and a small preview of what you would actually see on that rung:
@@ -280,6 +283,7 @@ FastAPI app factory with REST + SSE + WebSocket surfaces. The full route catalog
 | `POST` | `/brain/decide` | Trace an utterance through the routing gates, with a per-rung preview and optional broad-classifier comparison |
 | `POST` | `/knowledge/teach` · `GET /knowledge` · `POST /knowledge/recall` | Teach durable facts, list them, recall by query |
 | `POST` | `/plan/code` | Coding agent: sandboxed draft → run → fix loop (bounded rounds) + plan, scaffold fallback when no model |
+| `GET` | `/build/artifacts` · `POST /build/run` · `POST /build/save` | Saved Build workspace files, sandbox re-run of a saved file, save a drafted artifact to disk |
 | `POST` | `/explore` | Research pipeline |
 | `GET` | `/explore/trending` | Current daily research topics from live top-story news (rotating window; feeds the Explore panel's chips) |
 | `GET` | `/events/stream` | Live SSE activity channel — every frame carries a `correlation_id` |
@@ -351,6 +355,9 @@ The suite is hermetic: phone and desktop tests use fake runners (`NoopPhoneRunne
 - Tests that shell out to `node` (JS parity mirrors, UI pacing) skip cleanly when Node isn't installed; `scripts/dead_code_hunt.py` is an AST-based dead-def/dead-param finder used to keep the core packages lean.
 - The coding agent's sandbox degrades gracefully: its POSIX network isolation (`unshare`) is best-effort — kernels that restrict unprivileged user namespaces fall back to fresh-cwd + timeout isolation instead of crashing the run.
 - Planning never performs device I/O: phone planning on a machine without `adb` still produces a reviewable plan (execution reports the real gap).
+- Browser-walk e2e tests survive Edge's launcher handoff: the launcher process may exit 0 while the real browser keeps serving CDP, so the wait loop treats the **debugging port as the only truth** (exit only accelerates failure after a grace window), and the browser tree runs inside a **kill-on-close Job Object** so no zombie headless Edge processes survive a run to poison later ones.
+
+**Web performance is measured, not guessed.** A lab-audit pass (loopback baseline → trace → targeted fixes → re-measure) landed four structural wins, each verified in the live page: gzip compression on every text asset (document 34→7 KB on the wire, styles −80%, scripts −74%), the ten app scripts load with `defer` plus `preconnect` for the font origins and a fonts URL slimmed to the weights the CSS actually uses, and the Ollama availability probe runs off the event loop (`asyncio.to_thread`, 0.5 s timeout) — a dead Ollama used to freeze the whole server for ~2 s on every page load; now it costs nothing and never blocks SSE.
 
 UI and rendered-output quality have their own harnesses:
 
@@ -393,6 +400,7 @@ For a browser-driven smoke of the real page (guided-click result card, reduced m
 | Web UI / responsive | ✅ Command-center redesign with fluid auto-fit — 11 panels verified overflow-free from 390px to 1920px, plus a computed-style A/B guard for stylesheet cleanups |
 | Learn tab (teach & recall) | ✅ Typed facts persist as durable knowledge and are recallable in chat — pinned by `tests/test_build_learn.py` |
 | Build tab (code planning) | ✅ Coding agent (draft → run in sandbox → read real errors → fix, 3 rounds) with visible step trace; language-aware plans, derived artifact names, editor + Save-to-disk — pinned by `tests/test_code_agent.py`, `tests/test_build_learn.py` |
+| Build tab (multi-file projects) | ✅ `Plan The Project`: JSON file-map drafting, entry-point sandbox runs with real error feedback, per-file Copy/Save, Saved Artifacts strip + sandbox re-runs — pinned by `tests/test_build_project.py` |
 | Cloud LLM | ✅ OpenAI-compatible / Gemini / Groq / **Claude (native `/v1/messages`)** presets; Test Connection (no-save ping), System-panel token usage + last-error surfacing, Explore synthesis follows the active brain; model picker for local Ollama — pinned by `tests/test_integrations_llm.py`, `tests/test_brain_mode_and_tasks.py`, `tests/test_vision_model_config.py` |
 | Self-improvement | ⚠️ Telemetry + sandboxed previews implemented; fully autonomous improvement is *not* enabled |
 
@@ -418,6 +426,7 @@ See [docs/STATUS.md](docs/STATUS.md) for the phase-by-phase history.
 - [ ] Expanded cloud-LLM presets and model routing (Claude multimodal for Vision — the `/v1/messages` image-content shim)
 - [ ] Trending-chip shuffle (exclude seen topics on demand) and a user-selectable news edition in Settings
 - [ ] LLM-powered chat synthesis: flowing prose answers when a model is configured, template fallback otherwise
+- [ ] Phone companion app (AccessibilityService over WebSocket — see [docs/PHONE_COMPANION_APP.md](docs/PHONE_COMPANION_APP.md)) and wireless-adb pairing for cable-free control
 
 ## 🤝 Contributing
 
