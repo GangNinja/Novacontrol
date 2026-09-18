@@ -361,33 +361,41 @@ class FocusRingBrowserWalkTests(unittest.TestCase):
             # CI Linux images: the Chrome sandbox can fail to initialize under
             # containers/root; both flags are standard headless-CI hygiene.
             browser_args[1:1] = ["--no-sandbox", "--disable-dev-shm-usage"]
-        self._job = _win_job_kill_on_close()
-        suspended = 0x4  # CREATE_SUSPENDED: assign to the job before any re-exec
+        self._job = _win_job_kill_on_close()  # None off-Windows
+        is_windows = sys.platform == "win32"
+        browser_creationflags = flags
+        if is_windows:
+            # CREATE_SUSPENDED: assign the launcher to the kill-on-close job
+            # before it can re-exec the real browser process. POSIX rejects
+            # any nonzero creationflags with ValueError, so this must stay
+            # Windows-only (Linux CI broke here in run #6).
+            browser_creationflags |= 0x4  # CREATE_SUSPENDED
         self.browser_proc = subprocess.Popen(
             browser_args,
             stdout=subprocess.DEVNULL, stderr=self.browser_err,
-            creationflags=flags | suspended,
+            creationflags=browser_creationflags,
         )
-        assigned = False
-        if self._job is not None:
-            import ctypes
-            from ctypes import wintypes
+        if is_windows:
+            assigned = False
+            if self._job is not None:
+                import ctypes
+                from ctypes import wintypes
 
-            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            k32.AssignProcessToJobObject.restype = wintypes.BOOL
-            k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
-            k32.OpenProcess.restype = wintypes.HANDLE
-            k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-            k32.CloseHandle.argtypes = [wintypes.HANDLE]
-            # PROCESS_SET_QUOTA | PROCESS_TERMINATE — the access the job API
-            # documents for assignment.
-            proc = k32.OpenProcess(0x0100 | 0x0001, False, self.browser_proc.pid)
-            if proc:
-                assigned = bool(k32.AssignProcessToJobObject(self._job, proc))
-                k32.CloseHandle(proc)
-        _resume_process_threads(self.browser_proc.pid)
-        if not assigned:
-            self._job = None  # best effort: cleanup falls back to terminate()
+                k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                k32.AssignProcessToJobObject.restype = wintypes.BOOL
+                k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+                k32.OpenProcess.restype = wintypes.HANDLE
+                k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+                k32.CloseHandle.argtypes = [wintypes.HANDLE]
+                # PROCESS_SET_QUOTA | PROCESS_TERMINATE — the access the job API
+                # documents for assignment.
+                proc = k32.OpenProcess(0x0100 | 0x0001, False, self.browser_proc.pid)
+                if proc:
+                    assigned = bool(k32.AssignProcessToJobObject(self._job, proc))
+                    k32.CloseHandle(proc)
+            _resume_process_threads(self.browser_proc.pid)
+            if not assigned:
+                self._job = None  # best effort: cleanup falls back to terminate()
         self._wait_debugger()
 
     def _cleanup(self) -> None:
