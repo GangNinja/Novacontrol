@@ -370,7 +370,7 @@ For a browser-driven smoke of the real page (guided-click result card, reduced m
 
 ## 🛠 Development
 
-- Docs live in [`docs/`](docs/) — start with [ARCHITECTURE.md](docs/ARCHITECTURE.md), [DEVELOPMENT.md](docs/DEVELOPMENT.md), and [STATUS.md](docs/STATUS.md)
+- Docs live in [`docs/`](docs/) — start with [ARCHITECTURE.md](docs/ARCHITECTURE.md), [DEVELOPMENT.md](docs/DEVELOPMENT.md), and [STATUS.md](docs/STATUS.md); [DEVELOPMENT_LOG.md](docs/DEVELOPMENT_LOG.md) records recent work commit-by-commit
 - [AGENTS.md](AGENTS.md) documents architectural conventions for contributors (one language layer, capability registration, verification-first actions)
 - Lint with `ruff check src tests` (line length 100, configured in `pyproject.toml`)
 
