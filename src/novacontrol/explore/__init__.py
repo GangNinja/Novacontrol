@@ -2,6 +2,7 @@
 
 from novacontrol.explore.explainer import ResearchExplainer
 from novacontrol.explore.models import ExploreReport, ExploreRequest, ResearchSource, VideoResult
+from novacontrol.explore.planner import ResearchPlan, plan_research
 from novacontrol.explore.providers import (
     DuckDuckGoLiteSearchProvider,
     SearchProvider,
@@ -18,7 +19,9 @@ __all__ = [
     "ExploreReport",
     "ExploreRequest",
     "ExploreService",
+    "plan_research",
     "ResearchExplainer",
+    "ResearchPlan",
     "ResearchSource",
     "SearchProvider",
     "VideoProvider",

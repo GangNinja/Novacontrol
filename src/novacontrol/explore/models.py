@@ -33,6 +33,11 @@ class ResearchSource:
     url: str
     snippet: str = ""
     source_type: str = "web"
+    # The readable prose of the page itself, when PageReader could fetch it.
+    # Deliberately NOT part of to_dict(): it is evidence for synthesis, and
+    # shipping six pages of article text to the browser on every report would
+    # bloat the response for a field the UI does not render.
+    content: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {

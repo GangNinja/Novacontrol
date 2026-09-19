@@ -133,7 +133,9 @@
   // including LIVE: reduced motion turning on mid-session must detach the
   // tilt listeners and clear any transforms left on the cards.
   const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
-  const CARD_SELECTOR = ".surface, .command-console, .info-card, .metric-card";
+  // `.telemetry-card` belongs in the same family: the Command Center's live
+  // metric cards are cards, and they respond to the pointer like the rest.
+  const CARD_SELECTOR = ".surface, .command-console, .info-card, .metric-card, .telemetry-card";
 
   function clearTilt() {
     document.querySelectorAll(CARD_SELECTOR).forEach((card) => {

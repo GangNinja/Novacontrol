@@ -49,7 +49,9 @@ class NovaBrain:
         self._cloud_provider: object | None = None
         # User-facing brain mode: "auto" (best local LLM, else scratch), "llm"
         # (force the local/external env model), "scratch" (always local rules),
-        # "cloud" (the configured cloud LLM, falling back like "llm").
+        # "cloud" (the configured cloud LLM, and ONLY when the user picks it —
+        # a stored key never activates itself; with none configured it falls
+        # back like "llm").
         self.mode = "auto"
         self.scratch = ScratchReasoningEngine()
         self._conversation = conversation or ConversationManager(
@@ -92,12 +94,17 @@ class NovaBrain:
         return "llm" if self.model_configured else "scratch"
 
     def set_cloud_provider(self, provider: object | None) -> None:
-        """Install (or clear) the cloud LLM and switch onto it when present."""
+        """Install (or clear) the cloud LLM key — WITHOUT switching onto it.
+
+        Storing a key is not asking for it. The cloud brain runs only when the
+        user selects Cloud themselves (`set_mode("cloud")`), so a configured
+        key sits ready and unused while the local brain keeps answering. It
+        used to activate on install, which silently pointed every chat and
+        research request at a provider the user had merely pasted a key into.
+        Clearing the key while Cloud IS active falls back to the local brain.
+        """
         self._cloud_provider = provider
-        if provider is not None:
-            self.mode = "cloud"
-            self.completion_provider = provider
-        elif self.mode == "cloud":
+        if provider is None and self.mode == "cloud":
             self.set_mode("auto")
 
     def set_local_provider(self, provider: object) -> None:

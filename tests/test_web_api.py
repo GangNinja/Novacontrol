@@ -375,6 +375,46 @@ class CommandExecutionApiTests(_IsolatedApiTestCase):
         (asset_version,) = tokens
         self.assertEqual(match.group(1), asset_version[:8], "UI stamp must be the injected asset version, shortened")
 
+    def test_health_reports_the_same_build_id_the_page_shows(self) -> None:
+        """`/health` and the sidebar stamp must agree, or staleness can't be detected.
+
+        The page compares its own stamp against /health to notice that it is
+        rendering CSS/JS from before an edit. Both sides have to come from the
+        same content-derived hash: if they diverge the check either never fires
+        (a stale page looks current) or fires forever (a current page is told to
+        reload).
+        """
+        body = self._client.get("/").text
+        match = re.search(r"UI v([0-9a-f]{8})", body)
+        self.assertIsNotNone(match, "served HTML must carry a visible 'UI v<8-hex>' stamp")
+
+        health = self._client.get("/health")
+        self.assertEqual(health.status_code, 200)
+        payload = health.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["ui_version"], "/health must report the build id it is serving")
+        self.assertEqual(
+            payload["ui_version"][:8],
+            match.group(1),
+            "/health build id must match the build id stamped into the page",
+        )
+
+    def test_health_build_id_changes_when_a_ui_file_changes(self) -> None:
+        """The build id has to move when the UI does — that is the whole mechanism."""
+        from pathlib import Path
+
+        from novacontrol.api.app import _static_asset_version
+
+        static_dir = Path("src/novacontrol/web/static")
+        before = _static_asset_version(static_dir)
+        probe = static_dir / "js" / "_probe_stale_build.js"
+        probe.write_text("// probe\n", encoding="utf-8")
+        try:
+            self.assertNotEqual(before, _static_asset_version(static_dir))
+        finally:
+            probe.unlink()
+        self.assertEqual(before, _static_asset_version(static_dir))
+
 
 class AskAndExploreApiTests(_IsolatedApiTestCase):
     """The flattened {route, intent, summary, data} envelope and the flat /explore
@@ -527,14 +567,16 @@ class BrainModeAndTaskApiTests(_IsolatedApiTestCase):
         carries its label and model, the key never travels back."""
         installed = self._client.post(
             "/brain/cloud",
-            json={"provider": "claude", "api_key": "sk-ant-test-1234567890", "model": "claude-opus-4-1"},
+            json={"provider": "claude", "api_key": "sk-ant-test-1234567890abcdefgh", "model": "claude-opus-4-1"},
         )
         self.assertEqual(installed.status_code, 200)
         body = installed.json()
-        self.assertEqual(body["mode"], "cloud")
+        # Storing a key never switches the brain: the mode the user is running
+        # (auto/local by default) survives, and Cloud is a deliberate choice.
+        self.assertEqual(body["mode"], "auto")
         self.assertEqual(body["cloud"]["provider"], "claude")
         self.assertEqual(body["cloud"]["model"], "claude-opus-4-1")
-        self.assertNotIn("sk-ant-test-1234567890", json.dumps(body))
+        self.assertNotIn("sk-ant-test-1234567890abcdefgh", json.dumps(body))
 
         # The stored config re-arms at boot (same namespace as other clouds).
         stored = self._nova._cloud_llm_store.read("cloud_llm")
@@ -549,22 +591,22 @@ class BrainModeAndTaskApiTests(_IsolatedApiTestCase):
         self.assertEqual(no_key.status_code, 422)
 
         installed = self._client.post(
-            "/brain/cloud", json={"provider": "openai", "api_key": "sk-test-1234567890"}
+            "/brain/cloud", json={"provider": "openai", "api_key": "sk-test-1234567890abcdefgh"}
         )
         self.assertEqual(installed.status_code, 200)
         body = installed.json()
-        self.assertEqual(body["mode"], "cloud")
+        self.assertEqual(body["mode"], "auto")
         cloud = body["cloud"]
         self.assertTrue(cloud["configured"])
         self.assertEqual(cloud["provider"], "openai")
         # The key must NEVER travel back to any client — redacted tail only.
-        self.assertNotIn("sk-test-1234567890", json.dumps(body))
-        self.assertTrue(cloud["api_key_hint"].endswith("7890"))
+        self.assertNotIn("sk-test-1234567890abcdefgh", json.dumps(body))
+        self.assertTrue(cloud["api_key_hint"].endswith("efgh"))
 
         # The config (key included) persists locally and re-arms at boot.
         stored = self._nova._cloud_llm_store.read("cloud_llm")
         self.assertEqual(stored["provider"], "openai")
-        self.assertEqual(stored["api_key"], "sk-test-1234567890")
+        self.assertEqual(stored["api_key"], "sk-test-1234567890abcdefgh")
 
         cleared = self._client.post("/brain/cloud/clear")
         self.assertEqual(cleared.status_code, 200)
@@ -593,19 +635,19 @@ class BrainModeAndTaskApiTests(_IsolatedApiTestCase):
         ) as builder:
             ok = self._client.post(
                 "/brain/cloud/test",
-                json={"provider": "openai", "api_key": "sk-paste-1234567890", "model": "gpt-4o-mini"},
+                json={"provider": "openai", "api_key": "sk-paste-1234567890abcdefgh", "model": "gpt-4o-mini"},
             )
         self.assertEqual(ok.status_code, 200)
         body = ok.json()
         self.assertTrue(body["ok"])
         self.assertEqual(body["sample"], "ok")
         self.assertFalse(body["saved"], "a test ping must never claim it saved")
-        builder.assert_called_once_with("openai", "sk-paste-1234567890", model="gpt-4o-mini")
+        builder.assert_called_once_with("openai", "sk-paste-1234567890abcdefgh", model="gpt-4o-mini")
 
         # Nothing persisted, nothing activated.
         self.assertEqual(self._nova._cloud_llm_store.read("cloud_llm"), {})
         self.assertFalse(self._nova.brain.cloud_provider_name)
-        self.assertNotIn("sk-paste-1234567890", json.dumps(self._client.get("/brain/mode").json()))
+        self.assertNotIn("sk-paste-1234567890abcdefgh", json.dumps(self._client.get("/brain/mode").json()))
 
         # A failing ping surfaces the provider's rejection as a 422 detail.
         class _ExplodingProvider:
@@ -620,7 +662,7 @@ class BrainModeAndTaskApiTests(_IsolatedApiTestCase):
         ):
             bad = self._client.post(
                 "/brain/cloud/test",
-                json={"provider": "openai", "api_key": "sk-bad-1234567890"},
+                json={"provider": "openai", "api_key": "sk-bad-1234567890abcdefgh"},
             )
         self.assertEqual(bad.status_code, 422)
         self.assertIn("401", bad.json()["detail"])
@@ -629,6 +671,22 @@ class BrainModeAndTaskApiTests(_IsolatedApiTestCase):
         # Validation parity with the real connect: unknown provider + empty key.
         self.assertEqual(self._client.post("/brain/cloud/test", json={"provider": "nope", "api_key": "k"}).status_code, 422)
         self.assertEqual(self._client.post("/brain/cloud/test", json={"provider": "openai", "api_key": "  "}).status_code, 422)
+
+    def test_vertex_format_key_is_rejected_for_gemini(self) -> None:
+        """The motivating mixup: a Google Cloud/Vertex token pasted into the
+        Gemini (AI Studio) provider is rejected at save AND test time with a
+        message that names the mistake and the fix — and nothing is stored."""
+        vertex_key = "AQ.Ab8RLIrN2fTq_example_vertex_service_token_9SVA"
+        for path in ("/brain/cloud", "/brain/cloud/test"):
+            response = self._client.post(path, json={"provider": "gemini", "api_key": vertex_key})
+            self.assertEqual(response.status_code, 422, path)
+            detail = response.json()["detail"]
+            self.assertIn("AI Studio", detail)
+            self.assertIn("Vertex", detail)
+            self.assertIn("aistudio.google.com/apikey", detail)
+        # Rejected at the gate: nothing persisted, brain untouched.
+        self.assertEqual(self._nova._cloud_llm_store.read("cloud_llm"), {})
+        self.assertFalse(self._nova.brain.cloud_provider_name)
 
     def test_chat_clear_wipes_server_conversation(self) -> None:
         self._client.post("/ask", json={"request": "hello there"})

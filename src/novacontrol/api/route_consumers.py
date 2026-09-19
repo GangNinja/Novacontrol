@@ -47,6 +47,9 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("POST", "/learn"): "renderLearning",
     ("POST", "/train"): "renderLearning",
     ("GET", "/system/health"): "renderHealth",
+    # Command Center telemetry has its own poll loop and in-place card updater
+    # (js/telemetry.js) rather than going through run(type) -> render().
+    ("GET", "/system/telemetry"): "renderTelemetry",
     ("GET", "/system/harden"): "renderHealth",
     ("GET", "/system/package"): "renderGeneric",  # explicit generic fallback
     ("GET", "/status"): "renderGeneric",  # home metrics + generic fallback card

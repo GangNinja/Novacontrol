@@ -36,15 +36,80 @@ function submitChat(options = {}) {
   });
 }
 
+/* ── Build freshness ──────────────────────────────────────── */
+
+// There is no build step: the CSS/JS on disk ARE the product. A tab left open
+// (or restored) across an edit therefore keeps rendering a build that no longer
+// exists on the server, which is how an already-fixed layout keeps getting
+// reported as broken. Every asset URL carries a content hash and the sidebar
+// shows it as `UI v<hex>`; /health reports the SAME hash for the build being
+// served right now. When they disagree, this page is old — say so instead of
+// letting the reader debug a build that is gone.
+const BUILD_CHECK_INTERVAL_MS = 60000;
+let staleBuildReported = false;
+
+function currentBuildId() {
+  const stamp = byId("uiVersion");
+  const match = stamp && /v([0-9a-f]{6,})/.exec(stamp.textContent || "");
+  return match ? match[1] : "";
+}
+
+function watchForStaleBuild() {
+  const check = async () => {
+    if (staleBuildReported || document.hidden) return;
+    const shown = currentBuildId();
+    if (!shown) return;
+    let served = "";
+    try {
+      const response = await fetch("/health", { headers: authHeaders() });
+      if (!response.ok) return;
+      served = String((await response.json()).ui_version || "");
+    } catch (_) { return; } // offline or restarting: nothing to compare against
+    if (!served || served.startsWith(shown)) return;
+    staleBuildReported = true;
+    reportStaleBuild(shown, served.slice(0, 8));
+  };
+  check();
+  setInterval(check, BUILD_CHECK_INTERVAL_MS);
+  // Coming back to the tab is the moment a stale page is most likely to be
+  // read as current, so re-check then rather than waiting out the interval.
+  window.addEventListener("focus", check);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) check(); });
+}
+
+function reportStaleBuild(shown, served) {
+  const stamp = byId("uiVersion");
+  if (stamp) {
+    stamp.dataset.stale = "true";
+    stamp.textContent = `UI v${shown} — old, server has v${served}`;
+    stamp.title = "This tab was loaded before the UI files changed, so it is rendering an old build. Reload to get the current one.";
+  }
+  showToastWithAction({
+    message: `This tab is running an older UI build (v${shown}); the server now serves v${served}. Reload to get the current build.`,
+    actionLabel: "Reload",
+    seconds: 600,
+    onAction: () => { window.location.reload(); },
+  });
+}
+
 /* ── Tab Navigation ───────────────────────────────────────── */
 
 function setupTabs() {
   document.querySelectorAll(".nav-item").forEach((button) => {
     button.addEventListener("click", () => {
+      // Every panel is hidden by the same class, so the target panel must be
+      // cleared of any stray state before it is shown: a panel left laid out
+      // under another one is exactly the "pages stack under Command" failure.
       document.querySelectorAll(".nav-item").forEach((item) => item.classList.remove("active"));
       document.querySelectorAll(".panel").forEach((panel) => panel.classList.remove("active"));
       button.classList.add("active");
       byId(button.dataset.panel).classList.add("active");
+      // Panels share ONE scroll container, so the position left behind by the
+      // previous panel carries over: opening a second panel could land the
+      // reader a thousand pixels down it, mid-card, with the panel heading
+      // off-screen above. Every switch starts at the top.
+      const workspace = document.querySelector(".workspace");
+      if (workspace) workspace.scrollTop = 0;
       // Panel choice survives reloads; restored on init by restoreActivePanel().
       try { localStorage.setItem("novacontrol.activePanel", button.dataset.panel); } catch (_) { /* storage unavailable */ }
     });
@@ -54,7 +119,10 @@ function setupTabs() {
 function restoreActivePanel() {
   let saved = "";
   try { saved = localStorage.getItem("novacontrol.activePanel") || ""; } catch (_) { /* storage unavailable */ }
-  const target = saved && byId(saved) ? saved : "commandPanel";
+  // "homePanel" is the Command tab's real id (the old "commandPanel" fallback
+  // matched no element, so a first visit restored nothing and only worked
+  // because index.html ships homePanel pre-activated).
+  const target = saved && byId(saved) ? saved : "homePanel";
   const nav = document.querySelector(`.nav-item[data-panel="${target}"]`);
   if (nav) nav.click();
 }
@@ -857,7 +925,11 @@ async function connectCloudLlm() {
   try {
     const result = await requestJson("/brain/cloud", { provider, api_key: apiKey, model });
     byId("cloudApiKey").value = ""; // never linger in the DOM after install
-    showToast(brainModeToast(result));
+    // Saving a key does NOT switch the brain (the server keeps the current
+    // mode), so say what happened instead of implying the cloud is now live.
+    showToast(result.mode === "cloud"
+      ? brainModeToast(result)
+      : `Cloud LLM saved — still answering locally until you pick Cloud LLM in the Brain switch`);
     await refreshCloudStatus();
     await refreshStatus(); // brain switch + AI Brain card follow the cloud mode
   } catch (error) {
@@ -1068,6 +1140,7 @@ async function loadTrendingTopics() {
 setupTabs();
 setupActions();
 setupVision();
+watchForStaleBuild(); // a tab left open across an edit is rendering an old build
 setupRoutingExplorer();
 setupVoice();
 restoreActivePanel(); // must run after setupTabs binds the nav clicks
@@ -1076,3 +1149,5 @@ connectActivitySource(); // one live activity channel for the whole page
 loadActivityFromServer(); // seed the timeline from the server journal
 loadTrendingTopics(); // Explore chips from today's news (falls back to static chips)
 refreshStatus();
+setupTelemetrySection(); // Command Center metric cards + NOVA CORE indicator
+startTelemetry(); // one poll loop feeds both, paused while the tab is hidden

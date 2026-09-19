@@ -459,6 +459,7 @@ function renderEditableArtifact(target, artifact, language, goal) {
       showToast(`Saved → ${result.filename} (${result.bytes} bytes)`);
       const note = el("p", "summary", `Saved to ${result.path}`);
       holder.appendChild(note);
+      refreshWorkspaceArtifacts();
     } catch (error) {
       showToast(String(error.message || error));
     } finally {

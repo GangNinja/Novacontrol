@@ -20,6 +20,7 @@ from novacontrol.integrations import (
     build_vision_provider,
     make_ollama_reprobe,
     ollama_models,
+    validate_cloud_key,
 )
 from novacontrol.integrations import llm as llm_module
 from novacontrol.integrations.llm import cloud_llm_presets, get_cloud_preset
@@ -409,6 +410,61 @@ class ProviderTelemetryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(provider.last_error, "RuntimeError: HTTP Error 401: Unauthorized")
         self.assertEqual(provider.usage["requests"], 0)
+
+
+class ValidateCloudKeyTests(unittest.TestCase):
+    """Paste-time key-format gate: impossible keys never reach the wire.
+
+    The motivating case: a Google Cloud/Vertex service token (AQ.…) pasted
+    into the Gemini (AI Studio) provider 404s mysteriously — the format gate
+    now names the mixup at save/test time instead.
+    """
+
+    def test_vertex_token_in_gemini_is_rejected_with_mixup_message(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            validate_cloud_key("gemini", "AQ.Ab8RLIrN2fTq_example_service_token_9SVA")
+        message = str(ctx.exception)
+        self.assertIn("AI Studio", message)
+        self.assertIn("Vertex", message)
+        self.assertIn("aistudio.google.com/apikey", message)
+
+    def test_oauth_token_in_gemini_is_also_caught(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            validate_cloud_key("gemini", "ya29.a0AfH6SMB_example_oauth_token")
+        self.assertIn("AI Studio", str(ctx.exception))
+
+    def test_wellformed_ai_studio_key_passes(self) -> None:
+        validate_cloud_key("gemini", "AIza" + "A1_-" * 9)  # 39 chars, AIza charset
+
+    def test_openai_sk_key_passes_and_garbage_is_rejected(self) -> None:
+        validate_cloud_key("openai", "sk-proj-AAAAAAAAAAAAAAAAAAAAAAAA123456")
+        with self.assertRaises(ValueError) as ctx:
+            validate_cloud_key("openai", "gsk_totally_not_openai_1234567890")
+        self.assertIn("sk-", str(ctx.exception))
+
+    def test_claude_sk_ant_key_passes_and_bare_sk_is_rejected(self) -> None:
+        validate_cloud_key("claude", "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAA")
+        with self.assertRaises(ValueError) as ctx:
+            validate_cloud_key("claude", "sk-plain-openai-style-1234567890")
+        self.assertIn("sk-ant-", str(ctx.exception))
+
+    def test_groq_and_deepseek_shapes(self) -> None:
+        validate_cloud_key("groq", "gsk_" + "a" * 24)
+        with self.assertRaises(ValueError):
+            validate_cloud_key("groq", "sk-not-groq-12345678901234567890")
+        validate_cloud_key("deepseek", "sk-" + "0123456789abcdef" * 2)
+        with self.assertRaises(ValueError):
+            validate_cloud_key("deepseek", "gsk_" + "a" * 24)  # Groq key, not DeepSeek
+
+    def test_unvalidated_providers_pass_anything(self) -> None:
+        # openrouter/mistral formats are not reliably distinctive: no gate.
+        for provider in ("openrouter", "mistral"):
+            validate_cloud_key(provider, "totally-unrecognized-shape")
+
+    def test_empty_and_whitespace_keys_pass_through(self) -> None:
+        # Empty is the caller's required-field check, not a format problem.
+        for key in ("", "   "):
+            validate_cloud_key("gemini", key)
 
 
 if __name__ == "__main__":

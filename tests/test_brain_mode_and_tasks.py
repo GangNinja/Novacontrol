@@ -157,6 +157,7 @@ class ChatCloudRoundTripTests(unittest.IsolatedAsyncioTestCase):
         # Point the preset URL at the local fake for this test only.
         cloud.base_url = self.base_url
         brain.set_cloud_provider(cloud)
+        brain.set_mode("cloud")  # the cloud brain runs only when it is chosen
 
         response = await brain.chat(BrainRequest(text="hello there", context={}))
 
@@ -296,8 +297,13 @@ class ExploreFollowsBrainModeTests(unittest.IsolatedAsyncioTestCase):
             app.set_brain_mode("llm")
             self.assertEqual(self._explore_provider(app), "fake-local")
 
-            # cloud: the cloud provider takes over BOTH surfaces.
-            app.set_cloud_llm("openai", "sk-test-12345678", model="gpt-4o-mini")
+            # Configuring a cloud key does NOT move either surface onto it: the
+            # local model keeps answering until Cloud is selected by hand.
+            app.set_cloud_llm("openai", "sk-test-1234567890abcdefgh", model="gpt-4o-mini")
+            self.assertEqual(self._explore_provider(app), "fake-local")
+
+            # cloud SELECTED: the cloud provider takes over BOTH surfaces.
+            app.set_brain_mode("cloud")
             self.assertEqual(self._explore_provider(app), "cloud:openai")
 
             # scratch with cloud configured: STILL templates — scratch wins.
@@ -359,14 +365,21 @@ class BrainModeCloudTests(unittest.IsolatedAsyncioTestCase):
         brain._ollama_reprobe = None
         return brain
 
-    async def test_cloud_provider_activates_and_survives_mode_detours(self) -> None:
+    async def test_installing_a_cloud_key_stays_local_until_cloud_is_selected(self) -> None:
+        """Storing a key is not asking for it: a configured cloud LLM must sit
+        unused until the user picks Cloud, and then survive mode detours."""
         provider = _FakeLLM()
         brain = self._brain(EchoLLMProvider())
         brain.set_cloud_provider(provider)
 
-        self.assertEqual(brain.mode, "cloud")
-        self.assertIs(brain.completion_provider, provider)
+        # Installed, reported, and NOT in use: local mode is untouched.
+        self.assertEqual(brain.mode, "auto")
         self.assertEqual(brain.cloud_provider_name, "fake-ollama")
+        self.assertEqual(str(brain.completion_provider.name), "echo")
+
+        # Selecting Cloud is what activates it.
+        brain.set_mode("cloud")
+        self.assertIs(brain.completion_provider, provider)
 
         # A scratch detour then "cloud" again re-arms the SAME cloud provider.
         brain.set_mode("scratch")

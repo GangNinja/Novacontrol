@@ -11,7 +11,9 @@ These tests pin:
   * run_saved_artifact: real subprocess run of a saved .py, 422-style
     rejection of missing/non-runnable files;
   * list_workspace_artifacts: newest-first with runnable flags;
-  * HTTP surface: /build/project 422 without a model, /build/run shape.
+  * scaffold fallback: no model -> deterministic runnable multi-file starter
+    (mode code_project, generated_by scaffold, sandbox-verified entry point);
+  * HTTP surface: /build/project scaffold without a model, /build/run shape.
 """
 from __future__ import annotations
 
@@ -151,6 +153,114 @@ class ProjectAgentTests(unittest.TestCase):
         self.assertTrue(any(s.kind == "skipped" for s in out.steps))
 
 
+class ProjectScaffoldFallbackTests(unittest.TestCase):
+    """No model (or a failing one) still yields a runnable multi-file starter."""
+
+    def setUp(self) -> None:
+        import os
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self._previous_cwd = Path.cwd()
+        os.chdir(self._tmp.name)
+
+    def tearDown(self) -> None:
+        import os
+
+        os.chdir(self._previous_cwd)
+        self._tmp.cleanup()
+
+    def _app(self):
+        from novacontrol.application import NovaControlApplication
+
+        return NovaControlApplication(data_dir=Path(self._tmp.name) / "data")
+
+    def test_python_scaffold_shape(self) -> None:
+        from novacontrol.application import _scaffold_project
+
+        files, entry = _scaffold_project("a calculator", "python")
+        paths = [f["path"] for f in files]
+        self.assertEqual(entry, "main.py")
+        self.assertEqual(len(paths), 3)
+        self.assertIn("main.py", paths)
+        self.assertTrue(any(p.startswith("test_") for p in paths))
+        # The logic module name must be importable from main.py.
+        logic = next(p for p in paths if p.endswith("_logic.py"))
+        module = logic[:-3]
+        main_src = next(f["content"] for f in files if f["path"] == "main.py")
+        self.assertIn(f"from {module} import", main_src)
+
+    def test_python_scaffold_entry_actually_runs(self) -> None:
+        from novacontrol.application import _scaffold_project
+        from novacontrol.core.code_agent import run_sandboxed
+
+        import asyncio
+
+        files, entry = _scaffold_project("a palindrome checker", "python")
+        ran_ok, output = asyncio.run(run_sandboxed(
+            "python", [(f["path"], f["content"]) for f in files], entry,
+        ))
+        self.assertTrue(ran_ok)
+        self.assertIn("demo ->", output)
+
+    def test_javascript_scaffold_runs_when_node_exists(self) -> None:
+        import shutil
+
+        if not shutil.which("node"):
+            self.skipTest("no node runtime")
+        from novacontrol.application import _scaffold_project
+        from novacontrol.core.code_agent import run_sandboxed
+
+        import asyncio
+
+        files, entry = _scaffold_project("a string utils project", "javascript")
+        paths = [f["path"] for f in files]
+        self.assertIn("package.json", paths)
+        ran_ok, _ = asyncio.run(run_sandboxed(
+            "javascript", [(f["path"], f["content"]) for f in files], entry,
+        ))
+        self.assertTrue(ran_ok)
+
+    def test_non_runnable_language_gets_honest_skip(self) -> None:
+        import asyncio
+
+        app = self._app()
+        result = asyncio.run(app.build_code_project("some schema", language="sql"))
+        self.assertEqual(result["generated_by"], "scaffold")
+        self.assertFalse(result["ran_ok"])
+        self.assertTrue(any(s["kind"] == "skipped" for s in result["steps"]))
+
+    def test_build_code_project_falls_back_without_model(self) -> None:
+        import asyncio
+
+        app = self._app()  # default brain: echo provider, model not configured
+        result = asyncio.run(app.build_code_project("a vowel counter", language="python"))
+        self.assertEqual(result["mode"], "code_project")
+        self.assertEqual(result["generated_by"], "scaffold")
+        self.assertTrue(result["ran_ok"])
+        self.assertEqual(result["model"], "")
+        self.assertIn("Scaffolded", result["summary"])
+        self.assertIn("connect", result["summary"])
+        self.assertTrue(any(s["kind"] == "run" for s in result["steps"]))
+
+    def test_fallback_after_agent_failure_records_reason(self) -> None:
+        import asyncio
+
+        app = self._app()
+
+        class DyingProvider:
+            name = "dying"
+
+            async def complete(self, messages: Any, max_tokens: int = 0) -> str:
+                raise RuntimeError("provider exploded")
+
+        app.brain.completion_provider = DyingProvider()
+        result = asyncio.run(app.build_code_project("a sorter", language="python"))
+        self.assertEqual(result["generated_by"], "scaffold")
+        self.assertTrue(result["ran_ok"])  # scaffold still verified
+        gave_up = next(s for s in result["steps"] if s["kind"] == "gave_up")
+        self.assertIn("provider exploded", gave_up["detail"])
+
+
 class RunSavedArtifactTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -230,12 +340,19 @@ class BuildProjectApiTests(unittest.TestCase):
         os.chdir(self._previous_cwd)
         self._tmp.cleanup()
 
-    def test_project_without_model_is_422_with_guidance(self) -> None:
+    def test_project_without_model_returns_scaffold(self) -> None:
         response = self.client.post(
             "/build/project", json={"goal": "a calculator", "language": "python"}
         )
-        self.assertEqual(response.status_code, 422)
-        self.assertIn("coding model", response.json()["detail"])
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["mode"], "code_project")
+        self.assertEqual(body["generated_by"], "scaffold")
+        self.assertTrue(body["ran_ok"])  # scaffold entry runs clean in the sandbox
+        self.assertEqual(body["entry"], "main.py")
+        self.assertGreaterEqual(len(body["files"]), 2)
+        self.assertIn("Scaffolded", body["summary"])
+        self.assertTrue(any(s["kind"] == "run" and "verified" in s["detail"] for s in body["steps"]))
 
     def test_run_missing_artifact_is_422(self) -> None:
         response = self.client.post("/build/run", json={"filename": "ghost.py"})

@@ -22,6 +22,7 @@ from novacontrol.explore.trending import TrendingTopicsProvider
 from novacontrol.planning import PlanningEngine, WorkflowExecutor
 from novacontrol.release import ReleaseHardeningChecker, RuntimePackageBuilder, SystemHealthMonitor
 from novacontrol.settings import ApprovalMode
+from novacontrol.telemetry import SystemTelemetry
 
 
 _ASSET_VERSION_MARKER = "__NC_ASSET_VERSION__"
@@ -34,6 +35,17 @@ _UI_VERSION_MARKER = "__NC_UI_VERSION__"
 # token store is bounded by the expiry sweep on every undo look-up.
 _TASK_UNDO_WINDOW_SECONDS = 30.0
 _task_clear_snapshots: dict[str, dict[str, Any]] = {}
+
+
+def _telemetry_sampler_enabled() -> bool:
+    """Whether the slow-sensor sampler thread runs.
+
+    Off by environment for test runs, which would otherwise spawn a probe
+    process per app instance. The endpoint still works with it off: the cheap
+    metrics are read live and the sampled ones report themselves unavailable.
+    """
+    disabled = os.environ.get("NOVACONTROL_DISABLE_TELEMETRY_SAMPLER", "").strip().lower()
+    return disabled not in {"1", "true", "yes", "on"}
 
 
 def _static_asset_version(static_dir: Path) -> str:
@@ -171,12 +183,22 @@ def create_app() -> Any:
     if static_dir.exists():
         app.mount("/static", NoCacheStaticFiles(directory=static_dir), name="static")
 
+    # Real system telemetry for the Command Center. The GPU/network/temperature
+    # probe costs seconds, so a daemon thread samples it on a slow cadence and
+    # /system/telemetry serves the cached reading — a poll never spawns anything.
+    telemetry = SystemTelemetry(nova, background=_telemetry_sampler_enabled())
+
+    @app.on_event("startup")
+    async def start_telemetry() -> None:
+        telemetry.start()
+
     @app.on_event("startup")
     async def startup() -> None:
         await nova.start()
 
     @app.on_event("shutdown")
     async def shutdown() -> None:
+        telemetry.stop()
         await nova.stop()
 
     async def require_auth(authorization: str | None = Header(default=None)) -> str:
@@ -187,7 +209,12 @@ def create_app() -> Any:
 
     @app.get("/health")
     async def health() -> dict[str, str]:
-        return {"status": "ok"}
+        # The build id belongs to liveness, not decoration: the UI files on disk
+        # ARE the product (no build step), so a long-lived page can be rendering
+        # CSS/JS from before an edit — which is how an already-fixed layout bug
+        # keeps being reported. The page compares its own stamp against this and
+        # offers a reload, so "which build am I looking at" is never a mystery.
+        return {"status": "ok", "ui_version": _static_asset_version(static_dir)}
 
     @app.get("/")
     async def web_app() -> Any:
@@ -195,8 +222,9 @@ def create_app() -> Any:
         # into every script/link URL so edits rekey assets without a manual bump.
         html = (static_dir / "index.html").read_text(encoding="utf-8")
         version = _static_asset_version(static_dir)
-        # The sidebar footer shows the same content-derived build id (shortened),
-        # so a stale cached page is recognizable at a glance: refresh and compare.
+        # The sidebar footer shows the same content-derived build id (shortened)
+        # that /health reports, so a stale cached page is recognizable at a
+        # glance and self-detecting: the page polls /health and says so.
         # Never hand-write a date token here — the hash is the stamp.
         html = html.replace(_ASSET_VERSION_MARKER, version).replace(_UI_VERSION_MARKER, version[:8])
         return HTMLResponse(content=html, headers=_never_cache_headers())
@@ -214,6 +242,17 @@ def create_app() -> Any:
     @app.get("/system/health")
     async def system_health() -> dict[str, Any]:
         return SystemHealthMonitor(Path.cwd()).run(nova.status()).to_dict()
+
+    @app.get("/system/telemetry")
+    async def system_telemetry() -> dict[str, Any]:
+        """Live machine metrics for the Command Center, all of them real.
+
+        Cheap metrics (CPU, RAM, disk, battery, uptime) are read live on each
+        request; the expensive ones come from the sampler thread's cache. Every
+        metric carries `available` and, when false, the reason — the UI renders
+        "Unavailable" rather than a plausible-looking number nobody measured.
+        """
+        return telemetry.payload()
 
     @app.get("/system/harden")
     async def system_harden() -> dict[str, Any]:
@@ -505,8 +544,10 @@ def create_app() -> Any:
     async def build_project(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
         """Draft a small multi-file project with the coding agent.
 
-        Requires a configured model (single-file /plan/code still works
-        without one). Returns the whole file map + agent trace.
+        Uses the configured model when available; without one it falls back
+        to a deterministic, sandbox-verified scaffold (mode still
+        `code_project`, `generated_by` = "scaffold"). Returns the whole
+        file map + agent trace.
         """
         try:
             return await nova.build_code_project(

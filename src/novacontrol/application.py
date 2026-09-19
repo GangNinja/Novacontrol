@@ -60,6 +60,7 @@ from novacontrol.integrations import (
     get_cloud_preset,
     make_ollama_reprobe,
     ollama_models,
+    validate_cloud_key,
 )
 from novacontrol.integrations.llm import _redact_key
 from novacontrol.knowledge import KnowledgeBase
@@ -562,7 +563,10 @@ class NovaControlApplication:
             "configured": True,
             "provider": provider.split(":", 1)[-1],
             "label": preset["label"] if preset else provider,
-            "model": self.brain.model_name if self.brain.mode == "cloud" else "",
+            # The CONFIGURED model, shown whether or not Cloud is the active
+            # mode: the Settings card describes what is saved, and the Brain
+            # switch plus the status line carry what is actually running.
+            "model": str(getattr(live, "model", "") or ""),
             "api_key_hint": self._redacted_cloud_key(),
             "usage": dict(usage) if isinstance(usage, dict) else None,
             "last_error": last_error,
@@ -587,13 +591,21 @@ class NovaControlApplication:
             )
         if not api_key.strip():
             raise ValueError("An API key is required to configure a cloud LLM.")
+        # Paste-time format gate: a key that cannot be valid for this
+        # provider (the Vertex-token-vs-AI-Studio-key mixup) is rejected
+        # here, before anything is stored or the brain is switched.
+        validate_cloud_key(provider_id, api_key)
         provider = build_cloud_provider(provider_id, api_key, model=model)
         assert provider is not None  # preset + non-empty key are validated above
         if self._cloud_llm_store is not None:
             self._cloud_llm_store.write("cloud_llm", {"provider": provider_id, "api_key": api_key.strip(), "model": model.strip()})
+        # Installing a key only STORES it: the brain stays on whatever mode the
+        # user is running (local by default) until they pick Cloud themselves in
+        # the Brain switch. Auto-switching here is how a pasted key silently
+        # became the brain for every chat and research request, cloud latency
+        # and all.
         self.brain.set_cloud_provider(provider)
         self._sync_explore_provider()
-        self.settings.update(brain_mode="cloud")
         self.persist()
         return self.brain_status()
 
@@ -624,6 +636,9 @@ class NovaControlApplication:
             )
         if not api_key.strip():
             raise ValueError("Paste an API key to test first.")
+        # Same paste-time format gate as connect: catch impossible keys
+        # before spending a network round-trip on a guaranteed 404/401.
+        validate_cloud_key(provider_id, api_key)
         provider = build_cloud_provider(provider_id, api_key, model=model)
         assert provider is not None  # preset + non-empty key are validated above
         try:
@@ -1174,39 +1189,96 @@ class NovaControlApplication:
         language = _CODE_LANGUAGES.get(language.lower().strip(), language.lower().strip() or "python")
         completion = getattr(self.brain, "completion_provider", None)
         configured = bool(getattr(self.brain, "model_configured", False))
-        if completion is None or not configured:
-            raise ValueError(
-                "Multi-file projects need a coding model. Connect Ollama or a "
-                "cloud key in Settings (single-file drafting works without one)."
-            )
-
-        from novacontrol.core.code_agent import run_project_agent
-
-        try:
-            result = await run_project_agent(goal, language, completion)
-        except Exception as exc:  # noqa: BLE001 - surface as an honest failure
-            raise ValueError(f"The coding agent could not draft the project: {exc}") from exc
 
         project_name = _code_artifact_name(goal, language).rsplit(".", 1)[0]
+
+        result = None
+        fallback_reason = ""
+        if completion is not None and configured:
+            from novacontrol.core.code_agent import run_project_agent
+
+            try:
+                result = await run_project_agent(goal, language, completion)
+            except Exception as exc:  # noqa: BLE001 - scaffold fallback must survive provider errors
+                logger.warning("build_code_project agent loop failed (%s); using deterministic scaffold", exc)
+                fallback_reason = f"Agent loop failed: {exc}"
+
+        if result is not None:
+            files = result.files
+            entry = result.entry
+            ran_ok = result.ran_ok
+            steps: list[dict[str, str]] = [s.to_dict() for s in result.steps]
+            final_output = result.final_output
+            fix_rounds = result.fix_rounds
+            model_name = result.model_name
+            generated_by = "agent"
+            summary = (
+                f"Agent-drafted a {len(files)}-file {language} project "
+                f"(entry {entry})"
+                + (" — verified: ran clean" if ran_ok
+                   else " — ran with issues (see trace)")
+            )
+        else:
+            # No model wired (or the provider hard-failed): still return a
+            # REAL, runnable multi-file starter — an error wall made "Plan The
+            # Project" feel like nothing gets coded. The scaffold's entry
+            # point actually runs in the sandbox, and the trace records the
+            # honest reason full agent drafting wasn't used.
+            files, entry = _scaffold_project(goal, language)
+            steps = []
+            if fallback_reason:
+                steps.append({"kind": "gave_up", "detail": fallback_reason, "output": ""})
+            ran_ok = False
+            final_output = ""
+            fix_rounds = 0
+            model_name = ""
+            generated_by = "scaffold"
+            from novacontrol.core.code_agent import runtime_available, run_sandboxed
+
+            if runtime_available(language):
+                try:
+                    ran_ok, final_output = await run_sandboxed(
+                        language,
+                        [(f["path"], f["content"]) for f in files],
+                        entry,
+                    )
+                    steps.append({
+                        "kind": "run",
+                        "detail": "Scaffold verified: entry point executed"
+                        if ran_ok else "Scaffold entry point failed (see output)",
+                        "output": final_output,
+                    })
+                except Exception as exc:  # noqa: BLE001 - sandbox failure must not hide the scaffold
+                    steps.append({"kind": "gave_up", "detail": f"Sandbox execution failed: {exc}", "output": ""})
+            else:
+                steps.append({
+                    "kind": "skipped",
+                    "detail": f"No {language} runtime here — scaffold provided but not executed",
+                    "output": "",
+                })
+            for f in files:
+                f["generated_by"] = "scaffold"
+            summary = (
+                f"Scaffolded a {len(files)}-file {language} project starter (entry {entry})"
+                + (" — verified: ran clean" if ran_ok else " — not executed here")
+                + " — connect a working LLM (Ollama or a cloud key in Settings) for full auto-drafting"
+            )
+
         self._record_activity("build", "Project drafted", f"{language}: {goal[:50]}")
         return {
             "mode": "code_project",
             "project": project_name,
             "goal": goal,
             "language": language,
-            "entry": result.entry,
-            "files": result.files,
-            "ran_ok": result.ran_ok,
-            "steps": [s.to_dict() for s in result.steps],
-            "final_output": result.final_output,
-            "fix_rounds": result.fix_rounds,
-            "model": result.model_name,
-            "summary": (
-                f"Agent-drafted a {len(result.files)}-file {language} project "
-                f"(entry {result.entry})"
-                + (" — verified: ran clean" if result.ran_ok
-                   else " — ran with issues (see trace)")
-            ),
+            "entry": entry,
+            "files": files,
+            "ran_ok": ran_ok,
+            "steps": steps,
+            "final_output": final_output,
+            "fix_rounds": fix_rounds,
+            "model": model_name,
+            "generated_by": generated_by,
+            "summary": summary,
         }
 
     async def run_saved_artifact(self, filename: str) -> dict[str, Any]:
@@ -1913,6 +1985,113 @@ def _scaffold_code(goal: str, language: str, artifact_name: str) -> str:
         f"// Generated by NovaControl Build — edit freely, then Save to disk.\n\n"
         f"// TODO: implement {func}\n"
     )
+
+
+def _scaffold_project(goal: str, language: str) -> tuple[list[dict[str, str]], str]:
+    """Deterministic multi-file starter for the typed goal (no model needed).
+
+    Project-scope sibling of _scaffold_code: a small, honest file map whose
+    entry point actually runs. Python gets main.py + a logic module + a real
+    pytest file; JavaScript gets main.js + a logic module + package.json with
+    "type": "module" so the ESM import executes under plain `node` in the
+    sandbox. Other languages get a structured two-file header split. Every
+    file's content is runnable-or-honest — nothing decorative that lies.
+    """
+    title = goal.strip().rstrip(".") or "the task"
+    func = re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_")[:40] or "solution"
+    if func[0].isdigit():
+        func = f"task_{func}"
+    stem = re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_")[:32] or "project"
+
+    def files_map(pairs: list[tuple[str, str]]) -> list[dict[str, str]]:
+        return [{"path": path, "content": content} for path, content in pairs]
+
+    if language == "python":
+        # The logic module's import name must be a valid identifier; fall
+        # back to a plain name when the goal-derived stem is not.
+        module = f"{stem}_logic"
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", module):
+            module = "logic"
+        logic_file = f"{module}.py"
+        files = files_map([
+            (
+                "main.py",
+                f'"""{title} — entry point.\n\n'
+                'Generated by NovaControl Build (project scaffold) — edit freely,\n'
+                'then save each file to disk from the Build tab.\n"""\n\n'
+                f"from {module} import {func}\n\n\n"
+                "def main() -> None:\n"
+                f'    demo = {func}("  NovaControl ")\n'
+                f'    print("{func} demo ->", repr(demo))\n\n\n'
+                'if __name__ == "__main__":\n'
+                "    main()\n",
+            ),
+            (
+                logic_file,
+                f'"""{title} — core module.\n\n'
+                'Generated by NovaControl Build — edit freely.\n"""\n\n\n'
+                f"def {func}(text: str = '') -> str:\n"
+                f'    """Solve: {title}.\n\n'
+                '    Replace this body with the real implementation; the shape\n'
+                '    below already runs and is trivially testable.\n'
+                '    """\n'
+                '    if not text:\n'
+                '        return ""\n'
+                '    return text.strip()\n',
+            ),
+            (
+                f"test_{stem}.py",
+                f'"""Tests for: {title}.\"""\n\n'
+                f"from {module} import {func}\n\n\n"
+                f"def test_{func}_trims_input() -> None:\n"
+                f'    assert {func}("  hi ") == "hi"\n\n\n'
+                f"def test_{func}_empty_input() -> None:\n"
+                f'    assert {func}("") == ""\n',
+            ),
+        ])
+        return files, "main.py"
+
+    if language == "javascript":
+        logic_file = f"{stem}_logic.js"
+        files = files_map([
+            (
+                "main.js",
+                f"/**\n * {title} — entry point.\n"
+                " * Generated by NovaControl Build (project scaffold) — edit freely.\n */\n\n"
+                f'import {{ {func} }} from "./{logic_file}";\n\n'
+                f'console.log("{func} demo ->", {func}("  NovaControl "));\n',
+            ),
+            (
+                logic_file,
+                f"/**\n * {title} — core module.\n"
+                " * Generated by NovaControl Build — edit freely.\n */\n\n"
+                f"export function {func}(input) {{\n"
+                '  if (input == null) return "";\n'
+                "  return String(input).trim();\n"
+                "}\n",
+            ),
+            (
+                "package.json",
+                '{\n'
+                f'  "name": "{stem}",\n'
+                '  "type": "module",\n'
+                '  "private": true\n'
+                '}\n',
+            ),
+        ])
+        return files, "main.js"
+
+    ext = _CODE_EXT.get(language, "txt")
+    header = (
+        f"// {title} — {{role}}\n"
+        "// Generated by NovaControl Build (project scaffold) — edit freely.\n\n"
+        "// TODO: implement\n"
+    )
+    files = files_map([
+        (f"main.{ext}", header.format(role="entry point")),
+        (f"{stem}_logic.{ext}", header.format(role="core module")),
+    ])
+    return files, f"main.{ext}"
 
 
 def _code_plan_steps(goal: str, language: str) -> list[tuple[str, str]]:

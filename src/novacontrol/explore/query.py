@@ -377,7 +377,12 @@ def extract_search_topic(topic: str) -> str:
 
 
 def build_search_queries(topic: str, max_sources: int) -> tuple[tuple[str, str], ...]:
-    """Generate topic-aware search queries from cleaned topic words."""
+    """Generate topic-aware search queries from cleaned topic words.
+
+    Used when NO synthesis model is connected: `planner.plan_research` has the
+    model choose the queries whenever there is one, because a model can read
+    what the question actually asks for and no keyword transformation can.
+    """
     lower = topic.lower()
     core = extract_search_topic(topic)
     if detect_shopping_context(topic):
@@ -399,6 +404,12 @@ def build_search_queries(topic: str, max_sources: int) -> tuple[tuple[str, str],
         queries.append((f"{core} best options review", "review"))
     else:
         queries.append((f"{core} explained simply", "explanation"))
+    # Question-shaped topics get their own words searched too: engines answer "why
+    # do cats purr" as a question, and the keyword core alone is what returns
+    # pages about the words instead of the question.
+    asked = " ".join(topic.strip().split()).strip("?.")
+    if _QUESTION_START.match(asked) and len(asked.split()) <= 12 and asked.lower() != core.lower():
+        queries.append((asked, "question"))
     return tuple(queries[:max(2, min(max_sources, 4))])
 
 
@@ -428,6 +439,35 @@ def wiki_search_variations(topic: str) -> list[str]:
             seen.add(v_lower)
             result.append(v)
     return result
+
+
+def relevance_score(title: str, snippet: str, url: str, topic: str) -> float:
+    """Generic relevance of a candidate source to the topic (0..~3).
+
+    Information-retrieval scoring, not rules: (1) how many of the topic's
+    capitalized ENTITIES appear, weighted highest — entities define the story;
+    (2) full-phrase match; (3) content-word coverage. A page that names the
+    topic's entities in its title out-scores one that merely shares a keyword.
+    """
+    combined = f"{title.lower()} {(snippet or '').lower()}"
+    title_lower = title.lower()
+    topic_stripped = topic.strip()
+
+    entities = _proper_tokens(topic_stripped)
+    entity_hits = sum(1 for e in entities if e in combined)
+    entity_boost = 2.0 if entities and entity_hits == len(entities) else (1.0 if entity_hits else 0.0)
+
+    phrase = extract_search_topic(topic_stripped).lower().strip()
+    phrase_boost = 1.5 if len(phrase) > 3 and phrase in combined else 0.0
+
+    content = [
+        w for w in (_token(w) for w in extract_search_topic(topic_stripped).split())
+        if len(w) > 2 and w not in _FUNCTION_WORDS
+    ]
+    coverage = (sum(1 for w in content if w in combined) / len(content)) if content else 0.0
+
+    title_presence = 0.5 if phrase and phrase in title_lower else 0.0
+    return entity_boost + phrase_boost + coverage + title_presence
 
 
 def is_wiki_film_result(source_title: str, source_snippet: str) -> bool:
@@ -506,6 +546,24 @@ def _is_amount_token(word: str) -> bool:
     return bool(stripped) and stripped.isdigit()
 
 
+def content_terms(text: str) -> tuple[str, ...]:
+    """Content words of a phrase: lowercased, deduped, function words dropped.
+
+    Owned here, beside the tokenizer and the function-word set, so "what counts
+    as a topical word" is defined once for the whole Explore package — query
+    relevance, term weighting, and fact scoring all ask this function.
+    """
+    terms: list[str] = []
+    seen: set[str] = set()
+    for word in text.lower().split():
+        token = _token(word)
+        if len(token) < 3 or token in _FUNCTION_WORDS or token in seen:
+            continue
+        seen.add(token)
+        terms.append(token)
+    return tuple(terms)
+
+
 # High-frequency function words that add no topical signal.
 _FUNCTION_WORDS = frozenset({
     "the", "and", "for", "with", "from", "into", "how", "why", "what",
@@ -521,20 +579,25 @@ _PROPER_STOP = _FUNCTION_WORDS | {"i", "no", "not", "yes", "new", "amid", "after
 
 
 def _proper_tokens(topic: str) -> tuple[str, ...]:
-    """Capitalized, non-initial words of a topic, lowercased, order kept.
+    """Capitalized words of a topic, lowercased, order kept.
 
-    'No trailer for The Paradise: Nani comments…' -> ('paradise', 'nani',
-    'srikanth', 'odela'). These are the entities that define a headline; junk
-    pages match the sentence's generic words instead.
+    'Trump signs Russia sanctions bill…' -> ('trump', 'russia', 'india', 'china')
+    — the capitalized entities define a headline; junk pages match the
+    sentence's generic words instead. The LEADING capitalized word is included
+    (it is usually the story's main entity — 'Trump …' IS about Trump);
+    sentence-initial stopwords ('What', 'Tell', 'Is') are still excluded via
+    _PROPER_STOP, and a leading lowercase word is never an entity.
     """
     words = topic.strip().split()
     tokens: list[str] = []
     seen: set[str] = set()
-    for word in words[1:]:  # skip sentence-initial position
+    for index, word in enumerate(words):
         stripped = _token(word)
         # Possessives carry the name without the clutter: "Odela's" -> "odela".
         stripped = re.sub(r"'s$", "", stripped, flags=re.IGNORECASE)
         if not stripped or not stripped[0].isupper():
+            continue
+        if index == 0 and stripped.lower() in _PROPER_STOP:
             continue
         lower = stripped.lower()
         if lower in _PROPER_STOP or len(lower) <= 2 or lower in seen:

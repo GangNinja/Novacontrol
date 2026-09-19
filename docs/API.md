@@ -10,6 +10,7 @@ The Phase 12 API subsystem provides REST and WebSocket entrypoints through FastA
 - `GET /health`: Health check. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /status`: Runtime status. *(frontend: web panel `renderGeneric`)*
 - `GET /system/health`: Aggregated system health. *(frontend: web panel `renderHealth`)*
+- `GET /system/telemetry`: Live machine telemetry for the Command Center (CPU, memory, storage, GPU, network, battery, temperature). *(frontend: web panel `renderTelemetry`)*
 - `GET /system/harden`: Release hardening report. *(frontend: web panel `renderHealth`)*
 - `GET /system/package`: Runtime package manifest. *(frontend: web panel `renderGeneric`)*
 - `POST /ask`: Route a natural-language request through NovaControl. *(frontend: web panel `renderChatResult`)*

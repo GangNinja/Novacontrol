@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 import json
 import logging
 import os
+import re
 import time
 from typing import Any
 from urllib.error import URLError
@@ -383,6 +384,77 @@ def get_cloud_preset(provider_id: str) -> dict[str, str] | None:
         if row["id"] == provider_id:
             return dict(row)
     return None
+
+
+# ── Save-time key-format validation ─────────────────────────
+#
+# Each provider's paste-time shape check. A key that cannot possibly be
+# valid for the chosen provider is rejected BEFORE any network call or
+# persistence, with the format the provider actually expects. Deliberately
+# shape-only (never a reachability check): a genuinely wrong-but-well-formed
+# key must still reach the live Test Connection so its real 401 explains
+# itself. Patterns are conservative — anything they don't recognize passes.
+_CLOUD_KEY_PATTERNS: dict[str, tuple[re.Pattern[str], str, str]] = {
+    # AI Studio keys start with "AIza"; Google Cloud/Vertex service keys and
+    # OAuth tokens ("AQ.Ab8R…" / "ya29.") do NOT — they 404 against the AI
+    # Studio endpoint, which reads as a mystery failure. Catch that at paste.
+    "gemini": (
+        re.compile(r"^AIza[0-9A-Za-z_-]{30,}$"),
+        "AI Studio keys look like AIza… (39 chars)",
+        "This looks like a Google Cloud/Vertex or OAuth token, not an AI Studio key.",
+    ),
+    "openai": (
+        re.compile(r"^sk-[A-Za-z0-9_-]{20,}$"),
+        "OpenAI keys look like sk-…",
+        "",  # no common mixup worth naming
+    ),
+    "claude": (
+        re.compile(r"^sk-ant-[A-Za-z0-9_-]{20,}$"),
+        "Anthropic keys look like sk-ant-…",
+        "",  # generic sk- keys usually come from OpenAI; say so
+    ),
+    "groq": (
+        re.compile(r"^gsk_[A-Za-z0-9]{20,}$"),
+        "Groq keys look like gsk_…",
+        "",
+    ),
+    "deepseek": (
+        re.compile(r"^sk-[A-Za-z0-9]{20,}$"),
+        "DeepSeek keys look like sk-… (hex-style characters)",
+        "",
+    ),
+    # openai/mistral/openrouter key formats are not reliably distinctive;
+    # leave them unvalidated rather than reject valid keys.
+}
+
+
+def validate_cloud_key(provider_id: str, api_key: str) -> None:
+    """Reject a paste-time key that cannot be valid for the provider.
+
+    Raises ValueError with a user-facing explanation when the key's shape
+    contradicts the chosen provider (the Vertex-key-vs-Gemini mixup being
+    the motivating case). Well-formed keys always pass through untouched —
+    the live Test Connection remains the authority on actual validity.
+    """
+    key = api_key.strip()
+    rule = _CLOUD_KEY_PATTERNS.get(provider_id)
+    if rule is None or not key:
+        return
+    pattern, expected, mixup = rule
+    if pattern.match(key):
+        return
+    # Known cross-provider mixup? Name it and point at the fix; otherwise
+    # state the expected shape plainly.
+    if provider_id == "gemini" and mixup and not key.startswith("AIza"):
+        raise ValueError(
+            f"That doesn't look like a Gemini (AI Studio) key. {mixup} "
+            f"Create one free at aistudio.google.com/apikey — {expected}."
+        )
+    hint = f"{mixup} " if mixup else ""
+    raise ValueError(
+        f"That doesn't look like a valid key for this provider. {hint}"
+        f"Expected format: {expected}."
+    )
 
 
 def _redact_key(key: str) -> str:

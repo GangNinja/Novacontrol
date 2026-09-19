@@ -38,7 +38,9 @@ INTERACTIVE_TAGS = ("button", "a", "input", "select", "textarea")
 
 def _read_static() -> tuple[str, str, str]:
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    css = (STATIC / "styles.css").read_text(encoding="utf-8")
+    # Every stylesheet in static/ participates in the focus-ring contract so
+    # an additional layer (e.g. nc-os.css) can never drop ring coverage.
+    css = "\n".join(p.read_text(encoding="utf-8") for p in sorted(STATIC.glob("*.css")))
     js_files = [STATIC / "app.js"]
     js_dir = STATIC / "js"
     if js_dir.is_dir():

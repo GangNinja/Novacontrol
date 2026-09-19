@@ -1,7 +1,15 @@
-"""Answer synthesis: source facts → structured text answer.
+"""Answer synthesis: source evidence → a written answer.
 
-Owns: extracting facts from snippets, categorizing them,
-ranking by relevance, building type-specific answers.
+Owns: pulling facts out of source text, ranking them against the user's
+question, and composing the answer — plus the connected-model path that writes
+prose from the same evidence.
+
+There is no per-topic rule table here any more. Answers used to be assembled by
+keyword buckets ("cause", "step", "definition" word lists) filled from search
+blurbs, which is how "why do cats purr" produced a re-listing of pages that
+mentioned purring. The local path now ranks the sentences the sources actually
+contain (see `evidence.py`) and composes the answer from the top ones; the
+question's wording is never echoed back as a framing line.
 """
 
 from __future__ import annotations
@@ -10,6 +18,14 @@ from collections.abc import Mapping, Sequence
 import logging
 import re
 
+from novacontrol.explore.evidence import (  # noqa: F401  (Sentence re-exported for callers)
+    Evidence,
+    Sentence,
+    build_evidence,
+    join_sentences,
+    page_text_of,
+)
+from novacontrol.explore.planner import usable_provider
 from novacontrol.explore.query import QueryFrame
 from novacontrol.explore.models import ResearchSource
 
@@ -52,6 +68,22 @@ _CHROME_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\bshare (this|on) (article|page|post)\b",
         r"\bread (more|next|the full (article|story))\s*$",
         r"^\s*(menu|search|home|sign up|log in|share|advertisement)\s*$",
+        # Meta-discourse: sentences about the PAGE instead of about the subject.
+        # "In this article they will discuss the concept of Abetment under the
+        # Indian Penal Code" was served as a research fact, and it tells the
+        # reader nothing about abetment. Form patterns, not topic words: the
+        # subject can be anything and this phrasing still means "no content".
+        r"\b(this|the following|that) (article|guide|post|page|section|overview|piece|blog)\b",
+        r"\bwe (will |'ll |can )?(discuss|cover|explain|look at|explore|talk about)\b",
+        r"\byou (will|'ll|can) (learn|discover|find out)\b",
+        r"\b(read on|keep reading|let's (dive|get started)|without further ado)\b",
+        r"\b(table of contents|updated[: ]|published[: ]|min read)\b",
+        r"\bin (this|the following) (video|episode|chapter|course)\b",
+        # Standing disclaimers: true about the SITE, not about the subject.
+        r"\binformation is (current|accurate|up[- ]?to[- ]?date)\b",
+        r"\bnot a substitute for (professional|veterinary|medical|legal) advice\b",
+        r"\bconsult (your|a|an) (doctor|vet|veterinarian|physician|lawyer|professional)\b",
+        r"\b(we|i) (may )?(earn|receive) (a )?(commission|compensation)\b",
     )
 )
 
@@ -75,6 +107,23 @@ def is_boilerplate(text: str) -> bool:
 # Snippet cleaning
 # ────────────────────────────────────────────────────────────
 
+# A snippet that opens with a rhetorical teaser ("Ever wonder why cats purr?",
+# "Have you ever wondered…?") has its answer in the NEXT sentence; the teaser
+# itself is marketing copy, and keeping it is how a research answer ended up
+# opening with the user's own question echoed back. This is a FORM pattern
+# about search snippets, not a fact about any topic.
+_TEASER_SENTENCE = re.compile(
+    r"^\s*(?:ever|have you ever|did you ever|do you)\s+wonder(?:ed)?[^.!?]{0,120}[.!?]\s*"
+    r"|^\s*wondering[^.!?]{0,120}\?\s*"
+    r"|^\s*curious about[^.!?]{0,120}\?\s*",
+    re.IGNORECASE,
+)
+
+# Tolerant on purpose: scraped links arrive mangled as "https:/." (one slash,
+# trailing dot), which the strict `https?://\S+` form misses entirely.
+_URL_IN_TEXT = re.compile(r"https?:\S*", re.IGNORECASE)
+
+
 def clean_snippet(text: str) -> str:
     """Clean a raw search snippet into a readable fact.
 
@@ -82,13 +131,19 @@ def clean_snippet(text: str) -> str:
     rather than presenting a consent banner or footer as a research fact.
     """
     cleaned = " ".join(text.split()).strip()
+    # Raw links survive snippet scraping as "https:/." style fragments; they
+    # are never part of a fact and they leaked into a live answer.
+    cleaned = _URL_IN_TEXT.sub("", cleaned)
+    cleaned = " ".join(cleaned.split()).strip()
     # Date prefixes
     cleaned = re.sub(r"^[A-Z][a-z]{2}\s+\d{1,2},\s*\d{4}\s*[·•\-–]\s*", "", cleaned)
     cleaned = re.sub(r"^\d{1,2}\s+[A-Z][a-z]{2}\s+\d{4}\s*[·•\-–]\s*", "", cleaned)
     cleaned = re.sub(r"^\d{4}\s*[·•\-–]\s*", "", cleaned)
-    # Truncation markers
-    cleaned = re.sub(r"\.{3,}", ".", cleaned)
-    cleaned = re.sub(r"\u2026+", ".", cleaned)
+    # Truncation markers. A snippet cut off mid-sentence KEEPS its ellipsis: a
+    # search snippet that stops at "...purring is due to stress or" must read as
+    # truncated, not as a finished sentence ending in a dangling "or."
+    cleaned = re.sub(r"\.{3,}", "\u2026", cleaned)
+    cleaned = re.sub(r"\u2026+", "\u2026", cleaned)
     cleaned = re.sub(r"\s*\.\s*$", ".", cleaned)
     # Filler prefixes
     for pattern in (
@@ -107,370 +162,193 @@ def clean_snippet(text: str) -> str:
     cleaned = strip_boilerplate(cleaned)
     if not cleaned:
         return ""
-    if cleaned and cleaned[0].islower():
+    # Drop a leading rhetorical teaser, but only when real content follows it.
+    teased = _TEASER_SENTENCE.sub("", cleaned, count=1).strip()
+    if len(teased) >= 30:
+        cleaned = teased
+    # Removing a teaser can orphan its closing quote/bracket ('Ever wonder …?'
+    # leaves '" Cats can purr …'): quotes, not words, are what get cleaned.
+    cleaned = cleaned.lstrip("\"'\u2018\u2019\u201c\u201d)]}:;,.-\u2013\u2014\u2026 ").strip()
+    if not cleaned:
+        return ""
+    if cleaned[0].islower():
         cleaned = cleaned[0].upper() + cleaned[1:]
-    if cleaned and cleaned[-1] not in ".!?":
+    if cleaned[-1] not in ".!?\u2026":
         cleaned += "."
     return cleaned.strip()
-
-
-# ────────────────────────────────────────────────────────────
-# Fact categorization
-# ────────────────────────────────────────────────────────────
-# Buckets are *advisory*: they decide which section a fact ideally lands in
-# and are used with word boundaries so generic words ("is a", "are") never
-# swallow facts that actually answer a why/how question. Keyword groups with
-# rarer, stronger signals are checked first; weak definition words last.
-
-CAUSE_KW = ("because", "due to", "caused by", "results from", "reason",
-            "why", "effect", "impact", "leads to", "trigger")
-STEP_KW = ("step", "first", "start by", "begin by", "next", "then", "finally",
-           "create", "build", "set up", "make sure", "organize", "prepare")
-NEED_KW = ("need", "require", "must have", "essential", "supply",
-           "material", "equipment", "tool")
-TIP_KW = ("tip", "pro tip", "best", "recommend", "try", "add", "include")
-DEF_KW = ("is a", "is the", "are", "defined as", "known as", "means",
-          "refers to", "involves", "consists of")
-
-_CATEGORY_ORDER: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("cause", CAUSE_KW),
-    ("step", STEP_KW),
-    ("need", NEED_KW),
-    ("tip", TIP_KW),
-    ("definition", DEF_KW),
-)
-
-
-def categorize(fact: str) -> str:
-    lower = fact.lower()
-    for cat, keywords in _CATEGORY_ORDER:
-        if any(re.search(rf"\b{re.escape(kw)}\b", lower) for kw in keywords):
-            return cat
-    return "info"
-
-
-def score_fact(fact: str, query_type: str) -> float:
-    lower = fact.lower()
-    score = float(len(fact))
-    boosts = {
-        "how_to": (STEP_KW, 2.0),
-        "explanation": (DEF_KW, 2.0),
-        "cause": (CAUSE_KW, 2.0),
-        "recommendation": (("best", "top", "recommend", "choose", "pick"), 1.5),
-    }
-    if query_type in boosts:
-        kw, mult = boosts[query_type]
-        if any(re.search(rf"\b{re.escape(k)}\b", lower) for k in kw):
-            score *= mult
-    if any(w in lower for w in ("how to", "step", "tip", "idea", "create", "plan")):
-        score *= 1.3
-    if len(fact) < 30:
-        score *= 0.5
-    return score
 
 
 # ────────────────────────────────────────────────────────────
 # Fact extraction
 # ────────────────────────────────────────────────────────────
 
+# Video pages are not prose sources: their "snippet" is a video description
+# (title, channel blurb, promo line), which is how a Dodo clip's description
+# became a research "fact". Videos keep their own section in the report.
+_VIDEO_HOSTS = ("youtube.com", "youtu.be", "vimeo.com", "dailymotion.com")
+
+
+def _is_video_page(url: str) -> bool:
+    host = url.lower()
+    return any(video_host in host for video_host in _VIDEO_HOSTS)
+
+
+# Facts are SENTENCES. A fact used to be a whole search blurb, so a report's
+# "findings" could be three truncated meta descriptions; the page's own
+# sentences are what a finding actually looks like.
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
+
+
 def extract_facts(sources: Sequence[ResearchSource]) -> list[str]:
-    """Extract clean, ranked facts from source snippets."""
+    """Clean, ranked facts: one sentence each, from the best text per source.
+
+    Reads the page we fetched when there is one and the search blurb otherwise,
+    splits it into sentences, drops chrome, and ranks by how much each sentence
+    reads like a statement (length, plus the informative-marker boost that has
+    always been here). Video pages stay excluded: a video description is not
+    evidence.
+    """
     candidates: list[tuple[float, str]] = []
     seen: set[str] = set()
 
     for source in sources:
-        snippet = (source.snippet or "").strip()
-        if not snippet or len(snippet) < 15:
+        if _is_video_page(source.url):
             continue
-        cleaned = clean_snippet(snippet)
-        if not cleaned or len(cleaned) < 15:
+        text = page_text_of(source)
+        if not text or len(text) < 15:
             continue
-        # Strip truncation artifacts
-        last_period = cleaned.rfind(".")
-        last_question = cleaned.rfind("?")
-        last_excl = cleaned.rfind("!")
-        end_pos = max(last_period, last_question, last_excl)
-        if end_pos > 0 and end_pos < len(cleaned) - 1:
-            after = cleaned[end_pos + 1:].strip()
-            if len(after) < 5:
-                cleaned = cleaned[:end_pos + 1]
-        cleaned = re.sub(r",\s*\.\s*$", ".", cleaned).strip()
-        key = cleaned.lower()[:80]
-        if key in seen:
-            continue
-        seen.add(key)
-        score = float(len(cleaned))
-        lower = cleaned.lower()
-        if any(w in lower for w in ("how to", "step", "tip", "idea", "create", "plan", "need")):
-            score *= 1.5
-        if any(w in lower for w in ("include", "contain", "example", "such as", "like")):
-            score *= 1.3
-        if len(cleaned) < 30:
-            score *= 0.5
-        candidates.append((score, cleaned))
+        for raw in _SENTENCE_BOUNDARY.split(text):
+            cleaned = clean_snippet(raw)
+            if not cleaned or len(cleaned) < 15:
+                continue
+            key = cleaned.lower()[:80]
+            if key in seen:
+                continue
+            seen.add(key)
+            score = float(len(cleaned))
+            lower = cleaned.lower()
+            if any(w in lower for w in ("how to", "step", "tip", "idea", "create", "plan", "need")):
+                score *= 1.5
+            if any(w in lower for w in ("include", "contain", "example", "such as", "like")):
+                score *= 1.3
+            if len(cleaned) < 30:
+                score *= 0.5
+            candidates.append((score, cleaned))
 
     candidates.sort(key=lambda x: x[0], reverse=True)
     return [fact for _, fact in candidates[:6]]
 
 
+
 # ────────────────────────────────────────────────────────────
-# Template answer builders
-#
-# Fact buckets only *advise* placement. Each builder takes its topic facts
-# from the matching bucket, and when that bucket is empty it falls back to
-# the best remaining facts from any bucket — so a non-empty answer body is
-# guaranteed whenever at least one usable fact exists, instead of emitting
-# just an intro line (the old "why do cats purr" empty-shell failure).
+# Composition: the local answer is built from the sources' sentences
 # ────────────────────────────────────────────────────────────
 
-_BUCKETS = ("cause", "step", "need", "tip", "definition", "info")
+def select_answer_sentences(evidence: Evidence) -> tuple[tuple[Sentence, ...], tuple[Sentence, ...]]:
+    """The (lead, supporting) sentences the local answer spends.
 
-Cats = dict[str, list[tuple[float, str]]]
-
-
-def _attribution(domains: list[str], n: int) -> str:
-    if not domains:
-        return f"Based on {n} research findings"
-    if len(domains) == 1:
-        return f"Based on research from {domains[0]}"
-    if len(domains) == 2:
-        return f"Based on research from {domains[0]} and {domains[1]}"
-    return f"Based on research from {', '.join(domains[:3])}"
-
-
-def _bucket_facts(cats: Cats, key: str, n: int, used: set[str]) -> list[str]:
-    """Top facts from one bucket only (no cross-bucket borrowing)."""
-    picked: list[str] = []
-    for _score, fact in cats[key]:
-        if fact in used:
-            continue
-        used.add(fact)
-        picked.append(fact)
-        if len(picked) >= n:
-            break
-    return picked
+    Returned separately so the report can record what was already shown: the
+    highlights and the sections below the answer then draw from what is left,
+    instead of repeating the same sentences in a second widget.
+    """
+    lead_count = 3 if evidence.has_page_text else 2
+    lead = evidence.take(lead_count, complete_only=True) or evidence.take(1)
+    spent = {sentence.text for sentence in lead}
+    # The supporting bullets hold a floor: a sentence the ranking judged far
+    # weaker than the leader is boilerplate, and padding the answer with it is
+    # how an answer stops being one.
+    support = (
+        evidence.take(5, exclude=spent, complete_only=True, min_score_ratio=0.35)
+        or evidence.take(5, exclude=spent, min_score_ratio=0.35)
+    )
+    return lead, support
 
 
-def _any_facts(ranked: list[str], n: int, used: set[str]) -> list[str]:
-    """Best remaining facts from any bucket, in global relevance order."""
-    picked: list[str] = []
-    for fact in ranked:
-        if fact in used:
-            continue
-        used.add(fact)
-        picked.append(fact)
-        if len(picked) >= n:
-            break
-    return picked
-
-
-def _bullets(items: Sequence[str]) -> list[str]:
-    return [f"• {i}" for i in items]
-
-
-def _numbered(items: Sequence[str]) -> list[str]:
-    return [f"{i}. {item.rstrip('.')}." for i, item in enumerate(items, 1)]
-
-
-def _build_how_to(topic: str, cats: Cats, ranked: list[str], attr: str) -> str:
-    used: set[str] = set()
-    steps = _bucket_facts(cats, "step", 5, used)
-    needs = _bucket_facts(cats, "need", 3, used)
-    tips = _bucket_facts(cats, "tip", 3, used)
-    parts = [f"{attr}, here is how to {topic}:", ""]
-    if steps:
-        parts.append("**Steps:**")
-        parts.extend(_numbered(steps))
-        parts.append("")
-    if needs:
-        parts.append("**What you'll need:**")
-        parts.extend(_bullets(needs))
-        parts.append("")
-    if tips:
-        parts.append("**Tips:**")
-        parts.extend(_bullets(tips))
-        parts.append("")
-    if not steps:
-        points = _any_facts(ranked, 4, used)
-        if points:
-            parts.append("**Key points:**")
-            parts.extend(_bullets(points))
-            parts.append("")
-    return "\n".join(parts).strip()
-
-
-def _build_explanation(topic: str, cats: Cats, ranked: list[str], attr: str) -> str:
-    used: set[str] = set()
-    defs = _bucket_facts(cats, "definition", 3, used)
-    info = _bucket_facts(cats, "info", 4, used)
-    tips = _bucket_facts(cats, "tip", 2, used)
-    parts = [f"{attr}, here is what you need to know about {topic}:", ""]
-    if defs:
-        parts.append("**What it is:**")
-        parts.extend(_bullets(defs))
-        parts.append("")
-    if info:
-        parts.append("**Key points:**")
-        parts.extend(_bullets(info))
-        parts.append("")
-    if tips:
-        parts.append("**Notable details:**")
-        parts.extend(_bullets(tips))
-        parts.append("")
-    if not defs and not info:
-        points = _any_facts(ranked, 5, used)
-        if points:
-            parts.append("**Key points:**")
-            parts.extend(_bullets(points))
-            parts.append("")
-    return "\n".join(parts).strip()
-
-
-def _build_cause(topic: str, cats: Cats, ranked: list[str], attr: str) -> str:
-    used: set[str] = set()
-    causes = _bucket_facts(cats, "cause", 4, used)
-    context = _bucket_facts(cats, "info", 2, used) + _bucket_facts(cats, "definition", 2, used)
-    parts = [f"{attr}, here is why {topic}:", ""]
-    if causes:
-        parts.extend(_bullets(causes))
-        parts.append("")
-    if context:
-        parts.append("**Additional context:**")
-        parts.extend(_bullets(context))
-        parts.append("")
-    if not causes and not context:
-        points = _any_facts(ranked, 5, used)
-        if points:
-            parts.append("**Key points:**")
-            parts.extend(_bullets(points))
-            parts.append("")
-    return "\n".join(parts).strip()
-
-
-def _build_recommendation(
-    topic: str, cats: Cats, ranked: list[str], attr: str, context: str | None = None
+def compose_answer(
+    evidence: Evidence, sources: Sequence[ResearchSource], *, question: str = ""
 ) -> str:
-    used: set[str] = set()
-    ctx = f" for {context}" if context else ""
-    info = _bucket_facts(cats, "info", 5, used)
-    tips = _bucket_facts(cats, "tip", 3, used)
-    parts = [f"{attr}, here are the key considerations for {topic}{ctx}:", ""]
-    if info:
-        parts.extend(_numbered(info))
-        parts.append("")
-    if tips:
-        parts.append("**Recommendations:**")
-        parts.extend(_bullets(tips))
-        parts.append("")
-    if not info and not tips:
-        points = _any_facts(ranked, 5, used)
-        if points:
-            parts.extend(_numbered(points))
-            parts.append("")
+    """Write the local answer out of ranked source sentences.
+
+    It opens with the sentences that best answer the question, as a paragraph —
+    because that is what an answer looks like — and then lists the remaining
+    strong sentences as supporting detail. Every sentence is one a source
+    wrote; nothing is invented.
+
+    The question's own wording never comes back as a framing line ("here is
+    what the sources say about X"): that line answers nothing and reads as a
+    template. Attribution goes at the END, where it belongs, naming the domains
+    the sentences came from.
+
+    With page text the answer can carry a real paragraph; with only search
+    blurbs (which end in "…") the lead stays the best COMPLETE sentence and the
+    rest become bullets, so a digest never masquerades as flowing prose.
+    """
+    lead, support = select_answer_sentences(evidence)
+
+    parts: list[str] = []
+    if lead:
+        parts.append(join_sentences(lead))
+    if support:
+        parts += ["", "**Supporting detail:**"]
+        parts.extend(f"• {sentence.text}" for sentence in support)
+    domains = [d for source in sources[:4] if (d := _domain(source.url))]
+    if domains:
+        parts += ["", f"Sources: {', '.join(dict.fromkeys(domains))}."]
     return "\n".join(parts).strip()
-
-
-def _build_comparison(
-    topic: str,
-    cats: Cats,
-    ranked: list[str],
-    attr: str,
-    context: str | None = None,
-    items: tuple[str, ...] = (),
-) -> str:
-    used: set[str] = set()
-    items_str = ", ".join(items[:3]) if items else topic
-    facts = _bucket_facts(cats, "info", 5, used)
-    if not facts:
-        facts = _bucket_facts(cats, "definition", 3, used)
-    if not facts:
-        facts = _any_facts(ranked, 5, used)
-    parts = [f"{attr}, here is a comparison of {items_str}:"]
-    if context:
-        parts += ["", f"For {context}:"]
-    parts.append("")
-    if facts:
-        parts.extend(_bullets(facts))
-        parts.append("")
-    return "\n".join(parts).strip()
-
-
-def _build_ideas(topic: str, cats: Cats, ranked: list[str], attr: str) -> str:
-    used: set[str] = set()
-    tips = _bucket_facts(cats, "tip", 5, used)
-    info = _bucket_facts(cats, "info", 3, used)
-    parts = [f"{attr}, here are ideas for {topic}:", ""]
-    if tips:
-        parts.append("**Ideas:**")
-        parts.extend(_numbered(tips))
-        parts.append("")
-    if info:
-        parts.append("**More inspiration:**")
-        parts.extend(_bullets(info))
-        parts.append("")
-    if not tips and not info:
-        points = _any_facts(ranked, 5, used)
-        if points:
-            parts.append("**Ideas:**")
-            parts.extend(_numbered(points))
-            parts.append("")
-    return "\n".join(parts).strip()
-
-
-_BUILDERS = {
-    "how_to": _build_how_to,
-    "explanation": _build_explanation,
-    "cause": _build_cause,
-    "recommendation": _build_recommendation,
-    "comparison": _build_comparison,
-    "ideas": _build_ideas,
-}
 
 
 # ────────────────────────────────────────────────────────────
 # Main synthesis entry point
 # ────────────────────────────────────────────────────────────
 
-def synthesize_answer(topic: str, frame: QueryFrame, sources: Sequence[ResearchSource]) -> str:
-    """Build a template answer from source facts.
+def local_answer(
+    evidence: Evidence,
+    sources: Sequence[ResearchSource],
+    *,
+    topic: str,
+    question: str = "",
+) -> tuple[str, tuple[str, ...]]:
+    """The local answer plus the sentences it spent on it.
 
-    Facts are ranked globally and bucketed only to choose section placement;
-    every builder falls back to the best remaining facts when its preferred
-    bucket is empty, so the answer never degenerates to a bare intro line as
-    long as at least one usable fact exists.
+    When nothing can be quoted at all, the answer names the pages it found
+    instead of emitting a "here is what the sources say about X" shell with no
+    content under it.
     """
-    facts = extract_facts(sources)
-    if not facts:
-        titles = [s.title for s in sources[:3] if s.title]
-        if titles:
-            return (
-                f"Based on {len(sources)} source(s), here is what the research found about {topic}: "
-                + "; ".join(titles) + ". Check the source links below for the full details."
-            )
-        return ""
-
-    source_domains = list({d for s in sources if (d := _domain(s.url))})[:3]
-    query_type = frame.kind if frame.kind in _BUILDERS else "explanation"
-
-    cats: Cats = {key: [] for key in _BUCKETS}
-    for fact in facts:
-        cats[categorize(fact)].append((score_fact(fact, query_type), fact))
-    for bucket in cats.values():
-        bucket.sort(key=lambda item: item[0], reverse=True)
-    ranked = [
-        fact for _score, fact in sorted(
-            (item for bucket in cats.values() for item in bucket),
-            key=lambda item: item[0], reverse=True,
+    if evidence:
+        lead, support = select_answer_sentences(evidence)
+        return (
+            compose_answer(evidence, sources, question=question),
+            tuple(sentence.text for sentence in (*lead, *support)),
         )
-    ]
+    titles = [source.title for source in sources[:3] if source.title]
+    if titles:
+        return (
+            f"Nothing in the sources could be quoted for {topic}, so here are the pages "
+            "that were found: " + "; ".join(titles) + ". Open a source to read it directly.",
+            (),
+        )
+    return "", ()
 
-    attr = _attribution(source_domains, len(facts))
-    builder = _BUILDERS.get(query_type, _build_explanation)
-    if query_type == "recommendation":
-        return _build_recommendation(topic, cats, ranked, attr, frame.context)
-    if query_type == "comparison":
-        return _build_comparison(topic, cats, ranked, attr, frame.context, frame.items)
-    return builder(topic, cats, ranked, attr)
+
+def synthesize_answer(
+    topic: str,
+    frame: QueryFrame,
+    sources: Sequence[ResearchSource],
+    *,
+    question: str = "",
+) -> str:
+    """Build the local answer from the strongest evidence in the sources.
+
+    `question` is the user's own phrasing (or the topic a vague follow-up was
+    resolved to); relevance is judged against it, not against whatever the
+    query parser reduced the topic to. Sentences come from the pages we read
+    when reading worked, and from the search blurbs when it did not.
+    """
+    if not sources:
+        return ""
+    ask = " ".join(str(question or topic).split()) or topic
+    evidence = build_evidence(ask, frame, sources)
+    return local_answer(evidence, sources, topic=topic, question=ask)[0]
 
 
 def _domain(url: str) -> str:
@@ -483,6 +361,28 @@ def _domain(url: str) -> str:
 # ────────────────────────────────────────────────────────────
 # LLM synthesis
 # ────────────────────────────────────────────────────────────
+
+# How much of one page the model gets. Enough for the argument it makes, not so
+# much that six sources swamp a small local model's context.
+_MAX_PAGE_CHARS_IN_PROMPT = 2400
+
+
+def _research_block(sources: Sequence[ResearchSource], *, per_source_chars: int = _MAX_PAGE_CHARS_IN_PROMPT) -> str:
+    """The research handed to the model: page prose where we read it, else the blurb.
+
+    The page is the whole point of reading it — a model given only meta
+    descriptions can do no better than paraphrase them, which is exactly the
+    keyword-shaped answer this path exists to replace.
+    """
+    lines: list[str] = []
+    for source in sources[:5]:
+        text = " ".join(page_text_of(source).split())
+        if len(text) < 40:
+            continue
+        if len(text) > per_source_chars:
+            text = text[:per_source_chars].rsplit(" ", 1)[0] + "…"
+        lines.append(f"- [{source.title}]({source.url}): {text}")
+    return "\n".join(lines)
 
 # ────────────────────────────────────────────────────────────
 # LLM prompt instructions by query type
@@ -536,12 +436,21 @@ async def try_llm_synthesis(
     frame: QueryFrame,
     sources: Sequence[ResearchSource],
     prior_topics: tuple[str, ...] = (),
+    *,
+    question: str = "",
+    focus: str = "",
 ) -> str | None:
-    """Attempt LLM-powered answer synthesis. Returns None if unavailable."""
-    if provider is None:
-        return None
-    name = str(getattr(provider, "name", "")).lower()
-    if not name or "echo" in name:
+    """Attempt LLM-powered answer synthesis. Returns None if unavailable.
+
+    QUESTION-FIRST by construction: the model is handed the user's own words
+    and asked to ANSWER them from the research, not to describe the topic. It
+    is forbidden from listing source titles or pasting snippets, because a
+    model that echoes the evidence reproduces exactly the keyword-shaped
+    non-answer this path exists to replace. When the research does not answer
+    the question, the model is told to say so rather than pad — an honest gap
+    is worth more than another blurb.
+    """
+    if provider is None or not usable_provider(provider):
         return None
     complete = getattr(provider, "complete", None)
     if complete is None:
@@ -551,11 +460,7 @@ async def try_llm_synthesis(
     if not facts:
         return None
 
-    source_list = "\n".join(
-        f"- [{s.title}]({s.url}): {text}"
-        for s in sources[:5]
-        if (text := clean_snippet(s.snippet or "")) and len(text) > 10
-    )
+    source_list = _research_block(sources)
     facts_text = "\n".join(f"{i+1}. {f}" for i, f in enumerate(facts))
 
     # Type-specific instructions
@@ -565,18 +470,31 @@ async def try_llm_synthesis(
         "You synthesize research into clear, accurate answers. Be concise and factual.",
     )
 
-    prompt = f"Synthesize a clear answer about '{topic}' from the research below.\n\n"
+    ask = " ".join(str(question or topic).split())
+    prompt = f"Question: {ask}\n"
+    if ask.lower() != topic.lower():
+        prompt += f"Subject under discussion: {topic}\n"
+    if focus:
+        prompt += f"What the question is actually asking for: {focus}\n"
+    prompt += (
+        "\nAnswer that question from the research below. Write the answer a "
+        "knowledgeable person would give out loud: directly, in your own words, "
+        "in flowing prose.\n"
+        "Do not list source titles, do not paste snippet text, do not restate the "
+        "question, and do not pad with background the question did not ask for. "
+        "Use only the research; if it does not answer part of the question, say "
+        "plainly what is missing instead of guessing.\n"
+    )
     if type_instruction:
-        prompt += f"How to structure this answer: {type_instruction}\n\n"
+        prompt += f"Shape of this answer: {type_instruction}\n"
     # Conversation context
     if prior_topics:
-        prompt += f"Previous exploration in this conversation: {', '.join(prior_topics)}\n"
-        prompt += f"The user may be following up on one of these topics. If the current question "
-        prompt += f"refers to a prior topic (e.g. 'tell me more about that'), connect it to "
-        prompt += f"the relevant prior topic in your answer.\n\n"
-    prompt += f"Source snippets:\n{source_list}\n\n"
-    prompt += f"Key facts:\n{facts_text}\n\n"
-    prompt += f"Question kind: {frame.kind}"
+        prompt += f"\nEarlier exploration in this conversation: {', '.join(prior_topics)}\n"
+        prompt += (
+            "The user may be following up on one of those; if the question refers to "
+            "a prior topic, connect it to the relevant one.\n"
+        )
+    prompt += f"\nResearch:\n{source_list}\n\nThe sentences that best match the question:\n{facts_text}\n"
     if frame.context:
         prompt += f"\nContext: {frame.context}"
     if frame.items:
@@ -587,12 +505,11 @@ async def try_llm_synthesis(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt},
         ]
-        result = await complete(messages)
-        result = str(result).strip()
-        if "research assistant" in result.lower()[:80]:
-            return None
-        if len(result) > 50 and "topic" not in result.lower().split("\n")[0][:20]:
-            return result
+        result = str(await complete(messages)).strip()
     except Exception as exc:
         logger.debug("LLM synthesis failed: %s", exc)
-    return None
+        return None
+    # A one-liner is a refusal or a stray token, not an answer; anything longer
+    # is used verbatim. (The old gate also rejected answers whose first line
+    # mentioned the word "topic" — a heuristic that discarded real answers.)
+    return result if len(result) >= 40 else None

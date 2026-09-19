@@ -12,6 +12,12 @@ from typing import Any
 # The detection tests pass their own explicit environ to the factory functions.
 os.environ.setdefault("NOVACONTROL_DISABLE_OLLAMA", "1")
 
+# The telemetry sampler spawns a PowerShell process per cadence to read GPU,
+# network and thermal counters. Tests never need it: /system/telemetry still
+# serves the live cheap metrics and reports the sampled ones unavailable, which
+# is exactly the degradation the suite pins.
+os.environ.setdefault("NOVACONTROL_DISABLE_TELEMETRY_SAMPLER", "1")
+
 
 def shell_launch_offenders(source_code: str) -> list[str]:
     """AST scan for shell-capable subprocess launches in a module's source.
@@ -127,6 +133,41 @@ class EchoProvider:
             if msg.get("role") == "user":
                 return f"{self._prefix} {msg['content']}"
         return f"{self._prefix} (no user message)"
+
+
+class OfflinePageReader:
+    """Page reader that reads nothing, for hermetic tests.
+
+    Reading a source page is real network I/O. Any test that constructs an
+    ExploreService without naming a reader would otherwise fetch six live URLs
+    and slow the suite down by seconds per case, so the offline reader below
+    replaces the DEFAULT one for the whole run (see `install_offline_page_reader`).
+    Tests that want the reading path inject their own reader through the
+    service's `page_reader=` argument.
+    """
+
+    def __init__(self, pages: Mapping[str, str] | None = None, **kwargs: object) -> None:
+        self.pages = dict(pages or {})
+        self.read_calls: list[str] = []
+
+    def read(self, url: str) -> str:
+        self.read_calls.append(url)
+        return self.pages.get(url, "")
+
+    async def read_many(self, urls: Sequence[str], *, limit: int | None = None) -> dict[str, str]:
+        for url in urls:
+            self.read_calls.append(url)
+        return {url: text for url in urls if (text := self.pages.get(url, ""))}
+
+
+def install_offline_page_reader() -> None:
+    """Make ExploreService's default page reader read nothing, process-wide."""
+    from novacontrol.explore import service as explore_service
+
+    explore_service.PageReader = OfflinePageReader  # type: ignore[misc, assignment]
+
+
+install_offline_page_reader()
 
 
 async def collect_events(

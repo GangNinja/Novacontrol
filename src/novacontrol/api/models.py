@@ -123,6 +123,7 @@ class ApiSurface:
                 ApiRoute("GET", "/health", "Health check."),
                 ApiRoute("GET", "/status", "Runtime status."),
                 ApiRoute("GET", "/system/health", "Aggregated system health."),
+                ApiRoute("GET", "/system/telemetry", "Live machine telemetry for the Command Center (CPU, memory, storage, GPU, network, battery, temperature)."),
                 ApiRoute("GET", "/system/harden", "Release hardening report."),
                 ApiRoute("GET", "/system/package", "Runtime package manifest."),
                 ApiRoute("POST", "/ask", "Route a natural-language request through NovaControl.", authenticated=True),

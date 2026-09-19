@@ -505,6 +505,9 @@ class SetLocalProviderTests(unittest.TestCase):
         cloud = FakeOllamaProvider("cloud")
         brain = NovaBrain(completion_provider=FakeOllamaProvider("old"))
         brain.set_cloud_provider(cloud)
+        # Installing the key does not activate it; selecting Cloud does.
+        self.assertIsNot(brain.completion_provider, cloud)
+        brain.set_mode("cloud")
         self.assertIs(brain.completion_provider, cloud)
         brain.set_local_provider(FakeOllamaProvider("local"))
         # Cloud stays active; the local pick is stored for later.

@@ -223,40 +223,51 @@ class ReducedMotionPlaywrightTests(unittest.TestCase):
                 browser.close()
 
     def _tilt_transform_after_move(self, page) -> str:
-        """Move the mouse over a visible card and return its inline transform.
+        """Move the mouse over an ON-SCREEN card and return its inline transform.
 
-        Uses real mousemove events over the first visible .surface so the
-        assertion observes the actual tilt handlers, not any internal flag.
+        Uses real mousemove events over the first visible card so the assertion
+        observes the actual tilt handlers, not any internal flag.
+
+        The card must be inside the viewport, not merely present in the DOM: a
+        real mouse move cannot reach a card below the fold, so picking one there
+        would report "no transform" and read as a broken tilt handler when the
+        only problem is that the mouse never arrived. The Command Center's first
+        card in DOM order sits below the fold on a 720px-tall viewport (the
+        telemetry section leads the panel), so the check is a viewport test.
         """
+        cards_js = (
+            "'.surface, .command-console, .info-card, .metric-card, .telemetry-card'"
+        )
         page.evaluate(
-            "document.querySelectorAll('.surface, .command-console, .info-card, .metric-card')"
+            f"document.querySelectorAll({cards_js})"
             ".forEach(c => { c.style.transform = ''; })"
         )
         box = page.evaluate(
-            """(() => {
-              const cards = [...document.querySelectorAll(
-                '.surface, .command-console, .info-card, .metric-card'
-              )];
-              const card = cards.find(c => {
+            f"""(() => {{
+              const cards = [...document.querySelectorAll({cards_js})];
+              const card = cards.find(c => {{
                 const r = c.getBoundingClientRect();
-                return r.width > 40 && r.height > 40;
-              });
+                if (!(r.width > 40 && r.height > 40)) return false;
+                const cx = r.left + r.width / 2;
+                const cy = r.top + r.height / 2;
+                // Inside the viewport, and clear of the sticky ribbon.
+                return cx > 0 && cx < window.innerWidth && cy > 80 && cy < window.innerHeight;
+              }});
               if (!card) return null;
               const r = card.getBoundingClientRect();
-              return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-            })()"""
+              return {{ x: r.left + r.width / 2, y: r.top + r.height / 2 }};
+            }})()"""
         )
         if box is None:
-            self.fail("no visible card found for the tilt probe")
+            self.fail("no on-screen card found for the tilt probe")
         page.mouse.move(box["x"], box["y"])
         page.mouse.move(box["x"] + 6, box["y"] + 4)  # second event: deltas update
         return page.evaluate(
-            """(() => {
-              const card = [...document.querySelectorAll(
-                '.surface, .command-console, .info-card, .metric-card'
-              )].find(c => (c.style.transform || '').length > 0);
+            f"""(() => {{
+              const card = [...document.querySelectorAll({cards_js})]
+                .find(c => (c.style.transform || '').length > 0);
               return card ? card.style.transform : "";
-            })()"""
+            }})()"""
         )
 
     def test_reduced_motion_collapses_motion_on_live_elements(self) -> None:

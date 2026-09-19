@@ -1,11 +1,23 @@
 """UI audit: responsive fit + stylesheet A/B.
 
-Two checks that catch the failures a screenshot review misses:
+Three checks that catch the failures a screenshot review misses:
 
 1. **Fit** — walks every sidebar panel at every breakpoint and measures
    horizontal overflow (document scrollWidth plus any element whose box sticks
    out past the right edge). A panel that needs sideways scrolling is the
    "doesn't fit the screen" bug.
+
+1c. **Navigation is present and never an overlay** — the sidebar must have a
+   width at every audit width and must not sit fixed over the workspace. The
+   off-canvas drawer failed this: at 700px the nav covered the panel, and a
+   whole-panel click looked like clipped content.
+
+1b. **One panel at a time, filling the screen** — the same walk also checks that
+   exactly one panel is laid out (an id-selector `display` rule once beat
+   `.panel { display: none }`, so the Command Center stayed rendered under
+   whatever panel was open and pushed the chosen one ~1100px below the fold),
+   that the clicked panel starts inside the viewport, and that it fills the
+   workspace instead of leaving a dead strip down the right edge.
 
 2. **Stylesheet A/B** (``--baseline``) — hashes the computed style of every
    element over ~50 properties, swaps the page's stylesheet for a baseline copy
@@ -122,6 +134,57 @@ CLICK_PANEL_JS = """
 }
 """
 
+# Only the active panel may be laid out. `#homePanel { display: flex }` shipped
+# once and beat `.panel { display: none }` on ID specificity, which left TWO
+# panels in the workspace: the Command Center filled the viewport and the panel
+# the user actually clicked began below the fold.
+PANEL_STATE_JS = """
+() => {
+  const shown = [...document.querySelectorAll('.panel')]
+    .filter((p) => getComputedStyle(p).display !== 'none');
+  const active = document.querySelector('.panel.active');
+  const box = active ? active.getBoundingClientRect() : null;
+  const workspace = document.querySelector('.workspace');
+  const ws = workspace ? workspace.getBoundingClientRect() : null;
+  return {
+    shown: shown.map((p) => p.id),
+    active: active ? active.id : null,
+    activeTop: box ? Math.round(box.top) : null,
+    rightGap: box && ws ? Math.round(ws.right - box.right) : null,
+  };
+}
+"""
+
+# The reading column (`#chatPanel`) is deliberately narrower than the workspace —
+# a comfortable measure for conversation — so the fill check skips it.
+_READING_MEASURE_PANELS = ("chatPanel",)
+# --gutter-x tops out at 56px; anything past that plus slack is dead space.
+_MAX_GUTTER_PX = 56
+_FILL_CHECK_MAX_WIDTH = 1920
+
+
+def _panel_state_failures(width: int, panel: str, state: dict[str, Any]) -> list[str]:
+    """Failures for one (width, panel): panels stacked, off-screen, or unfilled."""
+    failures: list[str] = []
+    if len(state["shown"]) != 1 or state["shown"][0] != state["active"]:
+        failures.append(
+            f"{width}px {panel}: panels rendered at once {state['shown']} "
+            f"(only '{state['active']}' should be laid out)"
+        )
+    if state["activeTop"] is None or not 0 <= state["activeTop"] < 900:
+        failures.append(
+            f"{width}px {panel}: the clicked panel starts at y={state['activeTop']} "
+            "— outside the viewport, so its content is below the fold"
+        )
+    if panel not in _READING_MEASURE_PANELS and width <= _FILL_CHECK_MAX_WIDTH:
+        gap = state["rightGap"]
+        if gap is not None and gap > _MAX_GUTTER_PX + 8:
+            failures.append(
+                f"{width}px {panel}: content column leaves {gap}px of dead space on the "
+                "right (the pane does not fill the screen)"
+            )
+    return failures
+
 
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *_args: object) -> None:  # keep the audit output clean
@@ -156,7 +219,20 @@ NAV_JS = """
   const clipped = items
     .filter((el) => { const r = el.getBoundingClientRect(); return r.right > vw + 1 || r.left < -1; })
     .map((el) => (el.textContent || '').trim());
-  return { items: items.length, clipped, horizontalScroll: Math.max(0, nav.scrollWidth - nav.clientWidth) };
+  const sidebar = document.querySelector('.sidebar');
+  const work = document.querySelector('.workspace');
+  const sideBox = sidebar ? sidebar.getBoundingClientRect() : null;
+  const workBox = work ? work.getBoundingClientRect() : null;
+  const fixed = sidebar ? getComputedStyle(sidebar).position === 'fixed' : false;
+  return {
+    items: items.length,
+    clipped,
+    horizontalScroll: Math.max(0, nav.scrollWidth - nav.clientWidth),
+    sidebarWidth: sideBox ? Math.round(sideBox.width) : 0,
+    // A fixed sidebar sitting over the workspace is the off-canvas drawer: it
+    // covers the panel the reader asked for.
+    overlaysWorkspace: Boolean(fixed && sideBox && workBox && sideBox.right > workBox.left + 1),
+  };
 }
 """
 
@@ -210,12 +286,23 @@ def main() -> int:
                             f"{width}px {panel}: page overflow {res['horizontalScroll']}px, "
                             f"offenders {json.dumps(res['offenders'])}"
                         )
+                    failures.extend(_panel_state_failures(width, panel, page.evaluate(PANEL_STATE_JS)))
                     nav = page.evaluate(NAV_JS)
                     if nav and (nav["clipped"] or nav["horizontalScroll"] > 0):
                         failures.append(
                             f"{width}px {panel}: navigation hides destinations "
                             f"({len(nav['clipped'])} of {nav['items']} off-screen: "
                             f"{', '.join(nav['clipped'][:5])})"
+                        )
+                    if nav and nav["sidebarWidth"] <= 0:
+                        failures.append(
+                            f"{width}px {panel}: the sidebar has no width — navigation is "
+                            "unreachable without a toggle"
+                        )
+                    elif nav and nav["overlaysWorkspace"]:
+                        failures.append(
+                            f"{width}px {panel}: the sidebar is fixed over the workspace, "
+                            "so it covers the panel the reader opened"
                         )
                 page.close()
             browser.close()
@@ -233,7 +320,7 @@ def main() -> int:
     if failures or drift:
         print("RESULT: FAIL")
         return 1
-    print("RESULT: PASS — every panel fits; " +
+    print("RESULT: PASS — every panel fits, one panel at a time; " +
           ("no computed-style drift" if baseline_url else "stylesheet A/B skipped"))
     return 0
 

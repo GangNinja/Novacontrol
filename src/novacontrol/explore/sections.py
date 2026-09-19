@@ -1,45 +1,120 @@
-"""Section generation: facts + sources → structured report sections.
+"""Section generation: ranked evidence → the report's sections and highlights.
 
-Owns: building sections, highlights, key points, learning paths,
-next questions, overview text, offline fallbacks.
+Owns: highlights, sections, key points, learning paths, next questions,
+overview text, and the offline fallbacks.
+
+Rule-free by construction. Sections used to be assembled by matching keyword
+word lists ("step", "tip", "defined as") separately per question kind, which is
+why the same handful of facts reappeared under "What It Is", "How It Works",
+and "Key Points". They are now slices of ONE ranked pool (see `evidence.py`):
+the answer takes the best sentences, the highlights the next, the sections the
+next after that — so every surface tells the reader something new, and nothing
+here knows anything about the topic. Comparison keeps its question-form
+structure (the options came out of the question itself, not out of a word
+list), and the offline fallbacks are unchanged.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 import re
 from typing import Any
 
+from novacontrol.explore.evidence import Evidence, Sentence, build_evidence, page_text_of
 from novacontrol.explore.query import QueryFrame, sentence_subject, display_subject
 from novacontrol.explore.synthesizer import clean_snippet, extract_facts
 from novacontrol.explore.source_helpers import clean_source_title, domain as _domain
-from novacontrol.explore.models import ResearchSource, VideoResult
+from novacontrol.explore.models import ResearchSource, VideoResult  # noqa: F401  (re-exported type)
+
+# Sentence boundary used when a source's text has to be split for display.
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
+
+
+# ────────────────────────────────────────────────────────────
+# Ranked picks: the one pool every surface draws from
+# ────────────────────────────────────────────────────────────
+
+def _ranked_picks(
+    frame: QueryFrame,
+    sources: Sequence[ResearchSource],
+    evidence: Evidence | None,
+    count: int,
+    used: Iterable[str] = (),
+) -> tuple[Sentence, ...]:
+    """The next best `count` sentences the report has not shown yet.
+
+    `used` carries the sentences already spent by the answer and by any earlier
+    section, which is what keeps a page from repeating itself. Complete
+    sentences are preferred; truncated blurbs are used only to fill the quota.
+    """
+    if not sources:
+        return ()
+    pool = evidence if evidence is not None else build_evidence(frame.subject, frame, sources)
+    if not pool:
+        return ()
+    picked = pool.take(count, exclude=used, complete_only=True)
+    if len(picked) < count:
+        already = (*used, *(pick.text for pick in picked))
+        picked = (*picked, *pool.take(count, exclude=already))
+    return picked[:count]
+
+
+def _ranked_texts(
+    frame: QueryFrame,
+    sources: Sequence[ResearchSource],
+    evidence: Evidence | None,
+    count: int,
+    used: Iterable[str] = (),
+) -> tuple[str, ...]:
+    return tuple(pick.text for pick in _ranked_picks(frame, sources, evidence, count, used))
+
+
+def _pool_exhausted(evidence: Evidence | None, used: Iterable[str]) -> bool:
+    """True when the answer already spent every sentence the pool held.
+
+    Only THEN may a surface go empty: an empty card beats showing the reader the
+    same sentence twice. With no ranked pool at all (search failed, or sources
+    too thin to quote) the snippet digests are the only content there is, and
+    hiding them would leave the report blank.
+    """
+    return bool(tuple(used)) and evidence is not None and bool(len(evidence))
 
 
 # ────────────────────────────────────────────────────────────
 # Answer highlights
 # ────────────────────────────────────────────────────────────
 
-def answer_highlights(frame: QueryFrame, sources: Sequence[ResearchSource]) -> tuple[str, ...]:
+def answer_highlights(
+    frame: QueryFrame,
+    sources: Sequence[ResearchSource],
+    *,
+    evidence: Evidence | None = None,
+    used: Iterable[str] = (),
+) -> tuple[str, ...]:
     if frame.kind == "comparison" and len(frame.items) >= 2:
         return _comparison_highlights(frame)
-    if frame.kind == "ideas":
-        return _ideas_highlights(frame, sources)
-    highlights = _extract_highlights_from_sources(sources)
-    return highlights or (
+    picks = _ranked_texts(frame, sources, evidence, 4, used)
+    if picks:
+        return picks
+    # Nothing is left that the answer has not already shown. The snippet digest
+    # would put those same sentences back on the page in a second widget.
+    if _pool_exhausted(evidence, used):
+        return ()
+    return _snippet_highlights(sources) or (
         f"Research {len(sources)} source(s) for information about {frame.subject}.",
         "Check the source links for detailed explanations and evidence.",
         "Compare information across multiple sources for the most reliable understanding.",
     )
 
 
-def _extract_highlights_from_sources(sources: Sequence[ResearchSource]) -> tuple[str, ...]:
+def _snippet_highlights(sources: Sequence[ResearchSource]) -> tuple[str, ...]:
+    """Last resort when a source offers no sentence worth ranking."""
     highlights, seen = [], set()
     for source in sources:
         snippet = (source.snippet or "").strip()
         if not snippet or len(snippet) < 20:
             continue
-        for sentence in re.split(r'(?<=[.!?])\s+', snippet):
+        for sentence in _SENTENCE_BOUNDARY.split(snippet):
             cleaned = clean_snippet(sentence)
             if not cleaned or len(cleaned) < 20:
                 continue
@@ -63,19 +138,6 @@ def _comparison_highlights(frame: QueryFrame) -> tuple[str, ...]:
     return highlights
 
 
-def _ideas_highlights(frame: QueryFrame, sources: Sequence[ResearchSource]) -> tuple[str, ...]:
-    if sources:
-        h = _extract_highlights_from_sources(sources)
-        if h:
-            return h[:4]
-    return (
-        "Start with one practical idea you can do immediately.",
-        "Add one creative variation so the result does not feel generic.",
-        "Keep cost, setup, and cleanup small for the first version.",
-        "Save the best version as a repeatable template.",
-    )
-
-
 def _comparison_clause(item: str) -> str:
     return f"Choose {item} when its strengths match your highest-priority constraint"
 
@@ -84,78 +146,55 @@ def _comparison_clause(item: str) -> str:
 # Sections
 # ────────────────────────────────────────────────────────────
 
-def build_sections(frame: QueryFrame, sources: Sequence[ResearchSource]) -> tuple[dict[str, Any], ...]:
+def build_sections(
+    frame: QueryFrame,
+    sources: Sequence[ResearchSource],
+    *,
+    evidence: Evidence | None = None,
+    used: Iterable[str] = (),
+) -> tuple[dict[str, Any], ...]:
     if frame.kind == "comparison" and len(frame.items) >= 2:
         return _comparison_sections(frame, sources)
-    if frame.kind == "ideas":
-        return _ideas_sections(frame, sources)
     if not sources:
         return _offline_sections(frame)
-    return _source_based_sections(frame, sources)
+    return _evidence_sections(frame, sources, evidence, used)
 
 
-def _source_based_sections(frame: QueryFrame, sources: Sequence[ResearchSource]) -> tuple[dict[str, Any], ...]:
-    topic = frame.subject
+def _evidence_sections(
+    frame: QueryFrame,
+    sources: Sequence[ResearchSource],
+    evidence: Evidence | None,
+    used: Iterable[str],
+) -> tuple[dict[str, Any], ...]:
+    """Findings ranked against the question, then the per-source references."""
     sections: list[dict[str, Any]] = []
 
-    if frame.kind in ("how_to", "ideas"):
-        kw_groups = [
-            ("How To Get Started", ("step", "first", "start", "begin", "need", "create", "plan", "make", "set up", "organize", "include", "prepare"), 5),
-            ("Ideas And Tips", ("tip", "idea", "try", "use", "add", "include", "creative", "fun", "great", "best", "easy", "simple"), 4),
-            ("What You Need", ("need", "require", "must have", "essential", "material", "supply", "tool", "equipment"), 3),
-        ]
-    elif frame.kind in ("explanation", "mechanism"):
-        kw_groups = [
-            ("What It Is", ("is", "are", "defined", "known as", "means", "refers to", "consists of", "involves", "type", "form"), 3),
-            ("How It Works", ("works", "process", "step", "method", "technique", "uses", "operates", "functions", "happens"), 4),
-        ]
-    else:
-        kw_groups = []
+    picks = _ranked_picks(frame, sources, evidence, 6, used)
+    if picks:
+        sections.append({
+            "title": "Key Findings",
+            "items": tuple({"text": pick.text, "source_indices": (pick.source_index,)} for pick in picks),
+        })
+    elif not _pool_exhausted(evidence, used):
+        facts = extract_facts(sources)
+        if facts:
+            sections.append({
+                "title": "Key Findings",
+                "items": tuple({"text": fact, "source_indices": ()} for fact in facts[:5]),
+            })
 
-    for title, keywords, max_items in kw_groups:
-        items = _extract_section_items(sources, keywords=keywords, max_items=max_items)
-        if items:
-            sections.append({"title": title, "items": items})
-
-    if not sections:
-        all_facts = extract_facts(sources)
-        if all_facts:
-            sections.append({"title": "Key Findings", "items": tuple({"text": f, "source_indices": ()} for f in all_facts[:5])})
-
-    if sources:
-        ref_items = tuple(
-            {"text": f"{clean_source_title(s.title, s.url)}: {text}",
-             "source_indices": (i,)}
-            for i, s in enumerate(sources[:4], start=1)
-            if (text := clean_snippet(s.snippet or "")) and len(text) > 10
-        )
-        if ref_items:
-            sections.append({"title": "From The Sources", "items": ref_items})
+    ref_items = tuple(
+        {
+            "text": f"{clean_source_title(source.title, source.url)}: {text}",
+            "source_indices": (index,),
+        }
+        for index, source in enumerate(sources[:4], start=1)
+        if (text := clean_snippet(source.snippet or "")) and len(text) > 10
+    )
+    if ref_items:
+        sections.append({"title": "From The Sources", "items": ref_items})
 
     return tuple(sections) if sections else _offline_sections(frame)
-
-
-def _extract_section_items(sources: Sequence[ResearchSource], *, keywords: tuple[str, ...], max_items: int = 3) -> tuple[dict[str, Any], ...]:
-    items, seen = [], set()
-    for index, source in enumerate(sources, start=1):
-        snippet = (source.snippet or "").strip()
-        if not snippet:
-            continue
-        for sentence in re.split(r'(?<=[.!?])\s+', snippet):
-            lower = sentence.lower()
-            if not any(kw in lower for kw in keywords):
-                continue
-            cleaned = clean_snippet(sentence)
-            if not cleaned or len(cleaned) < 20:
-                continue
-            key = cleaned.lower()[:60]
-            if key in seen:
-                continue
-            seen.add(key)
-            items.append({"text": cleaned, "source_indices": (index,)})
-            if len(items) >= max_items:
-                return tuple(items)
-    return tuple(items)
 
 
 def _matching_source_indices(sources: Sequence[ResearchSource], terms: tuple[str, ...]) -> tuple[int, ...]:
@@ -183,37 +222,6 @@ def _comparison_sections(frame: QueryFrame, sources: Sequence[ResearchSource]) -
     )
 
 
-def _ideas_sections(frame: QueryFrame, sources: Sequence[ResearchSource]) -> tuple[dict[str, Any], ...]:
-    topic = frame.subject
-    if sources:
-        items = tuple(
-            {"text": text, "source_indices": (i,)}
-            for i, s in enumerate(sources[:5], start=1)
-            if (text := clean_snippet(s.snippet or s.title)) and len(text) > 15
-        )
-        if items:
-            return (
-                {"title": "Ideas From Research", "items": items[:4]},
-                {"title": "Try These First", "items": (
-                    {"text": "Pick the easiest idea from above and try it this week.", "source_indices": ()},
-                    {"text": "Add one personal detail to make it feel intentional.", "source_indices": ()},
-                    {"text": "Save what worked as a template for next time.", "source_indices": ()},
-                )},
-            )
-    return (
-        {"title": "Try These First", "items": (
-            {"text": f"Make the smallest useful version of {topic} and test it once.", "source_indices": ()},
-            {"text": "Create a low-cost version using what you already have.", "source_indices": ()},
-            {"text": "Add one unusual constraint or personal detail for a creative version.", "source_indices": ()},
-        )},
-        {"title": "Choose The Best Idea", "items": (
-            {"text": "Pick the idea with the clearest outcome and fewest blockers.", "source_indices": ()},
-            {"text": "Avoid ideas that need too much setup before you know if they work.", "source_indices": ()},
-            {"text": "Save the winning version as a repeatable template.", "source_indices": ()},
-        )},
-    )
-
-
 def _offline_sections(frame: QueryFrame) -> tuple[dict[str, Any], ...]:
     topic = frame.subject
     return (
@@ -234,17 +242,34 @@ def _offline_sections(frame: QueryFrame) -> tuple[dict[str, Any], ...]:
 # Key points
 # ────────────────────────────────────────────────────────────
 
-def key_points(frame: QueryFrame, sources: Sequence[ResearchSource]) -> tuple[str, ...]:
+def key_points(
+    frame: QueryFrame,
+    sources: Sequence[ResearchSource],
+    *,
+    evidence: Evidence | None = None,
+    used: Iterable[str] = (),
+) -> tuple[str, ...]:
     if frame.kind == "comparison" and len(frame.items) >= 2:
         return _comparison_highlights(frame)
-    if frame.kind == "ideas":
-        return _ideas_highlights(frame, sources)
+    picks = _ranked_texts(frame, sources, evidence, 5, used)
+    if picks:
+        return picks
+    # Same contract as the highlights: never re-show what the answer spent.
+    if _pool_exhausted(evidence, used):
+        return ()
+    return _snippet_key_points(frame, sources) or (
+        f"Research {len(sources)} source(s) for information about {frame.subject}.",
+        "Check the source links for detailed explanations.",
+    )
+
+
+def _snippet_key_points(frame: QueryFrame, sources: Sequence[ResearchSource]) -> tuple[str, ...]:
     points, seen = [], set()
     for source in sources[:5]:
         snippet = (source.snippet or "").strip()
         if not snippet or len(snippet) < 20:
             continue
-        for sentence in re.split(r'(?<=[.!?])\s+', snippet):
+        for sentence in _SENTENCE_BOUNDARY.split(snippet):
             cleaned = clean_snippet(sentence)
             if not cleaned or len(cleaned) < 20:
                 continue
@@ -257,10 +282,7 @@ def key_points(frame: QueryFrame, sources: Sequence[ResearchSource]) -> tuple[st
             seen.add(key)
             points.append(cleaned)
             break
-    return tuple(points) if points else (
-        f"Research {len(sources)} source(s) for information about {frame.subject}.",
-        "Check the source links for detailed explanations.",
-    )
+    return tuple(points)
 
 
 # ────────────────────────────────────────────────────────────
@@ -268,22 +290,34 @@ def key_points(frame: QueryFrame, sources: Sequence[ResearchSource]) -> tuple[st
 # ────────────────────────────────────────────────────────────
 
 def detailed_explanation(frame: QueryFrame, sources: Sequence[ResearchSource], depth: str) -> str:
+    """Per-source detail: what THIS source says, in its own sentences."""
     if not sources:
         return _offline_detailed_explanation(frame, depth)
     sections = []
     for i, source in enumerate(sources[:6], start=1):
-        snippet = (source.snippet or "").strip()
         title = source.title or f"Source {i}"
-        cleaned = clean_snippet(snippet) if len(snippet) > 15 else ""
-        if cleaned:
-            sections.append(f"{i}. {title}: {cleaned}")
+        body = _source_summary(source)
+        if body:
+            sections.append(f"{i}. {title}: {body}")
         else:
             sections.append(f"{i}. {title} (see source for details)")
     if depth == "deep":
-        sections.append("Verification: compare agreement across sources, check whether snippets support each claim.")
+        sections.append("Verification: compare agreement across sources, check whether the quoted sentences support each claim.")
     else:
         sections.append("For a quick understanding, focus on the main points above, then check the source links for deeper details.")
     return "\n".join(sections)
+
+
+def _source_summary(source: ResearchSource) -> str:
+    """The first readable sentences a source offers, page text over blurb."""
+    text = page_text_of(source)
+    if text:
+        cleaned = [clean_snippet(part) for part in _SENTENCE_BOUNDARY.split(text)]
+        usable = [part for part in cleaned if part and len(part) > 15][:2]
+        if usable:
+            return " ".join(usable)[:420]
+    snippet = (source.snippet or "").strip()
+    return clean_snippet(snippet) if len(snippet) > 15 else ""
 
 
 def _offline_detailed_explanation(frame: QueryFrame, depth: str) -> str:
@@ -346,4 +380,3 @@ def overview(topic: str, sources: Sequence[ResearchSource]) -> str:
     domain_text = ", ".join(domains) if domains else f"{len(sources)} sources"
     return (f"Research on {display} from {domain_text}: "
             f"{len(sources)} source(s) analyzed with key findings organized below.")
-

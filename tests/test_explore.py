@@ -59,20 +59,65 @@ class ExploreSynthesisTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.sources[0].url, "https://example.com/basics")
         self.assertEqual(report.videos[0].channel, "Example Channel")
         self.assertTrue(report.answer)
-        self.assertTrue(report.answer_highlights)
+        # Highlights are the next-best sentences from the same ranked pool, so
+        # they must never be sentences the answer already showed. With the two
+        # generic source sentences this fixture has, the answer spends them both
+        # and the report correctly shows none rather than repeating itself.
+        for highlight in report.answer_highlights:
+            self.assertNotIn(highlight, report.answer)
         self.assertTrue(report.sections)
         self.assertTrue(report.source_chips)
         self.assertIn("claims", report.verification)
         self.assertTrue(report.follow_up_questions)
 
-    async def test_answer_contains_topic(self) -> None:
+    async def test_answer_is_substantial_and_sourced(self) -> None:
+        """The local answer is composed from source sentences, and says which.
+
+        It is NOT required to echo the question back: naming the topic as a
+        framing line is the shape of the template answer this replaced. The
+        topic appears in a real answer because the SOURCES say it (covered by
+        `test_answer_quotes_the_sources_topic_words`).
+        """
         report = await self._make_service().research(
             ExploreRequest("Explain how noise-cancelling headphones actually work")
         )
         self.assertEqual(report.topic, "noise-cancelling headphones")
         self.assertTrue(len(report.answer) > 50)
-        self.assertIn("noise-cancelling headphones", report.answer.lower())
+        self.assertIn("Sources:", report.answer)
+        self.assertIn("example.com", report.answer)
+        self.assertNotIn("what the sources say", report.answer.lower())
         self.assertTrue(len(report.sections) >= 1)
+
+    async def test_answer_quotes_the_sources_topic_words(self) -> None:
+        """When the sources are actually about the topic, the answer is too."""
+        from novacontrol.explore.models import ResearchSource
+
+        class TopicalSearchProvider:
+            async def search(self, query: str, *, limit: int = 6) -> tuple[ResearchSource, ...]:
+                return (
+                    ResearchSource(
+                        "Active noise cancellation explained",
+                        "https://audio.example.com/anc",
+                        "Noise-cancelling headphones work by sampling ambient sound with a "
+                        "microphone and playing an inverted wave that cancels it out.",
+                    ),
+                    ResearchSource(
+                        "How ANC headphones cancel sound",
+                        "https://sound.example.org/anc",
+                        "The inverted wave is generated in real time, which is why "
+                        "noise-cancelling headphones work best on steady low-frequency noise.",
+                    ),
+                )[:limit]
+
+        service = ExploreService(
+            search_provider=TopicalSearchProvider(),
+            video_provider=FakeVideoProvider(),
+            wiki_provider=FakeWikiProvider(),
+        )
+        report = await service.research(
+            ExploreRequest("Explain how noise-cancelling headphones actually work")
+        )
+        self.assertIn("noise-cancelling headphones", report.answer.lower())
 
     async def test_answer_not_hardcoded(self) -> None:
         report = await self._make_service().research(
@@ -156,7 +201,9 @@ class ExploreOfflineTests(unittest.IsolatedAsyncioTestCase):
             ExploreRequest("Compare React, Vue, and Svelte for building a dashboard")
         )
         self.assertEqual(report.topic, "React, Vue, and Svelte")
-        self.assertIn("For building a dashboard", report.answer)
+        # The comparison STRUCTURE lives in the sections (below); the answer
+        # itself is the sources' own sentences about each option.
+        self.assertTrue(report.answer.strip())
         section_titles = [s["title"] for s in report.sections]
         self.assertIn("Quick Comparison", section_titles)
         self.assertIn("How To Decide", section_titles)
@@ -165,7 +212,7 @@ class ExploreOfflineTests(unittest.IsolatedAsyncioTestCase):
         report = await self._make_service().research(
             ExploreRequest("Compare email, chat, and phone calls for customer support")
         )
-        self.assertIn("For customer support", report.answer)
+        self.assertTrue(report.answer.strip())
         section_titles = [s["title"] for s in report.sections]
         self.assertIn("Quick Comparison", section_titles)
         self.assertIn("How To Decide", section_titles)
@@ -672,6 +719,85 @@ class ShoppingQueryContextTests(unittest.TestCase):
             with self.subTest(good=title):
                 self.assertTrue(is_relevant(title, snippet, url, topic))
 
+    def test_headline_lead_entity_is_an_anchor(self) -> None:
+        """The screenshot bug: the lead capitalized word of a headline was
+        skipped, so 'Trump signs Russia sanctions bill authorising up to 100%
+        tariffs on India, China' searched 'russia india china' — Wikipedia's
+        generic Russia article passed the any-of-entity gate and became the
+        answer. The lead entity IS the story; it must anchor both the search
+        core and relevance, and the specific story must OUT-RANK the generic
+        page when both pass."""
+        from novacontrol.explore.query import (
+            _proper_tokens,
+            extract_search_topic,
+            relevance_score,
+        )
+        topic = "Trump signs Russia sanctions bill authorising up to 100% tariffs on India, China"
+        self.assertIn("trump", _proper_tokens(topic))
+        self.assertEqual(extract_search_topic(topic), "trump russia india china")
+
+        news = relevance_score(
+            "Trump signs Russia sanctions bill, clearing way for 100% tariffs on India and China",
+            "The US president signed the sanctions bill authorising 100% tariffs on India and China over Russian oil purchases.",
+            "https://example.com/trump-russia-sanctions",
+            topic,
+        )
+        generic = relevance_score(
+            "Russia",
+            "Russia is generally considered a great power and wields significant regional influence, possessing the largest stockpile of nuclear weapons.",
+            "https://en.wikipedia.org/wiki/Russia",
+            topic,
+        )
+        self.assertGreater(news, generic, "the specific story must out-rank the generic page")
+
+        # Question-shaped topics are unaffected: sentence-initial stopwords
+        # still never become entities.
+        self.assertEqual(_proper_tokens("What is quantum computing?"), ())
+
+    def test_search_ranking_prefers_best_scoring_sources(self) -> None:
+        """The service ranks the candidate pool by relevance instead of taking
+        results in provider order: a generic page that arrives first cannot
+        take a slot a genuinely on-topic story earns."""
+        import asyncio
+
+        from novacontrol.explore import ResearchSource
+        from novacontrol.explore.service import ExploreService
+
+        topic = "Trump signs Russia sanctions bill authorising up to 100% tariffs on India, China"
+
+        def src(title: str, url: str, snippet: str) -> ResearchSource:
+            return ResearchSource(title=title, url=url, snippet=snippet, source_type="web")
+
+        class OrderedProvider:
+            """Serves the generic page FIRST, real coverage second — first-pass
+            order would keep the generic page and drop the story."""
+
+            async def search(self, query: str, *, limit: int = 6):
+                if "explained" in query:
+                    return ()
+                return (
+                    src("Russia", "https://en.wikipedia.org/wiki/Russia",
+                        "Russia is generally considered a great power and wields significant regional influence."),
+                    src("Trump signs Russia sanctions bill, clearing way for 100% tariffs",
+                        "https://example.com/story-1",
+                        "The president signed the sanctions bill authorising 100% tariffs on India and China over Russian oil."),
+                    src("Trump's big move: 100% tariff threat explained",
+                        "https://example.com/story-2",
+                        "Trump signs the Russia sanctions bill; India and China face up to 100% US tariff risk."),
+                )
+
+        service = ExploreService(search_provider=OrderedProvider(), video_provider=OrderedProvider())
+        from novacontrol.explore.models import ExploreRequest
+
+        request = ExploreRequest(topic=topic)
+        sources = asyncio.run(service._multi_platform_search(request))
+        urls = [s.url for s in sources]
+        self.assertIn("https://example.com/story-1", urls)
+        self.assertIn("https://example.com/story-2", urls)
+        self.assertNotIn("https://en.wikipedia.org/wiki/Russia", urls)
+        # The strongest story leads.
+        self.assertEqual(sources[0].url, "https://example.com/story-1")
+
     def test_short_headline_stays_whole(self) -> None:
         """A short non-question topic has no filler to strip and no drowning
         risk: it must pass through intact (minus punctuation), keeping words
@@ -720,7 +846,12 @@ class ExploreSearchRetryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertGreaterEqual(flaky.calls, 2)
         self.assertEqual(len(report.sources), 1)
-        self.assertEqual(report.warnings, ())
+        # No SEARCH warning: the retry recovered, so this is not a degraded
+        # report. (A synthesis note may still be present — this service has no
+        # model connected, and the report says so rather than implying that
+        # the template digest was written by one.)
+        self.assertFalse([w for w in report.warnings if "usable web results" in w])
+        self.assertTrue(any("No model is connected" in w for w in report.warnings))
         self.assertEqual(report.provider_status, "online")
 
     async def test_permanent_failure_still_reports_offline(self) -> None:

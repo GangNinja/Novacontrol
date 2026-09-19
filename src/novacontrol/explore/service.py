@@ -13,9 +13,12 @@ from novacontrol.explore.query import (
     extract_search_topic,
     is_relevant,
     is_wiki_film_result,
+    relevance_score,
     wiki_search_variations,
 )
 from novacontrol.explore.models import ExploreReport, ExploreRequest, ResearchSource, VideoResult
+from novacontrol.explore.page_reader import PageReader
+from novacontrol.explore.planner import ResearchPlan, plan_research
 from novacontrol.explore.providers import (
     ResilientSearchProvider,
     SearchProvider,
@@ -38,6 +41,8 @@ class ExploreService:
         wiki_provider: SearchProvider | None = None,
         explainer: ResearchExplainer | None = None,
         completion_provider: object | None = None,
+        page_reader: PageReader | None = None,
+        read_pages: bool = True,
         cache: TtlCache[ExploreReport] | None = None,
         cache_ttl_seconds: float = 900,
         event_bus: EventBus | None = None,
@@ -45,6 +50,11 @@ class ExploreService:
         self.search_provider = search_provider or ResilientSearchProvider()
         self._wiki_provider = wiki_provider or WikipediaSearchProvider()
         self.video_provider = video_provider or YouTubeSearchVideoProvider()
+        # Reading the pages is what turns a set of search blurbs into evidence
+        # an answer can be built from; it is switchable only so tests and
+        # offline runs can skip the network.
+        self.page_reader = page_reader or PageReader()
+        self.read_pages = read_pages
         self.explainer = explainer or ResearchExplainer(completion_provider=completion_provider)
         self.cache = cache or TtlCache()
         self.cache_ttl_seconds = cache_ttl_seconds
@@ -97,6 +107,11 @@ class ExploreService:
         if resolved != request.topic:
             request = replace(request, topic=resolved)
 
+        # The phrasing the answer will be judged against: the user's own words,
+        # or the resolved topic when a vague follow-up was rewritten ("tell me
+        # more about that" is not answerable, "cats purr" is).
+        question = resolved if resolved != raw_input else raw_input
+
         cache_key = self._cache_key(request)
         cached = self.cache.get(cache_key)
         if cached is not None:
@@ -104,9 +119,22 @@ class ExploreService:
             await self._announce_completion(request.topic)
             return cached
 
+        # Search planning is the model's job when one is connected: it reads the
+        # question and chooses the queries, so the evidence gathered is the
+        # evidence that answers it instead of pages that share its keywords.
+        plan = await plan_research(
+            self.explainer.completion_provider,
+            question,
+            prior_topics=request.prior_topics,
+            max_queries=max(2, min(request.max_sources, 4)),
+        )
+        if plan:
+            await self._emit("planning", f"Researching: {plan.focus or question}", correlation_id=request.id, topic=request.topic)
+
         await self._emit("searching", f"Searching for '{request.topic}'...", correlation_id=request.id, topic=request.topic)
-        sources, search_warnings = await self._search_with_retry(request)
+        sources, search_warnings = await self._search_with_retry(request, plan)
         await self._emit("sources_found", f"Found {len(sources)} source(s)", correlation_id=request.id, count=len(sources))
+        sources = await self._read_sources(sources, request)
 
         if request.include_videos:
             await self._emit("searching_videos", "Searching for related videos...", correlation_id=request.id)
@@ -123,6 +151,8 @@ class ExploreService:
             videos,
             warnings=warnings,
             provider_status="offline" if search_warnings else "online",
+            question=question,
+            plan=plan,
         )
         # A degraded report (search failed → offline templates, no sources) is
         # cached only briefly so a transient blip doesn't pin the non-answer
@@ -146,7 +176,7 @@ class ExploreService:
         return report
 
     async def _search_with_retry(
-        self, request: ExploreRequest
+        self, request: ExploreRequest, plan: ResearchPlan | None = None
     ) -> tuple[tuple[ResearchSource, ...], tuple[str, ...]]:
         """Search once and retry once when it returns nothing usable.
 
@@ -156,15 +186,17 @@ class ExploreService:
         the offline 'multiple dimensions' non-answer; with it, that answer
         only appears when search genuinely cannot serve the topic.
         """
-        sources, warnings = await self._safe_search(request)
+        sources, warnings = await self._safe_search(request, plan)
         if sources or not warnings:
             return sources, warnings
         await self._emit("retrying", "Search came back empty — retrying once...", correlation_id=request.id)
-        return await self._safe_search(request)
+        return await self._safe_search(request, plan)
 
-    async def _safe_search(self, request: ExploreRequest) -> tuple[tuple[ResearchSource, ...], tuple[str, ...]]:
+    async def _safe_search(
+        self, request: ExploreRequest, plan: ResearchPlan | None = None
+    ) -> tuple[tuple[ResearchSource, ...], tuple[str, ...]]:
         try:
-            sources = await self._multi_platform_search(request)
+            sources = await self._multi_platform_search(request, plan)
         except Exception:
             return (
                 (),
@@ -214,16 +246,30 @@ class ExploreService:
         # answered.)
         return (sources, ())
 
-    async def _multi_platform_search(self, request: ExploreRequest) -> tuple[ResearchSource, ...]:
+    async def _multi_platform_search(
+        self, request: ExploreRequest, plan: ResearchPlan | None = None
+    ) -> tuple[ResearchSource, ...]:
         topic = request.topic
-        # Generate topic-aware search queries instead of generic ones
-        queries = build_search_queries(topic, request.max_sources)
-        limit_each = max(2, min(request.max_sources, 4))
-        merged: list[ResearchSource] = []
+        # Queries come from the model's plan when one was produced; the
+        # deterministic builder is the fallback, not the default.
+        if plan:
+            queries = tuple((query, "planned") for query in plan.queries)
+            # Relevance is judged against the PLAN, not just the question's
+            # literal words: a model-chosen angle ("cat purr vocal folds") is
+            # exactly the evidence the answer needs, and the keyword gate must
+            # not throw it away for failing to repeat the user's phrasing.
+            relevance_reference = " ".join(plan.queries)
+        else:
+            queries = build_search_queries(topic, request.max_sources)
+            relevance_reference = topic
+        limit_each = max(4, min(request.max_sources + 2, 6))
+        # Collect a candidate POOL across queries, then keep the best-scoring
+        # ones. First-pass-wins let a generic match (a Wikipedia page sharing
+        # one keyword with the topic) take a slot a genuinely on-topic news
+        # story earned later in the list.
+        candidates: list[tuple[float, str, ResearchSource]] = []
         seen: set[str] = set()
         for query, source_type in queries:
-            if len(merged) >= request.max_sources:
-                break
             try:
                 raw_results = await self.search_provider.search(query, limit=limit_each)
             except Exception:
@@ -232,14 +278,61 @@ class ExploreService:
                 key = _source_key(source.url)
                 if not key or key in seen:
                     continue
-                # Filter out clearly irrelevant results
-                if not is_relevant(source.title, source.snippet, source.url, topic):
+                if not is_relevant(source.title, source.snippet, source.url, relevance_reference):
                     continue
                 seen.add(key)
-                merged.append(replace(source, source_type=source_type))
-                if len(merged) >= request.max_sources:
-                    break
-        return tuple(merged)
+                score = relevance_score(source.title, source.snippet, source.url, relevance_reference)
+                candidates.append((score, source_type, source))
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        # Relevance cutoff: keep sources scoring at least half of the best
+        # candidate (absolute floor 1.0). A page that merely shares one keyword
+        # with a well-covered topic scores far below the real coverage and is
+        # NOT used as filler; when nothing strong exists, everything relevant
+        # that passed still ships (weak-topic answers stay better than none).
+        kept = [c for c in candidates if c[0] >= max(1.0, 0.5 * candidates[0][0])]
+        if not kept:
+            kept = candidates[:1]
+        return tuple(
+            replace(source, source_type=source_type)
+            for _score, source_type, source in kept[: request.max_sources]
+        )
+
+    async def _read_sources(
+        self, sources: tuple[ResearchSource, ...], request: ExploreRequest
+    ) -> tuple[ResearchSource, ...]:
+        """Attach the readable prose of each source page to the source.
+
+        A search result's blurb is a 150-character meta description, which is
+        why an answer built only from blurbs can never say more than "here are
+        the pages that mention your keywords". The page itself holds the
+        paragraph that answers the question; this is where it enters the run.
+        Sources whose pages cannot be read keep working through their blurb, so
+        this is strictly an upgrade.
+        """
+        if not self.read_pages or not sources:
+            return sources
+        await self._emit(
+            "reading", f"Reading {len(sources)} source page(s)...", correlation_id=request.id
+        )
+        texts = await self.page_reader.read_many([source.url for source in sources], limit=len(sources))
+        if not texts:
+            await self._emit(
+                "reading_failed",
+                "Source pages could not be read; using search summaries instead.",
+                correlation_id=request.id,
+            )
+            return sources
+        read = tuple(
+            replace(source, content=texts.get(source.url, "")) if texts.get(source.url) else source
+            for source in sources
+        )
+        await self._emit(
+            "read",
+            f"Read {len(texts)} of {len(sources)} source page(s).",
+            correlation_id=request.id,
+            count=len(texts),
+        )
+        return read
 
     async def _safe_video_search(self, request: ExploreRequest) -> tuple[tuple[VideoResult, ...], tuple[str, ...]]:
         try:

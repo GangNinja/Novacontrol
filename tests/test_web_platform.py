@@ -18,7 +18,11 @@ class WebPlatformTests(unittest.TestCase):
     def setUp(self) -> None:
         static = Path("src/novacontrol/web/static")
         self.html = (static / "index.html").read_text(encoding="utf-8")
-        self.css = (static / "styles.css").read_text(encoding="utf-8")
+        # All stylesheets participate so an additional layer (e.g. nc-os.css)
+        # can never bypass the UI contracts pinned against styles.css.
+        self.css = "\n".join(
+            p.read_text(encoding="utf-8") for p in sorted(static.glob("*.css"))
+        )
         js_files = [static / "app.js"]
         js_dir = static / "js"
         if js_dir.is_dir():

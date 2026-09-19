@@ -1,12 +1,17 @@
 """Synthesizer regression tests.
 
-Pins the fact-density guarantee: whatever shape the incoming snippets take
-(definition-heavy, cause-heavy, a lone single fact) and whatever query kind
-the user asked for, the template synthesizer must emit a non-empty answer
-whose body carries the extracted facts — never a bare intro shell and never
-an empty string. This is the regression guard for the bucket fallback
-machinery in synthesizer.py (each builder falls back to _any_facts when its
-preferred bucket is empty).
+Pins the fact-density guarantee: whatever shape the incoming sources take
+(definition-heavy, cause-heavy, a lone single fact) and whatever query kind the
+user asked for, the local synthesizer must emit a non-empty answer whose body
+carries what the sources actually say — never a bare intro shell naming the
+topic, and never an empty string.
+
+The answer is composed from ranked source sentences now (see `evidence.py`)
+rather than from keyword buckets, so the guard is stated in terms of content:
+the facts must be in the answer and no template framing line may stand in
+their place. Bullet lines are no longer required — a one-source answer is one
+sentence, and formatting it as a bullet was a template artifact, not a
+property of a good answer.
 
 Also pins the site-chrome guard: search snippets glue consent banners,
 footers, and trademark lines onto real content, and none of that may reach an
@@ -16,7 +21,6 @@ quantum computing" with a Terms-of-Use sentence).
 
 from __future__ import annotations
 
-import re
 import unittest
 
 from novacontrol.explore.models import ResearchSource
@@ -66,7 +70,25 @@ _SINGLE_FACT = (
     "stretching over 2300 kilometers."
 )
 
-_FACT_LINE = re.compile(r"^\s*(?:\u2022|\d+\.)\s")
+# The failure mode this suite exists to prevent: an answer that is only
+# scaffolding — a framing line naming the topic with no fact under it.
+_TEMPLATE_FRAMING: tuple[str, ...] = (
+    "here is what the sources say",
+    "here are the considerations",
+    "here is a comparison of",
+    "here are the ideas the sources suggest",
+    "here is what the research found",
+)
+
+
+def _assert_facts_in_body(case: str, answer: str, *markers: str) -> None:
+    """The answer is non-empty, carries the sources' facts, and is no shell."""
+    assert answer.strip(), f"{case}: answer must not be empty"
+    for marker in markers:
+        assert marker in answer, f"{case}: fact missing from the answer: {marker!r}"
+    lowered = answer.lower()
+    for framing in _TEMPLATE_FRAMING:
+        assert framing not in lowered, f"{case}: answer is template scaffolding: {framing!r}"
 
 
 def _answer(query: str, snippets: tuple[str, ...]) -> str:
@@ -94,36 +116,19 @@ class FactDensityGuaranteeTests(unittest.TestCase):
         for kind, query in _QUERY_KINDS:
             with self.subTest(kind=kind):
                 answer = _answer(query, _DEFINITION_SNIPPETS)
-                self.assertTrue(answer.strip(), f"{kind}: answer must not be empty")
-                self.assertIn("glucose", answer, f"{kind}: definition fact missing")
-                self.assertIn("black hole", answer, f"{kind}: second definition fact missing")
-                self.assertTrue(
-                    any(_FACT_LINE.match(line) for line in answer.splitlines()),
-                    f"{kind}: answer body carries no fact lines",
-                )
+                _assert_facts_in_body(kind, answer, "glucose", "black hole")
 
     def test_cause_heavy_snippets(self) -> None:
         for kind, query in _QUERY_KINDS:
             with self.subTest(kind=kind):
                 answer = _answer(query, _CAUSE_SNIPPETS)
-                self.assertTrue(answer.strip(), f"{kind}: answer must not be empty")
-                self.assertIn("chlorophyll", answer, f"{kind}: causal fact missing")
-                self.assertIn("thermal", answer, f"{kind}: second causal fact missing")
-                self.assertTrue(
-                    any(_FACT_LINE.match(line) for line in answer.splitlines()),
-                    f"{kind}: answer body carries no fact lines",
-                )
+                _assert_facts_in_body(kind, answer, "chlorophyll", "thermal")
 
     def test_single_fact_input(self) -> None:
         for kind, query in _QUERY_KINDS:
             with self.subTest(kind=kind):
                 answer = _answer(query, (_SINGLE_FACT,))
-                self.assertTrue(answer.strip(), f"{kind}: answer must not be empty")
-                self.assertIn("coral reef", answer, f"{kind}: the lone fact is missing")
-                self.assertTrue(
-                    any(_FACT_LINE.match(line) for line in answer.splitlines()),
-                    f"{kind}: the lone fact never reaches the answer body",
-                )
+                _assert_facts_in_body(kind, answer, "coral reef")
 
 
 # ────────────────────────────────────────────────────────────

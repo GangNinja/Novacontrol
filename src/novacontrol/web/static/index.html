@@ -8,6 +8,7 @@
     <title>NovaControl</title>
     <link rel="icon" href="/static/nova-mark.svg">
     <link rel="stylesheet" href="/static/styles.css?v=__NC_ASSET_VERSION__">
+    <link rel="stylesheet" href="/static/nc-os.css?v=__NC_ASSET_VERSION__">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <!-- Perf: only weights the stylesheet actually uses (12 woff2 → 8). -->
@@ -29,6 +30,7 @@
           <div>
             <h1>NovaControl</h1>
             <span id="statusText" class="status-glow" aria-live="polite">Initializing...</span>
+            <span class="brand-sub" aria-hidden="true">Nova Core</span>
           </div>
         </div>
         <nav class="nav" aria-label="Workspace">
@@ -79,6 +81,22 @@
       </aside>
 
       <main id="mainContent" class="workspace">
+        <!-- System ribbon: lives INSIDE the scroll container so sticky works;
+             negative margins bleed it through the workspace padding. -->
+        <header class="system-ribbon">
+          <span id="ribbonState" class="ribbon-state" data-state="ready" aria-live="polite">Ready</span>
+          <span class="ribbon-spacer"></span>
+          <!-- NOVA CORE: always-on pulse of the machine this is running on. The
+               numbers are the same real telemetry the Command Center renders;
+               clicking opens the full read-out below. -->
+          <button id="coreIndicator" type="button" class="core-indicator" aria-expanded="false" aria-controls="telemetryDetails" title="NOVA CORE — live system telemetry. Click for the full read-out.">
+            <span id="corePulse" class="core-pulse" data-state="idle" aria-hidden="true"></span>
+            <span class="core-label">NOVA CORE</span>
+            <span id="coreReadout" class="core-readout">reading hardware…</span>
+          </button>
+          <button id="paletteButton" type="button" class="cyber-btn small" aria-label="Open command palette (Ctrl+K)" title="Command palette (Ctrl+K)">⌘ Commands</button>
+          <button id="focusModeButton" type="button" class="cyber-btn small" aria-label="Toggle focus mode" aria-pressed="false" title="Focus mode: dim everything except the active panel">◎ Focus</button>
+        </header>
         <section id="homePanel" class="panel active">
           <div class="section-head">
             <div>
@@ -88,6 +106,26 @@
             <button id="homeHealthButton" type="button" class="cyber-btn">Check System</button>
           </div>
           <div id="metricGrid" class="metric-grid"></div>
+
+          <!-- System telemetry: real metrics read from this machine, or an
+               explicit "unavailable" with the reason. Nothing here is invented,
+               and the sampled metrics say how old their sample is. -->
+          <article class="telemetry" id="telemetrySection">
+            <div class="section-head telemetry-head">
+              <div>
+                <p class="eyebrow">Live</p>
+                <h3>System Telemetry</h3>
+              </div>
+              <div class="telemetry-head-actions">
+                <span id="telemetryFreshness" class="pill" title="How long ago the slow sensors (GPU, network, temperature) were sampled.">waiting for first reading</span>
+                <button id="telemetryToggle" type="button" class="cyber-btn small" aria-expanded="false" aria-controls="telemetryDetails">Details</button>
+              </div>
+            </div>
+            <div id="telemetryGrid" class="telemetry-grid" aria-busy="true"></div>
+            <div id="telemetryEngines" class="telemetry-engines"></div>
+            <div id="telemetryDetails" class="telemetry-details" hidden></div>
+          </article>
+
           <article class="command-console">
             <h3>Quick Command</h3>
             <div class="ai-composer command-composer">
@@ -230,7 +268,7 @@
             <article class="surface">
               <h3>Plan Project</h3>
               <label for="codeProjectInput" class="sr-only">Project goal</label>
-              <textarea id="codeProjectInput" rows="3" placeholder="Describe a PROJECT — the agent drafts multiple files, runs the entry point, and fixes real errors. Needs a coding model." class="cyber-input" aria-label="Project goal"></textarea>
+              <textarea id="codeProjectInput" rows="3" placeholder="Describe a PROJECT — the agent drafts multiple files, runs the entry point, and fixes real errors. Without a model you get a runnable starter scaffold." class="cyber-input" aria-label="Project goal"></textarea>
               <button id="codeProjectButton" type="button" class="cyber-btn primary">Plan The Project</button>
             </article>
             <article class="surface">
@@ -346,7 +384,7 @@
           </div>
           <article class="surface cloud-llm-card">
             <h3>Cloud LLM (ChatGPT, Gemini, Groq, …)</h3>
-            <p class="cloud-hint">Pick a provider and paste its API key — it is stored only on this machine (data/cloud_llm.json, gitignored) and sent nowhere except the provider itself. Installing one switches the Chat brain to Cloud LLM; clearing it falls back to your local brain.</p>
+            <p class="cloud-hint">Pick a provider and paste its API key — it is stored only on this machine (data/cloud_llm.json, gitignored) and sent nowhere except the provider itself. Saving a key only stores it: your local brain keeps answering until you pick <strong>Cloud LLM</strong> in the Chat panel's Brain switch. Clearing the key falls back to the local brain.</p>
             <div class="cloud-llm-form">
               <label class="field">
                 <span>Provider</span>
@@ -538,6 +576,32 @@
         </section>
       </main>
     </div>
+
+    <!-- Command palette (Ctrl+K): presentation only — every entry clicks an
+         existing nav item or an existing header button. -->
+    <div id="commandPalette" class="command-palette" hidden>
+      <div class="cp-backdrop"></div>
+      <div class="cp-box" role="dialog" aria-modal="true" aria-label="Command palette">
+        <div class="cp-head">
+          <span class="cp-logo">Nova ⌘</span>
+          <label for="paletteInput" class="sr-only">Search commands</label>
+          <input id="paletteInput" type="text" class="cp-input" placeholder="Jump to a panel or run a command…" autocomplete="off">
+          <span class="cp-esc">ESC</span>
+        </div>
+        <div id="paletteList" class="cp-list" role="listbox" aria-label="Commands"></div>
+        <div class="cp-foot"><span>↑↓ Navigate</span><span>↵ Run</span><span>Ctrl+K Toggle</span></div>
+      </div>
+    </div>
+
+    <!-- Startup splash: fades over the real initializing shell; no fake state. -->
+    <div class="nc-splash" aria-hidden="true">
+      <div class="nc-splash-inner">
+        <div class="nc-splash-mark"><img src="/static/nova-mark.svg" alt=""></div>
+        <div class="nc-splash-title">NovaControl</div>
+        <div class="nc-splash-sub">Initializing systems</div>
+        <div class="nc-splash-bar"></div>
+      </div>
+    </div>
     <!-- Perf: all scripts are deferred — they only run init on DOMContentLoaded,
          and no inline script reads their globals (verified). Execution order is
          still document order, so app.js's DOMContentLoaded listeners register
@@ -547,10 +611,12 @@
     <script defer src="/static/js/render-utils.js?v=__NC_ASSET_VERSION__"></script>
     <script defer src="/static/js/render-explore.js?v=__NC_ASSET_VERSION__"></script>
     <script defer src="/static/js/render-panels.js?v=__NC_ASSET_VERSION__"></script>
+    <script defer src="/static/js/telemetry.js?v=__NC_ASSET_VERSION__"></script>
     <script defer src="/static/js/activity.js?v=__NC_ASSET_VERSION__"></script>
     <script defer src="/static/js/routing-explorer.js?v=__NC_ASSET_VERSION__"></script>
     <script defer src="/static/js/voice.js?v=__NC_ASSET_VERSION__"></script>
     <script defer src="/static/js/effects.js?v=__NC_ASSET_VERSION__"></script>
     <script defer src="/static/app.js?v=__NC_ASSET_VERSION__"></script>
+    <script defer src="/static/js/nc-os.js?v=__NC_ASSET_VERSION__"></script>
   </body>
 </html>

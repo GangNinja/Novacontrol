@@ -141,8 +141,18 @@
      monitor, a laptop, a tablet or a phone without discrete jumps:
        --content-max  widest the workspace column is ever allowed to sprawl
        --read-max     comfortable reading measure for long-form chat/answers
-       --gutter-*     page gutters, scaled to the viewport                */
-  --content-max:        1400px;
+       --gutter-*     page gutters, scaled to the viewport
+
+     --content-max is a CAP, not a target: the column is `min(--content-max,
+     100%)`, so it fills the workspace (minus gutters) at every width below
+     the cap. It sat at 1400px, which every 1600-2560px monitor hits with
+     hundreds of pixels to spare — the centered column then left a dead strip
+     down the right edge and the UI read as "not fitted to the screen".
+     2120px fills edge-to-edge up to ~2560px viewports (268px sidebar + two
+     56px gutters + 2120 = 2500) and only caps past that, where a full-bleed
+     dashboard would sprawl; per-panel reading measures (`--read-max`) still
+     keep long-form text column-width. */
+  --content-max:        2120px;
   --read-max:           1180px;
   --gutter-x:           clamp(16px, 2.6vw, 56px);
   --gutter-y:           clamp(18px, 2.2vw, 38px);
@@ -733,6 +743,10 @@ select.cyber-input {
 }
 
 /* ---- Focus-Visible Rings ---- */
+/* .cli-output is a scrollable <pre>: browsers make scroll containers keyboard
+   focusable, so it joins the tab walk and must show the standard ring like
+   every other focusable element. */
+.cli-output:focus-visible,
 .cyber-btn:focus-visible,
 .nav-item:focus-visible,
 .example-chip:focus-visible,
@@ -2507,6 +2521,184 @@ h1, h2, h3, h4, .eyebrow {
   color: var(--text-muted);
   text-transform: none;
   user-select: none;
+}
+
+/* ── System telemetry (Command Center) ──────────────────────────────────────
+   Compact live metric cards. A card whose metric this machine cannot report is
+   muted and says why — never a zero dressed up as a reading. Bars animate on
+   width only, because the values update in place every couple of seconds. */
+.telemetry {
+  margin-top: 18px;
+  padding: 18px 20px 20px;
+  border: 1px solid var(--border-dim);
+  border-radius: 14px;
+  background:
+    radial-gradient(1200px 200px at 0% 0%, rgba(0, 234, 255, 0.05), transparent 70%),
+    var(--card-bg-subtle);
+}
+
+.telemetry-head { margin-bottom: 14px; align-items: flex-end; }
+
+.telemetry-head h3 { margin: 2px 0 0; font-size: 1.05rem; letter-spacing: 0.02em; }
+
+.telemetry-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.telemetry-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.telemetry-card {
+  --telemetry-accent: var(--brand-cyan);
+  position: relative;
+  padding: 12px 14px 11px;
+  border: 1px solid var(--border-dim);
+  border-radius: 11px;
+  background: linear-gradient(180deg, rgba(3, 11, 24, 0.72), rgba(2, 7, 16, 0.55));
+  overflow: hidden;
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+.telemetry-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 2px;
+  background: var(--telemetry-accent);
+  opacity: 0.75;
+}
+
+.telemetry-card[data-state="busy"] { --telemetry-accent: var(--brand-amber); }
+.telemetry-card[data-state="hot"] { --telemetry-accent: var(--brand-pink); }
+.telemetry-card[data-state="missing"] { --telemetry-accent: var(--text-muted); }
+.telemetry-card[data-state="hot"] { box-shadow: 0 0 18px rgba(244, 114, 182, 0.12); }
+.telemetry-card[data-available="false"] { opacity: 0.62; }
+
+.telemetry-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.telemetry-name {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.telemetry-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--telemetry-accent);
+  box-shadow: 0 0 6px var(--telemetry-accent);
+}
+
+.telemetry-value {
+  margin: 7px 0 9px;
+  font-size: 1.02rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.telemetry-card[data-available="false"] .telemetry-value {
+  font-size: 0.86rem;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+/* The bar is the "real-time" signal: it eases to each new reading instead of
+   snapping, so change is visible without a chart redrawn twice a second. */
+.telemetry-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.14);
+  overflow: hidden;
+}
+
+.telemetry-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--telemetry-accent), rgba(255, 255, 255, 0.35));
+  transition: width 0.45s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.telemetry-card[data-bar="none"] .telemetry-bar { background: rgba(148, 163, 184, 0.08); }
+.telemetry-card[data-bar="none"] .telemetry-fill { background: none; }
+
+.telemetry-note {
+  margin: 8px 0 0;
+  font-size: 0.68rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.telemetry-engines {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.telemetry-details {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-dim);
+}
+
+.telemetry-detail-list {
+  display: grid;
+  grid-template-columns: minmax(120px, max-content) 1fr;
+  gap: 6px 18px;
+  margin: 0;
+  font-size: 0.76rem;
+}
+
+.telemetry-detail-list dt {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  align-self: baseline;
+}
+
+.telemetry-detail-list dd {
+  margin: 0;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.telemetry-error {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--brand-pink);
+}
+
+/* A stale build is not cosmetic: this tab is rendering CSS/JS the server no
+   longer serves, so any layout it shows is not the current product. */
+.sidebar-footer .ui-version[data-stale="true"] {
+  opacity: 1;
+  color: var(--brand-amber);
+  line-height: 1.5;
+  cursor: help;
 }
 
 /* ---- Section heads ---- */

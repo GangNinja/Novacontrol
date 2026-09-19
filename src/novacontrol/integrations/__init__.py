@@ -16,6 +16,7 @@ from novacontrol.integrations.llm import (
     is_ollama_vision_model,
     make_ollama_reprobe,
     ollama_models,
+    validate_cloud_key,
 )
 from novacontrol.integrations.redis import (
     RedisEventBus,
@@ -48,5 +49,6 @@ __all__ = [
     "detect_ollama",
     "get_cloud_preset",
     "is_ollama_vision_model",
+    "validate_cloud_key",
     "ollama_models",
 ]
