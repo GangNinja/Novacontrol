@@ -106,8 +106,13 @@ class HardwareMetricTests(unittest.TestCase):
         self.assertGreater(storage["total_bytes"], 0)
         self.assertGreater(storage["used_bytes"], 0)
         self.assertLess(storage["used_bytes"], storage["total_bytes"])
-        self.assertAlmostEqual(
-            storage["used_bytes"] + storage["free_bytes"], storage["total_bytes"], delta=1
+        # POSIX filesystems hold back reserved blocks (f_bfree > f_bavail), and
+        # shutil's `free` is what an unprivileged writer may still use — so on a
+        # Linux runner's root, used + free legitimately lands BELOW total. The
+        # invariant that must hold on every filesystem is the inequality, not
+        # the byte-exact sum.
+        self.assertLessEqual(
+            storage["used_bytes"] + storage["free_bytes"], storage["total_bytes"]
         )
 
     def test_battery_either_measures_or_explains(self) -> None:
@@ -187,16 +192,25 @@ class ScalarArrayNormalizationTests(unittest.TestCase):
 
     def test_powershell_payload_is_normalized(self) -> None:
         hw = HardwareTelemetry(clock=lambda: 100.0)
-        with mock.patch.object(
-            hw,
-            "_run_windows_probe",
-            return_value={
-                "net_interfaces": "Wi-Fi",  # the one-adapter scalar shape
-                "net_received_bytes": 500,
-                "net_sent_bytes": 100,
-                "gpu_name": "Intel(R) Arc(TM) Graphics",
-                "gpu_util": 12.0,
-            },
+        # Route through the production PowerShell collector explicitly: without
+        # this, a psutil install routes sample_expensive() to _sample_via_psutil
+        # (which ignores the probe's net keys) and a non-Windows runner routes
+        # it to _sample_posix (which never calls the probe) — the test would
+        # then pass, fail, or skip depending on the machine it runs on.
+        with (
+            mock.patch.object(hw, "_psutil", None),
+            mock.patch("novacontrol.telemetry.hardware._WINDOWS", True),
+            mock.patch.object(
+                hw,
+                "_run_windows_probe",
+                return_value={
+                    "net_interfaces": "Wi-Fi",  # the one-adapter scalar shape
+                    "net_received_bytes": 500,
+                    "net_sent_bytes": 100,
+                    "gpu_name": "Intel(R) Arc(TM) Graphics",
+                    "gpu_util": 12.0,
+                },
+            ),
         ):
             payload = hw.sample_expensive()
         self.assertEqual(payload["net_interfaces"], ["Wi-Fi"])

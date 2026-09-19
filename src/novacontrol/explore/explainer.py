@@ -85,6 +85,7 @@ class ResearchExplainer:
             question=ask,
             focus=plan.focus if plan else "",
         )
+        spent: tuple[str, ...]
         if llm_answer:
             # A written answer is prose, not quoted sentences, so nothing in the
             # pool has been shown yet and no sentence needs excluding.
