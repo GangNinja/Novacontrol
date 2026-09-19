@@ -355,6 +355,30 @@ class FocusRingBrowserWalkTests(unittest.TestCase):
         )
         self.addCleanup(self._cleanup)
         self._wait_healthy()
+        # One clean relaunch around the flakiest dependency this suite has:
+        # the headless browser's own startup. CI runs have broken on it before
+        # (slow cold starts, sandbox init, dbus probing), and run #10 proved a
+        # healthy launch can simply never bind its debugging port within the
+        # deadline on one job while the identical launch succeeds on another
+        # minutes earlier. A fresh port, a fresh profile dir, and one second
+        # launch separate "one bad browser start" from a real regression; two
+        # consecutive failures still fail the job, with both errors attached.
+        try:
+            self._launch_browser()
+        except AssertionError as first_error:
+            self._teardown_browser_attempt()
+            self.dbg_port = _free_port()
+            self.tmpdir = tempfile.mkdtemp(prefix="nc-focus-")
+            try:
+                self._launch_browser()
+            except AssertionError as second_error:
+                self.fail(
+                    "headless browser failed to start on two attempts: "
+                    f"[first] {first_error} | [second] {second_error}"
+                )
+
+    def _launch_browser(self) -> None:
+        """Spawn the headless browser and wait for its CDP endpoint to answer."""
         self.browser_err = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
         browser_args = [self.browser, "--headless", "--disable-gpu", "--no-first-run",
                         f"--remote-debugging-port={self.dbg_port}",
@@ -365,6 +389,7 @@ class FocusRingBrowserWalkTests(unittest.TestCase):
             browser_args[1:1] = ["--no-sandbox", "--disable-dev-shm-usage"]
         self._job = _win_job_kill_on_close()  # None off-Windows
         is_windows = sys.platform == "win32"
+        flags = subprocess.CREATE_NO_WINDOW if is_windows else 0
         browser_creationflags = flags
         if is_windows:
             # CREATE_SUSPENDED: assign the launcher to the kill-on-close job
@@ -399,6 +424,28 @@ class FocusRingBrowserWalkTests(unittest.TestCase):
             if not assigned:
                 self._job = None  # best effort: cleanup falls back to terminate()
         self._wait_debugger()
+
+    def _teardown_browser_attempt(self) -> None:
+        """Kill a failed browser launch and release its port/profile/handles."""
+        proc = getattr(self, "browser_proc", None)
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        job = getattr(self, "_job", None)
+        if job and sys.platform == "win32":
+            import ctypes
+
+            ctypes.windll.kernel32.CloseHandle(job)
+        self._job = None
+        err = getattr(self, "browser_err", None)
+        if err is not None:
+            try:
+                err.close()
+            except OSError:
+                pass
 
     def _cleanup(self) -> None:
         for proc in (getattr(self, "browser_proc", None), getattr(self, "server", None)):

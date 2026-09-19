@@ -55,5 +55,12 @@ jobs:
           cache: pip
       - name: Install package with dev dependencies
         run: python -m pip install -e ".[dev]"
-      - name: Run mypy
+      # Both platform views, so Windows-only ctypes/winreg code in hardware.py
+      # (and anything like it) is checked even though the runner is Linux:
+      # typeshed declares those attributes Windows-only, so a Linux-only check
+      # lets Windows-view regressions through and a Windows-only check does the
+      # reverse. The default run is the linux view (native to the runner).
+      - name: Run mypy (linux view)
         run: python -m mypy src
+      - name: Run mypy (windows view)
+        run: python -m mypy src --platform win32

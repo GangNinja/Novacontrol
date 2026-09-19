@@ -142,8 +142,17 @@ class _SYSTEM_POWER_STATUS(ctypes.Structure):
     ]
 
 
+# The Windows-only reads below are guarded with `sys.platform` (not the module
+# _WINDOWS flag) because the type checker checks this file under BOTH platform
+# views — CI verifies the Windows view from Linux with `mypy --platform win32`
+# — and only a literal `sys.platform` comparison lets it narrow the branch and
+# accept `ctypes.windll`/`winreg`, which typeshed declares Windows-only.
+
+
 def _win_cpu_times() -> tuple[float, float, float] | None:
     """(idle, kernel, user) as 100ns FILETIME ticks, or None if unreadable."""
+    if sys.platform != "win32":
+        return None
     kernel32 = ctypes.windll.kernel32
     idle, kernel, user = _FILETIME(), _FILETIME(), _FILETIME()
     ok = kernel32.GetSystemTimes(
@@ -155,6 +164,8 @@ def _win_cpu_times() -> tuple[float, float, float] | None:
 
 
 def _win_memory() -> dict[str, Any] | None:
+    if sys.platform != "win32":
+        return None
     status = _MEMORYSTATUSEX()
     status.dwLength = ctypes.sizeof(_MEMORYSTATUSEX)
     if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
@@ -167,6 +178,8 @@ def _win_memory() -> dict[str, Any] | None:
 
 
 def _win_battery() -> dict[str, Any] | None:
+    if sys.platform != "win32":
+        return None
     status = _SYSTEM_POWER_STATUS()
     if not ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(status)):
         return None
@@ -180,6 +193,8 @@ def _win_battery() -> dict[str, Any] | None:
 
 
 def _win_uptime() -> float | None:
+    if sys.platform != "win32":
+        return None
     kernel32 = ctypes.windll.kernel32
     kernel32.GetTickCount64.restype = ctypes.c_uint64
     return float(kernel32.GetTickCount64()) / 1000.0
@@ -267,7 +282,7 @@ def _import_psutil() -> Any:
 
 def _cpu_model_name() -> str:
     """The marketing CPU name, not `platform.processor()`'s family string."""
-    if _WINDOWS:
+    if sys.platform == "win32":  # literal form: the type checker narrows this
         try:
             import winreg
 
