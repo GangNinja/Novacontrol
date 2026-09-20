@@ -1,7 +1,7 @@
 # NovaControl Development Log
 
 Work record from the routing-explorer + phone-control checkpoint (`580ae07`,
-2026-09-10) through the current tip (`ddac7d5`, 2026-09-18). Every section is
+2026-09-10) through the current tip (`7b17629`, 2026-09-20). Every section is
 anchored to the commit that carries it. For feature-level docs see the rest of
 `docs/`; this file is the "what changed, when, and why" record.
 
@@ -18,6 +18,10 @@ anchored to the commit that carries it. For feature-level docs see the rest of
 | `e38e8ff` | 09-16 | Hardening delta: deadline loop + Job Object zombie reaping |
 | `ef3b24e` | 09-17 | Multi-file project coding agent, zombie fix, perf hardening |
 | `ddac7d5` | 09-18 | Windows-only process flags guarded for Linux CI — run #7 fully green |
+| `8a91efd` | 09-20 | Question-first research pipeline (planner, ranked evidence, synthesis rewrite) and real system telemetry for the Command Center |
+| `b0139c7` | 09-20 | CI fixes: POSIX storage invariant, host-dependent PowerShell routing test, mypy `spent` annotation |
+| `a378f26` | 09-20 | mypy checks both platform views (linux + win32); one clean browser relaunch on a stuck CDP port |
+| `7b17629` | 09-20 | Local Ollama made actually usable: memory-guarded one-model residency, real vision capability gate, configurable provider timeout |
 
 ## 1. Brain intelligence: the scratch engine grew real math coverage
 
@@ -179,16 +183,72 @@ Three forensic rounds, each caught by evidence rather than guessed:
   `PhoneCommandRunner` Protocol — the companion app is a third runner, not a
   rewrite. **Not implemented yet; plan only.**
 
-## 11. Where things stand
+## 11. Local Ollama: detection was never the problem, usability was
 
-- **Scale**: ~56,000 lines total (28.9k Python source, 15.6k tests, 7.8k web
-  UI, remainder docs/scripts/config).
-- **Validation at the tip**: full suite 759 passed / 0 failed (Windows);
-  mypy clean; `docs/API.md` in sync; CI run #7 green on py3.12 + py3.13;
-  browser-walk verified on real Edge with zero zombie processes.
-- **History**: all work pushed; `main` == `origin/main` at `ddac7d5`.
-- **Open threads**: project-mode drafting requires a working model (single-file
-  mode has deterministic fallback, projects deliberately error honestly);
-  stored Gemini key is still the Vertex-format one (Settings → Test Connection
-  with an `AIza…` key fixes Chat/Coding/Explore in one step); NovaLink M1
-  (companion transport) is designed and ready to build when scheduled.
+Wiring a newly pulled local model (`qwen3:8b`) into the project surfaced this:
+every layer *reported* the model as the active brain, and not one completion
+had ever succeeded. Three independent defects, each invisible from the outside.
+
+**The timeout rejected requests the machine could serve.** `_default_transport`
+hardcoded a 30s socket timeout. On this CPU-only box a one-line answer takes
+20–60s, so `/ask` burned 90s (two timeouts plus the shaping call) and returned
+`Model provider failed: TimeoutError` — while the payload still reported
+`provider: "ollama"`, and the provider's own usage counter stayed at 0
+requests. The timeout is now `NOVACONTROL_LLM_TIMEOUT` (default 600s); a dead
+socket still fails immediately, so the ceiling costs nothing on cloud.
+
+**"Not Echo" was treated as evidence of eyes.** `has_vision_model` and the
+runner-side locate gate both accepted any non-Echo provider, so a text-only
+chat brain was reported as a vision model. The protocol fails loudly here —
+Ollama answers HTTP 400 when `qwen3:8b` is handed an image — but `/vision/status`
+claimed vision was available, and a guided click would have used coordinates a
+blind model invented. The gate is now `provider_supports_vision`: local models
+are checked against Ollama's own `/api/show` capability metadata (`qwen3:8b` →
+`completion/tools/thinking`, no `vision`; `qwen3-vl:4b` → includes `vision`),
+cloud presets against the registered vision-capable list, and the Echo fallback
+refused. Name prefixes remain only as the fallback when metadata is unavailable,
+and the prefix list now knows the `qwen3-vl` line.
+
+**Residency is now measured, not accidental.** A chat brain and a vision brain
+cannot both be held in RAM here: 5.9 GB + 3.3 GB against a desktop that already
+holds ~8.7 GB, with 1.4 GB already swapped at the time of measurement.
+`ollama_memory_plan()` measures free memory (reusing the telemetry layer's
+platform reads, so "free memory" has one definition in the codebase), reads
+resident sizes from `/api/ps`, sizes the incoming model from `/api/tags`, and
+returns what must be unloaded — with a 512 MB headroom so "fits" means "fits
+and stays usable". Two reasons to evict are deliberately separate: exclusivity
+is policy (`NOVACONTROL_OLLAMA_UNLOAD_ON_SWITCH`, default on) and memory forces
+an eviction even when the policy is off. Unmeasurable values are `None` — never
+a confident "fits" — and an unreachable server evicts nothing.
+
+Two smaller fixes rode along. The chat auto-pick now skips vision models: the
+VL model is listed *first* on this instance, and the old auto-pick would have
+reassigned the chat brain to it. And keep-alive is applied through the native
+`/api/generate`, because `/v1/chat/completions` accepts the field and silently
+ignores it — verified against a live server, where the model stayed resident.
+
+Measured after the fixes, on the machine that motivated them: `/ask` returns a
+real model answer (3 successful calls, 1725 tokens, no error);
+`locate_element("Settings")` lands at a real `llm_vision` point inside the
+target button; and the resident roster holds exactly one model across
+chat↔vision switches (`['qwen3:8b']` → `['qwen3-vl:4b']` → `['qwen3:8b']`).
+
+The work also exposed two test-isolation gaps: the vision-wiring test read the
+developer's real `data/` dir (so merely configuring a vision model broke it),
+and the local-model picker test assumed no Ollama was running. Both now hold on
+any machine.
+
+## 12. Where things stand
+
+- **Scale**: ~65,000 tracked lines (31.8k Python source, 18.2k tests, 10k
+  web UI, 2.9k markdown, remainder scripts/config).
+- **Validation at the tip**: full suite 893 passed / 12 skipped (Windows);
+  mypy clean on both the linux and win32 views; `docs/API.md` in sync; CI
+  green through run #11 (`a378f26`), which is where the both-views type check
+  landed — the run for `7b17629` carries the same checks.
+- **History**: all work pushed; `main` == `origin/main` at `7b17629`.
+- **Open threads**: stored Gemini key is still the Vertex-format one (Settings
+  → Test Connection with an `AIza…` key fixes Chat/Coding/Explore in one
+  step); local answers take 20–110s on this CPU-only box — the timeout now
+  lets them finish, but streaming would make them feel far faster; NovaLink
+  M1 (companion transport) is designed and ready to build when scheduled.
