@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 import json
 import logging
 import os
@@ -69,6 +70,7 @@ class OpenAICompatibleLLMProvider:
         model: str,
         chat_path: str = "/v1/chat/completions",
         transport: LLMTransport | None = None,
+        ollama_url: str = "",
     ) -> None:
         self._name = name
         self.base_url = base_url.rstrip("/")
@@ -76,6 +78,10 @@ class OpenAICompatibleLLMProvider:
         self.model = model
         self.chat_path = chat_path
         self.transport = transport or _default_transport
+        # Set for a provider that talks to the local Ollama, so completions can
+        # evict the other local model first and hold peak RAM to one model —
+        # see _manages_ollama_lifecycle and the lifecycle section below.
+        self.ollama_url = ollama_url.rstrip("/")
         # Lifetime telemetry for the System panel: cumulative token usage from
         # every usage block the API returned, and the last failure verbatim.
         self.usage = {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
@@ -85,7 +91,33 @@ class OpenAICompatibleLLMProvider:
     def name(self) -> str:
         return self._name
 
+    @property
+    def _manages_ollama_lifecycle(self) -> bool:
+        """True when this provider owns the real local-Ollama HTTP surface.
+
+        Only a provider pointed at Ollama AND still using the default transport
+        manages model residency. A caller that injected its own transport is
+        standing in for the whole HTTP surface (tests, a gateway, a proxy), and
+        reaching around it to hit /api/ps on this machine would be wrong.
+        """
+        return bool(self.ollama_url) and self.transport is _default_transport
+
     async def complete(self, messages: Sequence[Mapping[str, str]], **kwargs: object) -> str:
+        if self._manages_ollama_lifecycle and ollama_unload_on_switch():
+            # Local residency is exclusive by design: a machine that cannot hold
+            # the chat brain and the vision brain at once should pay the reload
+            # at a known instant instead of leaving the choice to memory
+            # pressure mid-answer. Best-effort and off-loop; a failure here must
+            # never cost the caller an answer it could otherwise get.
+            try:
+                await asyncio.to_thread(
+                    ensure_exclusive_ollama_model,
+                    self.model,
+                    self.ollama_url,
+                    keep_alive=ollama_keep_alive(),
+                )
+            except Exception as exc:  # pragma: no cover - defensive only
+                logger.debug("Ollama lifecycle check skipped: %s", exc)
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [dict(message) for message in messages],
@@ -224,6 +256,33 @@ class AnthropicMessagesProvider:
         return "".join(str(block.get("text", "")) for block in content if isinstance(block, dict) and block.get("type") == "text")
 
 
+# Socket timeout for provider requests, in seconds. This is a LOCAL-FIRST
+# surface: a llama-server backed daemon on CPU answers a one-line prompt in
+# 20-60s and takes considerably longer once a screenshot rides in the prompt,
+# so the old hardcoded 30s rejected requests the machine could genuinely
+# serve — every local completion timed out, and the brain quietly swapped in
+# its heuristic fallback while still reporting the Ollama provider. A dead
+# socket still raises immediately, so a generous ceiling costs nothing.
+# Override with NOVACONTROL_LLM_TIMEOUT (seconds).
+_DEFAULT_REQUEST_TIMEOUT = 600.0
+
+
+def _request_timeout() -> float:
+    """Provider socket timeout in seconds (NOVACONTROL_LLM_TIMEOUT else 600).
+
+    An unparseable or non-positive value falls back to the default rather
+    than raising: a typo in an env var must not break every LLM call.
+    """
+    raw = os.environ.get("NOVACONTROL_LLM_TIMEOUT", "").strip()
+    if not raw:
+        return _DEFAULT_REQUEST_TIMEOUT
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DEFAULT_REQUEST_TIMEOUT
+    return value if value > 0 else _DEFAULT_REQUEST_TIMEOUT
+
+
 def _default_transport(url: str, headers: dict[str, str], payload: dict[str, Any]) -> dict[str, Any]:
     request = Request(
         url,
@@ -231,7 +290,7 @@ def _default_transport(url: str, headers: dict[str, str], payload: dict[str, Any
         headers=headers,
         method="POST",
     )
-    with urlopen(request, timeout=30) as response:
+    with urlopen(request, timeout=_request_timeout()) as response:
         return dict(json.loads(response.read().decode("utf-8")))
 
 
@@ -292,10 +351,61 @@ def ollama_models(
     return list(info["models"]) if info else []
 
 
+_ollama_capabilities_cache: dict[str, frozenset[str]] = {}
+
+
+def ollama_model_capabilities(
+    model: str,
+    base_url: str = _OLLAMA_DEFAULT_URL,
+    *,
+    timeout: float = 5.0,
+    refresh: bool = False,
+) -> frozenset[str] | None:
+    """Capabilities Ollama reports for a model, or None when it cannot be asked.
+
+    ``/api/show`` is the authoritative answer where a name prefix is only a
+    guess: Ollama lists ``vision`` for a build that accepts image content and
+    omits it for a text-only one — including text-only builds whose names look
+    multimodal. Returns None (no evidence either way) when Ollama is
+    unreachable, the model is not pulled, or the installed version predates
+    capability metadata; an empty set would wrongly assert the model has no
+    capabilities at all. Callers fall back to the name heuristic on None.
+
+    Successful answers are cached per (url, model) because the vision gate is
+    consulted on every status read; a miss is never cached, so pulling the
+    model later is picked up without a restart.
+    """
+    key = f"{base_url.rstrip('/')}/{model}"
+    if not refresh and key in _ollama_capabilities_cache:
+        return _ollama_capabilities_cache[key]
+    try:
+        request = Request(
+            f"{base_url.rstrip('/')}/api/show",
+            data=json.dumps({"model": model}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (URLError, OSError, json.JSONDecodeError, ValueError, TypeError):
+        return None
+    raw = data.get("capabilities")
+    if not isinstance(raw, list):
+        return None  # older Ollama: no capability metadata to trust
+    capabilities = frozenset(str(item).lower() for item in raw if isinstance(item, str))
+    _ollama_capabilities_cache[key] = capabilities
+    return capabilities
+
+
 def _pick_ollama_model(models: list[str]) -> str:
     """Pick the best model from an Ollama model list.
 
-    Prefers smaller, faster models for interactive use.
+    Prefers smaller, faster models for interactive use. Vision models are
+    skipped while any text model exists: a machine that pulled a VL model for
+    the vision layer must not have its CHAT brain silently reassigned to it,
+    which is exactly what an auto-pick over an unordered model list would do
+    once both are installed. A vision model is still chosen when it is the
+    only thing available (it answers text questions perfectly well).
     """
     preferred_prefixes = ("phi3", "phi-3", "qwen2:0.5", "qwen2:1.5", "tinyllama",
                          "gemma:2b", "gemma2:2b", "llama3.2:1b", "llama3.2:3b",
@@ -305,8 +415,9 @@ def _pick_ollama_model(models: list[str]) -> str:
         for i, model in enumerate(lower_models):
             if model.startswith(prefix) or prefix in model:
                 return models[i]
-    # Fall back to first available model
-    return models[0]
+    text_models = [m for m in models if not is_ollama_vision_model(m)]
+    # Fall back to first available (text-preferred) model.
+    return (text_models or models)[0]
 
 
 def build_ollama_provider(
@@ -333,6 +444,7 @@ def build_ollama_provider(
         base_url=info["url"],
         api_key="ollama",
         model=model,
+        ollama_url=info["url"],
     )
 
 
@@ -472,7 +584,14 @@ def _redact_key(key: str) -> str:
 # known to accept {type: image_url} content per surface.
 
 # Ollama model-name prefixes that are multimodal (vision) models, best first.
+# This list is the OFFLINE fast path — ollama_model_capabilities() is asked
+# whenever a name matches nothing here, so a multimodal build missing from
+# this tuple is still usable. Keep the Qwen VL lines explicit anyway: they are
+# the strongest local grounds for UI elements and the family that keeps
+# shipping new sizes under new tags.
 OLLAMA_VISION_MODEL_PREFIXES: tuple[str, ...] = (
+    "qwen3-vl",
+    "qwen3vl",
     "llava",
     "llama3.2-vision",
     "llama3.1-vision",
@@ -499,12 +618,422 @@ def is_ollama_vision_model(model_name: str) -> bool:
                for prefix in OLLAMA_VISION_MODEL_PREFIXES)
 
 
-def _pick_ollama_vision_model(models: list[str]) -> str:
-    """Pick the best vision model from an Ollama model list ('' when none)."""
+def _pick_ollama_vision_model(models: list[str], *, base_url: str = _OLLAMA_DEFAULT_URL) -> str:
+    """Pick the best vision model from an Ollama model list ('' when none).
+
+    Known name prefixes decide first — that is a cheap, offline match against
+    models this project has always understood. Only when no name matches do we
+    ask Ollama itself, so a multimodal build the prefix list has never heard
+    of (a newer qwen-vl tag, say) is still found instead of the user being
+    told to pull a model they already have.
+    """
     for model in models:
         if is_ollama_vision_model(model):
             return model
+    for model in models:
+        capabilities = ollama_model_capabilities(model, base_url)
+        if capabilities and "vision" in capabilities:
+            return model
     return ""
+
+
+# ── Ollama model lifecycle (one model resident at a time) ──────────
+#
+# A small local machine cannot hold a chat brain and a vision brain at once.
+# On this project's reference box an 8B chat model is ~5.9 GB, a 4B VL model
+# ~3.3 GB, and the Windows desktop already holds ~8.7 GB before any model
+# loads — so Ollama evicts one to load the other, and the eviction surfaces as
+# a cold reload (measured: 49 s for the 8B). Evicting the other model FIRST,
+# deliberately, turns that into predictable behavior and holds peak RAM to a
+# single model, instead of leaving it to the kernel's memory pressure.
+#
+# Residency is controlled through the NATIVE api, not the OpenAI-compatible
+# one: /v1/chat/completions accepts a keep_alive field and ignores it (verified
+# against a live server — the model stayed resident), while
+# POST /api/generate {"keep_alive": 0} returns done_reason "unload" and
+# POST /api/generate {"keep_alive": "10m"} re-arms residency.
+
+_OLLAMA_PS_TIMEOUT = 2.0
+_OLLAMA_UNLOAD_TIMEOUT = 15.0
+_OLLAMA_LOAD_TIMEOUT = 300.0
+
+# Slack kept free BEYOND a model's own footprint. Loading a 5.9 GB model into a
+# machine with exactly 5.9 GB free leaves the OS and every other process with
+# nothing, and that shows up as paging during the load itself. This margin is
+# what makes "fits" mean "fits and stays usable" rather than "arithmetically
+# not impossible".
+_OLLAMA_MEMORY_HEADROOM_BYTES = 512 * 1024 * 1024
+
+# One process-wide telemetry reader (psutil/Win32//proc reads live in that
+# layer); created on first use so importing this module stays free of it.
+_hardware_telemetry: Any = None
+
+
+def ollama_unload_on_switch() -> bool:
+    """Whether a completion evicts other resident models first (default on).
+
+    Disable with NOVACONTROL_OLLAMA_UNLOAD_ON_SWITCH=0 on a machine with RAM
+    to spare, where paying a reload per switch costs more than the memory.
+    """
+    raw = os.environ.get("NOVACONTROL_OLLAMA_UNLOAD_ON_SWITCH", "").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def ollama_keep_alive() -> str:
+    """Configured residency window for a loaded model ('' = Ollama's own default).
+
+    NOVACONTROL_OLLAMA_KEEP_ALIVE takes an Ollama duration ("30s", "10m",
+    "24h") or a plain seconds count. Left unset, this module never overrides
+    Ollama's built-in residency — the default is to change nothing. When set,
+    it is applied to a model that this module (re)loads on a switch, which is
+    the one moment residency is ours to choose.
+    """
+    return os.environ.get("NOVACONTROL_OLLAMA_KEEP_ALIVE", "").strip()
+
+
+def _same_ollama_model(left: str, right: str) -> bool:
+    """Ollama identity match: 'qwen3' and 'qwen3:latest' are the same model."""
+    def base(name: str) -> str:
+        normalized = name.strip().lower()
+        return normalized[: -len(":latest")] if normalized.endswith(":latest") else normalized
+
+    return bool(base(left)) and base(left) == base(right)
+
+
+def _gigabytes(value: int | None) -> str:
+    """Human GB for a measurement, or 'unknown' — never a confident 0."""
+    return "unknown" if value is None else f"{value / 1024 ** 3:.1f} GB"
+
+
+def ollama_available_memory_bytes() -> int | None:
+    """This machine's available physical memory in bytes (None when unreadable).
+
+    Reuses the telemetry layer's own platform reads (psutil → Win32
+    GlobalMemoryStatusEx → /proc/meminfo) so "how much memory is free" has
+    exactly ONE definition in this codebase, and reports None rather than a
+    convenient guess when the OS will not say.
+    """
+    global _hardware_telemetry  # noqa: PLW0603
+    try:
+        if _hardware_telemetry is None:
+            from novacontrol.telemetry.hardware import HardwareTelemetry
+
+            _hardware_telemetry = HardwareTelemetry()
+        memory = _hardware_telemetry.memory()
+    except Exception:  # pragma: no cover - a memory check must never break a load
+        return None
+    if not memory.get("available"):
+        return None
+    value = memory.get("available_bytes")
+    return int(value) if isinstance(value, (int, float)) else None
+
+
+def ollama_resident_models(
+    base_url: str = _OLLAMA_DEFAULT_URL, *, timeout: float = _OLLAMA_PS_TIMEOUT
+) -> list[dict[str, Any]] | None:
+    """Models Ollama holds in memory right now, each with its resident size.
+
+    None means "could not ask" (server down, timeout, odd payload), which is
+    deliberately distinct from an empty list meaning "nothing is resident":
+    only a real answer may drive an eviction. A size of 0 means Ollama did not
+    report one — never a claim that the model is free.
+    """
+    try:
+        request = Request(f"{base_url.rstrip('/')}/api/ps", method="GET")
+        with urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (URLError, OSError, json.JSONDecodeError, ValueError, TypeError):
+        return None
+    models = data.get("models")
+    if not isinstance(models, list):
+        return None
+    resident: list[dict[str, Any]] = []
+    for entry in models:
+        if isinstance(entry, dict) and "name" in entry:
+            size = entry.get("size")
+            resident.append({
+                "name": str(entry["name"]),
+                "size": int(size) if isinstance(size, (int, float)) else 0,
+            })
+    return resident
+
+
+def ollama_loaded_models(
+    base_url: str = _OLLAMA_DEFAULT_URL, *, timeout: float = _OLLAMA_PS_TIMEOUT
+) -> list[str] | None:
+    """Names of the models Ollama currently holds in memory (None if unaskable)."""
+    resident = ollama_resident_models(base_url, timeout=timeout)
+    return None if resident is None else [entry["name"] for entry in resident]
+
+
+def _ollama_size_on_disk(
+    model: str, base_url: str = _OLLAMA_DEFAULT_URL, *, timeout: float = _OLLAMA_PS_TIMEOUT
+) -> int | None:
+    """Weights size from /api/tags: the footprint a not-yet-loaded model takes."""
+    try:
+        request = Request(f"{base_url.rstrip('/')}/api/tags", method="GET")
+        with urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (URLError, OSError, json.JSONDecodeError, ValueError, TypeError):
+        return None
+    models = data.get("models")
+    if not isinstance(models, list):
+        return None
+    for entry in models:
+        if isinstance(entry, dict) and _same_ollama_model(str(entry.get("name", "")), model):
+            size = entry.get("size")
+            return int(size) if isinstance(size, (int, float)) else None
+    return None
+
+
+def ollama_model_size_bytes(
+    model: str, base_url: str = _OLLAMA_DEFAULT_URL, *, timeout: float = _OLLAMA_PS_TIMEOUT
+) -> int | None:
+    """A model's footprint in bytes: its resident size if loaded, else on disk.
+
+    /api/ps reports the ACTUAL resident size (weights plus the KV cache for the
+    loaded context); /api/tags reports the weights on disk for any pulled model,
+    which is the best estimate available for one that is not loaded yet.
+    """
+    resident = ollama_resident_models(base_url, timeout=timeout)
+    if resident is not None:
+        for entry in resident:
+            if _same_ollama_model(entry["name"], model) and entry["size"]:
+                return int(entry["size"])
+    return _ollama_size_on_disk(model, base_url, timeout=timeout)
+
+
+def unload_ollama_model(
+    model: str, base_url: str = _OLLAMA_DEFAULT_URL, *, timeout: float = _OLLAMA_UNLOAD_TIMEOUT
+) -> bool:
+    """Release a model's memory immediately. True when Ollama accepted it.
+
+    ``keep_alive: 0`` is Ollama's documented way to unload as soon as the
+    (empty) request completes, and it answers ``done_reason: "unload"``.
+    """
+    try:
+        request = Request(
+            f"{base_url.rstrip('/')}/api/generate",
+            data=json.dumps({"model": model, "keep_alive": 0}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=timeout) as response:
+            response.read()
+        logger.info("Unloaded Ollama model %s", model)
+        return True
+    except (URLError, OSError, json.JSONDecodeError, ValueError, TypeError):
+        return False
+
+
+def warm_ollama_model(
+    model: str,
+    base_url: str = _OLLAMA_DEFAULT_URL,
+    *,
+    keep_alive: str = "",
+    timeout: float = _OLLAMA_LOAD_TIMEOUT,
+) -> bool:
+    """Load a model with a chosen residency window, without generating.
+
+    ``/api/generate`` with no prompt answers ``done_reason: "load"`` — the
+    model is brought into memory and ``keep_alive`` decides how long it
+    stays. This is the only way to set residency: the OpenAI-compatible
+    endpoint drops the field.
+    """
+    payload: dict[str, Any] = {"model": model}
+    if keep_alive:
+        payload["keep_alive"] = keep_alive
+    try:
+        request = Request(
+            f"{base_url.rstrip('/')}/api/generate",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=timeout) as response:
+            response.read()
+        return True
+    except (URLError, OSError, json.JSONDecodeError, ValueError, TypeError):
+        return False
+
+
+@dataclass(frozen=True)
+class OllamaMemoryPlan:
+    """What must happen before `model` loads, and the evidence behind it.
+
+    The measured figures travel with the decision so a load can be explained
+    with real numbers, and so "could not measure" (None) is never quietly read
+    as "nothing to worry about".
+    """
+
+    model: str
+    available_bytes: int | None
+    incoming_bytes: int | None
+    resident_models: tuple[str, ...]
+    resident_bytes: int
+    evict: tuple[str, ...]
+    fits_after_evict: bool | None
+
+    def describe(self) -> str:
+        """One line for the log: what was measured, and what was decided."""
+        incoming = _gigabytes(self.incoming_bytes)
+        available = _gigabytes(self.available_bytes)
+        if not self.resident_models:
+            return f"{self.model} ({incoming}): nothing else resident, {available} free"
+        resident = ", ".join(self.resident_models)
+        if not self.evict:
+            return f"{self.model} ({incoming}): keeping {resident} resident, {available} free"
+        if self.fits_after_evict is None:
+            verdict = "fit afterwards unknown"
+        elif self.fits_after_evict:
+            verdict = "room afterwards"
+        else:
+            verdict = "NOT enough room afterwards — expect paging"
+        freed = _gigabytes(self.resident_bytes)
+        return f"{self.model} ({incoming}): unloading {resident} (frees {freed}), {available} free — {verdict}"
+
+
+def ollama_memory_plan(
+    model: str,
+    base_url: str = _OLLAMA_DEFAULT_URL,
+    *,
+    exclusive: bool = True,
+    timeout: float = _OLLAMA_PS_TIMEOUT,
+) -> OllamaMemoryPlan:
+    """Decide what must be unloaded before `model` can be loaded.
+
+    There are two independent reasons to evict, which is why the plan reports
+    them apart:
+
+    - ``exclusive`` (the default): only ONE model may be resident, whatever the
+      memory situation happens to be. A machine that runs a chat brain AND a
+      vision brain must not hold both — the second is not a spare, it is the
+      reason the first gets paged out mid-answer.
+    - MEMORY: whatever that setting says, a machine that cannot hold the
+      incoming model alongside what is already resident must unload first.
+      ``fits_after_evict`` reports whether unloading actually buys enough room,
+      so a load that will thrash is visible BEFORE it starts.
+
+    Never raises. An unreachable server yields a plan that evicts nothing — with
+    no evidence, doing nothing is the only honest action.
+    """
+    resident = ollama_resident_models(base_url, timeout=timeout)
+    if resident is None:
+        return OllamaMemoryPlan(
+            model=model,
+            available_bytes=None,
+            incoming_bytes=None,
+            resident_models=(),
+            resident_bytes=0,
+            evict=(),
+            fits_after_evict=None,
+        )
+    others = tuple(entry for entry in resident if not _same_ollama_model(entry["name"], model))
+    others_bytes = sum(int(entry["size"]) for entry in others)
+    available = ollama_available_memory_bytes()
+    incoming: int | None = None
+    for entry in resident:
+        if _same_ollama_model(entry["name"], model) and entry["size"]:
+            incoming = int(entry["size"])
+            break
+    if incoming is None:
+        incoming = _ollama_size_on_disk(model, base_url, timeout=timeout)
+    required = None if incoming is None else incoming + _OLLAMA_MEMORY_HEADROOM_BYTES
+    memory_forces_evict = available is not None and required is not None and available < required
+    evict = (
+        tuple(entry["name"] for entry in others)
+        if (exclusive or memory_forces_evict)
+        else ()
+    )
+    fits: bool | None = None
+    if available is not None and required is not None:
+        freed = sum(int(entry["size"]) for entry in others if entry["name"] in evict)
+        fits = available + freed >= required
+    return OllamaMemoryPlan(
+        model=model,
+        available_bytes=available,
+        incoming_bytes=incoming,
+        resident_models=tuple(entry["name"] for entry in others),
+        resident_bytes=others_bytes,
+        evict=evict,
+        fits_after_evict=fits,
+    )
+
+
+def ensure_exclusive_ollama_model(
+    model: str,
+    base_url: str = _OLLAMA_DEFAULT_URL,
+    *,
+    keep_alive: str = "",
+    timeout: float = _OLLAMA_PS_TIMEOUT,
+) -> list[str]:
+    """Unload whatever must go, so `model` loads with room to actually work.
+
+    Returns the names evicted (empty when nothing had to move). Never raises and
+    never blocks: this runs on the critical path of a completion, so a lifecycle
+    probe that cannot reach the server must do nothing rather than fail a
+    request that could otherwise succeed.
+
+    The decision comes from ollama_memory_plan, so exclusivity AND the measured
+    memory situation are both honored — see that function for why they are
+    reported separately.
+
+    When a switch happened and ``keep_alive`` is configured, the incoming model
+    is re-armed with that window: the one moment residency is ours to choose,
+    since the completion itself goes out over the OpenAI-compatible endpoint,
+    which discards keep_alive.
+    """
+    plan = ollama_memory_plan(model, base_url, exclusive=ollama_unload_on_switch(), timeout=timeout)
+    evicted: list[str] = []
+    for resident in plan.evict:
+        if unload_ollama_model(resident, base_url):
+            evicted.append(resident)
+    if evicted or plan.fits_after_evict is False:
+        logger.info("Ollama memory plan: %s", plan.describe())
+    if evicted and keep_alive:
+        warm_ollama_model(model, base_url, keep_alive=keep_alive)
+    return evicted
+
+
+def provider_supports_vision(provider: object | None) -> bool:
+    """True only when a provider can ACTUALLY accept image content.
+
+    A provider's NAME is not evidence of its eyes. The application wires the
+    chat brain's provider into the vision layer as a default, and that
+    provider is very often a text-only local model (qwen3, llama3.2, …) — it
+    reports a healthy name and model id, cannot see a screenshot, and will
+    invent click coordinates for a picture it never received. The old gate
+    ("anything that is not the Echo fallback") therefore declared vision
+    available on a machine that had none, and vision status said so.
+
+    Decided per surface:
+    - ``vision:*`` — built by build_vision_provider, already validated against
+      the provider's own capability metadata;
+    - ``ollama`` — accepted only when Ollama reports ``vision`` for that exact
+      model, falling back to the name heuristic when capability metadata is
+      unavailable (older Ollama);
+    - a registered vision-capable cloud preset (gpt-4o, gemini, …);
+    - everything else, the Echo fallback included, is refused.
+    """
+    if provider is None:
+        return False
+    name = str(getattr(provider, "name", "") or "").strip().lower()
+    if not name:
+        return False
+    if name.startswith("vision:"):
+        return True
+    if "echo" in name:
+        return False
+    surface = name.split(":", 1)[-1] if ":" in name else name
+    if surface == "ollama":
+        model = str(getattr(provider, "model", "") or "").strip()
+        if not model:
+            return False
+        capabilities = ollama_model_capabilities(model)
+        if capabilities is None:
+            return is_ollama_vision_model(model)  # no metadata: best guess
+        return "vision" in capabilities
+    return surface in VISION_CAPABLE_CLOUD_PRESETS
 
 
 def build_vision_provider(
@@ -535,13 +1064,17 @@ def build_vision_provider(
             return None, "Ollama is not reachable at " + ollama_url
         if model.strip():
             chosen = model.strip()
-            if not is_ollama_vision_model(chosen):
+            # Name prefix OR Ollama's own capability metadata — whichever
+            # recognizes it. Without the second check a genuinely multimodal
+            # model the prefix list has not been taught would be refused.
+            capabilities = ollama_model_capabilities(chosen, info["url"])
+            if not is_ollama_vision_model(chosen) and not (capabilities and "vision" in capabilities):
                 return None, (
                     f"{chosen!r} is not a vision model. Pull one, e.g. "
                     "`ollama pull llama3.2-vision` or `ollama pull llava`."
                 )
         else:
-            chosen = _pick_ollama_vision_model(list(info["models"]))
+            chosen = _pick_ollama_vision_model(list(info["models"]), base_url=info["url"])
             if not chosen:
                 return None, (
                     "No vision model found in Ollama. Pull one, e.g. "
@@ -552,6 +1085,7 @@ def build_vision_provider(
             base_url=info["url"],
             api_key="ollama",
             model=chosen,
+            ollama_url=info["url"],
         ), ""
 
     preset = get_cloud_preset(provider_id)
@@ -722,6 +1256,7 @@ def make_ollama_reprobe(
             base_url=info["url"],
             api_key="ollama",
             model=model.strip() or _pick_ollama_model(info["models"]),
+            ollama_url=info["url"],
         )
         state["provider"] = provider
         return provider

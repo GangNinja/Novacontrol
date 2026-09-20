@@ -526,6 +526,12 @@ class BrainModeAndTaskApiTests(_IsolatedApiTestCase):
                 "novacontrol.application.build_llm_provider_from_environment",
                 return_value=EchoLLMProvider(),
             ),
+            # The local-model picker probes the REAL Ollama at 127.0.0.1:11434.
+            # These tests are written for "no Ollama reachable" (empty listing,
+            # a pin that persists without membership validation), so the probe
+            # is pinned too — otherwise a developer with Ollama running sees
+            # this class fail while CI stays green.
+            mock.patch("novacontrol.application.ollama_models", return_value=[]),
         ]
 
     def test_brain_mode_round_trip_and_scratch_reporting(self) -> None:

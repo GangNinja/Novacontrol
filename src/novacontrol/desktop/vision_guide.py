@@ -21,6 +21,7 @@ import json
 import sys
 from typing import Any
 
+from novacontrol.integrations.llm import provider_supports_vision
 from novacontrol.intelligence.normalize import normalize
 
 try:  # Pillow is optional at import time; degrade gracefully.
@@ -330,10 +331,12 @@ async def locate_element(
     # whole screenshot as base64 plus the region vocabulary itself, so the echo
     # always contains words like 'top-left' and can never carry real screen
     # understanding (the exact trap vision.py's has_vision_model gates against;
-    # this runner-side gate closes the same hole for locating).
-    provider_name = str(getattr(llm_provider, "name", "") or "").lower()
-    real_provider = llm_provider is not None and "echo" not in provider_name
-    if real_provider:
+    # this runner-side gate closes the same hole for locating). "Not Echo" is
+    # not enough either: a text-only local model (qwen3, llama3.2) accepts the
+    # request, cannot see the image, and answers with invented coordinates that
+    # this layer would then click — provider_supports_vision asks the provider
+    # for real capability metadata instead.
+    if provider_supports_vision(llm_provider):
         point = await _llm_region(llm_provider, screenshot_path, label)
         if point is not None:
             return point[0], point[1], "llm_vision"

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from novacontrol.core.buglog import BugLog
@@ -186,7 +187,14 @@ class VisionProviderWiringTests(unittest.TestCase):
     def test_application_wires_brain_provider_into_desktop(self) -> None:
         from novacontrol.application import NovaControlApplication
 
-        app = NovaControlApplication()
+        # A TEMP data dir: this asserts the BOOT default. The real ./data holds
+        # runtime config, and a configured vision model legitimately replaces
+        # the runner's provider with the dedicated vision one (_restore_vision_
+        # provider) — correct behaviour for a user who set one up, not a
+        # violation of this invariant. Reading the developer's own data dir
+        # made this test fail for anyone who had configured a vision model.
+        with TemporaryDirectory() as data_dir:
+            app = NovaControlApplication(data_dir=data_dir)
         self.assertIs(app.desktop.runner.vision_provider, app.brain.completion_provider)
 
 

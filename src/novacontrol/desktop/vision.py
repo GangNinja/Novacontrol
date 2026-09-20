@@ -27,6 +27,7 @@ from typing import Any
 
 from novacontrol.core.buglog import BugLog
 from novacontrol.desktop.controller import DesktopAutomationController
+from novacontrol.integrations.llm import provider_supports_vision
 
 
 def _cv2_frame_diff(before_file: Path, after_file: Path) -> dict[str, Any]:
@@ -131,10 +132,13 @@ class VisionController:
 
         The Echo fallback "answers" by echoing the prompt back — counting it as
         a vision model would serve the prompt's own text as a screen summary
-        (exactly the trap agentcore's interpreter gates against).
+        (exactly the trap agentcore's interpreter gates against). Not-Echo is
+        necessary but NOT sufficient: the application wires the chat brain's
+        provider in by default, and on a local-Ollama machine that is usually a
+        TEXT-ONLY model (qwen3, llama3.2, …) that cannot see an image at all,
+        so provider_supports_vision asks the provider what it can really do.
         """
-        provider_name = str(getattr(self._llm_provider, "name", "") or "").lower()
-        return self._llm_provider is not None and "echo" not in provider_name
+        return provider_supports_vision(self._llm_provider)
 
     # -- perception ------------------------------------------------------------
 

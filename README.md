@@ -120,7 +120,7 @@ src/novacontrol/
 |---|---|
 | Python | **3.12+** |
 | OS | Windows (desktop + voice features); Linux/macOS for core web/API |
-| Ollama (optional) | Any recent version — local chat brain and/or a local vision model (e.g. `ollama pull llama3.2-vision`) |
+| Ollama (optional) | Any recent version — local chat brain and/or a local vision model (e.g. `ollama pull qwen3-vl:4b` or `ollama pull llama3.2-vision`) |
 | Android platform-tools (optional) | For phone control |
 
 ## 📦 Installation
@@ -154,10 +154,13 @@ NovaControl is configured via environment variables — no `.env` file is requir
 | `NOVACONTROL_REDIS_URL` | Redis for optional worker/queue features | — |
 | `NOVACONTROL_OLLAMA_URL` | Ollama endpoint for the LLM brain | `http://127.0.0.1:11434` |
 | `NOVACONTROL_DISABLE_OLLAMA` | Skip Ollama auto-detection | unset |
+| `NOVACONTROL_OLLAMA_UNLOAD_ON_SWITCH` | Unload the other local model before a completion, so only one is ever resident | `on` |
+| `NOVACONTROL_OLLAMA_KEEP_ALIVE` | Residency window applied to a model (re)loaded on a switch (e.g. `30m`) | Ollama's own default |
 | `NOVACONTROL_ENABLE_EXTERNAL_LLM` | Enable OpenAI-compatible/Gemini-style cloud providers | unset |
 | `NOVACONTROL_LLM_BASE_URL` | Cloud provider base URL | — |
 | `NOVACONTROL_LLM_API_KEY` | Cloud provider API key | — |
 | `NOVACONTROL_LLM_MODEL` | Model name | provider default |
+| `NOVACONTROL_LLM_TIMEOUT` | Socket timeout in seconds for every provider request — raise it for CPU-only local models, which answer far slower than a cloud API | `600` |
 
 > 🔐 **Secret handling:** API keys are stored locally and never returned by any API endpoint. This includes the vision-model key (`POST /vision/model` accepts it once and only ever reports a redacted tail). Never commit `.env` files or tokens — local artifacts like `token.txt` should stay out of version control.
 >
@@ -333,8 +336,10 @@ Windows-first, using Start-Menu scans (`.lnk` index), registry App Paths, UWP/St
 The Vision tab wraps desktop control in a perceive → locate → act → verify loop:
 
 - **Describe Screen** — captures your real screen and reports what's visible
-- **Configurable multimodal vision model** — point the whole vision layer at a real vision-capable model (local **Ollama** — llava, llama3.2-vision, moondream — auto-detected; or a cloud preset: **OpenAI, Gemini, OpenRouter**) from the web UI's Vision panel or `POST /vision/model`. The screenshot is embedded as OpenAI-format image content and elements are located **semantically** (a 0–1000 grid point), with OCR/landmarks as automatic fallback. The config hot-swaps at runtime, persists across restarts, and the API key is stored only on your machine and never returned by any endpoint.
+- **Configurable multimodal vision model** — point the whole vision layer at a real vision-capable model (local **Ollama** — qwen3-vl, qwen2.5vl, llava, llama3.2-vision, moondream — auto-detected; or a cloud preset: **OpenAI, Gemini, OpenRouter**) from the web UI's Vision panel or `POST /vision/model`. The screenshot is embedded as OpenAI-format image content and elements are located **semantically** (a 0–1000 grid point), with OCR/landmarks as automatic fallback. The config hot-swaps at runtime, persists across restarts, and the API key is stored only on your machine and never returned by any endpoint.
+- **A text-only model can never pose as a vision model** — a provider is accepted as vision-capable only when it can actually see: local Ollama models are checked against Ollama's own `/api/show` capability metadata (the authoritative answer, where a name is only a guess), cloud presets against the registered vision-capable list, and the Echo fallback is always refused. This is why `/vision/status` reports the truth on a machine whose chat brain is a text-only model, instead of feeding screenshots to a model that cannot see them and clicking the coordinates it invents.
 - **Guided Click** — type a target ("File", "Library", "Play GTA V"); the vision layer locates it via vision model → OCR → UI landmarks, moves the cursor, clicks, and saves before/after screenshots
+- **One local model resident at a time** — a local chat brain and a local vision brain cannot both be held in RAM on a small machine, so before any completion the app measures free system memory and asks Ollama what it already holds; if the incoming model would not fit (or simply because exclusivity is the policy) the other model is unloaded first, with a 512 MB headroom so "fits" means "fits and stays usable". Every decision is logged with its measured figures, and an unmeasurable situation is reported as unknown rather than guessed. `NOVACONTROL_OLLAMA_UNLOAD_ON_SWITCH=0` relaxes the policy — memory still forces an unload when it must — and `NOVACONTROL_OLLAMA_KEEP_ALIVE` sets the residency window applied on a switch.
 - **Pixel-diff verification** — before/after frames are diffed with an **OpenCV fast path** (numpy-backed, with connected-component *change-region localization*: did the click site itself react?) and a pure-Pillow fallback where OpenCV is unavailable; results carry the `verified`/`unverified` status and the change regions
 - **Honest verification** — when a click's effect can't be confirmed, it records *unverified* rather than claiming success; open verification bugs auto-resolve when a later verified click proves the change
 - Details: [docs/VISION.md](docs/VISION.md)

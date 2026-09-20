@@ -5,8 +5,10 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import unittest
 from unittest import mock
+from urllib.error import URLError
 
 import json
 
@@ -23,9 +25,22 @@ from novacontrol.integrations import (
     validate_cloud_key,
 )
 from novacontrol.integrations import llm as llm_module
-from novacontrol.integrations.llm import cloud_llm_presets, get_cloud_preset
+from novacontrol.integrations.llm import (
+    OllamaMemoryPlan,
+    cloud_llm_presets,
+    ensure_exclusive_ollama_model,
+    get_cloud_preset,
+    is_ollama_vision_model,
+    ollama_keep_alive,
+    ollama_loaded_models,
+    ollama_memory_plan,
+    ollama_unload_on_switch,
+    provider_supports_vision,
+    unload_ollama_model,
+)
 
 OLLAMA_URL = "http://127.0.0.1:11434"
+_GIB = 1024 ** 3
 
 
 class OllamaDetectionTests(unittest.TestCase):
@@ -465,6 +480,391 @@ class ValidateCloudKeyTests(unittest.TestCase):
         # Empty is the caller's required-field check, not a format problem.
         for key in ("", "   "):
             validate_cloud_key("gemini", key)
+
+
+class _FakeOllamaServer:
+    """Server double for the lifecycle endpoints.
+
+    Tracks which models are "resident" so a test can assert that a switch
+    really evicted the other one, and records every call for inspection.
+    ``sizes`` is the model roster with each footprint in bytes: /api/ps reports
+    the resident subset, /api/tags every pulled model.
+    """
+
+    def __init__(self, loaded: list[str], *, sizes: dict[str, int] | None = None) -> None:
+        self.loaded = list(loaded)
+        self.sizes = dict(sizes or {})
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def __call__(self, request: object, timeout: float = 0) -> object:
+        data = getattr(request, "data", None)
+        payload: dict[str, object] = json.loads(data.decode("utf-8")) if data else {}
+        path = str(getattr(request, "full_url", "")).replace(OLLAMA_URL, "")
+        self.calls.append((path, payload))
+        if path == "/api/ps":
+            body = json.dumps({
+                "models": [
+                    {"name": name, "size": self.sizes.get(name, 0)} for name in self.loaded
+                ]
+            }).encode("utf-8")
+        elif path == "/api/tags":
+            body = json.dumps({
+                "models": [{"name": name, "size": size} for name, size in self.sizes.items()]
+            }).encode("utf-8")
+        elif path == "/api/generate":
+            # keep_alive 0 unloads; any truthy value (re)loads with that window.
+            self.loaded = [name for name in self.loaded if name != payload.get("model")]
+            if payload.get("keep_alive"):
+                self.loaded.append(str(payload["model"]))
+            body = b'{"done": true}'
+        else:  # pragma: no cover - a wrong endpoint is a test failure
+            raise AssertionError(f"unexpected lifecycle endpoint: {path}")
+        return contextlib.closing(io.BytesIO(body))
+
+
+class OllamaLifecycleTests(unittest.TestCase):
+    """One local model resident at a time: evict before switching.
+
+    A machine that cannot hold a chat brain and a vision brain at once should
+    pay the reload deliberately, at a known instant, instead of letting memory
+    pressure decide mid-answer.
+    """
+
+    def test_loaded_models_reads_the_ps_roster(self) -> None:
+        server = _FakeOllamaServer(["qwen3:8b"])
+        with mock.patch("novacontrol.integrations.llm.urlopen", server):
+            self.assertEqual(ollama_loaded_models(), ["qwen3:8b"])
+
+    def test_loaded_models_is_none_when_unreachable(self) -> None:
+        # None (cannot ask) must be distinct from [] (nothing resident): only a
+        # real answer may drive an eviction.
+        with mock.patch("novacontrol.integrations.llm.urlopen", side_effect=URLError("refused")):
+            self.assertIsNone(ollama_loaded_models())
+
+    def test_unload_posts_keep_alive_zero_to_the_native_api(self) -> None:
+        server = _FakeOllamaServer(["qwen3:8b"])
+        with mock.patch("novacontrol.integrations.llm.urlopen", server):
+            self.assertTrue(unload_ollama_model("qwen3:8b"))
+        self.assertEqual(server.calls, [("/api/generate", {"model": "qwen3:8b", "keep_alive": 0})])
+        self.assertEqual(server.loaded, [])
+
+    def test_ensure_exclusive_evicts_only_the_other_model(self) -> None:
+        server = _FakeOllamaServer(["qwen3:8b", "qwen3-vl:4b"])
+        with mock.patch("novacontrol.integrations.llm.urlopen", server):
+            evicted = ensure_exclusive_ollama_model("qwen3-vl:4b")
+        self.assertEqual(evicted, ["qwen3:8b"])
+        self.assertEqual(server.loaded, ["qwen3-vl:4b"])
+
+    def test_ensure_exclusive_treats_latest_and_bare_name_as_one_model(self) -> None:
+        server = _FakeOllamaServer(["qwen3:latest"])
+        with mock.patch("novacontrol.integrations.llm.urlopen", server):
+            self.assertEqual(ensure_exclusive_ollama_model("qwen3"), [])
+        self.assertEqual(server.loaded, ["qwen3:latest"])
+
+    def test_ensure_exclusive_is_a_noop_when_nothing_is_resident(self) -> None:
+        server = _FakeOllamaServer([])
+        with mock.patch("novacontrol.integrations.llm.urlopen", server):
+            self.assertEqual(ensure_exclusive_ollama_model("qwen3:8b"), [])
+        # Nothing resident means nothing to unload — no /api/generate at all.
+        self.assertEqual([call for call in server.calls if call[0] == "/api/generate"], [])
+
+    def test_ensure_exclusive_never_raises_when_the_server_is_down(self) -> None:
+        with mock.patch("novacontrol.integrations.llm.urlopen", side_effect=URLError("down")):
+            self.assertEqual(ensure_exclusive_ollama_model("qwen3:8b"), [])
+
+    def test_configured_keep_alive_is_armed_on_a_switch(self) -> None:
+        server = _FakeOllamaServer(["qwen3:8b"])
+        with mock.patch("novacontrol.integrations.llm.urlopen", server):
+            ensure_exclusive_ollama_model("qwen3-vl:4b", keep_alive="30m")
+        self.assertIn(("/api/generate", {"model": "qwen3-vl:4b", "keep_alive": "30m"}), server.calls)
+        self.assertEqual(server.loaded, ["qwen3-vl:4b"])
+
+    def test_keep_alive_is_left_to_ollama_unless_configured(self) -> None:
+        # The default must change nothing: no env var, no arming call.
+        self.assertEqual(ollama_keep_alive(), "")
+        server = _FakeOllamaServer(["qwen3:8b"])
+        with mock.patch("novacontrol.integrations.llm.urlopen", server):
+            ensure_exclusive_ollama_model("qwen3-vl:4b")
+        # Exactly one /api/generate call, and it is the unload — an unset
+        # keep_alive must never produce an arming call of its own.
+        self.assertEqual(
+            [payload for path, payload in server.calls if path == "/api/generate"],
+            [{"model": "qwen3:8b", "keep_alive": 0}],
+        )
+
+    def test_unload_on_switch_can_be_disabled(self) -> None:
+        with mock.patch.dict(os.environ, {"NOVACONTROL_OLLAMA_UNLOAD_ON_SWITCH": "0"}):
+            self.assertFalse(ollama_unload_on_switch())
+        with mock.patch.dict(os.environ, {"NOVACONTROL_OLLAMA_UNLOAD_ON_SWITCH": ""}):
+            self.assertTrue(ollama_unload_on_switch())
+
+
+class OllamaMemoryPlanTests(unittest.TestCase):
+    """Measure memory BEFORE loading, and unload what must go first.
+
+    A 16 GB machine cannot hold a 5.9 GB chat model and a 3.3 GB vision model
+    alongside the desktop. Two separate reasons to evict are pinned here: never
+    co-resident by policy, and not-enough-memory whatever the policy says.
+    """
+
+    def _plan(
+        self,
+        model: str,
+        loaded: list[str],
+        *,
+        sizes: dict[str, int] | None = None,
+        available: int | None = 20 * _GIB,
+        exclusive: bool = True,
+    ) -> OllamaMemoryPlan:
+        server = _FakeOllamaServer(loaded, sizes=sizes)
+        with (
+            mock.patch("novacontrol.integrations.llm.urlopen", server),
+            mock.patch(
+                "novacontrol.integrations.llm.ollama_available_memory_bytes", return_value=available
+            ),
+        ):
+            return ollama_memory_plan(model, OLLAMA_URL, exclusive=exclusive)
+
+    def test_exclusive_evicts_even_with_memory_to_spare(self) -> None:
+        # The guarantee is policy, not memory pressure: with a roomy machine
+        # both models would FIT, and they still must not both be resident.
+        plan = self._plan(
+            "qwen3-vl:4b",
+            ["qwen3:8b"],
+            sizes={"qwen3:8b": 59 * _GIB // 10, "qwen3-vl:4b": 33 * _GIB // 10},
+            available=20 * _GIB,
+            exclusive=True,
+        )
+        self.assertEqual(plan.evict, ("qwen3:8b",))
+        self.assertEqual(plan.resident_models, ("qwen3:8b",))
+        self.assertTrue(plan.fits_after_evict)
+
+    def test_memory_alone_forces_eviction_when_exclusivity_is_off(self) -> None:
+        # With the policy switch off, a model that does not fit still unloads
+        # the one in its way — the safety floor is not optional.
+        plan = self._plan(
+            "qwen3-vl:4b",
+            ["qwen3:8b"],
+            sizes={"qwen3:8b": 59 * _GIB // 10, "qwen3-vl:4b": 33 * _GIB // 10},
+            available=_GIB // 2,  # 0.5 GB free: nowhere near enough
+            exclusive=False,
+        )
+        self.assertEqual(plan.evict, ("qwen3:8b",))
+        self.assertTrue(plan.fits_after_evict)  # 0.5 + 5.9 >= 3.3 + headroom
+
+    def test_no_eviction_when_the_model_fits_with_exclusivity_off(self) -> None:
+        plan = self._plan(
+            "qwen3-vl:4b",
+            ["qwen3:8b"],
+            sizes={"qwen3:8b": 59 * _GIB // 10, "qwen3-vl:4b": 1 * _GIB},
+            available=20 * _GIB,
+            exclusive=False,
+        )
+        self.assertEqual(plan.evict, ())
+        self.assertEqual(plan.resident_models, ("qwen3:8b",))  # still reported
+
+    def test_an_impossible_load_is_reported_instead_of_attempted_silently(self) -> None:
+        # A small resident model cannot free room for a big incoming one.
+        plan = self._plan(
+            "qwen3:8b",
+            ["moondream:latest"],
+            sizes={"moondream:latest": _GIB // 3, "qwen3:8b": 59 * _GIB // 10},
+            available=_GIB,
+        )
+        self.assertEqual(plan.evict, ("moondream:latest",))
+        self.assertFalse(plan.fits_after_evict)
+        self.assertIn("NOT enough room", plan.describe())
+
+    def test_nothing_resident_means_nothing_to_evict(self) -> None:
+        plan = self._plan("qwen3:8b", [], sizes={"qwen3:8b": 59 * _GIB // 10})
+        self.assertEqual(plan.evict, ())
+        self.assertEqual(plan.resident_models, ())
+        self.assertTrue(plan.fits_after_evict)
+
+    def test_the_model_already_alone_is_not_evicted(self) -> None:
+        plan = self._plan("qwen3-vl:4b", ["qwen3-vl:4b"], sizes={"qwen3-vl:4b": 33 * _GIB // 10})
+        self.assertEqual(plan.evict, ())
+        self.assertEqual(plan.resident_models, ())
+
+    def test_an_unmeasurable_situation_never_claims_it_fits(self) -> None:
+        # Unknown free memory, unknown model size, unreachable server: all three
+        # must read as None, never as a confident "fits".
+        plan = self._plan("qwen3:8b", ["qwen3:8b"], available=None)
+        self.assertIsNone(plan.fits_after_evict)
+        self.assertIsNone(plan.available_bytes)
+
+    def test_missing_model_size_leaves_the_fit_unknown(self) -> None:
+        plan = self._plan("qwen3:8b", [], sizes={})  # not in /api/tags either
+        self.assertIsNone(plan.incoming_bytes)
+        self.assertIsNone(plan.fits_after_evict)
+
+    def test_unreachable_server_evicts_nothing(self) -> None:
+        with mock.patch("novacontrol.integrations.llm.urlopen", side_effect=URLError("down")):
+            plan = ollama_memory_plan("qwen3:8b", OLLAMA_URL)
+        self.assertEqual(plan.evict, ())
+        self.assertIsNone(plan.fits_after_evict)
+
+    def test_describe_never_states_an_unmeasured_size_as_zero(self) -> None:
+        plan = self._plan("qwen3:8b", [], sizes={})
+        self.assertIn("unknown", plan.describe())
+
+
+class OllamaMemoryGuardedLoadTests(unittest.TestCase):
+    """The load-time guard, end to end through ensure_exclusive_ollama_model."""
+
+    def test_memory_pressure_evicts_even_with_the_policy_switch_off(self) -> None:
+        server = _FakeOllamaServer(
+            ["qwen3:8b"],
+            sizes={"qwen3:8b": 59 * _GIB // 10, "qwen3-vl:4b": 33 * _GIB // 10},
+        )
+        with (
+            mock.patch("novacontrol.integrations.llm.urlopen", server),
+            mock.patch("novacontrol.integrations.llm.ollama_available_memory_bytes", return_value=_GIB // 2),
+            mock.patch.dict(os.environ, {"NOVACONTROL_OLLAMA_UNLOAD_ON_SWITCH": "0"}),
+        ):
+            evicted = ensure_exclusive_ollama_model("qwen3-vl:4b")
+        self.assertEqual(evicted, ["qwen3:8b"])
+        self.assertEqual(server.loaded, [])
+
+    def test_the_other_model_never_stays_resident_by_default(self) -> None:
+        server = _FakeOllamaServer(
+            ["qwen3-vl:4b"],
+            sizes={"qwen3-vl:4b": 33 * _GIB // 10, "qwen3:8b": 59 * _GIB // 10},
+        )
+        with (
+            mock.patch("novacontrol.integrations.llm.urlopen", server),
+            mock.patch("novacontrol.integrations.llm.ollama_available_memory_bytes", return_value=20 * _GIB),
+        ):
+            evicted = ensure_exclusive_ollama_model("qwen3:8b")
+        self.assertEqual(evicted, ["qwen3-vl:4b"])
+        self.assertEqual(server.loaded, [])
+        self.assertEqual([call[0] for call in server.calls].count("/api/generate"), 1)
+
+
+class OllamaExclusiveCompletionTests(unittest.IsolatedAsyncioTestCase):
+    """A local completion evicts the other model BEFORE it runs."""
+
+    async def test_completion_evicts_the_other_model_first(self) -> None:
+        requested: list[str] = []
+        server = _FakeOllamaServer(["qwen3-vl:4b"])
+
+        def fake_default_transport(url: str, headers: dict[str, str], payload: dict[str, object]) -> dict[str, object]:
+            requested.append(url)
+            # The real server brings the requested model into memory on the
+            # completion itself — model this so the residency roster is honest.
+            server.loaded.append(str(payload["model"]))
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+        with (
+            mock.patch("novacontrol.integrations.llm._default_transport", fake_default_transport),
+            mock.patch("novacontrol.integrations.llm.urlopen", server),
+        ):
+            provider = OpenAICompatibleLLMProvider(
+                name="ollama",
+                base_url=OLLAMA_URL,
+                api_key="ollama",
+                model="qwen3:8b",
+                ollama_url=OLLAMA_URL,
+            )
+            self.assertTrue(provider._manages_ollama_lifecycle)
+            answer = await provider.complete([{"role": "user", "content": "hi"}])
+
+        self.assertEqual(answer, "ok")
+        # The eviction lands before the completion, and only one model survives.
+        self.assertEqual(server.calls[0], ("/api/ps", {}))
+        self.assertIn(("/api/generate", {"model": "qwen3-vl:4b", "keep_alive": 0}), server.calls)
+        self.assertEqual(server.loaded, ["qwen3:8b"])
+        self.assertEqual(requested, [f"{OLLAMA_URL}/v1/chat/completions"])
+
+    async def test_injected_transport_is_never_reached_around(self) -> None:
+        """A caller that supplies its own transport owns the HTTP surface."""
+        server = _FakeOllamaServer(["qwen3-vl:4b"])
+        provider = OpenAICompatibleLLMProvider(
+            name="ollama",
+            base_url=OLLAMA_URL,
+            api_key="ollama",
+            model="qwen3:8b",
+            transport=lambda url, headers, payload: {"choices": [{"message": {"content": "ok"}}]},
+            ollama_url=OLLAMA_URL,
+        )
+        self.assertFalse(provider._manages_ollama_lifecycle)
+        with mock.patch("novacontrol.integrations.llm.urlopen", server):
+            await provider.complete([{"role": "user", "content": "hi"}])
+        self.assertEqual(server.calls, [])
+
+
+class VisionCapabilityGateTests(unittest.TestCase):
+    """A text-only model must never be reported as a vision model.
+
+    The regression these pin: the vision layer counted any non-Echo provider as
+    multimodal, so a machine whose chat brain was a text-only local model
+    (qwen3, llama3.2) reported vision available, sent screenshots to a model
+    that cannot see them, and — with no failure — clicked invented
+    coordinates. Ollama rejected the same image outright with HTTP 400.
+    """
+
+    @staticmethod
+    def _ollama_provider(model: str) -> OpenAICompatibleLLMProvider:
+        return OpenAICompatibleLLMProvider(
+            name="ollama", base_url=OLLAMA_URL, api_key="ollama", model=model
+        )
+
+    def test_text_only_ollama_model_is_not_a_vision_model(self) -> None:
+        with mock.patch(
+            "novacontrol.integrations.llm.ollama_model_capabilities",
+            return_value=frozenset({"completion", "tools", "thinking"}),
+        ):
+            self.assertFalse(provider_supports_vision(self._ollama_provider("qwen3:8b")))
+
+    def test_ollama_model_reporting_vision_is_a_vision_model(self) -> None:
+        with mock.patch(
+            "novacontrol.integrations.llm.ollama_model_capabilities",
+            return_value=frozenset({"completion", "vision"}),
+        ):
+            self.assertTrue(provider_supports_vision(self._ollama_provider("qwen3-vl:4b")))
+
+    def test_missing_capability_metadata_falls_back_to_the_name(self) -> None:
+        # Older Ollama omits capabilities; the name heuristic is then the only
+        # evidence available, and it must not become an unconditional "yes".
+        with mock.patch("novacontrol.integrations.llm.ollama_model_capabilities", return_value=None):
+            self.assertTrue(provider_supports_vision(self._ollama_provider("qwen3-vl:4b")))
+            self.assertFalse(provider_supports_vision(self._ollama_provider("qwen3:8b")))
+
+    def test_echo_fallback_and_no_provider_are_refused(self) -> None:
+        self.assertFalse(provider_supports_vision(None))
+        self.assertFalse(provider_supports_vision(EchoLLMProvider()))
+
+    def test_purpose_built_and_cloud_vision_providers_are_trusted(self) -> None:
+        self.assertTrue(
+            provider_supports_vision(
+                OpenAICompatibleLLMProvider(
+                    name="vision:ollama", base_url=OLLAMA_URL, api_key="ollama", model="qwen3-vl:4b"
+                )
+            )
+        )
+        self.assertTrue(
+            provider_supports_vision(
+                OpenAICompatibleLLMProvider(
+                    name="cloud:openai",
+                    base_url="https://api.openai.com",
+                    api_key="sk-x",
+                    model="gpt-4o-mini",
+                )
+            )
+        )
+
+    def test_vl_model_names_are_recognized(self) -> None:
+        for name in ("qwen3-vl:4b", "qwen3vl:2b", "qwen2.5vl:3b", "llava:13b", "moondream:latest"):
+            self.assertTrue(is_ollama_vision_model(name), name)
+        self.assertFalse(is_ollama_vision_model("qwen3:8b"))
+
+    def test_chat_auto_pick_skips_the_vision_model(self) -> None:
+        # The VL model can be listed FIRST on the instance; a chat brain must
+        # still not be reassigned to it. A VL model only answers chat when it is
+        # the only thing installed.
+        self.assertEqual(llm_module._pick_ollama_model(["qwen3-vl:4b", "qwen3:8b"]), "qwen3:8b")
+        self.assertEqual(llm_module._pick_ollama_model(["phi3:mini", "qwen3-vl:4b"]), "phi3:mini")
+        self.assertEqual(llm_module._pick_ollama_model(["qwen3-vl:4b"]), "qwen3-vl:4b")
 
 
 if __name__ == "__main__":
