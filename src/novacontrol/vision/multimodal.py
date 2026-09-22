@@ -8,6 +8,8 @@ deterministic processor.
 from __future__ import annotations
 
 import base64
+import io
+import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -44,7 +46,7 @@ class MultimodalVisionProcessor:
             return await self._fallback.ocr(source)
 
         try:
-            image_data = _load_image_base64(source)
+            image_data = _load_image_base64_for_vision(source)
             if not image_data:
                 return await self._fallback.ocr(source)
 
@@ -63,7 +65,7 @@ class MultimodalVisionProcessor:
             return await self._fallback.understand_screen(source)
 
         try:
-            image_data = _load_image_base64(source)
+            image_data = _load_image_base64_for_vision(source)
             if not image_data:
                 return await self._fallback.understand_screen(source)
 
@@ -86,7 +88,7 @@ class MultimodalVisionProcessor:
             return await self._fallback.detect_windows(source)
 
         try:
-            image_data = _load_image_base64(source)
+            image_data = _load_image_base64_for_vision(source)
             if not image_data:
                 return await self._fallback.detect_windows(source)
 
@@ -116,7 +118,7 @@ class MultimodalVisionProcessor:
             return await self._fallback.understand_image(source)
 
         try:
-            image_data = _load_image_base64(source)
+            image_data = _load_image_base64_for_vision(source)
             if not image_data:
                 return await self._fallback.understand_image(source)
 
@@ -153,7 +155,7 @@ class MultimodalVisionProcessor:
                     text_content=text[:5000],
                 )
             else:
-                image_data = _load_image_base64(source)
+                image_data = _load_image_base64_for_vision(source)
                 if image_data:
                     result = await self._call_llm(
                         "Analyze this document image. Identify the title, "
@@ -219,3 +221,61 @@ def _load_image_base64(path: str) -> str | None:
         return base64.b64encode(data).decode("ascii")
     except Exception:
         return None
+
+
+def vision_max_image_side() -> int:
+    """Longest edge (px) a capture may keep before it is sent to the model.
+
+    Every screenshot pixel becomes image tokens the model must process, and on
+    a CPU-only Ollama box that token count IS most of the wall-clock time: a
+    full 1920x1080 PNG costs several times the inference of the same screen at
+    1280 px. The default keeps typical UI text legible while roughly halving the
+    pixel count of a 1080p capture. Set
+    ``NOVACONTROL_VISION_MAX_IMAGE_SIDE`` to 0 (or negative) to send captures
+    at full resolution.
+    """
+    raw = os.environ.get("NOVACONTROL_VISION_MAX_IMAGE_SIDE", "1280").strip()
+    try:
+        return int(float(raw))
+    except ValueError:
+        return 1280
+
+
+def _load_image_base64_for_vision(path: str) -> str | None:
+    """Load an image for the vision model, downscaled to the token budget.
+
+    Coordinates are unaffected by the downscale: multimodal models answer on a
+    normalized grid (0-1000 in this codebase) and every caller maps that onto
+    the ORIGINAL image dimensions, so returned points stay valid full-resolution
+    screen coordinates. Falls back to the untouched file bytes when Pillow is
+    unavailable, the file cannot be decoded, or it already fits the budget —
+    the model never sees a "prepared" image that silently lost its content.
+    """
+    limit = vision_max_image_side()
+    if limit <= 0:
+        return _load_image_base64(path)
+    try:
+        from PIL import Image
+    except ImportError:  # pragma: no cover - Pillow is optional at import time
+        return _load_image_base64(path)
+    try:
+        with Image.open(path) as img:
+            width, height = img.size
+            longest = max(width, height)
+            if longest <= limit:
+                return _load_image_base64(path)
+            scale = limit / longest
+            resized = img.convert("RGB").resize(
+                (max(1, round(width * scale)), max(1, round(height * scale))),
+                # Resampling.LANCZOS (not the module-level alias) is what the
+                # typed Pillow stub exposes, so this survives mypy.
+                Image.Resampling.LANCZOS,
+            )
+        buffer = io.BytesIO()
+        # PNG (lossless) on purpose: the resolution cut alone is the latency
+        # saving, and JPEG artifacts would cost the text legibility that
+        # locating a labeled button depends on.
+        resized.save(buffer, format="PNG", optimize=True)
+    except Exception:
+        return _load_image_base64(path)
+    return base64.b64encode(buffer.getvalue()).decode("ascii")

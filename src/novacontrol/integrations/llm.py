@@ -86,10 +86,26 @@ class OpenAICompatibleLLMProvider:
         # every usage block the API returned, and the last failure verbatim.
         self.usage = {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         self.last_error: str = ""
+        # Why the last reply stopped ("stop", "length", "timeout", …). Kept
+        # because an EMPTY answer with finish_reason "length" is a specific
+        # failure — the budget went to reasoning — and callers must be able to
+        # tell it apart from a mere formatting problem.
+        self.last_finish_reason: str = ""
 
     @property
     def name(self) -> str:
         return self._name
+
+    @property
+    def answer_was_truncated(self) -> bool:
+        """True when the last reply ran out of token budget.
+
+        A reasoning-capable local model can spend an entire budget on its
+        thinking and emit no answer at all; asking it again would burn the same
+        budget for the same result, so callers use this to skip a pointless
+        retry and fall back to a strategy that works.
+        """
+        return self.last_finish_reason == "length"
 
     @property
     def _manages_ollama_lifecycle(self) -> bool:
@@ -122,6 +138,19 @@ class OpenAICompatibleLLMProvider:
             "model": self.model,
             "messages": [dict(message) for message in messages],
         }
+        # Bound a LOCAL model's reply unless the caller set its own budget. A
+        # local model generates without bound, and a reasoning-capable one can
+        # pour every token into its thinking and never answer — an uncapped
+        # request then blocks until the socket timeout (measured: a 4B VL model
+        # never returned at all, and exhausts 600 tokens of pure reasoning).
+        # Cloud providers keep their own defaults: their servers already cap
+        # replies, and a small ceiling here would silently shorten answers.
+        if self.ollama_url and not any(
+            key in kwargs for key in ("max_tokens", "max_completion_tokens")
+        ):
+            budget = ollama_max_tokens()
+            if budget > 0:
+                payload["max_tokens"] = budget
         payload.update(kwargs)
         # The sync transport blocks on the socket; run it off the event loop so a
         # slow LLM response never freezes the rest of the local app.
@@ -148,7 +177,16 @@ class OpenAICompatibleLLMProvider:
         if not choices:
             return ""
         message = choices[0].get("message", {})
-        return str(message.get("content", ""))
+        self.last_finish_reason = str(choices[0].get("finish_reason") or "")
+        content = str(message.get("content", ""))
+        if not content and self.answer_was_truncated:
+            # Report the reasoning-only exhaustion instead of returning an empty
+            # string that looks like a caller-side parse bug.
+            self.last_error = (
+                "reply token budget exhausted before any answer "
+                "(reasoning-only model, or raise NOVACONTROL_OLLAMA_MAX_TOKENS)"
+            )
+        return content
 
 
 class AnthropicMessagesProvider:
@@ -689,6 +727,31 @@ def ollama_keep_alive() -> str:
     the one moment residency is ours to choose.
     """
     return os.environ.get("NOVACONTROL_OLLAMA_KEEP_ALIVE", "").strip()
+
+
+# Reply ceiling applied to LOCAL Ollama completions when the caller sets no
+# budget of its own (0 disables the cap). Local models generate without bound:
+# a measured qwen3-vl:4b spent 600 consecutive tokens on reasoning and returned
+# no answer at all, and with no ceiling the request simply blocks until the
+# socket timeout. 1024 tokens is far more than a local UI answer needs while
+# still ending a runaway generation.
+_OLLAMA_MAX_TOKENS_DEFAULT = 1024
+
+
+def ollama_max_tokens() -> int:
+    """Reply ceiling for local completions in tokens (0 = no ceiling).
+
+    NOVACONTROL_OLLAMA_MAX_TOKENS overrides it. Raise it for a model whose
+    reasoning legitimately needs more room; set it to 0 only when the socket
+    timeout is the failure mode you actually want.
+    """
+    raw = os.environ.get(
+        "NOVACONTROL_OLLAMA_MAX_TOKENS", str(_OLLAMA_MAX_TOKENS_DEFAULT)
+    ).strip()
+    try:
+        return int(float(raw))
+    except ValueError:
+        return _OLLAMA_MAX_TOKENS_DEFAULT
 
 
 def _same_ollama_model(left: str, right: str) -> bool:

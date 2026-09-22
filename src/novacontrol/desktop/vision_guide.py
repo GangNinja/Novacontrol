@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 import sys
 from typing import Any
 
@@ -244,48 +246,196 @@ def _heuristic_landmark(label: str, width: int, height: int) -> tuple[int, int] 
     return None
 
 
-def _parse_llm_point(answer: str, width: int, height: int) -> tuple[int, int] | None:
-    """Parse a vision model's locate answer into a pixel point.
+# Common JSON shapes a vision model uses for a 0-1000 grid location. The
+# documented contract is {"found": true, "x": .., "y": ..}, but Qwen-class VL
+# models also return a centre/point pair, axis-alias keys, or a bounding box.
+# Accepting them costs a few lines and turns an answer that would otherwise be
+# thrown away into a real click target.
+_GRID_X_KEYS: tuple[str, ...] = ("x", "center_x", "centre_x", "cx", "left")
+_GRID_Y_KEYS: tuple[str, ...] = ("y", "center_y", "centre_y", "cy", "top")
+_GRID_POINT_KEYS: tuple[str, ...] = ("point", "center", "centre", "coordinates")
+_GRID_BOX_KEYS: tuple[str, ...] = ("bbox", "box", "bounds", "rectangle")
+_GRID_MIN = 0.0
+_GRID_MAX = 1000.0
 
-    Accepts the JSON contract {"found": bool, "x": 0-1000, "y": 0-1000} with
-    coordinates on a normalized 0-1000 grid (resolution-independent, the same
-    convention vision models are commonly RL-trained on), and degrades to the
-    legacy coarse-region vocabulary ("middle-right") when the JSON is absent.
-    Anything else — including coordinate-free region words that _region_point
-    cannot resolve — returns None so the caller falls back to OCR.
+# A bare region word ("middle-right") is a legitimate legacy answer; a SENTENCE
+# that merely mentions a direction is not. This bounds the prose length that may
+# be read as a location, so "the top of the window shows nothing" cannot click
+# the top edge of the screen.
+_MAX_REGION_PHRASE = 40
+
+
+def _grid_number(value: Any) -> float | None:
+    """Coerce the shapes a model emits for one grid coordinate (500, 500.0, '500')."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        match = re.search(r"-?\d+(?:\.\d+)?", value)
+        if match is not None:
+            return float(match.group(0))
+    return None
+
+
+def _grid_point(data: dict[str, Any]) -> tuple[float, float] | None:
+    """Pull a 0-1000 grid point out of the JSON shapes models actually emit."""
+    for key in _GRID_POINT_KEYS:
+        value = data.get(key)
+        if isinstance(value, (list, tuple)) and len(value) >= 2:
+            x, y = _grid_number(value[0]), _grid_number(value[1])
+            if x is not None and y is not None:
+                return x, y
+    for key in _GRID_BOX_KEYS:
+        value = data.get(key)
+        if isinstance(value, (list, tuple)) and len(value) >= 4:
+            x1, y1, x2, y2 = (_grid_number(v) for v in value[:4])
+            if x1 is None or y1 is None or x2 is None or y2 is None:
+                continue
+            # The CENTRE of the detected box: a corner would click the edge.
+            return (x1 + x2) / 2, (y1 + y2) / 2
+    x_value = next((data[key] for key in _GRID_X_KEYS if key in data), None)
+    y_value = next((data[key] for key in _GRID_Y_KEYS if key in data), None)
+    x, y = _grid_number(x_value), _grid_number(y_value)
+    if x is not None and y is not None:
+        return x, y
+    return None
+
+
+def _interpret_llm_answer(answer: str, width: int, height: int) -> tuple[str, tuple[int, int] | None]:
+    """Classify a vision model's locate answer into (status, pixel point).
+
+    status is one of:
+
+      ``"found"``       — the element was located; the point is its pixel centre.
+      ``"absent"``      — the model explicitly reported it is not visible.
+      ``"unparseable"`` — no usable JSON and no bare region phrase, so the
+                          answer carries no location at all.
+
+    "absent" is deliberately distinct from "unparseable": a model that already
+    answered ``{"found": false}`` HAS answered, so only an unparseable reply is
+    worth a stricter re-ask (a second slow inference would just re-confirm it).
+
+    Coordinates arrive on a 0-1000 grid (resolution independent, the convention
+    vision models are commonly trained on) and are mapped onto the ORIGINAL
+    image size — so a capture downscaled to save tokens still produces correct
+    full-resolution click points.
     """
     text = str(answer).strip()
     if not text:
-        return None
+        return "unparseable", None
     if "{" in text:
-        import json as _json
-        import re as _re
-
-        match = _re.search(r"\{.*\}", text, _re.S)
-        if match:
+        match = re.search(r"\{.*\}", text, re.S)
+        if match is not None:
             try:
-                data = _json.loads(match.group(0))
-                if isinstance(data, dict) and data.get("found") is True:
-                    x_raw, y_raw = data.get("x"), data.get("y")
-                    if isinstance(x_raw, (int, float)) and isinstance(y_raw, (int, float)):
-                        if 0 <= x_raw <= 1000 and 0 <= y_raw <= 1000:
-                            return int(x_raw / 1000 * width), int(y_raw / 1000 * height)
-            except (_json.JSONDecodeError, ValueError, TypeError):
-                pass  # malformed JSON: fall through to region vocabulary
-    return _region_point(normalize(text), width, height)
+                data = json.loads(match.group(0))
+            except (json.JSONDecodeError, ValueError, TypeError):
+                data = None
+            if isinstance(data, dict):
+                grid_point = _grid_point(data)
+                if grid_point is not None and all(
+                    _GRID_MIN <= value <= _GRID_MAX for value in grid_point
+                ):
+                    gx, gy = grid_point
+                    return "found", (int(gx / 1000 * width), int(gy / 1000 * height))
+                if data.get("found") is False:
+                    return "absent", None
+                if data.get("found") is True:
+                    # Claimed a find but supplied no in-grid coordinate.
+                    return "unparseable", None
+    # Legacy coarse-region vocabulary, accepted only as a BARE phrase.
+    if len(text) <= _MAX_REGION_PHRASE:
+        region = _region_point(normalize(text), width, height)
+        if region is not None:
+            return "found", region
+    return "unparseable", None
+
+
+def _parse_llm_point(answer: str, width: int, height: int) -> tuple[int, int] | None:
+    """Parse a vision model's locate answer into a pixel point (or None).
+
+    Thin wrapper over _interpret_llm_answer for callers that only need the
+    point: "found" yields the point, while "absent" and "unparseable" both
+    yield None so the caller falls back to the next strategy (OCR, landmarks).
+    """
+    return _interpret_llm_answer(answer, width, height)[1]
+
+
+# Reply budget for a LOCATE request, much smaller than a chat answer. Locating
+# an element needs one JSON object (~25 tokens), so a model that has not
+# answered within this budget is not going to: a reasoning-heavy one spends
+# every token thinking (measured: 600 tokens, no answer) and an unbounded
+# request hangs the caller until the socket timeout. Capping it means the
+# locate layer fails fast and falls back to OCR instead of stalling.
+_LOCATE_MAX_TOKENS_DEFAULT = 256
+
+
+def _locate_max_tokens() -> int:
+    """Reply budget for a locate request (NOVACONTROL_VISION_MAX_TOKENS)."""
+    raw = os.environ.get(
+        "NOVACONTROL_VISION_MAX_TOKENS", str(_LOCATE_MAX_TOKENS_DEFAULT)
+    ).strip()
+    try:
+        return int(float(raw))
+    except ValueError:
+        return _LOCATE_MAX_TOKENS_DEFAULT
+
+
+def _budget_exhausted(provider: Any) -> bool:
+    """True when the provider's last reply ran out of tokens with no answer.
+
+    Distinguishes "the model could not format its answer" (recoverable with a
+    stricter prompt) from "the model never reached an answer at all": re-asking
+    the second case would burn an identical budget for an identical result.
+    """
+    return bool(getattr(provider, "answer_was_truncated", False))
+
+
+def _locate_messages(prompt: str, image_data: str) -> list[dict[str, Any]]:
+    """OpenAI-format multimodal message carrying the screenshot IN the content.
+
+    Providers drop unknown kwargs like ``image=``, so the picture must travel
+    inside the message content or the model never sees it at all.
+    """
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/png;base64,{image_data}",
+                        "detail": "high",
+                    },
+                },
+            ],
+        }
+    ]
 
 
 async def _llm_region(provider: Any, image_path: str, label: str) -> tuple[int, int] | None:
     """Ask the vision model where the label is; returns a pixel point.
 
-    The screenshot is embedded in the message as OpenAI-format multimodal
-    content — providers drop unknown kwargs like `image=`, so it MUST travel
-    inside the message content or the model never sees the picture. The answer
-    is parsed by _parse_llm_point (JSON 0-1000 grid, region fallback).
-    """
-    from novacontrol.vision.multimodal import _load_image_base64
+    Two accuracy measures live here beyond the prompt itself:
 
-    image_data = _load_image_base64(image_path)
+      * the capture is downscaled to a token budget before sending (see
+        ``_load_image_base64_for_vision``) — coordinates stay correct because
+        the answer is mapped onto the original dimensions read before encoding;
+      * a reply with no usable location gets ONE stricter re-ask, because a
+        model wrapping its JSON in prose is recoverable while OCR cannot name
+        an unlabeled icon at all.
+    """
+    from novacontrol.vision.multimodal import _load_image_base64_for_vision
+
+    if Image is None:  # pragma: no cover - Pillow is required for this layer
+        return None
+    try:
+        with Image.open(image_path) as image:
+            width, height = image.size
+    except Exception:
+        return None
+    image_data = _load_image_base64_for_vision(image_path)
     if not image_data:
         return None
     prompt = (
@@ -294,29 +444,34 @@ async def _llm_region(provider: Any, image_path: str, label: str) -> tuple[int, 
         "Answer with ONLY a JSON object: "
         '{"found": true, "x": <0-1000>, "y": <0-1000>} '
         "where x/y are the element's center on a 0-1000 grid across the whole "
-        "image (0,0 top-left, 1000,1000 bottom-right). "
+        "image as shown (0,0 top-left, 1000,1000 bottom-right). "
         'If it is not visible answer {"found": false}. No other text.'
     )
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{image_data}", "detail": "high"},
-                },
-            ],
-        }
-    ]
+    budget = _locate_max_tokens()
     try:
-        answer = await provider.complete(messages)
+        answer = await provider.complete(
+            _locate_messages(prompt, image_data),
+            **({"max_tokens": budget} if budget > 0 else {}),
+        )
     except Exception:
         return None
-    from PIL import Image as PILImage
-
-    with PILImage.open(image_path) as img:
-        return _parse_llm_point(str(answer), img.width, img.height)
+    status, point = _interpret_llm_answer(str(answer), width, height)
+    if status == "unparseable" and not _budget_exhausted(provider):
+        retry_prompt = (
+            f"Locate the element labeled '{label}'. "
+            "Reply with ONLY this JSON object, no prose and no code fences: "
+            '{"found": true, "x": <0-1000>, "y": <0-1000>}. '
+            'If the element is not visible reply {"found": false}.'
+        )
+        try:
+            answer = await provider.complete(
+                _locate_messages(retry_prompt, image_data),
+                **({"max_tokens": budget} if budget > 0 else {}),
+            )
+        except Exception:
+            return None
+        status, point = _interpret_llm_answer(str(answer), width, height)
+    return point if status == "found" else None
 
 
 async def locate_element(

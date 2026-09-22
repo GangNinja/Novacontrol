@@ -33,6 +33,7 @@ from novacontrol.integrations.llm import (
     is_ollama_vision_model,
     ollama_keep_alive,
     ollama_loaded_models,
+    ollama_max_tokens,
     ollama_memory_plan,
     ollama_unload_on_switch,
     provider_supports_vision,
@@ -134,6 +135,81 @@ class OllamaCompletionTests(unittest.IsolatedAsyncioTestCase):
             transport=lambda *_: {"choices": []},
         )
         self.assertEqual(await provider.complete([{"role": "user", "content": "hi"}]), "")
+
+
+class LocalReplyBudgetTests(unittest.IsolatedAsyncioTestCase):
+    """A local completion is capped so an unbounded generation cannot hang.
+
+    Measured failure this guards: qwen3-vl:4b spent 600 consecutive tokens on
+    reasoning and returned NO answer, and with no ceiling the request blocked
+    until the socket timeout — a vision click could stall for minutes.
+    """
+
+    def _capturing(self, **kwargs: object) -> tuple[OpenAICompatibleLLMProvider, dict]:
+        captured: dict = {}
+
+        def transport(url: str, headers: dict, payload: dict) -> dict:
+            captured["payload"] = payload
+            return {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
+
+        provider = OpenAICompatibleLLMProvider(
+            name="t", base_url="http://x", api_key="k", model="m",
+            transport=transport, **kwargs,  # type: ignore[arg-type]
+        )
+        return provider, captured
+
+    async def test_local_reply_gets_the_default_ceiling(self) -> None:
+        provider, captured = self._capturing(ollama_url=OLLAMA_URL)
+        await provider.complete([{"role": "user", "content": "hi"}])
+        self.assertEqual(captured["payload"]["max_tokens"], 1024)
+
+    async def test_caller_supplied_budget_wins(self) -> None:
+        provider, captured = self._capturing(ollama_url=OLLAMA_URL)
+        await provider.complete([{"role": "user", "content": "hi"}], max_tokens=8)
+        self.assertEqual(captured["payload"]["max_tokens"], 8)
+
+    async def test_env_override_and_zero_disables_the_ceiling(self) -> None:
+        with mock.patch.dict(os.environ, {"NOVACONTROL_OLLAMA_MAX_TOKENS": "64"}):
+            self.assertEqual(ollama_max_tokens(), 64)
+            provider, captured = self._capturing(ollama_url=OLLAMA_URL)
+            await provider.complete([{"role": "user", "content": "hi"}])
+        self.assertEqual(captured["payload"]["max_tokens"], 64)
+
+        with mock.patch.dict(os.environ, {"NOVACONTROL_OLLAMA_MAX_TOKENS": "0"}):
+            provider, captured = self._capturing(ollama_url=OLLAMA_URL)
+            await provider.complete([{"role": "user", "content": "hi"}])
+        self.assertNotIn("max_tokens", captured["payload"])
+
+    async def test_cloud_reply_keeps_the_servers_own_default(self) -> None:
+        # Cloud servers already cap replies; a local ceiling here would silently
+        # shorten long answers from gpt-4o et al.
+        provider, captured = self._capturing()
+        await provider.complete([{"role": "user", "content": "hi"}])
+        self.assertNotIn("max_tokens", captured["payload"])
+
+    async def test_reasoning_only_truncation_is_reported_not_silent(self) -> None:
+        provider = OpenAICompatibleLLMProvider(
+            name="t", base_url="http://x", api_key="k", model="m",
+            ollama_url=OLLAMA_URL,
+            transport=lambda *_: {
+                "choices": [{"message": {"content": ""}, "finish_reason": "length"}]
+            },
+        )
+        answer = await provider.complete([{"role": "user", "content": "hi"}])
+        self.assertEqual(answer, "")
+        self.assertTrue(provider.answer_was_truncated)
+        self.assertIn("token budget exhausted", provider.last_error)
+
+    async def test_truncated_reply_with_content_is_not_an_error(self) -> None:
+        provider = OpenAICompatibleLLMProvider(
+            name="t", base_url="http://x", api_key="k", model="m",
+            ollama_url=OLLAMA_URL,
+            transport=lambda *_: {
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "length"}]
+            },
+        )
+        self.assertEqual(await provider.complete([{"role": "user", "content": "hi"}]), "ok")
+        self.assertEqual(provider.last_error, "")
 
 
 class ProviderResolutionTests(unittest.TestCase):

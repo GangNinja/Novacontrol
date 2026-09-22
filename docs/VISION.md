@@ -79,6 +79,64 @@ Every eviction is logged with its measured figures, and an unmeasurable
 situation (`available_bytes: None`) is reported as unknown rather than read as
 "nothing to worry about".
 
+### Making a local vision call fast and honest
+
+A local vision model is the slowest component in the loop, and three separate
+mechanisms keep a call bounded and truthful:
+
+**A token budget on the image.** Every screenshot pixel becomes image tokens the
+model must process, and on a CPU-only box that token count *is* most of the
+wall clock. Captures are therefore downscaled to a longest edge of 1280 px
+(`NOVACONTROL_VISION_MAX_IMAGE_SIDE`, `0` disables) before being sent, and
+re-encoded losslessly so UI text stays legible. Coordinates are unaffected: the
+model answers on a normalized 0–1000 grid, parsed against the **original**
+image dimensions, so a downscaled capture still yields correct
+full-resolution click points.
+
+**Tolerant reading of the answer.** The documented contract is
+`{"found": true, "x": …, "y": …}`, but models also return stringified
+numbers, `center`/`centre`/`cx` pairs, or a bounding box. All accepted shapes
+are honoured (a box is clicked at its **centre**, never a corner). Every answer
+is classified rather than merely parsed:
+
+- `found` — located, with a pixel point;
+- `absent` — the model explicitly reported the element is not visible;
+- `unparseable` — no usable JSON and no bare region phrase.
+
+`absent` is deliberately distinct from `unparseable`: only an unparseable reply
+gets **one** stricter re-ask (bare JSON, no prose, no code fences). A model that
+already said "not visible" has answered, and a second call would cost another
+slow inference to hear the same thing. A prose sentence that merely mentions a
+direction ("the top of the window shows nothing") is not read as a location —
+only a short bare region phrase is, so such an answer cannot click the top edge
+of the screen.
+
+**A reply budget.** A locate request needs one small JSON object, so it is sent
+with a capped budget (`NOVACONTROL_VISION_MAX_TOKENS`, default 256). This
+matters more than it sounds: a local model generates without bound, and a
+**reasoning-capable** one can spend its entire budget thinking and never emit an
+answer. Measured on `qwen3-vl:4b` (4.4B, Q4_K_M, 100% CPU):
+
+| request | result |
+|---|---|
+| no output cap | never returned — killed at 170 s |
+| `max_tokens: 80` | 13.7 s, `finish_reason=length`, **content empty**, 332 chars of reasoning |
+| `max_tokens: 600` | 109.8 s, all 600 tokens consumed as reasoning, **content empty** |
+| `think: false` (native, and via OpenAI-compatible) | ignored — this model cannot stop thinking |
+
+The cap turns that from a multi-minute stall into a fast, explicit failure that
+falls back to OCR. When a reply is empty *because its budget ran out*, the
+provider records it (`answer_was_truncated`, plus `last_error`) and the locate
+layer skips the re-ask: the problem is the model, not the answer's format. Local
+completions generally carry a ceiling too (`NOVACONTROL_OLLAMA_MAX_TOKENS`,
+default 1024), while cloud providers keep their servers' own defaults so long
+answers are never silently shortened.
+
+**Practical guidance for a CPU-only machine:** prefer a non-reasoning vision
+model (`qwen2.5vl:3b`, `llava`, `moondream`). A `qwen3-vl` build that cannot
+stop thinking will consume its budget on reasoning regardless of the prompt, and
+the fallback path (OCR, landmarks) is what will actually click the element.
+
 ## Future Adapters
 
 OpenCV, EasyOCR, cloud vision models beyond the registered presets, and
