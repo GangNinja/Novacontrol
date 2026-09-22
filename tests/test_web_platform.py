@@ -958,6 +958,11 @@ class BackendFrontendContractTests(unittest.TestCase):
         "memory": "general",
         "project": "general",
         "clarify": "general",
+        # Measured readings and vision results are rendered by the GENERAL branch:
+        # they carry a finished sentence in `summary` plus their structured data,
+        # which is exactly what renderGeneralAiPage consumes.
+        "system_status": "general",
+        "vision": "general",
     }
     ALLOWED_BRANCHES = {"report", "command", "general"}
 
@@ -1180,6 +1185,11 @@ class BackendIntentRendererContractTests(unittest.TestCase):
         "memory": "general",
         "project": "general",
         "clarify": "general",
+        # Measured readings and vision results are rendered by the GENERAL branch:
+        # they carry a finished sentence in `summary` plus their structured data,
+        # which is exactly what renderGeneralAiPage consumes.
+        "system_status": "general",
+        "vision": "general",
     }
     ALLOWED_BRANCHES = frozenset({"report", "command", "general"})
 
@@ -1200,6 +1210,8 @@ class BackendIntentRendererContractTests(unittest.TestCase):
         "memory": "general",
         "project": "general",
         "agent": "general",
+        "system": "general",
+        "vision": "general",
     }
 
     # Intent -> the route its handler emits (mirrors _HANDLERS + the AGENT
@@ -1216,6 +1228,8 @@ class BackendIntentRendererContractTests(unittest.TestCase):
         "memory": "memory",
         "project": "project",
         "clarify": "brain",
+        "system_status": "system",
+        "vision": "vision",
     }
 
     def test_every_envelope_route_has_a_render_branch(self) -> None:

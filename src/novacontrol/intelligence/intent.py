@@ -15,7 +15,43 @@ from uuid import uuid4
 
 
 class IntentName(StrEnum):
-    """Global intent vocabulary, derived from existing NovaControl capabilities."""
+    """Global intent vocabulary, derived from existing NovaControl capabilities.
+
+    Specced request names map onto this vocabulary rather than duplicating it:
+
+        open_application      -> OPEN_APPLICATION
+        close_application     -> CLOSE_APPLICATION
+        launch_website        -> NAVIGATE
+        search_web            -> SEARCH_WEB
+        find_file             -> FIND_FILE
+        read_file             -> READ_FILE
+        create_file           -> WRITE_FILE
+        modify_file           -> MODIFY_FILE
+        delete_file           -> DELETE_FILE
+        move_file             -> MOVE_FILE
+        copy_file             -> COPY_FILE
+        execute_command       -> RUN_COMMAND
+        system_status         -> SYSTEM_STATUS (and the per-device *_STATUS)
+        volume_control        -> VOLUME_CONTROL
+        brightness_control    -> BRIGHTNESS_CONTROL
+        screenshot            -> TAKE_SCREENSHOT
+        screenshot_analysis   -> SCREENSHOT_ANALYSIS
+        browser_action        -> BROWSER_ACTION
+        code_generation       -> CODE_GENERATION
+        code_explanation      -> CODE_EXPLANATION
+        code_debugging        -> CODE_DEBUGGING
+        project_analysis      -> PROJECT_ANALYSIS
+        summarize             -> SUMMARIZE
+        explain               -> ANSWER_QUESTION
+        calculate             -> CALCULATE
+        media_control         -> MEDIA_CONTROL
+        general_question      -> GENERAL_QUESTION
+        conversation          -> CONVERSATION
+        unknown               -> CLARIFY
+
+    One name per real capability: synonyms are handled by exemplars and rules,
+    not by a second intent that routes to the same handler.
+    """
 
     OPEN_APPLICATION = "open_application"
     CLOSE_APPLICATION = "close_application"
@@ -54,6 +90,36 @@ class IntentName(StrEnum):
     AGENTIC_TASK = "agentic_task"
     CREATE_PROJECT = "create_project"
     IMPROVE_SELF = "improve_self"
+    # -- System status: answered deterministically, never via a language model.
+    SYSTEM_STATUS = "system_status"
+    CPU_STATUS = "cpu_status"
+    MEMORY_STATUS = "memory_status"
+    GPU_STATUS = "gpu_status"
+    BATTERY_STATUS = "battery_status"
+    NETWORK_STATUS = "network_status"
+    # -- Device controls.
+    VOLUME_CONTROL = "volume_control"
+    BRIGHTNESS_CONTROL = "brightness_control"
+    MEDIA_CONTROL = "media_control"
+    # -- Vision.
+    SCREENSHOT_ANALYSIS = "screenshot_analysis"
+    # -- Filesystem.
+    FIND_FILE = "find_file"
+    MODIFY_FILE = "modify_file"
+    DELETE_FILE = "delete_file"
+    MOVE_FILE = "move_file"
+    COPY_FILE = "copy_file"
+    # -- Browser / web.
+    BROWSER_ACTION = "browser_action"
+    # -- Code / project work.
+    CODE_GENERATION = "code_generation"
+    CODE_EXPLANATION = "code_explanation"
+    CODE_DEBUGGING = "code_debugging"
+    PROJECT_ANALYSIS = "project_analysis"
+    # -- Language-only intents.
+    CALCULATE = "calculate"
+    GENERAL_QUESTION = "general_question"
+    CONVERSATION = "conversation"
     CHAT = "chat"
     CLARIFY = "clarify"
 
@@ -198,7 +264,19 @@ class CapabilityRegistry:
 
 @dataclass(frozen=True, slots=True)
 class StructuredIntent:
-    """The standardized output of the global intelligence layer."""
+    """The standardized output of the global intelligence layer.
+
+    This is the live contract between language and execution, so its fields are
+    strict and its responsibilities are separated:
+
+      understanding  goal / entities / actions / confidence / source
+      requirements   requires_llm / vision / web / tools / confirmation
+      evidence       decision (how the route was chosen), latency_ms
+
+    The flags are ADVISORY to the planner — they describe what the request
+    needs, never what may be executed. Authorization stays with the approval
+    layer, which is why nothing here can request its own execution.
+    """
 
     raw_input: str
     normalized_input: str
@@ -214,7 +292,21 @@ class StructuredIntent:
     needs_clarification: bool = False
     clarification_question: str = ""
     ambiguity: tuple[str, ...] = ()
-    source: str = "fast_path"  # fast_path | learned_variant | contextual | semantic | clarification
+    source: str = "fast_path"  # fast_path | fuzzy | learned_variant | contextual | lexical | semantic | multi_intent | clarification
+    # -- what the request is FOR (the spec's UserIntent surface) ---------------
+    goal: str = ""
+    actions: tuple[str, ...] = ()
+    # -- what the request NEEDS (advisory; never an authorization) -------------
+    requires_llm: bool = False
+    requires_vision: bool = False
+    requires_web: bool = False
+    requires_tools: bool = False
+    requires_confirmation: bool = False
+    reasoning_level: str = "none"  # none | low | high | vision
+    # -- how it was understood, and what it cost -----------------------------
+    decision: dict[str, Any] = field(default_factory=dict)
+    latency_ms: float = 0.0
+    unresolved_steps: tuple[str, ...] = ()
     id: str = field(default_factory=lambda: uuid4().hex)
 
     def with_(self, **changes: Any) -> "StructuredIntent":
@@ -238,4 +330,15 @@ class StructuredIntent:
             "clarification_question": self.clarification_question,
             "ambiguity": list(self.ambiguity),
             "source": self.source,
+            "goal": self.goal,
+            "actions": list(self.actions),
+            "requires_llm": self.requires_llm,
+            "requires_vision": self.requires_vision,
+            "requires_web": self.requires_web,
+            "requires_tools": self.requires_tools,
+            "requires_confirmation": self.requires_confirmation,
+            "reasoning_level": self.reasoning_level,
+            "decision": dict(self.decision),
+            "latency_ms": round(self.latency_ms, 3),
+            "unresolved_steps": list(self.unresolved_steps),
         }

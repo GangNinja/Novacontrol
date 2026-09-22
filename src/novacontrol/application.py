@@ -76,11 +76,142 @@ from novacontrol.self_improvement import CodeChange, SelfImprovementEngine
 from novacontrol.settings import BRAIN_MODES, SettingsManager
 from novacontrol.skills import SkillRegistry
 from novacontrol.tasks import TaskCenter, TaskRecordStatus
+from novacontrol.telemetry.hardware import HardwareTelemetry
 from novacontrol.tools import ToolExecutor, ToolModule, ToolRegistry
 from novacontrol.vision import VisionModule
 from novacontrol.voice import VoiceModule
 
 _APPROVAL_TTL_SECONDS = 300.0  # A planned desktop action must be approved within 5 minutes.
+
+# Which live metrics each status intent needs. Deliberately per-intent: asking
+# "how much RAM do I have" must not pay for a GPU or network probe.
+_STATUS_METRICS: dict[str, tuple[str, ...]] = {
+    "memory_status": ("memory",),
+    "cpu_status": ("cpu",),
+    "gpu_status": ("gpu",),
+    "battery_status": ("battery",),
+    "network_status": ("network",),
+    "system_status": ("cpu", "memory", "storage", "battery", "uptime"),
+}
+
+
+def _format_gigabytes(value: object) -> str:
+    """Human GB, or 'unknown' — never a confident 0 for an unmeasured value."""
+    if not isinstance(value, (int, float)):
+        return "unknown"
+    return f"{float(value) / 1024 ** 3:.1f} GB"
+
+
+def _unavailable(subject: str, metric: dict[str, Any]) -> str:
+    reason = str(metric.get("reason") or "the operating system did not report it")
+    return f"I couldn't measure {subject}: {reason}."
+
+
+def _system_status_message(kind: str, metrics: dict[str, Any]) -> str:
+    """Turn measured metrics into ONE sentence, deterministically.
+
+    This is response generation without a model, which is the point: the figure
+    came from the machine, so the sentence about it should not be paraphrased by
+    something that never measured it.
+    """
+    if kind == "memory_status":
+        metric = metrics.get("memory") or {}
+        if metric.get("available"):
+            return (
+                f"You're currently using {_format_gigabytes(metric.get('used_bytes'))} of "
+                f"{_format_gigabytes(metric.get('total_bytes'))} RAM ({metric.get('percent')}%)."
+            )
+        return _unavailable("memory usage", metric)
+    if kind == "cpu_status":
+        metric = metrics.get("cpu") or {}
+        if metric.get("available"):
+            return f"CPU usage is {metric.get('percent')}% right now."
+        return _unavailable("CPU usage", metric)
+    if kind == "gpu_status":
+        metric = metrics.get("gpu") or {}
+        name = str(metric.get("name") or "the GPU")
+        if metric.get("available"):
+            gpu_memory = metric.get("memory") or {}
+            detail = ""
+            if gpu_memory.get("available") and gpu_memory.get("used_bytes"):
+                detail = f", using {_format_gigabytes(gpu_memory.get('used_bytes'))} of GPU memory"
+            return f"{name} is at {metric.get('percent')}% utilization{detail}."
+        if metric.get("name"):
+            return f"This machine has {metric['name']}, but its utilization could not be measured."
+        return _unavailable("GPU usage", metric)
+    if kind == "battery_status":
+        metric = metrics.get("battery") or {}
+        if metric.get("available"):
+            if metric.get("charging"):
+                state = "charging"
+            elif metric.get("on_ac"):
+                state = "plugged in"
+            else:
+                state = "running on battery"
+            return f"The battery is at {metric.get('percent')}% and {state}."
+        return _unavailable("the battery", metric)
+    if kind == "network_status":
+        metric = metrics.get("network") or {}
+        if metric.get("available"):
+            if metric.get("rate_available"):
+                download = float(metric.get("download_bps") or 0) / 1024
+                upload = float(metric.get("upload_bps") or 0) / 1024
+                return f"The network is up — {download:.0f} KB/s down and {upload:.0f} KB/s up."
+            return "The network is up; transfer rates are still being measured."
+        return _unavailable("the network", metric)
+    parts: list[str] = []
+    memory = metrics.get("memory") or {}
+    if memory.get("available"):
+        parts.append(f"RAM {memory.get('percent')}%")
+    cpu = metrics.get("cpu") or {}
+    if cpu.get("available"):
+        parts.append(f"CPU {cpu.get('percent')}%")
+    storage = metrics.get("storage") or {}
+    if storage.get("available"):
+        parts.append(f"disk {storage.get('percent')}% used")
+    battery = metrics.get("battery") or {}
+    if battery.get("available"):
+        parts.append(f"battery {battery.get('percent')}%")
+    uptime = metrics.get("uptime") or {}
+    if uptime.get("available"):
+        parts.append(f"up {float(uptime.get('seconds') or 0) / 3600:.1f} h")
+    if not parts:
+        return "I couldn't measure any system metric on this machine."
+    return "System status: " + ", ".join(parts) + "."
+
+
+def _nlu_payload(
+    understanding: Any,
+    understood: UnderstandResult,
+    decision: BrainDecision,
+    brain: NovaBrain,
+) -> dict[str, Any]:
+    """Safe operational metadata about how the request was understood.
+
+    This is what a status surface renders ("Understanding: Fast NLU / Intent:
+    open_application / Confidence: 97% / Model: None"). It carries NO model
+    reasoning — only the chosen component, the resolved intent, the measured
+    confidence and latency, and what the request needs next.
+    """
+    route = str(understanding.decision.get("route", ""))
+    escalated = bool(understanding.requires_llm)
+    return {
+        "understanding": str(understanding.decision.get("understanding", understood.strategy)),
+        "intent": understanding.intent.value,
+        "goal": understanding.goal,
+        "confidence": round(understanding.confidence, 3),
+        "route": route,
+        "reason": str(understanding.decision.get("reason", "")),
+        "model": (brain.model_name or brain.provider_name) if escalated else "",
+        "latency_ms": round(understanding.latency_ms, 3),
+        "requires_llm": understanding.requires_llm,
+        "requires_vision": understanding.requires_vision,
+        "requires_web": understanding.requires_web,
+        "requires_tools": understanding.requires_tools,
+        "requires_confirmation": understanding.requires_confirmation,
+        "handler": decision.intent.value,
+        "handler_reason": decision.reason,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -798,6 +929,23 @@ class NovaControlApplication:
         IntentName.CREATE_PROJECT: "project",
         IntentName.IMPROVE_SELF: "self_improvement",
         IntentName.AGENTIC_TASK: "agent",
+        # System status: measured on this machine and answered without a model.
+        IntentName.SYSTEM_STATUS: "system",
+        IntentName.CPU_STATUS: "system",
+        IntentName.MEMORY_STATUS: "system",
+        IntentName.GPU_STATUS: "system",
+        IntentName.BATTERY_STATUS: "system",
+        IntentName.NETWORK_STATUS: "system",
+        # Composite browser work routes to the real browser controller.
+        IntentName.BROWSER_ACTION: "browser",
+        # Visual understanding goes to the vision pipeline (a dedicated VLM),
+        # never to a text-only chat model.
+        IntentName.SCREENSHOT_ANALYSIS: "vision",
+        # Language-only intents stay with the chat handler, which already knows
+        # how to answer them locally (scratch) or through the configured model.
+        IntentName.CONVERSATION: "chat",
+        IntentName.GENERAL_QUESTION: "chat",
+        IntentName.CALCULATE: "chat",
     }
 
     # Handler keys used by _GIL_ROUTES -> BrainIntent values (the legacy
@@ -813,6 +961,8 @@ class NovaControlApplication:
         "project": BrainIntent.PROJECT,
         "self_improvement": BrainIntent.SELF_IMPROVEMENT,
         "agent": BrainIntent.AGENT,
+        "system": BrainIntent.SYSTEM_STATUS,
+        "vision": BrainIntent.VISION,
     }
 
     async def handle_request(self, text: str) -> ApplicationResponse:
@@ -864,12 +1014,23 @@ class NovaControlApplication:
         else:
             decision = self.brain.decide(request)
 
+        # Handlers receive the STRUCTURED understanding alongside the raw text,
+        # so no capability has to re-parse the sentence to know what was asked.
+        understanding = understood.intent
+        request = BrainRequest(
+            text=text,
+            context={**request.context, "nlu": understanding.to_dict()},
+        )
         handler = self._HANDLERS.get(decision.intent)
         if handler:
             route, payload = await handler(self, request, text)
         else:
             route, payload = await self._handle_agent(request, text)
 
+        # The request-understanding block travels with every response: safe
+        # operational metadata only (what understood it, the intent, the
+        # confidence, the cost) — never chain-of-thought or model reasoning.
+        payload = {**payload, "nlu": _nlu_payload(understanding, understood, decision, self.brain)}
         response = await self.brain.shape_response(request, decision, payload)
         self.tasks.update(task.id, TaskRecordStatus.COMPLETED, progress=1.0, result=response.to_dict())
         # Record the turn in the SHARED transcript so every client renders the
@@ -975,6 +1136,54 @@ class NovaControlApplication:
         response = await self.coordinator.delegate(AgentTask(text), self.agent_registry)
         return "agent", response.to_dict()
 
+    # ── Deterministic and vision surfaces ─────────────────────────────────
+
+    @property
+    def _hardware_status(self) -> HardwareTelemetry:
+        """The live machine reader, created once so CPU deltas have a baseline."""
+        existing = getattr(self, "_hardware_status_reader", None)
+        if existing is None:
+            existing = HardwareTelemetry()
+            self._hardware_status_reader = existing
+        return cast(HardwareTelemetry, existing)
+
+    async def _handle_system_status(self, request: BrainRequest, text: str) -> tuple[str, dict[str, Any]]:
+        """Answer a status question from the machine, never from a language model.
+
+        A model has no access to this machine's RAM, CPU, or battery. Asking one
+        would be slower, less accurate, and unable to carry the `available` flag
+        the telemetry layer attaches to every metric it could not measure — so a
+        measured reading is the only honest answer here.
+        """
+        understanding = request.context.get("nlu")
+        kind = ""
+        if isinstance(understanding, dict):
+            kind = str(understanding.get("intent", ""))
+        names = _STATUS_METRICS.get(kind, _STATUS_METRICS["system_status"])
+        reader = self._hardware_status
+        metrics = {name: getattr(reader, name)() for name in names}
+        message = _system_status_message(kind, metrics)
+        return "system", {
+            "deterministic": True,
+            "message": message,
+            "summary": message,
+            "metrics": metrics,
+            "measured_at": time.time(),
+        }
+
+    async def _handle_vision(self, request: BrainRequest, text: str) -> tuple[str, dict[str, Any]]:
+        """Capture and interpret the screen through the vision pipeline.
+
+        The dedicated vision provider (a VLM configured in the Vision panel) does
+        the looking; the text chat model is never handed an image. When no vision
+        model is wired, the controller reports what it could actually determine
+        instead of inventing a description.
+        """
+        described = await self.vision.describe_screen()
+        payload: dict[str, Any] = dict(described)
+        payload.setdefault("summary", str(payload.get("message", "")))
+        return "vision", payload
+
     _HANDLERS: dict[BrainIntent, _Handler] = {
         BrainIntent.CLARIFY: _handle_clarify,
         BrainIntent.CHAT: _handle_chat,
@@ -986,6 +1195,8 @@ class NovaControlApplication:
         BrainIntent.BROWSER_AUTOMATION: _handle_browser,
         BrainIntent.MEMORY: _handle_memory,
         BrainIntent.PROJECT: _handle_project,
+        BrainIntent.SYSTEM_STATUS: _handle_system_status,
+        BrainIntent.VISION: _handle_vision,
     }
 
     # --- Learning ---
@@ -1888,6 +2099,10 @@ class NovaControlApplication:
                 "telemetry": self.intelligence.telemetry.to_dict(),
                 "findings": self.intelligence.telemetry.improvement_findings(),
                 "capabilities": self.intelligence.capabilities.to_dict(),
+                # The live routing policy, so "why did that go to the model?" is
+                # answerable from the running system rather than from the source.
+                "thresholds": self.intelligence.thresholds.to_dict(),
+                "lexical_exemplars": self.intelligence.lexical.size,
             },
         }
 

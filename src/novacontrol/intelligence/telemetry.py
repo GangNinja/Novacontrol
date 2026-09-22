@@ -19,6 +19,15 @@ from typing import Any
 _MAX_SAMPLES = 50
 
 
+def _percentile(values: list[float], fraction: float) -> float:
+    """Nearest-rank percentile of a small sample (no numpy dependency)."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = max(0, min(len(ordered) - 1, int(round(fraction * (len(ordered) - 1)))))
+    return ordered[index]
+
+
 @dataclass(slots=True)
 class _Stats:
     resolved: Counter[str] = field(default_factory=Counter)
@@ -27,6 +36,12 @@ class _Stats:
     unknown: int = 0
     failed_entities: int = 0
     samples: list[dict[str, Any]] = field(default_factory=list)
+    # Where requests went once understood (fast / verify / llm / vision), and
+    # how often understanding itself needed a model. These two counters are what
+    # makes "is the NLU actually keeping work off the LLM?" answerable.
+    routes: Counter[str] = field(default_factory=Counter)
+    escalations: Counter[str] = field(default_factory=Counter)
+    latency_ms: list[float] = field(default_factory=list)
 
 
 class InterpretationTelemetry:
@@ -46,9 +61,16 @@ class InterpretationTelemetry:
         confidence: float,
         normalized: str = "",
         taught: bool = False,
+        route: str = "",
+        latency_ms: float = 0.0,
     ) -> None:
         self._stats.resolved[intent] += 1
         self._stats.strategies[strategy] += 1
+        if route:
+            self._stats.routes[route] += 1
+        if latency_ms > 0:
+            self._stats.latency_ms.append(latency_ms)
+            del self._stats.latency_ms[:-_MAX_SAMPLES]
         self._sample({
             "kind": "resolution",
             "intent": intent,
@@ -56,6 +78,18 @@ class InterpretationTelemetry:
             "confidence": round(confidence, 3),
             "normalized": normalized,
             "taught_variation": taught,
+            "route": route,
+            "latency_ms": round(latency_ms, 3),
+        })
+
+    def record_escalation(self, *, reason: str, normalized: str = "", latency_ms: float = 0.0) -> None:
+        """Record that understanding had to fall back to a language model."""
+        self._stats.escalations[reason or "unspecified"] += 1
+        self._sample({
+            "kind": "escalation",
+            "reason": reason,
+            "normalized": normalized,
+            "latency_ms": round(latency_ms, 3),
         })
 
     def record_clarification(self, *, question: str, normalized: str = "") -> None:
@@ -79,10 +113,20 @@ class InterpretationTelemetry:
 
     def to_dict(self) -> dict[str, Any]:
         s = self._stats
+        latencies = s.latency_ms
         return {
             "resolved_total": sum(s.resolved.values()),
             "resolved_by_intent": dict(s.resolved.most_common()),
             "resolved_by_strategy": dict(s.strategies.most_common()),
+            "routes": dict(s.routes.most_common()),
+            "escalations": dict(s.escalations.most_common()),
+            "escalation_rate": self._rate(sum(s.escalations.values())),
+            "latency_ms": {
+                "count": len(latencies),
+                "avg": round(sum(latencies) / len(latencies), 3) if latencies else 0.0,
+                "max": round(max(latencies), 3) if latencies else 0.0,
+                "p95": round(_percentile(latencies, 0.95), 3),
+            },
             "clarifications": s.clarifications,
             "unknown_intents": s.unknown,
             "failed_entity_resolutions": s.failed_entities,
@@ -115,6 +159,20 @@ class InterpretationTelemetry:
             findings.append(
                 f"Fuzzy matching dominates ({fuzzy} of {sum(s.resolved.values())}) — add canonical phrasings to the registry."
             )
+        escalations = sum(s.escalations.values())
+        if total and escalations / total > 0.3:
+            findings.append(
+                f"Understanding escalates to a language model for {escalations / total:.0%} of requests — "
+                "add intent rules or exemplars for the frequent phrasings."
+            )
+        if s.latency_ms:
+            avg = sum(s.latency_ms) / len(s.latency_ms)
+            p95 = _percentile(s.latency_ms, 0.95)
+            if p95 > 50.0:
+                findings.append(
+                    f"Understanding latency p95 is {p95:.0f} ms (avg {avg:.0f} ms) — check whether a "
+                    "model call is happening on the hot path."
+                )
         return findings
 
     # -- internals ---------------------------------------------------------------

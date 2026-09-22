@@ -692,12 +692,16 @@ def create_app() -> Any:
 
     @app.get("/intelligence")
     async def intelligence_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
-        """Global Intelligence Layer health: interpretation telemetry, the
-        self-improvement findings it produced, and the capability registry."""
+        """Global Intelligence Layer health: interpretation telemetry (including
+        per-layer latency, routing and escalation counts), the self-improvement
+        findings it produced, the capability registry, and the live confidence
+        thresholds the routing policy is currently using."""
         return {
             "telemetry": nova.intelligence.telemetry.to_dict(),
             "findings": nova.intelligence.telemetry.improvement_findings(),
             "capabilities": nova.intelligence.capabilities.to_dict(),
+            "thresholds": nova.intelligence.thresholds.to_dict(),
+            "lexical": {"exemplars": nova.intelligence.lexical.size},
         }
 
     @app.get("/bugs")

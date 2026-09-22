@@ -236,4 +236,167 @@ def default_capabilities() -> tuple[Capability, ...]:
             executor="agent_coordinator", verifier="response_verifier",
             supported_environments=("desktop",),
         ),
+        # ── System status: measured, never guessed ──────────────────────
+        # These carry `system_monitor` because they are read from the live
+        # telemetry layer. A language model has no access to this machine's
+        # memory, so asking one would be slower AND less accurate than reading
+        # the same numbers the Command Center already displays.
+        Capability(
+            capability="memory_status", intent=IntentName.MEMORY_STATUS,
+            description="Report live memory usage and the processes using it.",
+            risk=RiskLevel.LOW, executor="system_monitor", verifier="telemetry_verifier",
+            supported_environments=("desktop",),
+        ),
+        Capability(
+            capability="cpu_status", intent=IntentName.CPU_STATUS,
+            description="Report live CPU load and temperature.",
+            risk=RiskLevel.LOW, executor="system_monitor", verifier="telemetry_verifier",
+            supported_environments=("desktop",),
+        ),
+        Capability(
+            capability="gpu_status", intent=IntentName.GPU_STATUS,
+            description="Report GPU and video-memory state when a probe is available.",
+            risk=RiskLevel.LOW, executor="system_monitor", verifier="telemetry_verifier",
+            supported_environments=("desktop",),
+        ),
+        Capability(
+            capability="battery_status", intent=IntentName.BATTERY_STATUS,
+            description="Report battery charge and power source.",
+            risk=RiskLevel.LOW, executor="system_monitor", verifier="telemetry_verifier",
+            supported_environments=("desktop",),
+        ),
+        Capability(
+            capability="network_status", intent=IntentName.NETWORK_STATUS,
+            description="Report network connectivity and throughput.",
+            risk=RiskLevel.LOW, executor="system_monitor", verifier="telemetry_verifier",
+            supported_environments=("desktop",),
+        ),
+        Capability(
+            capability="system_status", intent=IntentName.SYSTEM_STATUS,
+            description="Report a combined system health snapshot.",
+            risk=RiskLevel.LOW, executor="system_monitor", verifier="telemetry_verifier",
+            supported_environments=("desktop",),
+        ),
+        # ── Device controls ─────────────────────────────────────────────
+        Capability(
+            capability="volume_control", intent=IntentName.VOLUME_CONTROL,
+            description="Change the system output volume or mute it.",
+            optional=("level",), risk=RiskLevel.LOW,
+            executor="desktop_controller", verifier="application_state_verifier",
+            supported_environments=("desktop",),
+        ),
+        Capability(
+            capability="brightness_control", intent=IntentName.BRIGHTNESS_CONTROL,
+            description="Change the display brightness.",
+            optional=("level",), risk=RiskLevel.LOW,
+            executor="desktop_controller", verifier="application_state_verifier",
+            supported_environments=("desktop",),
+        ),
+        Capability(
+            capability="media_control", intent=IntentName.MEDIA_CONTROL,
+            description="Play, pause, skip, or stop the current media.",
+            risk=RiskLevel.LOW, executor="desktop_controller",
+            verifier="application_state_verifier",
+            supported_environments=("desktop",),
+        ),
+        # ── Vision (a dedicated VLM, never the text chat model) ──────────
+        Capability(
+            capability="screenshot_analysis", intent=IntentName.SCREENSHOT_ANALYSIS,
+            description="Interpret a screenshot or image through the vision pipeline.",
+            risk=RiskLevel.LOW, executor="vision_pipeline", verifier="content_verifier",
+            supported_environments=("desktop",),
+        ),
+        # ── Filesystem operations ───────────────────────────────────────
+        Capability(
+            capability="find_file", intent=IntentName.FIND_FILE,
+            description="Locate a file on this machine.",
+            required=("file",), risk=RiskLevel.LOW,
+            executor="file_manager", verifier="file_exists_verifier",
+            supported_environments=("desktop",),
+        ),
+        Capability(
+            capability="modify_file", intent=IntentName.MODIFY_FILE,
+            description="Change the contents of an existing file.",
+            required=("file",), risk=RiskLevel.MEDIUM,
+            executor="file_manager", verifier="file_content_verifier",
+            supported_environments=("desktop",),
+        ),
+        Capability(
+            capability="delete_file", intent=IntentName.DELETE_FILE,
+            description="Delete a file.",
+            required=("file",), risk=RiskLevel.HIGH,
+            executor="file_manager", verifier="file_absent_verifier",
+            supported_environments=("desktop",),
+        ),
+        Capability(
+            capability="move_file", intent=IntentName.MOVE_FILE,
+            description="Move a file to another location.",
+            required=("file",), optional=("folder",), risk=RiskLevel.MEDIUM,
+            executor="file_manager", verifier="file_exists_verifier",
+            supported_environments=("desktop",),
+        ),
+        Capability(
+            capability="copy_file", intent=IntentName.COPY_FILE,
+            description="Copy or duplicate a file.",
+            required=("file",), risk=RiskLevel.MEDIUM,
+            executor="file_manager", verifier="file_exists_verifier",
+            supported_environments=("desktop",),
+        ),
+        # ── Composite browser work ──────────────────────────────────────
+        Capability(
+            capability="browser_action", intent=IntentName.BROWSER_ACTION,
+            description="Open a browser and carry out a search or navigation in one request.",
+            required=("query",), optional=("application", "website"), risk=RiskLevel.LOW,
+            executor="browser_controller", verifier="page_state_verifier",
+            supported_environments=("browser",),
+        ),
+        # ── Code / project work ─────────────────────────────────────────
+        Capability(
+            capability="code_generation", intent=IntentName.CODE_GENERATION,
+            description="Write new code for a described goal.",
+            required=("goal",), risk=RiskLevel.MEDIUM,
+            executor="code_agent", verifier="response_verifier",
+            supported_environments=("desktop",),
+        ),
+        Capability(
+            capability="code_explanation", intent=IntentName.CODE_EXPLANATION,
+            description="Explain what existing code does.",
+            required=("goal",), risk=RiskLevel.LOW,
+            executor="code_agent", verifier="response_verifier",
+            supported_environments=("desktop",),
+        ),
+        Capability(
+            capability="code_debugging", intent=IntentName.CODE_DEBUGGING,
+            description="Diagnose a failure and propose a fix.",
+            required=("goal",), risk=RiskLevel.LOW,
+            executor="code_agent", verifier="response_verifier",
+            supported_environments=("desktop",),
+        ),
+        Capability(
+            capability="project_analysis", intent=IntentName.PROJECT_ANALYSIS,
+            description="Review a project or codebase and report its shape.",
+            required=("goal",), risk=RiskLevel.LOW,
+            executor="code_agent", verifier="report_verifier",
+            supported_environments=("desktop",),
+        ),
+        # ── Language-only ───────────────────────────────────────────────
+        Capability(
+            capability="calculate", intent=IntentName.CALCULATE,
+            description="Evaluate an arithmetic expression locally.",
+            required=("expression",), risk=RiskLevel.LOW,
+            executor="scratch_brain", verifier="math_verifier",
+            supported_environments=("desktop",),
+        ),
+        Capability(
+            capability="general_question", intent=IntentName.GENERAL_QUESTION,
+            description="Answer a general question in conversation.",
+            risk=RiskLevel.LOW, executor="chat_brain", verifier="response_verifier",
+            supported_environments=("desktop",),
+        ),
+        Capability(
+            capability="conversation", intent=IntentName.CONVERSATION,
+            description="Reply to social or conversational input.",
+            risk=RiskLevel.LOW, executor="chat_brain", verifier="response_verifier",
+            supported_environments=("desktop",),
+        ),
     )

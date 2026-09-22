@@ -1188,3 +1188,27 @@ body.nc-focus-mode .system-ribbon { background: rgba(3, 9, 20, 0.97); }
 /* ── 20. Motion safety: the global reduced-motion block in styles.css already
    collapses every animation/transition above; splash and palette also honor it
    by becoming instant via that same block. Nothing further needed here. ───── */
+
+/* ── 21. Request-understanding metadata (Chat answers).
+   A compact, non-interactive readout of HOW a request was understood:
+   component, intent, confidence, model, latency. It is deliberately plain
+   text — no animations, nothing focusable — so it adds no tab stop and no
+   motion to a conversation. ───────────────────────────────────────────── */
+.understanding-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin: -8px 0 14px;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.02em;
+  color: var(--text-dim, #9aa4b2);
+}
+
+.understanding-meta-item {
+  padding: 2px 8px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.07);
+  white-space: nowrap;
+}

@@ -34,6 +34,56 @@ class SecuritySettings:
 
 
 @dataclass(frozen=True, slots=True)
+class NluSettings:
+    """Request-understanding thresholds (see intelligence/thresholds.py).
+
+    These live in the central configuration because the correct values are
+    machine-specific: a CPU-only box pays tens of seconds for a language-model
+    round trip while a GPU box pays one, so a deployment needs to be able to
+    tighten or loosen the bands without editing code. The same fields are also
+    overridable per-process with ``NOVACONTROL_NLU_*`` environment variables.
+    """
+
+    fast_confidence: float = 0.90
+    verify_confidence: float = 0.70
+    multi_step_confidence: float = 0.88
+    lexical_confidence: float = 0.62
+    reference_confidence: float = 0.74
+    allow_llm: bool = True
+    lexical_matching: bool = True
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "fast_confidence": self.fast_confidence,
+            "verify_confidence": self.verify_confidence,
+            "multi_step_confidence": self.multi_step_confidence,
+            "lexical_confidence": self.lexical_confidence,
+            "reference_confidence": self.reference_confidence,
+            "allow_llm": self.allow_llm,
+            "lexical_matching": self.lexical_matching,
+        }
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "NluSettings":
+        defaults = cls()
+        return cls(
+            fast_confidence=_float_setting(data, "fast_confidence", defaults.fast_confidence),
+            verify_confidence=_float_setting(data, "verify_confidence", defaults.verify_confidence),
+            multi_step_confidence=_float_setting(
+                data, "multi_step_confidence", defaults.multi_step_confidence
+            ),
+            lexical_confidence=_float_setting(
+                data, "lexical_confidence", defaults.lexical_confidence
+            ),
+            reference_confidence=_float_setting(
+                data, "reference_confidence", defaults.reference_confidence
+            ),
+            allow_llm=_bool_setting(data, "allow_llm", defaults.allow_llm),
+            lexical_matching=_bool_setting(data, "lexical_matching", defaults.lexical_matching),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ModuleSettings:
     enabled: bool = True
     options: Mapping[str, Any] = field(default_factory=dict)
@@ -45,6 +95,7 @@ class NovaControlConfig:
     database: DatabaseSettings = field(default_factory=DatabaseSettings)
     redis: RedisSettings = field(default_factory=RedisSettings)
     security: SecuritySettings = field(default_factory=SecuritySettings)
+    nlu: NluSettings = field(default_factory=NluSettings)
     modules: Mapping[str, ModuleSettings] = field(default_factory=dict)
 
     @classmethod
@@ -68,6 +119,7 @@ class NovaControlConfig:
             database=DatabaseSettings(**_mapping(data.get("database", {}))),
             redis=RedisSettings(**_mapping(data.get("redis", {}))),
             security=SecuritySettings(**_mapping(data.get("security", {}))),
+            nlu=NluSettings.from_mapping(_mapping(data.get("nlu", {}))),
             modules=modules,
         )
 
@@ -113,6 +165,23 @@ class NovaControlConfig:
                     default=base.security.require_approval_for_sensitive_actions,
                 ),
             ),
+            nlu=replace(
+                base.nlu,
+                # The centralized NLU band overrides; see
+                # intelligence/thresholds.py for the same fields' meaning.
+                fast_confidence=_parse_float(
+                    os.getenv("NOVACONTROL_NLU_FAST_CONFIDENCE"), default=base.nlu.fast_confidence
+                ),
+                verify_confidence=_parse_float(
+                    os.getenv("NOVACONTROL_NLU_VERIFY_CONFIDENCE"), default=base.nlu.verify_confidence
+                ),
+                allow_llm=_parse_bool(
+                    os.getenv("NOVACONTROL_NLU_ALLOW_LLM"), default=base.nlu.allow_llm
+                ),
+                lexical_matching=_parse_bool(
+                    os.getenv("NOVACONTROL_NLU_LEXICAL_MATCHING"), default=base.nlu.lexical_matching
+                ),
+            ),
         )
 
 
@@ -128,3 +197,34 @@ def _parse_bool(value: str | None, *, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_float(value: str | None, *, default: float) -> float:
+    """Parse a 0..1 setting, ignoring unusable input rather than failing boot."""
+    if value is None or not value.strip():
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        return default
+    return parsed if 0.0 <= parsed <= 1.0 else default
+
+
+def _float_setting(data: Mapping[str, Any], key: str, default: float) -> float:
+    value = data.get(key)
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if 0.0 <= parsed <= 1.0 else default
+
+
+def _bool_setting(data: Mapping[str, Any], key: str, default: bool) -> bool:
+    value = data.get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}

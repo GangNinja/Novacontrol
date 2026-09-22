@@ -239,6 +239,32 @@ class NovaBrain:
         decision: BrainDecision,
         payload: Mapping[str, Any],
     ) -> BrainResponse:
+        # A result that already carries its own sentence is NOT re-worded. A
+        # chat answer, a researched report, a measured reading and a planned
+        # step list all arrive finished; asking a model to paraphrase one costs
+        # tens of seconds on CPU hardware and can restate a correct answer
+        # incorrectly — for no gain the user can see. The model shapes only
+        # results that arrive with no user-facing sentence of their own (a bare
+        # plan or project record), where the local wording would be generic.
+        own_sentence = _payload_sentence(payload)
+        if own_sentence:
+            return BrainResponse(
+                decision=decision,
+                payload={**payload, "brain_mode": self.effective_mode},
+                summary=own_sentence,
+            )
+        # A DETERMINISTIC result is already a finished sentence (a measured RAM
+        # figure, a system snapshot). Paraphrasing it through a model would add
+        # tens of seconds on CPU hardware and risk restating a measured number
+        # incorrectly — the exact failure this separation exists to prevent.
+        if payload.get("deterministic") is True:
+            summary = str(payload.get("summary") or payload.get("message") or "").strip()
+            if summary:
+                return BrainResponse(
+                    decision=decision,
+                    payload={**payload, "brain_mode": self.effective_mode},
+                    summary=summary,
+                )
         if getattr(self.completion_provider, "name", "") == "echo":
             response_text = _friendly_summary(request, decision, payload)
             return BrainResponse(
@@ -613,6 +639,20 @@ def _looks_like_phone_command(text: str) -> bool:
         lower.startswith(("call ", "dial ", "text ", "sms "))
         or _contains(lower, "send a text", "send text", "take a screenshot", "take screenshot", "screenshot my phone", "screenshot of my phone")
     )
+
+
+def _payload_sentence(payload: Mapping[str, Any]) -> str:
+    """The payload's OWN user-facing sentence, or "" when it has none.
+
+    Precedence matches ``_friendly_summary`` so the two agree on which field is
+    the answer: a handler that produced a message/summary/overview/content has
+    already written the response, and no model should rewrite it.
+    """
+    for key in ("message", "overview", "summary", "content"):
+        text = payload.get(key)
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    return ""
 
 
 def _friendly_summary(

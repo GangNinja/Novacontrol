@@ -89,10 +89,34 @@ function renderResearchBubble(stream, report) {
   bubble.appendChild(handoff);
 }
 
+// Request-understanding metadata, rendered under the question. This is SAFE
+// OPERATIONAL metadata only: which component understood the request, the
+// resolved intent, the measured confidence, the model (empty when none was
+// needed) and the cost. The server never sends model reasoning, so there is no
+// chain-of-thought here to leak — and none may be added.
+function understandingMetaLine(nlu) {
+  if (!nlu || !nlu.understanding) return null;
+  const parts = [
+    `Understanding: ${nlu.understanding}`,
+    `Intent: ${label(nlu.intent || "unknown")}`,
+    `Confidence: ${Math.round((nlu.confidence || 0) * 100)}%`,
+    `Model: ${nlu.model || "None"}`,
+  ];
+  if (typeof nlu.latency_ms === "number") parts.push(`${nlu.latency_ms.toFixed(1)} ms`);
+  if (nlu.requires_vision) parts.push("Vision");
+  if (nlu.requires_confirmation) parts.push("Confirmation required");
+  const row = el("div", "understanding-meta");
+  parts.forEach((text) => row.appendChild(el("span", "understanding-meta-item", text)));
+  row.title = nlu.reason || "How NovaControl understood this request.";
+  return row;
+}
+
 function renderGeneralAiPage(target, { query, summary, route, payload }) {
   const layout = el("article", "ai-answer-layout");
   const main = el("div", "answer-main");
   main.appendChild(el("div", "query-chip", query));
+  const understanding = understandingMetaLine(payload.nlu);
+  if (understanding) main.appendChild(understanding);
 
   // Markdown-aware lead so scratch-brain answers render **bold** cleanly.
   const lead = el("div", "answer-lead");

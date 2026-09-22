@@ -12,6 +12,12 @@ from uuid import uuid4
 class BrainIntent(StrEnum):
     CHAT = "chat"
     EXPLORE = "explore"
+    # Deterministic machine readings (memory/CPU/battery/…): answered from the
+    # telemetry layer, never by a language model.
+    SYSTEM_STATUS = "system_status"
+    # Visual understanding: routed to the vision pipeline, which is the only
+    # place a screenshot is ever looked at.
+    VISION = "vision"
     PLAN = "plan"
     AGENT = "agent"
     SELF_IMPROVEMENT = "self_improvement"

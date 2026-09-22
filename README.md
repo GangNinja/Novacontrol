@@ -120,7 +120,7 @@ src/novacontrol/
 |---|---|
 | Python | **3.12+** |
 | OS | Windows (desktop + voice features); Linux/macOS for core web/API |
-| Ollama (optional) | Any recent version — local chat brain and/or a local vision model (e.g. `ollama pull qwen3-vl:4b` or `ollama pull llama3.2-vision`) |
+| Ollama (optional) | Any recent version — local chat brain and/or a local vision model (e.g. `ollama pull qwen3-vl:4b` or `ollama pull llama3.2-vision`). On a CPU-only machine a non-reasoning model (`qwen2.5vl:3b`, `llava`, `moondream`) answers far more reliably — a `qwen3-vl` build that cannot stop thinking spends its whole budget reasoning |
 | Android platform-tools (optional) | For phone control |
 
 ## 📦 Installation
@@ -161,6 +161,16 @@ NovaControl is configured via environment variables — no `.env` file is requir
 | `NOVACONTROL_LLM_API_KEY` | Cloud provider API key | — |
 | `NOVACONTROL_LLM_MODEL` | Model name | provider default |
 | `NOVACONTROL_LLM_TIMEOUT` | Socket timeout in seconds for every provider request — raise it for CPU-only local models, which answer far slower than a cloud API | `600` |
+| `NOVACONTROL_OLLAMA_MAX_TOKENS` | Reply ceiling for local completions — stops a reasoning-capable model from generating without bound; `0` disables it | `1024` |
+| `NOVACONTROL_VISION_MAX_IMAGE_SIDE` | Longest edge (px) a screenshot is downscaled to before the vision model sees it — the main lever on local vision latency; coordinates stay resolution-independent, `0` sends full resolution | `1280` |
+| `NOVACONTROL_VISION_MAX_TOKENS` | Reply budget for a locate request (one small JSON object is all it needs); `0` leaves it uncapped | `256` |
+| `NOVACONTROL_NLU_FAST_CONFIDENCE` | Confidence at or above which a reading is trusted as-is — no verification, no model | `0.90` |
+| `NOVACONTROL_NLU_VERIFY_CONFIDENCE` | Below this, understanding escalates to the language model (or asks a question when no model is available) | `0.70` |
+| `NOVACONTROL_NLU_MULTI_STEP_CONFIDENCE` | Confidence a multi-clause request's *weakest* clause needs before it needs no extra verification | `0.88` |
+| `NOVACONTROL_NLU_LEXICAL_CONFIDENCE` | Similarity the exemplar matcher must reach before it may claim an intent | `0.62` |
+| `NOVACONTROL_NLU_REFERENCE_CONFIDENCE` | Confidence assigned to a target resolved from context ("open it") — lower than a named one, by design | `0.74` |
+| `NOVACONTROL_NLU_ALLOW_LLM` | Allow understanding to escalate to a language model at all; `false` keeps the deterministic path and asks a question instead | `true` |
+| `NOVACONTROL_NLU_LEXICAL_MATCHING` | Enable the TF-IDF/character-ngram exemplar matcher (the paraphrase layer) | `true` |
 
 > 🔐 **Secret handling:** API keys are stored locally and never returned by any API endpoint. This includes the vision-model key (`POST /vision/model` accepts it once and only ever reports a redacted tail). Never commit `.env` files or tokens — local artifacts like `token.txt` should stay out of version control.
 >
@@ -264,6 +274,37 @@ While the server is up, tracing runs live through `POST /brain/decide` (the land
 
 A **"Compare with broad classifier"** toggle re-runs the same utterance through the scratch engine's *broad* `_classify()` view and highlights where the narrow routing gate and the broad engine deliberately disagree: **order** (e.g. `what time is 2 plus 3` — the narrow router promotes math ahead of time), **engine-only** (`open notepad and type hello` — the broad engine sees desktop_control but its row is routing_safe=False so routing dispatches to real automation instead of a canned answer), **breadth** (a wide engine match with no exact canned key), **unknown** (neither classifier has a local answer), or **match**. The JS mirror computes the same relation offline, and the Python↔JS relation parity is drift-guarded in CI.
 
+### How a request is understood
+
+Every request passes through the **Global Input Intelligence** layer before any subsystem sees it, and the cheapest layer that can understand the request wins:
+
+```
+normalize → rules → fuzzy (typos) → learned phrasings → context → exemplar similarity (TF-IDF)
+    → language model (only if still unresolved)
+```
+
+The reading is then scored against configurable confidence bands, and the band decides what happens next — never the other way around:
+
+| Reading | Route | What happens |
+|---|---|---|
+| confident (≥ `NOVACONTROL_NLU_FAST_CONFIDENCE`) | `fast` | straight to the capability, **no model** |
+| borderline | `verify` | accepted, flagged as below the fast band |
+| a reference resolved from context ("open it") | `verify` | planned, but never as certain as a named target |
+| low confidence, or a clause that could not be understood | `llm` | escalated to the language model, which answers in the **same structured schema** |
+| understood and already answered | `fast` | the result speaks for itself — it is **never re-worded** through a model |
+| needs an image | `vision` | the vision pipeline — a text-only model is never handed a screenshot |
+| no reading and no model | `clarify` | one precise question instead of a guess |
+
+Two rules keep that table honest. **A name the user actually said always beats a remembered reference:** *"where is my NovaControl folder"* is read as that folder, and *"read notes.txt"* or *"open notes.txt"* is a file to read — never an application literally called *notes.txt*. Only a phrase that names a **kind** and nothing else (*"open that file"*, *"run that"*, *"show me the thing"*) is resolved from context, at reduced confidence, or asked about when nothing is remembered. **Entities come from independent readers** — application, file, folder, project, url/website, query, level, text, numbers — so *"find my NovaControl project"* yields `project: novacontrol`, *"set volume to 40%"* yields `level: 40`, and a new entity type is a new reader rather than a new branch in the engine.
+
+So the common cases never touch a model: *"open chrome"*, *"launch chrome"* and *"please bring up Chrome"* resolve in well under a millisecond, and *"how much RAM do I have?"* is answered from the machine's own telemetry ("You're currently using 10.9 GB of 15.4 GB RAM (71.1%).") with no model involved at all. Multi-step language that every clause of is understood stays local too — *"Open VS Code, find my NovaControl project and run the tests."* decomposes into three planned steps without a model. Only genuinely novel, ambiguous or partly-unreadable language reaches the local model — and when it does, the model **understands**: it returns an intent, goal, entities and requirement flags, and NovaControl validates, authorizes and executes. A model never names a tool, a path or a command.
+
+**Understanding is not the whole wait.** A command can be understood in a millisecond and the request still take over a minute — because the *result* was also being sent to a model to be re-worded. *"open chrome"* produced a finished sentence (`Planned: Open chrome`) and then asked the local model to paraphrase it: **86 s of the 87 s**. A result that already reads as a sentence — a chat answer, a research report, a measured reading, a planned step list — is now returned verbatim, and the model words only results that arrive with no sentence of their own. The same request went from **86.1 s to 2.2 s** (measured, same machine, same model configured).
+
+**Honest about what is not built yet.** Nineteen of the taxonomy's intents — the file operations (`find_file`, `read_file`, `list_files`, `write_file`, …), the device controls (`volume_control`, `brightness_control`, `media_control`) and the code-intent family — are *understood* but have no executor wired to them, so they fall through to the existing handlers exactly as before. That gap is written down rather than hidden: every intent the rules can produce must be either dispatchable or listed in the drift-guard test (`tests/test_nlu_engine.py`), so adding rules for a capability with no executor fails the suite until it is wired up or deliberately documented.
+
+Chat answers show a compact readout of exactly this (`Understanding: Fast NLU · Intent: Open Application · Confidence: 92% · Model: None · 0.6 ms`); `GET /intelligence` exposes the same machine-readable picture, including per-layer latency, routing and escalation counts, and the live thresholds. Model lifecycle (load/unload/residency/available memory/active model) sits behind the `ModelManager` abstraction, so *"request understanding"* stays independent of which runtime is installed.
+
 ### CLI
 
 ```powershell
@@ -337,6 +378,7 @@ The Vision tab wraps desktop control in a perceive → locate → act → verify
 
 - **Describe Screen** — captures your real screen and reports what's visible
 - **Configurable multimodal vision model** — point the whole vision layer at a real vision-capable model (local **Ollama** — qwen3-vl, qwen2.5vl, llava, llama3.2-vision, moondream — auto-detected; or a cloud preset: **OpenAI, Gemini, OpenRouter**) from the web UI's Vision panel or `POST /vision/model`. The screenshot is embedded as OpenAI-format image content and elements are located **semantically** (a 0–1000 grid point), with OCR/landmarks as automatic fallback. The config hot-swaps at runtime, persists across restarts, and the API key is stored only on your machine and never returned by any endpoint.
+- **Vision calls are bounded and read tolerantly** — the capture is downscaled to a token budget before the model sees it (the main lever on local latency) while coordinates stay resolution-independent, the reply is capped so a reasoning-only model cannot stall the click for minutes, and every answer is classified as *found* / *not visible* / *unparseable* — a prose sentence that merely mentions a direction is never read as a click location, and only an unparseable reply is worth one stricter re-ask. Points are accepted from the documented `x`/`y` contract as well as centre pairs and bounding boxes (clicked at their centre). On a CPU-only machine prefer a non-reasoning vision model: `qwen2.5vl:3b`, `llava` or `moondream`.
 - **A text-only model can never pose as a vision model** — a provider is accepted as vision-capable only when it can actually see: local Ollama models are checked against Ollama's own `/api/show` capability metadata (the authoritative answer, where a name is only a guess), cloud presets against the registered vision-capable list, and the Echo fallback is always refused. This is why `/vision/status` reports the truth on a machine whose chat brain is a text-only model, instead of feeding screenshots to a model that cannot see them and clicking the coordinates it invents.
 - **Guided Click** — type a target ("File", "Library", "Play GTA V"); the vision layer locates it via vision model → OCR → UI landmarks, moves the cursor, clicks, and saves before/after screenshots
 - **One local model resident at a time** — a local chat brain and a local vision brain cannot both be held in RAM on a small machine, so before any completion the app measures free system memory and asks Ollama what it already holds; if the incoming model would not fit (or simply because exclusivity is the policy) the other model is unloaded first, with a 512 MB headroom so "fits" means "fits and stays usable". Every decision is logged with its measured figures, and an unmeasurable situation is reported as unknown rather than guessed. `NOVACONTROL_OLLAMA_UNLOAD_ON_SWITCH=0` relaxes the policy — memory still forces an unload when it must — and `NOVACONTROL_OLLAMA_KEEP_ALIVE` sets the residency window applied on a switch.
