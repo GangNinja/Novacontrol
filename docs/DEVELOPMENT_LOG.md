@@ -238,17 +238,165 @@ developer's real `data/` dir (so merely configuring a vision model broke it),
 and the local-model picker test assumed no Ollama was running. Both now hold on
 any machine.
 
-## 12. Where things stand
+## 12. Making local vision fast and honest
 
-- **Scale**: ~65,000 tracked lines (31.8k Python source, 18.2k tests, 10k
-  web UI, 2.9k markdown, remainder scripts/config).
-- **Validation at the tip**: full suite 893 passed / 12 skipped (Windows);
+The vision layer worked but was slow and brittle in three specific ways, each
+found by driving it against the live local model rather than by reading it.
+
+**The image was sent at full resolution.** Every screenshot pixel becomes image
+tokens the model must process, and on a CPU-only box that token count is most of
+the wall clock. Captures are now downscaled to a longest edge of 1280 px
+(`NOVACONTROL_VISION_MAX_IMAGE_SIDE`, `0` disables) and re-encoded losslessly so
+UI text stays legible. Coordinates are unaffected by construction: the model
+answers on a 0–1000 grid and the answer is mapped onto the **original**
+dimensions, read before encoding. Verified: a 1920×1080 probe reached the model
+as 768×432 under a 768 budget, and a `{"x": 500, "y": 500}` answer still
+returned the original-resolution point.
+
+**Answers were parsed for exactly one shape.** The old parser required
+`{"found": true, "x": int, "y": int}` with real numbers, and read *any* other
+text through the coarse-region vocabulary — so a model answering in prose
+("the top of the window shows nothing") had the word "top" turned into a click
+on the top edge of the screen. Answers are now classified as `found` /
+`absent` / `unparseable`, stringified numbers and `center`/`cx` pairs and
+bounding boxes are all accepted (a box is clicked at its centre), and the region
+vocabulary applies only to a bare short phrase. Only an `unparseable` reply
+gets one stricter re-ask — a model that already said `{"found": false}` has
+answered, and a second call would cost another slow inference to hear it again.
+
+**Nothing capped the reply, and this model never stops thinking.** Requests had
+no output budget at all, so a local model generated until the socket timeout.
+`qwen3-vl:4b` (4.4B Q4_K_M, 100% CPU) turned that into minutes of nothing:
+
+| request | result |
+|---|---|
+| no output cap | never returned — killed at 170 s |
+| `max_tokens: 80` | 13.7 s, `finish_reason=length`, **empty content**, 332 chars of reasoning |
+| `max_tokens: 600` | 109.8 s, all 600 tokens consumed as reasoning, **empty content** |
+| `think: false` (native `/api/chat`, and OpenAI-compatible) | ignored — the model's template cannot disable thinking |
+| `/no_think` in the prompt | ignored — same 32-token reasoning-only reply |
+
+So the fix is not to persuade the model but to bound it. A locate request now
+carries a small budget (`NOVACONTROL_VISION_MAX_TOKENS`, default 256), which
+turns a multi-minute stall into a fast explicit failure that falls back to OCR;
+the provider records *why* a reply stopped (`answer_was_truncated`, plus
+`last_error` naming the exhausted budget) and the locate layer skips the re-ask
+when that is the reason — the problem is the model, not the answer's format.
+Local completions generally carry a ceiling too
+(`NOVACONTROL_OLLAMA_MAX_TOKENS`, default 1024), applied only when the provider
+talks to the local Ollama: cloud servers already cap their replies, and a local
+ceiling would silently shorten long answers from gpt-4o and friends.
+
+The honest conclusion for this hardware, recorded in the README and
+`docs/VISION.md`: prefer a **non-reasoning** vision model (`qwen2.5vl:3b`,
+`llava`, `moondream`). On this box the `qwen3-vl` build cannot stop thinking, so
+its budget goes to reasoning and the OCR/landmark fallback is what actually
+clicks the element — the layer now says so quickly and honestly instead of
+stalling for minutes.
+
+## 13. Hybrid NLU: understanding before the model
+
+**The problem.** Every request went to a large local model first. That made a
+one-word command cost 20–110s on this CPU-only box, made the answer
+non-deterministic where it did not need to be, and spent a 5.5 GB model on
+questions the machine could already answer from its own telemetry. The fix was
+not a better prompt — it was to put a **lightweight understanding layer in front
+of the model** and let the model be the last resort.
+
+**The extension point already existed.** `novacontrol/intelligence/` was the one
+place raw language was interpreted (normalization, rule registry, intent
+taxonomy, context resolution, semantic fallback). Nothing was rebuilt: the
+hybrid layers were added *inside* it, and every subsystem — brain, planner,
+desktop runner, phone mode, Explore — keeps consuming the same single
+`GlobalInputIntelligence` entry point.
+
+```
+normalize → rules → fuzzy (typos) → learned phrasings → context
+    → exemplar similarity (TF-IDF) → language model (only if still unresolved)
+```
+
+**New in the layer.** A 62-intent taxonomy with a `StructuredIntent` contract
+(`goal`, `entities`, `actions`, `confidence`, `requires_llm/vision/web/tools/
+confirmation`, `source`, `reasoning_level`, `latency_ms`, and the route
+decision with its reason); a pure-Python **TF-IDF + character-ngram** matcher
+over 200 exemplar phrasings (no new dependency, no embeddings required);
+**modular entity readers** (application, file, folder, project, url/website,
+query, level, text, numbers); a strict Pydantic `UserIntent` at the
+model/JSON boundary; centralised, **configurable thresholds** (env + config)
+with an explicit `fast / verify / llm / vision / clarify` route; the
+`ModelManager` lifecycle abstraction over the Ollama primitives; and per-layer
+latency telemetry surfaced in Chat and `GET /intelligence`.
+
+**Measured** (deterministic path, no provider attached, 27 phrasings):
+mean **0.98 ms**, median **0.15 ms**, p95 **1.44 ms**, worst case 13.9 ms — the
+worst case being the *multi-step* request, which is still ~1000× cheaper than
+asking a model about it.
+
+**Three defects found by driving the layer rather than reading it**, all of the
+same family — a plausible reading that is confidently wrong:
+
+| Input | Was | Now |
+|---|---|---|
+| `read notes.txt`, `open notes.txt` | *nothing* / an application called "notes.txt" | `read_file` with `file: notes.txt` |
+| `find my NovaControl project` | clarify (0.00 confidence) | `find_file` with `project: novacontrol` |
+| `where is my NovaControl folder` | clarify — hijacked as a bare "the folder" reference | `find_file`, `folder: novacontrol` |
+| `Open VS Code, find my NovaControl project and run the tests.` | 2 of 3 clauses, route `clarify` | 3 planned steps, 0 unresolved, no model |
+
+The root cause of the last two was a reference heuristic that fired on *any*
+short phrase ending in a kind word (`file`, `folder`, `site`). It now fires only
+when nothing before that word names a target, so "open that file" still resolves
+from context while a folder the user just named is read by name. Content files
+gained a rule that must precede `open_application` (a text file has no launcher),
+and content files, named folders and projects each gained their own rule or
+reader rather than a branch inside the engine.
+
+**The remaining cost was outside the layer.** Installing it exposed a defect
+*after* understanding: the result was also handed to a model to be re-worded.
+`open chrome` was understood in **1.4 ms** and still took **86.1 s**, because the
+desktop plan already carried its own finished sentence (`Planned: Open chrome`)
+and the shaping step asked the local model to paraphrase it. Every non-status
+route paid that tax — the chat handler's answer was even summarized a *second*
+time on the way out. A result that already reads as a sentence (a chat answer, a
+research report, a measured reading, a planned step list) is now returned
+verbatim, and the model words only results that arrive with no sentence of their
+own (a bare plan or project record), where the local wording would be generic.
+Same request: **86.1 s → 2.2 s**, with the same model still configured. Four
+tests pin it by counting provider calls, so a finished result that reaches the
+model again fails the suite.
+
+**Understood is not the same as executable.** Nineteen intents the rules resolve
+— the file operations (`find_file`, `read_file`, `list_files`, `write_file`, …),
+the device controls (`volume_control`, `brightness_control`, `media_control`) and
+the code family — have no executor wired, so they fall through to the legacy
+handlers exactly as before. That is safe (nothing dispatches a capability the
+dispatcher does not know) but it means the reported understanding can name a
+capability this build cannot serve, so the gap is written down in a drift guard:
+every intent the rules can produce must be either routed or listed as
+not-yet-dispatchable, and a stale exemption fails the suite.
+
+**Validation at the tip of this work**: **1014 passed / 12 skipped**, mypy clean
+on both the linux and win32 views, `docs/API.md` in sync. The regression that
+mattered was caught the same way as before — by running the whole suite, not the
+new tests.
+
+## 14. Where things stand
+
+- **Scale**: ~70,000 lines (35.4k Python source across 189 modules, 19.4k tests,
+  10k web UI, 3.1k markdown, remainder scripts/config).
+- **Validation at the tip**: full suite **1014 passed / 12 skipped** (Windows);
   mypy clean on both the linux and win32 views; `docs/API.md` in sync; CI
-  green through run #11 (`a378f26`), which is where the both-views type check
-  landed — the run for `7b17629` carries the same checks.
-- **History**: all work pushed; `main` == `origin/main` at `7b17629`.
-- **Open threads**: stored Gemini key is still the Vertex-format one (Settings
+  green through run #12 (`316b95a`), the first run after the both-views type
+  check landed.
+- **History**: all work pushed through `316b95a`; the vision work of section 12
+  is committed as `8a203e6` and the hybrid NLU layer of section 13 as
+  `d44e0a3`, with this log entry on top.
+- **Open threads**: nineteen taxonomy intents (file operations, device
+  controls, the code family) are understood but have no executor wired — see
+  the drift guard in `tests/test_nlu_engine.py`; stored
+  Gemini key is still the Vertex-format one (Settings
   → Test Connection with an `AIza…` key fixes Chat/Coding/Explore in one
   step); local answers take 20–110s on this CPU-only box — the timeout now
-  lets them finish, but streaming would make them feel far faster; NovaLink
-  M1 (companion transport) is designed and ready to build when scheduled.
+  lets them finish, but streaming would make them feel far faster; the local
+  vision model on this machine is reasoning-only and should be swapped for a
+  non-reasoning VL build; NovaLink M1 (companion transport) is designed and
+  ready to build when scheduled.
