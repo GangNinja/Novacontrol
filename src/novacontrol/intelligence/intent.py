@@ -51,6 +51,10 @@ class IntentName(StrEnum):
 
     One name per real capability: synonyms are handled by exemplars and rules,
     not by a second intent that routes to the same handler.
+
+    The names above the taxonomy that differ from ours live in
+    :data:`INTENT_ALIASES`, so the mapping is data a caller can act on rather
+    than prose only a reader can use.
     """
 
     OPEN_APPLICATION = "open_application"
@@ -129,6 +133,34 @@ class RiskLevel(StrEnum):
     MEDIUM = "medium"
     HIGH = "high"
     CRITICAL = "critical"
+
+
+# The specification's names for capabilities this taxonomy already has. A
+# second intent per synonym would route to the same handler twice; an alias is
+# the same name under a different spelling, so it resolves instead.
+INTENT_ALIASES: dict[str, IntentName] = {
+    "launch_website": IntentName.NAVIGATE,
+    "create_file": IntentName.WRITE_FILE,
+    "execute_command": IntentName.RUN_COMMAND,
+    "screenshot": IntentName.TAKE_SCREENSHOT,
+    "explain": IntentName.ANSWER_QUESTION,
+    "unknown": IntentName.CLARIFY,
+}
+
+
+def resolve_intent(name: str) -> IntentName | None:
+    """The intent for a name from this taxonomy OR its synonym set.
+
+    Returns ``None`` for a name this system does not have: the caller decides
+    whether that is an error, rather than a guess being made here.
+    """
+    candidate = str(name or "").strip().lower().replace("-", "_")
+    if not candidate:
+        return None
+    try:
+        return IntentName(candidate)
+    except ValueError:
+        return INTENT_ALIASES.get(candidate)
 
 
 def _ensure_tuple(value: "str | tuple[str, ...]") -> tuple[str, ...]:

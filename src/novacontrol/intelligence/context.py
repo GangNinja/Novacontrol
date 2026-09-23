@@ -58,5 +58,47 @@ class InteractionContext:
         return str(self.environment.get("application", "") or "")
 
     def candidates_for(self, kind: str) -> list[str]:
-        """Known entities of a kind, most-recent-first."""
-        return list(self.entities.get(kind, ()))
+        """Known entities of a kind, most-recent-first.
+
+        What was said outranks what is merely true of the machine right now,
+        so the environment value is offered last — it is a resolution source of
+        a weaker kind ("close it" after the app was opened externally).
+        """
+        known = list(self.entities.get(kind, ()))
+        ambient = str(self.environment.get(kind, "") or "")
+        if ambient and ambient not in known:
+            known.append(ambient)
+        return known
+
+    @property
+    def active_project(self) -> str:
+        """The project in play: what was said, else what the environment knows."""
+        return str(self.environment.get("project", "") or self.last_entity("project") or "")
+
+    def recent_files(self, *, limit: int = 5) -> list[str]:
+        """Files this conversation has touched, most-recent-first."""
+        return self.candidates_for("file")[:limit]
+
+    @property
+    def current_task(self) -> str:
+        """What the user is in the middle of, as best the context knows."""
+        last = self.last_intent()
+        if not last:
+            return ""
+        return str(last.get("goal", "") or last.get("intent", "") or "")
+
+    def resolve_snapshot(self) -> dict[str, Any]:
+        """Everything a reference may be resolved against, in one object.
+
+        The context resolver (and, later, a context-aware planner) needs the
+        same six answers; assembling them here keeps "what counts as context"
+        a decision this module makes rather than each caller's.
+        """
+        return {
+            "active_application": self.active_application(),
+            "active_project": self.active_project,
+            "recent_files": self.recent_files(),
+            "current_task": self.current_task,
+            "pending": dict(self.pending_intent) if self.pending_intent else None,
+            "recent_utterances": list(self.utterances[:3]),
+        }

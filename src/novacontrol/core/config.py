@@ -49,8 +49,14 @@ class NluSettings:
     multi_step_confidence: float = 0.88
     lexical_confidence: float = 0.62
     reference_confidence: float = 0.74
+    # Calibrated confidence below which an embedding match is not acted on.
+    # Defaulted from a measured precision/coverage curve (see
+    # intelligence/thresholds.py); the right line depends on the embedding
+    # backend, hence a setting.
+    semantic_confidence: float = 0.60
     allow_llm: bool = True
     lexical_matching: bool = True
+    semantic_matching: bool = True
 
     def to_mapping(self) -> dict[str, Any]:
         return {
@@ -59,8 +65,10 @@ class NluSettings:
             "multi_step_confidence": self.multi_step_confidence,
             "lexical_confidence": self.lexical_confidence,
             "reference_confidence": self.reference_confidence,
+            "semantic_confidence": self.semantic_confidence,
             "allow_llm": self.allow_llm,
             "lexical_matching": self.lexical_matching,
+            "semantic_matching": self.semantic_matching,
         }
 
     @classmethod
@@ -78,8 +86,12 @@ class NluSettings:
             reference_confidence=_float_setting(
                 data, "reference_confidence", defaults.reference_confidence
             ),
+            semantic_confidence=_float_setting(
+                data, "semantic_confidence", defaults.semantic_confidence
+            ),
             allow_llm=_bool_setting(data, "allow_llm", defaults.allow_llm),
             lexical_matching=_bool_setting(data, "lexical_matching", defaults.lexical_matching),
+            semantic_matching=_bool_setting(data, "semantic_matching", defaults.semantic_matching),
         )
 
 
@@ -175,11 +187,18 @@ class NovaControlConfig:
                 verify_confidence=_parse_float(
                     os.getenv("NOVACONTROL_NLU_VERIFY_CONFIDENCE"), default=base.nlu.verify_confidence
                 ),
+                semantic_confidence=_parse_float(
+                    os.getenv("NOVACONTROL_NLU_SEMANTIC_CONFIDENCE"),
+                    default=base.nlu.semantic_confidence,
+                ),
                 allow_llm=_parse_bool(
                     os.getenv("NOVACONTROL_NLU_ALLOW_LLM"), default=base.nlu.allow_llm
                 ),
                 lexical_matching=_parse_bool(
                     os.getenv("NOVACONTROL_NLU_LEXICAL_MATCHING"), default=base.nlu.lexical_matching
+                ),
+                semantic_matching=_parse_bool(
+                    os.getenv("NOVACONTROL_NLU_SEMANTIC_MATCHING"), default=base.nlu.semantic_matching
                 ),
             ),
         )

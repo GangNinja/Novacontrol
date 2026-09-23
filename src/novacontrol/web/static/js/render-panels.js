@@ -100,7 +100,9 @@ function understandingMetaLine(nlu) {
     `Understanding: ${nlu.understanding}`,
     `Intent: ${label(nlu.intent || "unknown")}`,
     `Confidence: ${Math.round((nlu.confidence || 0) * 100)}%`,
-    `Model: ${nlu.model || "None"}`,
+    // "Not required" is the honest wording for the fast path: a request served
+    // by the lightweight layers did not skip a model, it never needed one.
+    `LLM: ${nlu.model || "Not required"}`,
   ];
   if (typeof nlu.latency_ms === "number") parts.push(`${nlu.latency_ms.toFixed(1)} ms`);
   if (nlu.requires_vision) parts.push("Vision");

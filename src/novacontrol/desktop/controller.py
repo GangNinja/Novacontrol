@@ -161,6 +161,21 @@ def parse_desktop_command(command: str) -> list[DesktopStep]:
         loose_match = re.match(r"(?:open|show|go to)\s+(?:the\s+|my\s+)?(.+?)\s*(?:folder|directory)\b", main_part)
         if loose_match:
             loose_folder = loose_match.group(1).strip()
+        else:
+            # A project is named in prose, not by extension, and opening one
+            # means opening its FOLDER: "open my NovaControl project". Without
+            # this the app branch below reads the whole phrase as a program
+            # called "my novacontrol project" and tries to launch it. The
+            # lookahead keeps the bare "open my project" out (nothing named
+            # there) so it stays a reference rather than a folder called "my".
+            project_match = re.match(
+                r"(?:open|show|go to|launch)\s+(?:(?:my|our|the)\s+)?"
+                r"(?!(?:my|our|the|a|an|new|that|this|those|these|it)\s+project\b)"
+                r"(.+?)\s+project\b",
+                main_part,
+            )
+            if project_match:
+                loose_folder = project_match.group(1).strip()
     if folder_match:
         steps.append(DesktopStep(kind="open_folder", target=folder_match.group(1).strip()))
     elif known_folder:

@@ -702,6 +702,10 @@ def create_app() -> Any:
             "capabilities": nova.intelligence.capabilities.to_dict(),
             "thresholds": nova.intelligence.thresholds.to_dict(),
             "lexical": {"exemplars": nova.intelligence.lexical.size},
+            # What the optional embedding layer is (a backend, an index size) and
+            # how it has actually been used (cache hits), so "semantic matching"
+            # is a measurable part of the status rather than a claim.
+            "semantic": nova.intelligence.semantic.to_dict(),
         }
 
     @app.get("/bugs")

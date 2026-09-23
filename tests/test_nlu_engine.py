@@ -354,13 +354,25 @@ class LexicalLayerTests(unittest.TestCase):
         self.assertEqual(first, second)
 
     def test_lexical_matching_can_be_disabled(self) -> None:
-        """A phrasing only the exemplar corpus knows depends on the switch."""
+        """A phrasing only the exemplar corpus knows depends on the switches.
+
+        TWO switches, because two layers read that corpus: TF-IDF (lexical) and
+        the embedding index (semantic). Switching off one leaves the other —
+        which is the point of separate switches — so the corpus-only phrasing is
+        only unreadable with both off.
+        """
         with_layer = _engine().understand("thanks that helped").intent.intent
-        without_layer = _engine(thresholds=NluThresholds(lexical_matching=False)).understand(
+        without_lexical = _engine(thresholds=NluThresholds(lexical_matching=False)).understand(
             "thanks that helped"
         ).intent.intent
+        without_any = _engine(
+            thresholds=NluThresholds(lexical_matching=False, semantic_matching=False)
+        ).understand("thanks that helped").intent.intent
         self.assertEqual(with_layer, IntentName.CONVERSATION)
-        self.assertEqual(without_layer, IntentName.CLARIFY)
+        # The embedding index still reads it: a near-exact exemplar is exactly
+        # the case the semantic layer is allowed to act on.
+        self.assertEqual(without_lexical, IntentName.CONVERSATION)
+        self.assertEqual(without_any, IntentName.CLARIFY)
 
 
 class ThresholdPolicyTests(unittest.TestCase):

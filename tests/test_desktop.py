@@ -658,6 +658,30 @@ class JarvisDesktopCommandTests(unittest.TestCase):
         steps = parse_desktop_command("open steam and go to library")
         self.assertEqual(steps[0].kind, "open")
 
+    def test_a_named_project_opens_as_a_folder_not_an_app(self) -> None:
+        """"open my NovaControl project" is a folder, under another name.
+
+        A project is named in prose, never by extension, so without its own
+        pattern the app branch reads the whole phrase as a program called
+        "my novacontrol project" and tries to launch it.
+        """
+        from novacontrol.desktop.controller import parse_desktop_command
+
+        steps = parse_desktop_command("open my NovaControl project")
+        self.assertEqual(steps[0].kind, "open_folder")
+        # The parser folds case before matching, and the on-disk folder search
+        # compares whole words, so the lowercased name still finds the folder.
+        self.assertEqual(steps[0].target, "novacontrol")
+        steps = parse_desktop_command("open the report project")
+        self.assertEqual(steps[0].kind, "open_folder")
+        self.assertEqual(steps[0].target, "report")
+        # A bare "open my project" names nothing, so it must not become a
+        # folder called "my" — there is no target to act on.
+        bare = parse_desktop_command("open my project")
+        self.assertFalse(
+            any(step.kind == "open_folder" and step.target.strip().lower() == "my" for step in bare)
+        )
+
     def test_resolve_folder_searches_temp_roots(self) -> None:
         """Spoken folder names resolve across the search roots by whole-word match."""
         import unittest.mock

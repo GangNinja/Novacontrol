@@ -37,6 +37,80 @@ _VERSION_LIKE = re.compile(r"\bv?\d+(?:\.\d+)+\b")
 
 _WHITESPACE = re.compile(r"\s+")
 
+# Conversational openers that carry no request. Stripped only when something
+# survives: "hi" is a whole conversational turn (the scratch brain answers it),
+# while "hey can you open chrome" is a command wearing a greeting.
+#
+# A word only belongs here if it is never the verb: "look" was in this list and
+# turned "look at this screenshot" into "at this screenshot", losing a vision
+# request to a clarifying question. Interjections are safe; anything that can
+# start a command is not.
+_LEADING_FILLER = re.compile(
+    r"^\s*(?:hey|hi|hello|yo|hiya|ok|okay|so|um|uh|well|now then)\b[\s,]*",
+    re.IGNORECASE,
+)
+
+# Contractions, expanded for MATCHING only (see ``expand_contractions``). The
+# rule table holds some phrasings in one form and some in the other; expanding
+# in place would break whichever form is missing, so this is applied as an
+# additional lookup pass rather than a rewrite.
+_CONTRACTIONS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
+    (re.compile(rf"\b{pattern}\b", re.IGNORECASE), replacement)
+    for pattern, replacement in (
+        ("can't", "cannot"), ("won't", "will not"), ("don't", "do not"),
+        ("doesn't", "does not"), ("didn't", "did not"), ("isn't", "is not"),
+        ("aren't", "are not"), ("couldn't", "could not"), ("shouldn't", "should not"),
+        ("wouldn't", "would not"), ("hasn't", "has not"), ("haven't", "have not"),
+        ("i'm", "i am"), ("i'll", "i will"), ("i've", "i have"), ("i'd", "i would"),
+        ("it's", "it is"), ("that's", "that is"), ("there's", "there is"),
+        ("what's", "what is"), ("where's", "where is"), ("who's", "who is"),
+        ("how's", "how is"), ("let's", "let us"), ("we're", "we are"),
+        ("you're", "you are"), ("they're", "they are"),
+    )
+)
+
+# Brand-to-launch-name aliases. Only pairs that are the SAME program — the
+# desktop runner resolves by name, so a wrong rewrite would launch the wrong
+# application or nothing at all.
+_APPLICATION_ALIASES: tuple[tuple[re.Pattern[str], str], ...] = tuple(
+    (re.compile(rf"\b{pattern}\b", re.IGNORECASE), canonical)
+    for pattern, canonical in (
+        ("google chrome", "chrome"),
+        ("microsoft edge", "edge"),
+        ("ms edge", "edge"),
+        ("mozilla firefox", "firefox"),
+        (r"windows explorer", "explorer"),
+        ("file explorer", "explorer"),
+    )
+)
+
+# Domain synonyms. ONE canonical form per group, and the groups are the ones
+# where two words really are interchangeable in a command ("show my ram" and
+# "show my memory" are the same request). This table is data: the exemplar
+# corpus consumes it to widen paraphrase coverage, and nothing rewrites user
+# text with it, so a synonym can never rename a file or an application.
+SYNONYM_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("memory", "ram"),
+    ("cpu", "processor"),
+    ("gpu", "graphics card", "video card"),
+    ("battery", "charge level", "power level"),
+    ("network", "connection", "internet"),
+    ("volume", "sound level", "loudness"),
+    ("brightness", "screen brightness", "display brightness"),
+    ("screenshot", "screen capture", "screen grab", "printscreen"),
+    ("folder", "directory", "dir"),
+    ("application", "app", "program"),
+    ("website", "web site", "site"),
+    ("delete", "remove", "erase"),
+    ("launch", "open", "start", "bring up", "fire up"),
+    ("close", "quit", "exit", "shut down"),
+    ("find", "locate", "search for", "look for"),
+)
+
+_SYNONYM_INDEX: dict[str, tuple[str, ...]] = {
+    term: group for group in SYNONYM_GROUPS for term in group
+}
+
 
 def contains_technical_token(text: str) -> bool:
     """True when the text holds tokens whose punctuation/spelling is semantic
@@ -71,10 +145,61 @@ def normalize(text: str) -> str:
         return value.rstrip(" .!?").strip()
 
     value = value.rstrip(" .!?;,:").strip()
-    value = _POLITE_TAIL.sub("", value)
-    value = _LEADING_POLITE.sub("", value)
+    # Politeness stacks: "can you please open chrome" needs both removed, so
+    # strip until the front stops changing.
+    previous = ""
+    while previous != value:
+        previous = value
+        value = _POLITE_TAIL.sub("", value).strip()
+        value = _LEADING_POLITE.sub("", value).strip()
+        value = _LEADING_FILLER.sub("", value).strip()
+        if not value:
+            value = previous  # a greeting on its own IS the request
+            break
     value = value.rstrip(" .!?;,:").strip()
+    for pattern, canonical in _APPLICATION_ALIASES:
+        value = pattern.sub(canonical, value)
     return _WHITESPACE.sub(" ", value).lower().strip()
+
+
+def expand_contractions(text: str) -> str:
+    """Contraction-expanded form of ``text``, for an extra matching pass.
+
+    Not applied by ``normalize``: the rule table holds some phrasings in one
+    form and some in the other, so rewriting up front would break whichever
+    form is missing. Callers try the normal form first and this one second.
+    """
+    value = text or ""
+    for pattern, replacement in _CONTRACTIONS:
+        value = pattern.sub(replacement, value)
+    return _WHITESPACE.sub(" ", value).strip()
+
+
+def synonym_variants(phrase: str, *, limit: int = 3) -> tuple[str, ...]:
+    """Phrasings of ``phrase`` with one synonym group substituted.
+
+    Used to widen the exemplar corpus, never to rewrite a live request: a
+    user's words are matched as they are, and these variants only add
+    paraphrase coverage for the lexical matcher.
+    """
+    normalized = normalize(phrase)
+    if not normalized:
+        return ()
+    variants: list[str] = []
+    for group in SYNONYM_GROUPS:
+        for term in group:
+            if not re.search(rf"\b{re.escape(term)}\b", normalized):
+                continue
+            for alternative in group:
+                if alternative == term:
+                    continue
+                candidate = re.sub(rf"\b{re.escape(term)}\b", alternative, normalized)
+                if candidate != normalized and candidate not in variants:
+                    variants.append(candidate)
+            break
+        if len(variants) >= limit:
+            break
+    return tuple(variants[:limit])
 
 
 def normalized_tokens(text: str) -> list[str]:

@@ -24,10 +24,10 @@ the configured threshold instead of trusting an opaque answer.
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-import math
 
 from novacontrol.intelligence.intent import IntentName
 from novacontrol.intelligence.normalize import normalize, normalized_tokens
@@ -53,7 +53,17 @@ class LexicalMatch:
     phrase: str
 
     def to_dict(self) -> dict[str, object]:
-        return {"intent": self.intent.value, "score": round(self.score, 4), "phrase": self.phrase}
+        """The candidate in the shape the NLU contract publishes.
+
+        ``candidate_intent`` and ``matched_examples`` are the agreed names for
+        a lexical match, so anything consuming a candidate (a UI readout, a
+        benchmark, a future embedding reranker) reads the same keys.
+        """
+        return {
+            "candidate_intent": self.intent.value,
+            "score": round(self.score, 4),
+            "matched_examples": [self.phrase],
+        }
 
 
 class LexicalMatcher:

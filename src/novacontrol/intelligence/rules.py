@@ -201,7 +201,12 @@ def default_rules() -> tuple[IntentRule, ...]:
             regex=(
                 r"^(?:read|show|display|view|cat|print)\b[^.]*\.[a-z0-9]{2,5}\b",
                 r"^(?:open|launch|start)\b[^.]*\.(?:txt|md|csv|tsv|log|json|ya?ml|toml|ini|"
-                r"cfg|conf|xml|py|js|ts|tsx|jsx|html|css|sh|bash|bat|ps1|sql|env)\b",
+                r"cfg|conf|xml|py|js|ts|tsx|jsx|html|css|sh|bash|bat|ps1|sql|env|"
+                # Documents and media: "open report.pdf" names a file to view,
+                # not an application to launch. Without these, the target was
+                # claimed as an application literally called "report.pdf".
+                r"pdf|docx?|xlsx?|pptx?|rtf|odt|ods|png|jpe?g|gif|svg|webp|bmp|"
+                r"zip|tar|gz|7z|mp3|mp4|wav|mov|mkv|avi)\b",
             ),
             entity="file",
             confidence=0.85,
@@ -221,6 +226,20 @@ def default_rules() -> tuple[IntentRule, ...]:
             prefixes=("find my project", "find the project", "locate my project",
                       "locate the project", "where is my project", "where's my project"),
             regex=(r"^(?:find|locate|where\s+is)\s+(?:my|our|the)?\s*[\w][\w .&+-]{1,40}?\s+project\b",),
+            entity="project",
+            confidence=0.85,
+        ),
+        # A project OPENED by name ("open my NovaControl project") is a folder
+        # with a prose name, not an application: the generic "open " rule would
+        # otherwise read the whole phrase as an app called "novacontrol
+        # project" and try to launch it. The lookahead keeps the bare "open my
+        # project" out, so a reference to something already known resolves from
+        # context instead of inventing a name.
+        IntentRule(
+            IntentName.OPEN_FOLDER,
+            regex=(r"^(?:open|show|launch|go\s+to)\s+(?:(?:my|our|the)\s+)?"
+                   r"(?!(?:my|our|the|a|an|new)\s+project\b)"
+                   r"[\w][\w .&+-]{1,40}?\s+project\b",),
             entity="project",
             confidence=0.85,
         ),

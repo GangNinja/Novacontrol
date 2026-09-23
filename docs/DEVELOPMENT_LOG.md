@@ -379,20 +379,351 @@ on both the linux and win32 views, `docs/API.md` in sync. The regression that
 mattered was caught the same way as before — by running the whole suite, not the
 new tests.
 
-## 14. Where things stand
+## 14. Phase 2: making the lightweight layer production-ready
 
-- **Scale**: ~70,000 lines (35.4k Python source across 189 modules, 19.4k tests,
-  10k web UI, 3.1k markdown, remainder scripts/config).
-- **Validation at the tip**: full suite **1014 passed / 12 skipped** (Windows);
-  mypy clean on both the linux and win32 views; `docs/API.md` in sync; CI
-  green through run #12 (`316b95a`), the first run after the both-views type
-  check landed.
-- **History**: all work pushed through `316b95a`; the vision work of section 12
-  is committed as `8a203e6` and the hybrid NLU layer of section 13 as
-  `d44e0a3`, with this log entry on top.
-- **Open threads**: nineteen taxonomy intents (file operations, device
-  controls, the code family) are understood but have no executor wired — see
-  the drift guard in `tests/test_nlu_engine.py`; stored
+Phase 1 proved a request could be understood without a model. Phase 2 was about
+making that understanding *reliable, inspectable and cheap enough to trust* —
+and about the one thing Phase 1's verification had left broken.
+
+**The fallback was returning nothing, and we knew why.** The Phase 1 audit ran
+the real slow-path request through the real provider and got **143 s, then 115 s,
+and zero characters of answer** — the model spent its entire reply budget
+thinking. The fix was to match the endpoint to the capability rather than trying
+to flag a workaround: `/v1/chat/completions` *ignores* `think: false` (OpenAI's
+shape has no place for it), but Ollama's own `/api/chat` honours it. Structured
+local calls now take that path. Measured on this CPU-only machine with the
+project's real understanding prompt: **118.2 s returning nothing → 13.4 s
+returning valid JSON**, which parsed into `recall` with `project: NovaControl`.
+Chat is deliberately left on the compatible surface — it wants prose, and a
+model's reasoning costs latency it does not need to pay.
+
+**Everything else in the phase was about not guessing.** A normalization
+pipeline collapses politeness, contractions, spelling variants and product
+aliases (*"hey, can you bring up Google Chrome for me?"* and *"please launch
+chrome"* reach the same reading) while proving it never eats an entity —
+`open report-final.pdf` still yields `file: report-final.pdf`, hyphen and dot
+intact. Confidence stopped being a similarity score wearing a label and became a
+sum: match strength, entity completeness against the catalog's declared
+requirements, how close the runner-up came, whether a reference was resolved,
+and what the request needs next. Ambiguity *lowers* a reading and a missing
+entity lowers it without zeroing it, which is what makes *"open chrome"* land at
+0.90 and *"open it"* at 0.74 without a special case for either.
+
+**A table, not three modules.** Intent definitions moved into one declarative
+catalog: description, examples drawn from the exemplar corpus, required and
+optional entities, tools, handler, confirmation, web, vision, confidence floor,
+execution category. Adding an intent is now a table entry, and two modules
+cannot silently disagree about what an intent means. The catalog also made an
+uncomfortable question answerable — *which* intents actually dispatch — which is
+how the nineteen unrouted ones became a written-down gap instead of a surprise.
+
+**Complexity, counted rather than measured in words.** `SIMPLE` / `MODERATE` /
+`COMPLEX` is decided from actions, dependencies between them, unresolved
+references, ambiguity and reasoning words. "Open Chrome" is local; "Open Chrome
+and search YouTube for Python tutorials" needs the planner; "Find the project I
+was working on yesterday, inspect the latest changes, run the tests, identify
+failures and explain what to fix" is the one case that reaches the model because
+of its *shape* rather than its confidence.
+
+**One test I had to correct rather than satisfy.** A new guard asserted that
+every intent's confidence floor sits below its own rule's reading — the point
+being that a deterministic match should never be silently demoted off the fast
+path. It failed on eight intents. Investigating showed the guard was wrong, not
+the catalog: its lookup took the *last* rule for an intent instead of the
+*strongest* (which is what the registry derives from), and the remaining seven
+cases were floors declared **deliberately** on actions that close, delete, spend
+or type, where paying for a second look is the whole point. The test now asserts
+the honest invariant — a floor above the rule's reading must be one of those
+deliberate cases, enumerated so a new accidental floor fails and silently
+removing a deliberate one fails too.
+
+**Measured, not estimated.** Phase 2 adds the timing breakdown a local model
+reports about its own work — weights load, time to first token, decode rate,
+true inference total — converted from Ollama's nanoseconds and recorded per
+escalated request. A cloud provider reports none of that, and now *says* it
+reported none: the aggregate is empty rather than a row of fabricated zeroes.
+
+**What the measurements actually say.** Deterministic understanding across the
+fast-path phrasings and their paraphrases (`Open Chrome.`, `Close Spotify.`,
+`Take a screenshot.`, `Open VS Code.`, `Turn volume to 50%`, `launch`/`start`/
+`bring up chrome`, `hey, can you open chrome for me?`, `check my memory`, `how
+much RAM am I using?`, `what programs are using my memory?`): **0.13–0.41 ms**,
+median 0.26 ms, every one on `fast_path` with no model — against a target of
+sub-100 ms. End-to-end through the real application, including the live
+`system_monitor` read and the response shaping: **137 ms** for *"What's my RAM
+usage?"* ("You're currently using 12.9 GB of 15.4 GB RAM (83.8%).") and **100 ms**
+for *"What's my battery percentage?"* — both returned as finished sentences with
+no model call.
+
+**One measurement deliberately not taken.** Re-running the live Qwen3 fallback
+would mean loading an 8B model against **2.7 GiB** of free memory on a 16 GB
+machine — enough to make the whole desktop thrash for minutes. No model was
+resident (`/api/ps` empty), so there was nothing to unload and nothing safe to
+load, and the decision was left to the user rather than taken at the machine's
+expense. The verified numbers from the fix above stand.
+
+**Validation at the tip of this work**: **1097 passed / 12 skipped**, mypy clean
+on both the linux and win32 views, `docs/API.md` in sync, the full suite run
+rather than the new tests alone.
+
+## 15. Phase 1's own bugs, and the embedding layer Phase 1 asked for
+
+An audit against the original specification — run the spec's own examples
+rather than re-reading the code — turned up two defects in behaviour shipped in
+section 13, one requirement that had been met only in prose, and one honest
+refusal.
+
+**A hand-built reading skipped the step that describes it.** *"Open Chrome and
+search YouTube for the latest AI news"* is detected as ONE browser task before
+the clause splitter can turn it into an app launch plus a stray search. But the
+composite path assembled its `StructuredIntent` directly and returned it, so it
+never passed through the post-processing that derives each reading's requirement
+flags from the catalog. It reported **`requires_web=False` for a web task** — the
+planner and the approval layer would have judged it by a different description
+of the same work than the catalog gives. Both the sync and async paths now
+post-process every reading, and its goal is rebuilt from the parts read
+(`verb + site + query`) instead of reporting the dangling *"for the latest ai
+news"* a greedy split left behind.
+
+**A project was being launched as a program.** *"Open my NovaControl project"*
+matched the generic *"open ___"* rule, which read the whole phrase as an
+application called *novacontrol project*. A project is named in prose, never by
+extension, so it now has its own rule and reads as `project: novacontrol`; the
+entity is mirrored to `folder` because a project IS a folder and that is what
+the capability opens. The companion fix was on the other side of the same
+coin: adding a *project* rule immediately broke *"show me that project"* into a
+project named *"show me that"* — a kind word preceded only by neutral words is a
+**reference**, so `project` joined the reference table and resolves from context
+(or asks) instead of inventing a name.
+
+**The same mistake was one layer down, and only end-to-end checking found it.**
+The NLU reading was right and the plan was still wrong: `plan_desktop_command`
+re-parses the raw request in the desktop controller, so with the intent and its
+`folder` entity resolved correctly, the planner still produced
+`open_application` targeting *"my novacontrol project"* — a program that does
+not exist. Unit tests could not see it (the NLU layer was correct); running the
+spec's own example through the HTTP API could. The controller now has a project
+pattern next to its other prose-folder patterns, with a lookahead so the bare
+*"open my project"* stays a reference rather than a folder named *my*. The
+request now plans `Open folder novacontrol`, resolved on disk like any other
+spoken folder name.
+
+**Six specification names had no machine-readable equivalent.** The taxonomy's
+docstring mapped `launch_website → navigate`, `create_file → write_file`,
+`execute_command → run_command`, `screenshot → take_screenshot`, `explain →
+answer_question` and `unknown → clarify`, but prose is not a mapping a caller can
+use. They are now an exported `INTENT_ALIASES` table plus `resolve_intent()`,
+which resolves either vocabulary and returns `None` for a name this system does
+not have. A second intent per synonym would have routed twice to one handler; an
+alias is the same name spelled differently, so it resolves.
+
+**The embedding layer Phase 1 asked for did not exist**, and the honest question
+was whether it *could* be built without a model. It can, and the interesting
+part of the work was deciding what it is allowed to decide. The default vector
+space is deterministic and dependency-free: content-word, bigram and character
+n-gram features, hashed with blake2b (not `hash()`, which is salted per process)
+and weighted by inverse document frequency. Two findings shaped it, both from
+running a leave-one-out benchmark over the whole exemplar corpus rather than
+trusting intuition:
+
+- **Function words were dominating the vectors.** With them in, *"how much ram
+do i have"* matched **battery_status** above memory_status — *"how much … do i
+have left"* is almost entirely function words. Dropping them raised precision at
+the acting threshold from 23% to 62% on the same sweep.
+- **A raw similarity is not a decision.** *"Show me the florb"* scores 0.61
+against *"show me the documents folder"* because it shares that phrase's shape,
+and sits within 0.04 of a different intent. Trusting similarity would have let
+nonsense select a tool — and worse, inside a multi-clause request it would have
+silently *resolved* the unresolvable clause, deleting the "I did not understand
+this part" signal the multi-step path depends on (a pre-existing test caught
+exactly that within minutes of the layer being wired in). The gate is therefore
+on the **calibrated** confidence after the multi-signal arithmetic: measured
+precision is 41% at 0.50, 48% at 0.55, **62% at 0.60 (8% of phrases)**, 67% at
+0.70, 80% at 0.80, and the default floor is the knee. That default is a config
+value, and the number describes the local hashing space — a deployment with a
+real embedding backend should lower it against its own measurement.
+
+One arithmetic bug was worth the whole exercise. An embedding similarity was
+being passed through the **lexical** slot of the confidence blend, which weights
+it at 35% — so a genuine paraphrase calibrated to ~0.22 and nonsense to ~0.16,
+i.e. the layer could never act and the two were nearly indistinguishable. An
+embedding match is not a hint *about* a deterministic match; it IS the evidence,
+so it now enters at full weight in its own signal (and a rule, when present,
+still carries a 65/35 blend — a feel-alike never overrules a real match).
+
+What the layer deliberately does **not** do: it is not taught as a learned
+variation (turning a similarity into a deterministic rule is a stronger claim
+than the evidence supports), it never reports itself as the language model (its
+source is `embedding`; `semantic` in this system means the model), and it is not
+consulted at all when the request is a bare reference or names a technical
+token. Per-layer costs (`rules`, `lexical`, `semantic`, `model`) now travel with
+each reading under `layer_ms`, so a slow request can be attributed to a step
+instead of to the pipeline.
+
+**Two existing tests had to be corrected rather than satisfied**, and both were
+wrong in instructive ways. My new invariant *"no catalog floor exceeds its
+rule's own confidence"* failed on eight intents — because the guard took the
+*last* matching rule instead of the *strongest* (which is what the registry
+derives from), and because the remaining cases are floors declared
+**deliberately** on actions that close, delete, spend or type. The guard now
+asserts the honest invariant with those cases enumerated, so a new accidental
+floor still fails. And `test_lexical_matching_can_be_disabled` asserted that
+turning off TF-IDF makes an exemplar-only phrasing unreadable — true until the
+embedding index read the same corpus. It now switches off *both* corpus-based
+layers and asserts the intermediate state explicitly: with TF-IDF off the
+embedding still reads a near-exact exemplar, which is exactly what an exact
+match should earn.
+
+**Measured, at the tip of this work** (Windows, CPU-only):
+
+| | |
+|---|---|
+| Embedding index build (200 exemplar phrases) | **~14 ms**, once, lazily |
+| Embedding query, uncached / cached | **0.9–1.5 ms** / **0.02–0.05 ms** |
+| Leave-one-out precision at the default floor | **62%** at 8% coverage (TF-IDF layer: 27% at its gate) |
+| Fast-path understanding | **0.2–4 ms**, no model |
+| `"open my NovaControl project"` | end-to-end **108–127 ms**: `open_folder`, `project: novacontrol`, plan `Open folder novacontrol`, no model |
+| `"open chrome and search youtube for X"` | `browser_action`, `requires_web=True`, goal rebuilt |
+
+**Validation at the tip of this work**: **1134 passed / 12 skipped**, mypy
+clean on both the linux and win32 views, `docs/API.md` in sync, `ruff` clean on
+the new modules and test files (the repo's pre-existing lint findings are
+untouched, and one import-sorting finding was removed rather than added). One pre-existing timing test
+(`test_telemetry.py::test_polling_is_cheap`, a 1.0 s budget for ten polls)
+measured 1.12 s under a loaded full-suite run and passes in isolation and on the
+next full run — load-sensitive, not caused by these changes, but it is a budget
+worth loosening.
+
+## 16. Phase 2, verified against its own specification
+
+Phase 2 was implemented and then reported as done. This section is what came of
+re-deriving all eighteen of its requirements from the code rather than from the
+report, running the spec's own example sentences through the live engine, and
+fixing everything that disagreed. Six real defects fell out — five of them
+silent, none of them caught by the suite that shipped with the work.
+
+**What held up under checking.** The normalization pipeline collapses
+politeness, contractions, synonyms and product aliases without eating a
+filename (`"open report-final.pdf"` keeps `report-final.pdf`). The catalog
+carries every field the spec names (description, examples, required and
+optional entities, tools, confirmation, web, vision, confidence floor,
+execution category). The lexical matcher returns the agreed contract —
+`candidate_intent`, `score`, `matched_examples`. Thirteen entity readers cover
+the spec's thirteen types. Confidence combines all six factors the spec lists.
+Strict validation does repair → stricter retry → controlled failure, and never
+lets a malformed reply reach tool execution. Fast-path understanding measured
+0.13–0.41 ms across the spec's seven example commands with no model call; the
+provider records load, first-token, decode and true inference timings; vision
+is schema-only with no VLM added, as item 12 requires; no additional model was
+installed (item 13); the spec's A–I case list is a test class; the UI readout
+shows Mode/NLU/Intent/Confidence/LLM/Latency; and an ununderstood request still
+falls through to the legacy brain path (item 17).
+
+**The defect that mattered most: a continuation was answered as a GPU reading.**
+*"Continue from where I stopped"* reached the embedding layer, whose nearest
+exemplar was `gpu_status` at **0.566 raw**, calibrating to **0.63** — over the
+0.60 floor — so a request to resume work was routed as hardware telemetry and
+would have been carried out. The floor was not the bug: a raw similarity has no
+way to know the phrase names no target at all. The fix is a shape test, not a
+threshold (`is_continuation`, narrow on purpose): a *bare* continuation is
+declined by the embedding layer and resolved from memory by the context
+resolver — replaying the last understanding — or, when nothing is remembered,
+left to the model and then to one precise question. The narrowness is the
+design: *"continue the project I was working on yesterday"* names something and
+still flows through the pipeline as the spec's COMPLEX example.
+
+**The learning loop was teaching phrases that must never become rules.**
+*"Do the same thing"* was taught against a file read — and because the learned
+layer runs *before* the context resolver, it then replayed that read after an
+unrelated browser task (`-> read_file`, expected `browser_action`). One measured
+scenario, two requests apart. Nothing is taught now for a phrase carrying a
+resolved reference, a bare reference, or a bare continuation; ordinary phrasings
+still teach, which a companion test pins down so the guard cannot quietly widen
+into "teach nothing".
+
+**A composite reading counted as one action.** *"Open Chrome and search YouTube
+for Python tutorials"* — the spec's own MODERATE example — was assessed
+`simple` with `needs_planner=False`, because the composite path called
+`_finalize` without its step count while every other multi-step path passed one.
+The reading already knew its actions (`open_application`, `navigate`,
+`search`); nothing asked. It is now `moderate` / `needs_planner=True`, and
+*"Open Chrome."* stays `simple`.
+
+**The vision requirement was lost exactly when it mattered.**
+*"Describe the image on screen"* has both a vision subject and a vision verb,
+but it resolves to nothing the lightweight layers can act on, so it took the
+clarification path — which routes *without* deriving requirements. Result:
+`requires_vision=False`, route `clarify`. The request was answerable by
+*looking*, and the system asked a text question instead. Requirements are now
+derived before routing on that path too: `requires_vision=True`, route
+`vision`, `reasoning_level=vision` — and the clarification record carries the
+route it was routed to, so the aggregate no longer files a vision request under
+"question" without saying where it actually went.
+
+**Item 15's success/failure was not recorded anywhere.** The record carried
+request id, timestamp, normalized text, intent, confidence, method, model use,
+model latency, tool and total latency — and stopped at "was it understood".
+Worse, the request id was minted separately from the intent's own id, so nothing
+*upstream* could report an outcome against it. The id is now derived from the
+intent (`req-<id[:12]>`), travels to the client in the NLU payload, and
+`record_outcome()` annotates the same sample after the handler runs — success or
+failure, with the exception's type, re-raised unchanged. An outcome nobody
+reported stays absent rather than counting as a success.
+
+**Deliberately left alone.** A fast-path reading whose target came from memory
+(*"open it"* after opening VS Code) still reports `source="fast_path"` while its
+`references` tuple and the routing reason record the context resolution and its
+confidence is capped at 0.74. The label describes where the *intent* came from —
+the fast path — and the evidence for the target travels beside it, so changing
+it would edit a contract nothing is currently misled by.
+
+**Measured after the fixes** (Windows, CPU-only, `NOVACONTROL_NLU_ALLOW_LLM=false`):
+
+| | |
+|---|---|
+| `"continue from where I stopped"`, no memory | one precise question, no invented intent |
+| same, after `"read report.pdf"` | `read_file`, `contextual`, **0.70** |
+| `"do the same thing"` after a read, then after a browser task | `read_file` → **`browser_action`** (was `read_file` both times) |
+| `"Open Chrome and search YouTube for Python tutorials."` | **moderate**, `needs_planner=True` (was `simple`) |
+| `"describe the image on screen"` | `requires_vision=True`, route **vision** (was `False` / clarify) |
+| record id vs intent id | identical (`req-<id[:12]>`), outcome recorded against it |
+
+**Validation at the tip of this work**: **1148 passed / 12 skipped**, 14 tests
+added for these fixes; mypy clean on both the linux and win32 views; `docs/API.md`
+in sync; `ruff` clean on every new module and test file. The repo's ~1.3k
+pre-existing lint findings are unchanged (one import-sorting finding removed
+earlier in this work, none added here).
+
+**Still true, and worth repeating:** the confidence thresholds are the spec's
+defaults rather than values tuned against a corpus of real requests; the
+embedding floor is measured against the *local* hashing vector space and must be
+re-measured for a real embedding backend; and one honest ambiguity remains —
+with no context at all, the single word *"resume"* reads as `media_control` via
+the exemplar matcher (a legitimate media command) rather than asking. With any
+context present it resumes the remembered task instead.
+
+## 17. Where things stand
+
+- **Scale**: ~72,000 lines (37.2k Python source across 192 modules, 20.5k tests,
+  9.4k web UI, remainder markdown/scripts/config).
+- **Validation at the tip**: full suite **1148 passed / 12 skipped** (Windows);
+  mypy clean on both the linux and win32 views; `docs/API.md` in sync. The CI
+  matrix last went green on `4dc67c2` (run #13), before the Phase 2 work.
+- **History**: the vision work of section 12 is committed as `8a203e6`, the
+  hybrid NLU layer of section 13 as `d44e0a3`, and the log entry covering both as
+  `4dc67c2`. The Phase 2 work of section 14, the fixes and embedding layer of
+  section 15, and the verification fixes of section 16 are **uncommitted** in the
+  working tree.
+- **Open threads**: the Phase 2 and section 15 changes have not been through CI
+  yet; the embedding layer's floor (0.60) is measured against the *local*
+  hashing vector space, so a deployment configuring a real embedding backend
+  should re-measure and lower it; nineteen
+  taxonomy intents (file operations, device controls, the code family) are
+  understood but have no executor wired — see the drift guard in
+  `tests/test_nlu_engine.py`; the live Qwen3 fallback has not been re-measured
+  since the endpoint fix, because loading 8B against 2.7 GiB free on this box
+  would thrash the desktop; the confidence thresholds are still the spec's
+  defaults rather than values tuned against a real corpus of requests; stored
   Gemini key is still the Vertex-format one (Settings
   → Test Connection with an `AIza…` key fixes Chat/Coding/Explore in one
   step); local answers take 20–110s on this CPU-only box — the timeout now

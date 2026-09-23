@@ -10,13 +10,38 @@ feeds the self-improvement engine's sandboxed planning.
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 # Kept small: telemetry is a rolling window, not an audit log (the audit log
 # already exists for actions). Everything counts, only the last samples are
 # kept verbatim.
 _MAX_SAMPLES = 50
+
+# The timing fields a local model reports about its own work, in the order a
+# request experiences them. Only fields the backend actually reported appear in
+# a sample, so an unmeasured path records nothing instead of a zero.
+_TIMING_FIELDS: tuple[str, ...] = (
+    "model_load_ms",
+    "first_token_ms",
+    "prompt_eval_ms",
+    "decode_ms",
+    "total_inference_ms",
+    "tokens_per_second",
+)
+
+
+def request_id_for(intent_id: str) -> str:
+    """The id that ties one request's understanding to its OUTCOME.
+
+    Derived from the intent's own id rather than minted separately, so the id
+    the API and the UI already hold is the one the log carries. A correlatable
+    id is what makes "understood correctly, then failed" a discoverable fact
+    instead of two unrelated records that happen to share a minute.
+    """
+    return f"req-{intent_id[:12]}"
 
 
 def _percentile(values: list[float], fraction: float) -> float:
@@ -41,7 +66,14 @@ class _Stats:
     # makes "is the NLU actually keeping work off the LLM?" answerable.
     routes: Counter[str] = field(default_factory=Counter)
     escalations: Counter[str] = field(default_factory=Counter)
+    outcomes: Counter[str] = field(default_factory=Counter)
     latency_ms: list[float] = field(default_factory=list)
+    # Per-field samples of the provider's own timings (load, prefill/decode,
+    # tokens/second). Kept as a list per field so the summary can report an
+    # average rather than only the most recent call.
+    model_timings: dict[str, list[float]] = field(
+        default_factory=lambda: {name: [] for name in _TIMING_FIELDS}
+    )
 
 
 class InterpretationTelemetry:
@@ -63,6 +95,10 @@ class InterpretationTelemetry:
         taught: bool = False,
         route: str = "",
         latency_ms: float = 0.0,
+        tool: str = "",
+        complexity: str = "",
+        request_id: str = "",
+        used_model: bool = False,
     ) -> None:
         self._stats.resolved[intent] += 1
         self._stats.strategies[strategy] += 1
@@ -80,21 +116,92 @@ class InterpretationTelemetry:
             "taught_variation": taught,
             "route": route,
             "latency_ms": round(latency_ms, 3),
+            "tool": tool,
+            "complexity": complexity,
+            "request_id": request_id,
+            "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
+            "nlu_method": strategy,
+            "used_model": used_model,
         })
 
-    def record_escalation(self, *, reason: str, normalized: str = "", latency_ms: float = 0.0) -> None:
-        """Record that understanding had to fall back to a language model."""
+    def record_escalation(
+        self,
+        *,
+        reason: str,
+        normalized: str = "",
+        latency_ms: float = 0.0,
+        timings: Mapping[str, float] | None = None,
+    ) -> None:
+        """Record that understanding had to fall back to a language model.
+
+        ``latency_ms`` here is the model's own cost, not the request's — the
+        difference between "understanding was slow" and "the model was slow"
+        is the whole point of measuring both.
+
+        ``timings`` is the backend's own breakdown of that cost (how long the
+        weights took to load, how long before the first token, how fast it then
+        decoded). It is optional because a cloud provider reports none, and a
+        missing measurement must stay visibly missing.
+        """
         self._stats.escalations[reason or "unspecified"] += 1
+        measured = {
+            name: round(float(timings[name]), 3)
+            for name in _TIMING_FIELDS
+            if timings is not None
+            and isinstance(timings.get(name), (int, float))
+            and timings[name] > 0
+        }
+        for name, value in measured.items():
+            self._stats.model_timings[name].append(value)
+            del self._stats.model_timings[name][:-_MAX_SAMPLES]
         self._sample({
             "kind": "escalation",
             "reason": reason,
             "normalized": normalized,
             "latency_ms": round(latency_ms, 3),
+            **measured,
         })
 
-    def record_clarification(self, *, question: str, normalized: str = "") -> None:
+    def record_outcome(self, *, request_id: str, success: bool, detail: str = "") -> None:
+        """Report what happened AFTER understanding: carried out, or not.
+
+        The engine can only record that a request was understood; whether it
+        then succeeded is known one layer up, where the handler runs. Recording
+        it against the same ``request_id`` is what closes the loop, and it is
+        deliberately separate from the resolution sample so a missing outcome
+        means "not reported" rather than "succeeded".
+        """
+        self._stats.outcomes["success" if success else "failure"] += 1
+        for sample in reversed(self._stats.samples):
+            if sample.get("request_id") == request_id and "kind" in sample:
+                if sample.get("outcome"):
+                    break  # already reported; the first word is the true one
+                sample["outcome"] = "success" if success else "failure"
+                if detail:
+                    sample["outcome_detail"] = detail
+                break
+
+    def record_clarification(
+        self, *, question: str, normalized: str = "", route: str = ""
+    ) -> None:
+        """Record the question AND the route that produced it.
+
+        Most clarifications are route ``clarify``, but not all: a request that
+        needs an image is flagged and routed to vision even when the words alone
+        resolve to nothing. Counting the route here is what keeps the aggregate
+        honest about where a request actually went.
+        """
         self._stats.clarifications += 1
-        self._sample({"kind": "clarification", "question": question, "normalized": normalized})
+        if route:
+            self._stats.routes[route] += 1
+        self._sample(
+            {
+                "kind": "clarification",
+                "question": question,
+                "normalized": normalized,
+                "route": route,
+            }
+        )
 
     def record_unknown(self, *, normalized: str = "") -> None:
         self._stats.unknown += 1
@@ -127,6 +234,16 @@ class InterpretationTelemetry:
                 "max": round(max(latencies), 3) if latencies else 0.0,
                 "p95": round(_percentile(latencies, 0.95), 3),
             },
+            # What the model cost us, broken down: how long residency took, how
+            # long before the first token, how fast it decoded. Empty when no
+            # escalated request has reported timings — an unmeasured path says
+            # nothing rather than claiming zero.
+            "model_timings": {
+                name: round(sum(values) / len(values), 3)
+                for name, values in s.model_timings.items()
+                if values
+            },
+            "outcomes": dict(s.outcomes.most_common()),
             "clarifications": s.clarifications,
             "unknown_intents": s.unknown,
             "failed_entity_resolutions": s.failed_entities,

@@ -50,7 +50,10 @@ _FILE_LIKE = re.compile(
 _QUOTED = re.compile(r"[\"'`]([^\"'`]{1,200})[\"'`]")
 _URL = re.compile(r"\b(?:https?://|www\.)\S+", re.IGNORECASE)
 _BARE_DOMAIN = re.compile(r"\b([a-z0-9-]+(?:\.[a-z0-9-]+)+)\b", re.IGNORECASE)
-_PERCENT = re.compile(r"\b(\d{1,3})\s*(?:%|percent)\b")
+# The word boundary belongs after the WORD form only: "%" is not a word
+# character, so a trailing \b made "20% off" unmatchable while "50%" at the
+# end of a string still matched — a difference no test had noticed.
+_PERCENT = re.compile(r"\b(\d{1,3})\s*(?:%|percent\b)")
 _BARE_LEVEL = re.compile(r"\b(?:to|=|at)\s*(\d{1,3})\b")
 _NUMBER = re.compile(r"\b(\d+(?:\.\d+)?)\b")
 # A project is named in prose ("find my NovaControl project"), never by an
@@ -60,6 +63,34 @@ _NAMED_PROJECT = re.compile(
     r"|\bproject\s+(?:called|named)\s+([\w][\w .&+'-]{0,40})",
     re.IGNORECASE,
 )
+
+_CLOCK_TIME = re.compile(
+    r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b|\b\d{1,2}:\d{2}(?::\d{2})?\b",
+    re.IGNORECASE,
+)
+_RELATIVE_TIME = re.compile(
+    r"\bin\s+\d{1,3}\s*(?:seconds?|minutes?|mins?|hours?)\b",
+    re.IGNORECASE,
+)
+_ABSOLUTE_DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b")
+_SPOKEN_DATE = re.compile(
+    r"\b(?:today|tomorrow|tonight|yesterday|next week|this week|next month|"
+    r"next (?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|on (?:monday|tuesday|"
+    r"wednesday|thursday|friday|saturday|sunday))\b",
+    re.IGNORECASE,
+)
+_DEVICE_WORD = re.compile(
+    r"\b(?:phone|mobile|android|iphone|laptop|desktop|pc|computer|mac|tablet|ipad|chromebook)\b",
+    re.IGNORECASE,
+)
+# Spoken device words collapse to the two the pipeline acts on: phone vs this box.
+_DEVICE_CANONICAL: dict[str, str] = {
+    "phone": "phone", "mobile": "phone", "android": "phone", "iphone": "phone",
+    "tablet": "phone", "ipad": "phone",
+    "laptop": "desktop", "desktop": "desktop", "pc": "desktop", "computer": "desktop",
+    "mac": "desktop", "chromebook": "desktop",
+}
+_BACKTICKED = re.compile(r"`([^`]{1,200})`")
 
 _SEARCH_FOR_SITE = re.compile(
     r"\b(?:search|look up|google|find)\b(?:.*?)\b(?:" + "|".join(KNOWN_SITES) + r")\b\s*(?:for|about)?\s*(.+)$",
@@ -299,6 +330,103 @@ class NumberExtractor:
 
 
 @dataclass(frozen=True, slots=True)
+class PercentageExtractor:
+    """A percentage the user stated, as its own kind.
+
+    ``level`` stays the contract for the device controls (volume/brightness),
+    where the number IS the setting; everywhere else a percentage is a value
+    the request carries, so it gets its own kind rather than overloading one.
+    """
+
+    name: str = "percentage"
+    kinds: tuple[str, ...] = ("percentage",)
+
+    def extract(self, normalized: str, intent: IntentName) -> dict[str, Any]:
+        if intent in (IntentName.VOLUME_CONTROL, IntentName.BRIGHTNESS_CONTROL):
+            return {}
+        match = _PERCENT.search(normalized)
+        if match:
+            return {"percentage": _clamp_percent(int(match.group(1)))}
+        return {}
+
+
+@dataclass(frozen=True, slots=True)
+class TimeExtractor:
+    """Clock times ("at 5pm", "6:30", "in 10 minutes")."""
+
+    name: str = "time"
+    kinds: tuple[str, ...] = ("time",)
+
+    def extract(self, normalized: str, intent: IntentName) -> dict[str, Any]:
+        match = _CLOCK_TIME.search(normalized)
+        if match:
+            return {"time": match.group(0).strip()}
+        relative = _RELATIVE_TIME.search(normalized)
+        if relative:
+            return {"time": relative.group(0).strip()}
+        return {}
+
+
+@dataclass(frozen=True, slots=True)
+class DateExtractor:
+    """Calendar dates, absolute or spoken ("tomorrow", "next monday")."""
+
+    name: str = "date"
+    kinds: tuple[str, ...] = ("date",)
+
+    def extract(self, normalized: str, intent: IntentName) -> dict[str, Any]:
+        match = _ABSOLUTE_DATE.search(normalized)
+        if match:
+            return {"date": match.group(0).strip()}
+        spoken = _SPOKEN_DATE.search(normalized)
+        if spoken:
+            return {"date": spoken.group(0).strip()}
+        return {}
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceExtractor:
+    """Which machine the request is about.
+
+    The phone intents are chosen by the rules, but the device is also *data*:
+    "open spotify on my phone" and "open spotify" are different requests, and a
+    later step that needs to know where to act should not have to re-read the
+    sentence to find out.
+    """
+
+    name: str = "device"
+    kinds: tuple[str, ...] = ("device",)
+
+    def extract(self, normalized: str, intent: IntentName) -> dict[str, Any]:
+        match = _DEVICE_WORD.search(normalized)
+        if match:
+            return {"device": _DEVICE_CANONICAL.get(match.group(0).lower(), match.group(0).lower())}
+        return {}
+
+
+@dataclass(frozen=True, slots=True)
+class CommandExtractor:
+    """A shell command the user spelled out ("run git status", ``ls -la``)."""
+
+    name: str = "command"
+    kinds: tuple[str, ...] = ("command",)
+
+    def extract(self, normalized: str, intent: IntentName) -> dict[str, Any]:
+        backticked = _BACKTICKED.search(normalized)
+        if backticked and backticked.group(1).strip():
+            return {"command": backticked.group(1).strip()}
+        # The command is whatever follows the execute verb, verbatim: this is
+        # the one entity that must never be "cleaned up" into a paraphrase.
+        for prefix in ("run command ", "run the command ", "execute command ", "execute ", "run "):
+            if normalized.startswith(prefix):
+                command = normalized[len(prefix):].strip()
+                if command and intent in (IntentName.RUN_COMMAND, IntentName.CHAT, IntentName.AGENTIC_TASK):
+                    return {"command": command}
+                break
+        return {}
+
+
+@dataclass(frozen=True, slots=True)
 class QuotedTextExtractor:
     """Explicitly quoted literal text ('type "hello world"')."""
 
@@ -321,7 +449,12 @@ def default_extractors() -> EntityExtractorRegistry:
         ProjectExtractor(),
         UrlExtractor(),
         QueryExtractor(),
+        CommandExtractor(),
         LevelExtractor(),
+        PercentageExtractor(),
+        TimeExtractor(),
+        DateExtractor(),
+        DeviceExtractor(),
         QuotedTextExtractor(),
         NumberExtractor(),
     ):

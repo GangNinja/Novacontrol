@@ -50,6 +50,7 @@ from novacontrol.desktop.vision import VisionController
 from novacontrol.explore import ExploreModule, ExploreRequest, ExploreService, set_explore_cache_provider
 from novacontrol.intelligence import GlobalInputIntelligence, UnderstandResult
 from novacontrol.intelligence.intent import IntentName, RiskLevel
+from novacontrol.intelligence.telemetry import request_id_for
 from novacontrol.integrations import (
     CLOUD_LLM_PRESETS,
     build_cloud_provider,
@@ -211,6 +212,9 @@ def _nlu_payload(
         "requires_confirmation": understanding.requires_confirmation,
         "handler": decision.intent.value,
         "handler_reason": decision.reason,
+        # The id the telemetry record carries, so what the client sees and what
+        # the outcome is reported against are the same request.
+        "request_id": request_id_for(understanding.id),
     }
 
 
@@ -1022,10 +1026,25 @@ class NovaControlApplication:
             context={**request.context, "nlu": understanding.to_dict()},
         )
         handler = self._HANDLERS.get(decision.intent)
-        if handler:
-            route, payload = await handler(self, request, text)
-        else:
-            route, payload = await self._handle_agent(request, text)
+        # Whether the request was actually CARRIED OUT is known here, not in the
+        # understanding layer, so the outcome is reported against the same
+        # request id. An exception is re-raised unchanged: recording a failure
+        # must not swallow it.
+        try:
+            if handler:
+                route, payload = await handler(self, request, text)
+            else:
+                route, payload = await self._handle_agent(request, text)
+        except Exception as exc:
+            self.intelligence.telemetry.record_outcome(
+                request_id=request_id_for(understanding.id),
+                success=False,
+                detail=type(exc).__name__,
+            )
+            raise
+        self.intelligence.telemetry.record_outcome(
+            request_id=request_id_for(understanding.id), success=True
+        )
 
         # The request-understanding block travels with every response: safe
         # operational metadata only (what understood it, the intent, the

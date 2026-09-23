@@ -16,10 +16,18 @@ from __future__ import annotations
 import inspect
 import re
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from novacontrol.intelligence.capabilities import default_capabilities
+from novacontrol.intelligence.complexity import (
+    Complexity,
+    ComplexityAssessment,
+    assess,
+    is_continuation,
+    signals_for,
+)
 from novacontrol.intelligence.context import InteractionContext
 from novacontrol.intelligence.entities import EntityExtractorRegistry, default_extractors
 from novacontrol.intelligence.exemplars import default_exemplars
@@ -39,8 +47,15 @@ from novacontrol.intelligence.normalize import (
     normalize,
     normalized_tokens,
 )
+from novacontrol.intelligence.registry import ExecutionCategory, IntentCatalog, default_catalog
 from novacontrol.intelligence.rules import default_rules
-from novacontrol.intelligence.telemetry import InterpretationTelemetry
+from novacontrol.intelligence.scoring import (
+    ConfidenceSignals,
+    ambiguity_from,
+    score_confidence,
+)
+from novacontrol.intelligence.semantic import EmbeddingIndex
+from novacontrol.intelligence.telemetry import InterpretationTelemetry, request_id_for
 from novacontrol.intelligence.thresholds import NluThresholds, Route, RoutingDecision
 from novacontrol.intelligence.understanding import parse_llm_output
 
@@ -127,7 +142,7 @@ _CONVERSATIONAL_EXECUTORS = frozenset({"chat_brain", "scratch_brain"})
 # multi-step split so the composite survives.
 _COMPOSITE_BROWSER = re.compile(
     r"^(?:open|launch|start)\s+(?P<app>[\w.]+)\s+(?:and|then)\s+"
-    r"(?:search|google|look up|find|go to|navigate to)\s+(?P<rest>.+)$",
+    r"(?P<verb>search|google|look up|find|go to|navigate to)\s+(?P<rest>.+)$",
     re.IGNORECASE,
 )
 _COMPOSITE_SITES = "|".join(
@@ -207,6 +222,9 @@ _REFERENCE_KINDS = (
     ("application", "application", IntentName.OPEN_APPLICATION),
     ("folder", "folder", IntentName.OPEN_FOLDER),
     ("directory", "folder", IntentName.OPEN_FOLDER),
+    # A project is a folder under another name, so "show me that project" is a
+    # reference to the remembered one — not a project named "show me that".
+    ("project", "project", IntentName.OPEN_FOLDER),
     ("website", "url", IntentName.NAVIGATE),
     ("site", "url", IntentName.NAVIGATE),
 )
@@ -294,12 +312,27 @@ class GlobalInputIntelligence:
         # ground between exact rules and a language-model call. Building the
         # index is lazy so a process that never needs it never pays for it.
         self._lexical: LexicalMatcher | None = None
+        # The semantic layer: an embedding index over the same exemplars, used
+        # when the words differ. Optional by construction — with no embedder
+        # supplied it is a deterministic local vector space, and the layer
+        # declines entirely when semantic matching is switched off.
+        self._semantic: EmbeddingIndex | None = None
+        # What each layer cost on the request being handled, so "understanding
+        # was slow" can be attributed to a layer instead of the whole pipeline.
+        self._layer_costs: dict[str, float] = {}
         # Self-improvement feed: rolling record of how input is interpreted.
         self.telemetry = InterpretationTelemetry()
         # What NovaControl can do, by intent — the orchestrator's planning table.
         self.capabilities = CapabilityRegistry()
         for capability in default_capabilities():
             self.capabilities.register(capability)
+        # The intent catalog: one declarative definition per intent (examples,
+        # required entities, tool, flags, confidence floor, execution category).
+        # It answers the questions the pipeline asks about an intent, so a new
+        # intent is one table entry rather than a branch in three modules.
+        self.catalog: IntentCatalog = default_catalog(
+            capabilities=default_capabilities(), exemplars=default_exemplars()
+        )
 
     @property
     def lexical(self) -> LexicalMatcher:
@@ -307,6 +340,18 @@ class GlobalInputIntelligence:
         if self._lexical is None:
             self._lexical = LexicalMatcher(default_exemplars())
         return self._lexical
+
+    @property
+    def semantic(self) -> EmbeddingIndex:
+        """The embedding index, built on first use.
+
+        Replacing the embedder is a constructor argument rather than a fork of
+        this class: ``EmbeddingIndex(exemplars, embedder=SomeModelBackend())``
+        is the whole change for a deployment that has embeddings available.
+        """
+        if self._semantic is None:
+            self._semantic = EmbeddingIndex(default_exemplars(), catalog=self.catalog)
+        return self._semantic
 
     @property
     def llm_available(self) -> bool:
@@ -323,6 +368,7 @@ class GlobalInputIntelligence:
 
     def understand(self, raw: str) -> UnderstandResult:
         started = time.perf_counter()
+        self._reset_layer_costs()
         raw_text = str(raw or "").strip()
         normalized = normalize(raw_text)
         if not normalized:
@@ -334,7 +380,22 @@ class GlobalInputIntelligence:
         # degrading into an app launch plus a stray search.
         composite = self._composite_browser_action(raw_text, normalized)
         if composite is not None:
-            return self._finalize(composite, "composite", started)
+            # Post-process like every other reading. A hand-built intent must not
+            # skip the step that derives its requirement flags from the catalog:
+            # without it, "open chrome and search youtube for X" reported
+            # ``requires_web=False`` for a web task, and the planner and the
+            # approval layer would have judged it by a different description of
+            # the same work than the catalog gives.
+            # Its own actions are the steps: without them a two-part browser task
+            # was assessed as ONE action and classified SIMPLE, so the planner it
+            # needs was never named. The spec's own MODERATE example is exactly
+            # this sentence.
+            return self._finalize(
+                self._post_process(composite),
+                "composite",
+                started,
+                steps=max(1, len(composite.actions)),
+            )
 
         # MULTI-INTENT: several imperative clauses -> decompose for the planner.
         steps = _split_steps(normalized)
@@ -381,12 +442,15 @@ class GlobalInputIntelligence:
             )
 
         # FAST PATH: deterministic registry match on normalized text.
+        rules_started = time.perf_counter()
         rule = self.registry.match(normalized)
         if rule is not None:
             intent = self._build_intent(raw_text, normalized, rule.intent, rule.entity, rule.confidence, "fast_path")
             intent = self._post_process(intent)
             if not intent.needs_clarification:
+                self._charge("rules", rules_started)
                 return self._finalize(intent, "fast_path", started)
+        self._charge("rules", rules_started)
 
         # FUZZY: token-level typo correction, then re-match.
         fuzzy = self._fuzzy_understand(raw_text, normalized, started)
@@ -412,13 +476,28 @@ class GlobalInputIntelligence:
         # LEXICAL: similarity over exemplar phrasings. The cheap middle ground
         # between an exact rule and a language-model call — this is what makes
         # "which programs are eating my memory" reach the right capability.
+        lexical_started = time.perf_counter()
         lexical = self._lexical_understand(raw_text, normalized, started)
+        self._charge("lexical", lexical_started)
+        # A lexical reading that does not trust ITSELF must not end the ladder:
+        # term matching can rank an exemplar highly while the arithmetic says
+        # the reading is a coin flip, and the embedding layer — which reads the
+        # paraphrases term matching cannot — deserves the look. Whichever layer
+        # is more confident wins, so a strong lexical match is never overruled.
+        if lexical is None or lexical.intent.confidence < self.thresholds.verify_confidence:
+            semantic_local = self._semantic_understand(raw_text, normalized, started)
+            if semantic_local is not None and (
+                lexical is None or semantic_local.intent.confidence > lexical.intent.confidence
+            ):
+                return semantic_local
         if lexical is not None:
             return lexical
 
-        # SEMANTIC fallback: only now consider a model.
+        # MODEL: only now consider a language model.
         if self.llm_available and not _looks_technical(normalized):
+            model_started = time.perf_counter()
             semantic = _run_semantic(self._provider, raw_text, normalized)
+            self._charge("model", model_started)
             if semantic is not None:
                 self._record(semantic, "semantic")
                 return self._finalize(semantic, "semantic", started, escalated=True)
@@ -490,6 +569,11 @@ class GlobalInputIntelligence:
             entities["website"] = site_name
         if query:
             entities["query"] = query
+        # The goal is the TASK, not the fragment a greedy split left behind:
+        # "open chrome and search youtube for the latest ai news" used to report
+        # its goal as the dangling "for the latest ai news", which reads as a
+        # prepositional phrase rather than something anyone asked for.
+        task = _composite_goal(match.group("verb"), site_name, query)
         return StructuredIntent(
             raw_input=raw_text,
             normalized_input=normalized,
@@ -497,7 +581,7 @@ class GlobalInputIntelligence:
             action="browser",
             target_kind="query",
             entities=entities,
-            goal=rest,
+            goal=task,
             actions=("open_application", "navigate", "search"),
             confidence=0.9,
             source="composite",
@@ -514,23 +598,129 @@ class GlobalInputIntelligence:
         # from context, never guessed at by similarity.
         if _is_bare_reference(normalized):
             return None
-        match = self.lexical.best(normalized)
-        if match is None or match.score < self.thresholds.lexical_confidence:
+        # Ranked, not just best: the runner-up's distance is evidence about
+        # whether this reading is a match or a coin flip. "close chrome" and
+        # "close the chrome tab" can score almost identically against different
+        # intents, and a single score cannot express that doubt.
+        ranked = self.lexical.rank(normalized, limit=2)
+        if not ranked:
             return None
+        match = ranked[0]
+        if match.score < self.thresholds.lexical_confidence:
+            return None
+        ambiguity, margin = ambiguity_from(tuple(item.score for item in ranked))
+        score = score_confidence(
+            ConfidenceSignals(
+                lexical_score=match.score,
+                ambiguity=ambiguity,
+                candidate_margin=margin,
+                context_available=bool(
+                    self.context.last_intent() or self.context.active_application()
+                ),
+                strategy="lexical",
+            )
+        )
         entity_kind = _DEFAULT_ENTITY_KIND.get(match.intent, "")
         intent = self._build_intent(
             raw_text,
             normalized,
             match.intent,
             entity_kind,
-            min(self.thresholds.fast_confidence, round(match.score, 3)),
+            min(self.thresholds.fast_confidence, round(score.confidence, 3)),
             "lexical",
+        )
+        # Keep the arithmetic: why this confidence, not just what it is.
+        original = intent.parameters
+        intent = intent.with_(
+            parameters={**original, "confidence_parts": score.to_dict()},
         )
         intent = intent.with_(parameters={**intent.parameters, "matched_exemplar": match.phrase})
         intent = self._post_process(intent)
         if intent.needs_clarification:
             return None
         return self._finalize(intent, "lexical", started, learned_phrase=normalized)
+
+    def _semantic_understand(
+        self, raw_text: str, normalized: str, started: float
+    ) -> UnderstandResult | None:
+        """Embedding similarity — the last cheap look before a language model.
+
+        Lexical matching needs shared words; an embedding does not, which is how
+        *"what is chewing up my ram"* reaches ``memory_status`` when no single
+        term overlaps its exemplar. The score is evidence rather than proof, so
+        a similarity below the configured floor is not acted on at all —
+        otherwise an unrelated request would be answered by whichever exemplar
+        happened to be nearest.
+        """
+        if not self.thresholds.semantic_matching or contains_technical_token(normalized):
+            return None
+        # A short reference names no target, so similarity would be a guess at
+        # the KIND rather than a reading of it.
+        if _is_bare_reference(normalized):
+            return None
+        # A continuation names no target either, and the guess here is not even
+        # about a kind: similarity between "continue from where I stopped" and a
+        # status exemplar is coincidence, not evidence. Measured, the nearest
+        # exemplar scored 0.57 raw — above the calibrated floor — so a request
+        # to resume work was answered as GPU telemetry. Only memory can say what
+        # to continue, so this layer declines and lets the context resolver and,
+        # if it cannot resolve it, the model do their jobs.
+        if is_continuation(normalized):
+            return None
+        layer_started = time.perf_counter()
+        ranked = self.semantic.rank(normalized, limit=2)
+        self._charge("semantic", layer_started)
+        if not ranked:
+            return None
+        match = ranked[0]
+        ambiguity, margin = ambiguity_from(tuple(item.score for item in ranked))
+        score = score_confidence(
+            ConfidenceSignals(
+                semantic_score=match.score,
+                ambiguity=ambiguity,
+                candidate_margin=margin,
+                context_available=bool(
+                    self.context.last_intent() or self.context.active_application()
+                ),
+                strategy="embedding",
+            )
+        )
+        # The gate is on the CALIBRATED reading, not the raw similarity: a
+        # nearest exemplar that is only nearest because the input is nonsense
+        # ("show me the florb") scores well raw and calibrates to nothing, and
+        # acting on that would invent an intent and swallow the "not understood"
+        # signal a multi-clause request depends on.
+        if score.confidence < self.thresholds.semantic_confidence:
+            return None
+        entity_kind = _DEFAULT_ENTITY_KIND.get(match.intent, "")
+        # Source "embedding", never "semantic": the latter names the language
+        # model in this system, and reporting a local vector match as a model
+        # call would misdescribe what happened to anyone reading the status.
+        intent = self._build_intent(
+            raw_text,
+            normalized,
+            match.intent,
+            entity_kind,
+            min(self.thresholds.fast_confidence, round(score.confidence, 3)),
+            "embedding",
+        )
+        # Keep the evidence, not just the conclusion: which candidate won, by
+        # how much, and which phrasing carried it — all checkable by a human.
+        intent = intent.with_(
+            parameters={
+                **intent.parameters,
+                "confidence_parts": score.to_dict(),
+                "semantic_match": match.to_dict(),
+            },
+        )
+        intent = self._post_process(intent)
+        if intent.needs_clarification:
+            # A similarity is not evidence enough to ASK with: the intent it
+            # guessed may not be the one the user meant, so a question built on
+            # it would ask about the wrong target. Let the model, or the generic
+            # clarification, do that instead.
+            return None
+        return self._finalize(intent, "embedding", started)
 
     def _finalize(
         self,
@@ -544,16 +734,84 @@ class GlobalInputIntelligence:
         learned_phrase: str = "",
     ) -> UnderstandResult:
         """Apply the routing policy, measure the cost, and record the outcome."""
-        intent = self._apply_route(intent, steps=steps, unresolved_steps=unresolved, escalated=escalated)
-        intent = intent.with_(latency_ms=(time.perf_counter() - started) * 1000.0)
+        # Per-layer attribution travels with the reading, so a latency report
+        # can say WHICH step was slow instead of only how slow the request was.
+        if self._layer_costs:
+            intent = intent.with_(
+                parameters={**intent.parameters, "layer_ms": dict(self._layer_costs)}
+            )
+        # COMPLEXITY first: it is the honest answer to "how much machinery does
+        # this deserve", and it is what lets a complex request reach a model
+        # instead of dying in clarification.
+        complexity = self._assess_complexity(intent, steps=steps, unresolved=unresolved)
+        intent = self._apply_route(
+            intent,
+            steps=steps,
+            unresolved_steps=unresolved,
+            escalated=escalated,
+            complexity=complexity,
+        )
+        intent = intent.with_(
+            latency_ms=(time.perf_counter() - started) * 1000.0,
+            parameters={**intent.parameters, "complexity": complexity.to_dict()},
+        )
         if escalated:
+            # The provider's own view of the call (load, first token, decode
+            # rate) is what makes the fallback path tunable; it is absent for a
+            # cloud provider, which is why it is read defensively rather than
+            # assumed.
+            measured = getattr(self._provider, "last_timings", None)
             self.telemetry.record_escalation(
                 reason=str(intent.decision.get("reason", "")),
                 normalized=intent.normalized_input,
                 latency_ms=intent.latency_ms,
+                timings=measured if isinstance(measured, Mapping) else None,
             )
         self._record(intent, strategy, learned_phrase=learned_phrase)
         return UnderstandResult(intent, strategy)
+
+    def _assess_complexity(
+        self, intent: StructuredIntent, *, steps: int, unresolved: int
+    ) -> ComplexityAssessment:
+        """Score how much machinery this request needs (see complexity.py)."""
+        definition = self.catalog.get(intent.intent)
+        categories: tuple[ExecutionCategory, ...] = (
+            (definition.category,) if definition is not None else ()
+        )
+        ambiguity = float(intent.parameters.get("ambiguity", 0.0) or 0.0)
+        return assess(
+            signals_for(
+                intent.normalized_input,
+                actions=max(1, steps),
+                unresolved=unresolved,
+                ambiguity=ambiguity,
+                categories=categories,
+            )
+        )
+
+    def _apply_confidence_floor(self, intent: StructuredIntent) -> StructuredIntent:
+        """Demote a shaky reading of an intent that declares a higher bar.
+
+        The catalog's ``confidence_floor`` is per intent: a deterministic match
+        clears its own rule's confidence by construction, while an action that
+        closes, types or spends needs a stronger reading before it acts without
+        a second look. This never blocks anything — it moves the route from
+        ``fast`` to ``verify``, which is flagged, not refused.
+        """
+        if intent.decision.get("route") != Route.FAST.value:
+            return intent
+        floor = self.catalog.confidence_floor(intent.intent)
+        if intent.confidence >= floor:
+            return intent
+        decision = RoutingDecision(
+            route=Route.VERIFY,
+            reason=(
+                f"Understood, but below the confidence {intent.intent.value} requires "
+                f"before acting without a second look ({intent.confidence:.2f} < {floor:.2f})."
+            ),
+            confidence=intent.confidence,
+        )
+        return intent.with_(decision=decision.to_dict(), requires_llm=decision.requires_llm)
 
     def _apply_route(
         self,
@@ -562,8 +820,16 @@ class GlobalInputIntelligence:
         steps: int = 1,
         unresolved_steps: int = 0,
         escalated: bool = False,
+        complexity: ComplexityAssessment | None = None,
     ) -> StructuredIntent:
-        """Attach the routing decision — the auditable "why this route"."""
+        """Attach the routing decision — the auditable "why this route".
+
+        Complexity gets the last word on one case only: a COMPLEX request that
+        the confidence bands would otherwise send to a clarifying question is
+        worth a model call, because clarification is a dead end while the model
+        can still understand it. With no model configured the request keeps the
+        question, so nothing about a model-less install changes.
+        """
         if escalated:
             decision = RoutingDecision(
                 route=Route.LLM,
@@ -581,11 +847,28 @@ class GlobalInputIntelligence:
                 llm_available=self.llm_available,
                 reference_resolved=bool(intent.references),
             )
-        return intent.with_(
+            if (
+                decision.route is Route.CLARIFY
+                and complexity is not None
+                and complexity.level is Complexity.COMPLEX
+                and self.llm_available
+            ):
+                decision = RoutingDecision(
+                    route=Route.LLM,
+                    reason=(
+                        "Complex request the lightweight layers could not resolve "
+                        f"({complexity.reasons[0]})."
+                    ),
+                    confidence=intent.confidence,
+                    requires_llm=True,
+                    reasoning_level="high",
+                )
+        routed = intent.with_(
             decision=decision.to_dict(),
             requires_llm=decision.requires_llm,
             reasoning_level=decision.reasoning_level,
         )
+        return self._apply_confidence_floor(routed)
 
     def _clarify_result(
         self,
@@ -598,11 +881,24 @@ class GlobalInputIntelligence:
         """Ask ONE precise question, without a model and without guessing."""
         resolved_question = question or self._clarification_question(normalized)
         self.telemetry.record_unknown(normalized=normalized)
-        self.telemetry.record_clarification(question=resolved_question, normalized=normalized)
         intent = self._clarify(raw_text, resolved_question)
+        # Derive what the request NEEDS before routing it. A request that asks
+        # about an image says nothing else this layer can use — but the vision
+        # route beats every other one, and a dead-end "what should I do?" would
+        # hide the fact that the request is answerable by LOOKING at it. The
+        # question is still the fallback; the flag is what lets a VLM take over.
+        intent = self._apply_requirements(intent)
         # A clarification is an outcome too: record WHY, so the surface that
         # shows "Understanding / Reason" does not have to guess.
         intent = self._apply_route(intent.with_(confidence=0.0), steps=1)
+        # Recorded WITH its route: most clarifications are route ``clarify``, but
+        # one that needs an image is routed to vision, and the aggregate should
+        # say where the request actually went.
+        self.telemetry.record_clarification(
+            question=resolved_question,
+            normalized=normalized,
+            route=str(intent.decision.get("route", "")),
+        )
         intent = intent.with_(latency_ms=(time.perf_counter() - started) * 1000.0)
         return UnderstandResult(intent, "clarification")
 
@@ -628,14 +924,38 @@ class GlobalInputIntelligence:
             return intent, kind
         return None
 
+    def _reset_layer_costs(self) -> None:
+        """Start a fresh per-layer breakdown for the request being handled."""
+        self._layer_costs = {}
+
     def _record(self, intent: StructuredIntent, strategy: str, *, learned_phrase: str = "") -> None:
-        """Feed the self-improvement telemetry (and teach the variation)."""
+        """Feed the self-improvement telemetry (and teach the variation).
+
+        One record per request answers the operational questions without
+        logging what the user said: which intent, how confident, how it was
+        understood, what would be run, and what it cost.
+        """
         taught = False
         # Learning loop: a fuzzy/contextual/lexical resolution proves the
         # phrasing maps to this intent — teach it so the next identical phrase
         # takes the fast path. Confidence must be solid before committing the
         # lesson, otherwise a mistake would be taught back as a rule.
-        if strategy in ("fuzzy", "contextual", "lexical") and intent.confidence >= 0.7:
+        # An embedding match is deliberately NOT taught: turning a similarity
+        # into a deterministic rule is a stronger claim than the evidence
+        # supports, and the next identical request will match it again anyway.
+        if (
+            strategy in ("fuzzy", "contextual", "lexical")
+            and intent.confidence >= 0.7
+            # A phrase whose target came from MEMORY, or whose meaning IS "the
+            # last thing", must never become a rule: the learned layer runs
+            # BEFORE the context resolver, so teaching it freezes what "that" or
+            # "the same thing" meant the first time it was heard. Measured —
+            # "do the same thing" was taught against a file read and then
+            # replayed that read after an unrelated browser task.
+            and not intent.references
+            and not _is_bare_reference(intent.normalized_input)
+            and not is_continuation(intent.normalized_input)
+        ):
             self.registry.register_variation(learned_phrase or intent.normalized_input, intent.intent)
             taught = True
         self.telemetry.record_resolution(
@@ -646,7 +966,29 @@ class GlobalInputIntelligence:
             taught=taught,
             route=str(intent.decision.get("route", "")),
             latency_ms=intent.latency_ms,
+            tool=self._selected_tool(intent),
+            complexity=str(intent.parameters.get("complexity", {}).get("level", "")),
+            request_id=request_id_for(intent.id),
+            used_model=strategy == "semantic",
         )
+
+    def _charge(self, layer: str, started: float) -> None:
+        """Add a layer's cost to this request's breakdown.
+
+        Attribution, not totals: the interesting question about a slow request
+        is WHICH layer was slow, and a single end-to-end number cannot answer
+        it. Only layers that actually ran appear, so a missing entry means "did
+        not run" rather than "measured zero".
+        """
+        cost_ms = (time.perf_counter() - started) * 1000.0
+        self._layer_costs[layer] = round(self._layer_costs.get(layer, 0.0) + cost_ms, 3)
+
+    def _selected_tool(self, intent: StructuredIntent) -> str:
+        """The executor this intent would reach, for the telemetry record."""
+        definition = self.catalog.get(intent.intent)
+        if definition is None or not definition.tools:
+            return ""
+        return definition.tools[0]
 
     async def understand_async(self, raw: str) -> UnderstandResult:
         """Async understand for event-loop contexts.
@@ -656,6 +998,7 @@ class GlobalInputIntelligence:
         is consulted at all, and only after every cheaper layer declined.
         """
         started = time.perf_counter()
+        self._reset_layer_costs()
         raw_text = str(raw or "").strip()
         normalized = normalize(raw_text)
         if not normalized:
@@ -663,7 +1006,17 @@ class GlobalInputIntelligence:
 
         composite = self._composite_browser_action(raw_text, normalized)
         if composite is not None:
-            return self._finalize(composite, "composite", started)
+            # Same reason as the sync path: the catalog decides what this needs.
+            # Its own actions are the steps: without them a two-part browser task
+            # was assessed as ONE action and classified SIMPLE, so the planner it
+            # needs was never named. The spec's own MODERATE example is exactly
+            # this sentence.
+            return self._finalize(
+                self._post_process(composite),
+                "composite",
+                started,
+                steps=max(1, len(composite.actions)),
+            )
 
         steps = _split_steps(normalized)
         if len(steps) > 1 and sum(1 for step in steps if _starts_with_verb(step)) >= 2:
@@ -816,13 +1169,34 @@ class GlobalInputIntelligence:
                 return None  # nothing to resolve -> fall through to a precise question
 
         # Bare reference phrases: resolve via context.
-        if normalized in _REFERENCE_PATTERNS or normalized in ("do the same thing", "same as before", "again", "that one"):
+        if normalized in _REFERENCE_PATTERNS or normalized in (
+            "do the same thing",
+            "same as before",
+            "again",
+            "that one",
+        ):
             replayed = self._resolve_reference(normalized)
             if replayed is not None:
                 return UnderstandResult(replayed, "contextual")
 
+        # Bare continuation ("continue from where I stopped", "resume"). One
+        # reading is available and it is the remembered one: re-run what was
+        # last understood, in this conversation's context. When memory holds
+        # nothing, returning None is the honest answer — the ladder then reaches
+        # the model, and only then the question.
+        if is_continuation(normalized):
+            resumed = self._resolve_reference(normalized)
+            if resumed is not None:
+                return UnderstandResult(resumed, "contextual")
+            return None
+
         # Pending clarification answer: "earthdial" after "which repository?"
+        # The question's own utterance is not an answer to it: without this
+        # guard, "open it" asked "Which application?" and then read itself back
+        # as the answer, producing an application literally called "open it".
         pending = self.context.pending_intent
+        if pending and pending.get("for") == normalized:
+            pending = None
         if pending:
             value = " ".join(tokens)
             if value and len(tokens) <= 6:
@@ -959,7 +1333,11 @@ class GlobalInputIntelligence:
                 clarification_question=question,
                 ambiguity=tuple(options[:3]),
             )
-            self.context.pending_intent = {"intent": intent.intent.value, "entity_kind": required}
+            self.context.pending_intent = {
+                "intent": intent.intent.value,
+                "entity_kind": required,
+                "for": intent.normalized_input,
+            }
             self.telemetry.record_failed_entity(
                 intent=intent.intent.value, entity_kind=required, normalized=intent.normalized_input,
             )
@@ -973,6 +1351,12 @@ class GlobalInputIntelligence:
         entities = dict(intent.entities)
         if intent.intent is IntentName.PHONE_SEND_TEXT and "message" in entities:
             entities.update(_split_message(str(entities["message"])))
+        # A project IS a folder, under the word the user used. The catalog asks
+        # open_folder for a "folder"; mirroring the prose name keeps the entity
+        # the user actually named AND satisfies the requirement, so "open my
+        # NovaControl project" opens it instead of being asked for a folder.
+        if intent.intent is IntentName.OPEN_FOLDER and "project" in entities and not entities.get("folder"):
+            entities["folder"] = entities["project"]
         for kind, value in list(entities.items()):
             lowered = str(value).strip().lower() if isinstance(value, str) else ""
             if lowered in _PLACEHOLDER_VALUES:
@@ -988,6 +1372,13 @@ class GlobalInputIntelligence:
                         references=(*intent.references, str(value)),
                         confidence=min(intent.confidence, self.thresholds.reference_confidence),
                     )
+                else:
+                    # Nothing to resolve it to, so the user named no target. A
+                    # pronoun is not a name: keeping "it" as the application
+                    # would have the planner try to launch a program called
+                    # "it". Dropping it lets the required-entity check ask the
+                    # precise question instead.
+                    del entities[kind]
         entities = {k: v for k, v in entities.items() if v not in (None, "")}
         return intent.with_(entities=entities)
 
@@ -1005,9 +1396,17 @@ class GlobalInputIntelligence:
         )
         # Phrase hints ("latest", "online") only mean "consult the web" for a
         # KNOWLEDGE intent. "am I online" is a network reading, not a search.
+        # The catalog also DECLARES what an intent needs; where it does, its
+        # statement is added to the derived one. These flags only ever widen
+        # ("needs the web", "needs a second look"), so a declaration cannot
+        # strip a requirement the capability layer already established.
+        definition = self.catalog.get(intent.intent)
         requires_web = intent.intent in _WEB_INTENTS or (
             intent.intent in _KNOWLEDGE_INTENTS
             and bool(_WEB_PHRASES.search(intent.normalized_input))
+        ) or bool(definition is not None and definition.requires_web)
+        requires_vision = requires_vision or bool(
+            definition is not None and definition.requires_vision
         )
         requires_tools = bool(
             capability is not None and capability.executor not in _CONVERSATIONAL_EXECUTORS
@@ -1015,6 +1414,7 @@ class GlobalInputIntelligence:
         requires_confirmation = bool(
             (capability is not None and capability.risk is not RiskLevel.LOW)
             or self._risk_for(intent.intent) in (RiskLevel.HIGH, RiskLevel.CRITICAL)
+            or (definition is not None and definition.requires_confirmation)
         )
         return intent.with_(
             requires_vision=requires_vision,
@@ -1038,18 +1438,31 @@ class GlobalInputIntelligence:
         }
         return RiskLevel.HIGH if intent in high_risk else RiskLevel.LOW
 
-    @staticmethod
-    def _required_entity(intent: IntentName) -> str:
-        mapping = {
-            IntentName.PHONE_SEND_TEXT: "message",
-            IntentName.RUN_COMMAND: "command",
-            IntentName.WRITE_FILE: "file",
-            IntentName.PHONE_CALL: "contact",
-            IntentName.OPEN_APPLICATION: "application",
-            IntentName.CLOSE_APPLICATION: "application",
-            IntentName.OPEN_FOLDER: "folder",
-        }
-        return mapping.get(intent, "")
+    def _required_entity(self, intent: IntentName) -> str:
+        """The entity to ask for when this intent arrives without a target.
+
+        Two sources, in this order:
+
+        * the positional map — the intents that are *only* meaningful with a
+          target ("open ___", "run ___"), where the question is part of the
+          intent's contract;
+        * the catalog — every other intent, so a newly registered intent
+          declares what it needs in its own table entry instead of being
+          special-cased here.
+
+        Catalog ``required_entities`` are a *dispatch* requirement, not a
+        clarification trigger: ``find_file`` declares ``file`` yet is perfectly
+        answerable as "find my NovaControl project". An intent opts in to being
+        asked with ``clarify_when_missing``, so a new intent can require a
+        target in its own table entry rather than being special-cased here.
+        """
+        positional = _REQUIRED_ENTITY_FALLBACK.get(intent, "")
+        if positional:
+            return positional
+        definition = self.catalog.get(intent)
+        if definition is None or not definition.clarify_when_missing:
+            return ""
+        return definition.required_entities[0] if definition.required_entities else ""
 
     # -- clarification ------------------------------------------------------------
 
@@ -1079,6 +1492,18 @@ class GlobalInputIntelligence:
 # STARTS with one of these is not a name the user uttered.
 _REFERENCE_FIRST_WORDS = frozenset({"that", "this", "those", "these"})
 
+# Positional entity requirements: intents whose declaration is not in the
+# catalog. Never the primary source — the catalog is consulted first.
+_REQUIRED_ENTITY_FALLBACK: dict[IntentName, str] = {
+    IntentName.PHONE_SEND_TEXT: "message",
+    IntentName.RUN_COMMAND: "command",
+    IntentName.WRITE_FILE: "file",
+    IntentName.PHONE_CALL: "contact",
+    IntentName.OPEN_APPLICATION: "application",
+    IntentName.CLOSE_APPLICATION: "application",
+    IntentName.OPEN_FOLDER: "folder",
+}
+
 # An input that ENDS with a reference word is asking about something already
 # known — "run that", "show me the thing", "open that file".
 _REFERENCE_TAIL = re.compile(r"\b(?:it|that|this|those|these|them|thing|one)\b\s*$")
@@ -1090,6 +1515,22 @@ def _is_bare_reference(normalized: str) -> bool:
     if not normalized or len(normalized.split()) > _REFERENCE_MAX_WORDS:
         return False
     return bool(_REFERENCE_TAIL.search(normalized))
+
+
+def _composite_goal(verb: str, site: str, query: str) -> str:
+    """The goal of a composite browser task, rebuilt from what was read out.
+
+    The clause that follows the verb is not the goal on its own: for *"open
+    chrome and search youtube for the latest ai news"* it is the dangling
+    *"for the latest ai news"*. Recomposing from the recognised verb, site and
+    query gives the task a reader can act on instead of a fragment.
+    """
+    parts = [verb.strip()]
+    if site:
+        parts.append(site)
+    if query:
+        parts.append(f"for {query}")
+    return " ".join(part for part in parts if part).strip()
 
 
 def _goal_for(normalized: str, entities: dict[str, Any]) -> str:
@@ -1118,19 +1559,31 @@ def _extract_constraints(normalized: str) -> list[str]:
     return constraints
 
 
-def _semantic_messages(raw: str) -> list[dict[str, str]]:
+def _semantic_messages(raw: str, *, strict: bool = False) -> list[dict[str, str]]:
     """Ask for the SAME structured shape the deterministic layers produce.
 
     The model is a fallback understanding component, not an executor: it is
     asked for an intent, a goal, entities, and the requirement flags — never for
     a command, a path, or a tool name. Everything it returns is validated
     before use (see parse_llm_output).
+
+    ``strict`` is the second attempt: same question, less room to answer it
+    badly. A local model that returned prose, a code fence, or a truncated
+    object is usually one instruction away from a clean answer, and one retry
+    is far cheaper than giving up on the request.
     """
     from novacontrol.intelligence.intent import IntentName as IN
 
     intents = ", ".join(item.value for item in IN)
+    preamble = (
+        "Reply with ONE single line of JSON and nothing else — no prose, no markdown, "
+        "no code fence, no explanation, no trailing commentary.\n\n"
+        if strict
+        else ""
+    )
     return [
         {"role": "user", "content": (
+            preamble +
             "Convert this user request for a computer-control assistant into ONE JSON object. "
             "Reply with JSON only — no prose, no markdown, no code fence — in exactly this shape:\n"
             '{"intent": "<one of: ' + intents + '>", '
@@ -1182,7 +1635,10 @@ def _run_semantic(provider: object, raw: str, normalized: str) -> StructuredInte
     if complete is None:
         return None
     try:
-        answer = complete(_semantic_messages(raw))
+        # ``json_mode`` asks a local provider for its structured path (Ollama:
+        # a thinking-free endpoint), where a reasoning model cannot spend the
+        # whole budget thinking and answer nothing.
+        answer = complete(_semantic_messages(raw), json_mode=True)
         if inspect.isawaitable(answer):
             # Async provider: only understand_async can await it. Close the
             # coroutine so the event loop never warns about an orphan.
@@ -1190,20 +1646,43 @@ def _run_semantic(provider: object, raw: str, normalized: str) -> StructuredInte
             if close is not None:
                 close()
             return None
-        return _parse_semantic(str(answer), raw, normalized)
+        parsed = _parse_semantic(str(answer), raw, normalized)
+        if parsed is not None:
+            return parsed
+        # One stricter attempt: an unusable reply is usually a formatting
+        # problem, and giving up on the request costs more than one retry.
+        retry = complete(_semantic_messages(raw, strict=True), json_mode=True)
+        if inspect.isawaitable(retry):
+            close = getattr(retry, "close", None)
+            if close is not None:
+                close()
+            return None
+        return _parse_semantic(str(retry), raw, normalized)
     except Exception:
         return None
 
 
 async def _run_semantic_async(provider: object, raw: str, normalized: str) -> StructuredIntent | None:
-    """Async twin of `_run_semantic`; awaits async providers (sync also OK)."""
+    """Async twin of `_run_semantic`; awaits async providers (sync also OK).
+
+    Two attempts, the second stricter. Anything still unusable yields None,
+    which the caller turns into ONE precise question — never a guessed intent.
+    """
     complete = getattr(provider, "complete", None)
     if complete is None:
         return None
-    try:
-        answer = complete(_semantic_messages(raw))
-        if inspect.isawaitable(answer):
-            answer = await answer
-        return _parse_semantic(str(answer), raw, normalized)
-    except Exception:
-        return None
+    for strict in (False, True):
+        try:
+            answer = complete(_semantic_messages(raw, strict=strict), json_mode=True)
+            if inspect.isawaitable(answer):
+                answer = await answer
+        except Exception:
+            # A failing transport on the first try is worth one more attempt;
+            # a failing transport twice means the provider is down.
+            if strict:
+                return None
+            continue
+        parsed = _parse_semantic(str(answer), raw, normalized)
+        if parsed is not None:
+            return parsed
+    return None

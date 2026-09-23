@@ -226,7 +226,60 @@ def _candidates(text: str) -> list[str]:
     stripped = text.strip()
     if stripped.startswith("{"):
         found.append(stripped)
+    repaired = repair_json(text)
+    if repaired is not None:
+        found.append(repaired)
     return found
+
+
+def repair_json(text: str) -> str | None:
+    """Best-effort repair of a nearly-valid model reply, or ``None``.
+
+    Two failures are worth repairing because they are mechanical rather than
+    semantic: a trailing comma (which small models emit constantly) and a
+    truncated tail (a reply cut off by its token budget — the object is
+    complete except for its closing braces).
+
+    Nothing is invented here. No key is added, no value is guessed, and the
+    result is only a candidate: it still has to pass the same validation as a
+    clean reply, so a repair can rescue a real answer and can never manufacture
+    one.
+    """
+    if not text or "{" not in text:
+        return None
+    candidate = text[text.find("{") :].strip()
+    # Drop a trailing comma before a closer — the commonest small-model slip.
+    # A comma directly before a closer cannot appear in valid JSON, so this
+    # cannot damage a well-formed reply, and the repaired text still has to
+    # pass the same validation as a clean one.
+    candidate = re.sub(r",(\s*[}\]])$", r"\1", candidate, flags=re.MULTILINE)
+    # A reply cut off by its token budget leaves structure open: close exactly
+    # what is open (and terminate a dangling string) and nothing more.
+    return _close_open_structure(candidate)
+
+
+def _close_open_structure(candidate: str) -> str:
+    """Append the closers for whatever the candidate left open."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for char in candidate:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+    tail = '"' if in_string else ""
+    return candidate + tail + "}" * max(0, depth)
 
 
 def _first_balanced_object(text: str) -> str | None:

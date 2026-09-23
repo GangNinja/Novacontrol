@@ -91,6 +91,14 @@ class OpenAICompatibleLLMProvider:
         # failure — the budget went to reasoning — and callers must be able to
         # tell it apart from a mere formatting problem.
         self.last_finish_reason: str = ""
+        # Timing breakdown of the last reply, straight from the wire. A local
+        # Ollama reports nanoseconds for load / prefill / decode, so these are
+        # measurements rather than estimates: ``model_load_ms`` is what bringing
+        # the weights in costs, ``first_token_ms`` is what has to happen before
+        # the first token can appear, and ``tokens_per_second`` comes from the
+        # decode phase alone. Empty when the server reported none — a backend
+        # that says nothing about its timing reports nothing, never a fake zero.
+        self.last_timings: dict[str, float] = {}
 
     @property
     def name(self) -> str:
@@ -106,6 +114,36 @@ class OpenAICompatibleLLMProvider:
         retry and fall back to a strategy that works.
         """
         return self.last_finish_reason == "length"
+
+    def _ollama_native_payload(
+        self, payload: Mapping[str, Any], *, structured: bool
+    ) -> dict[str, Any] | None:
+        """Native Ollama chat payload with thinking off, or None for /v1.
+
+        Only for STRUCTURED calls (understanding, JSON extraction) to the local
+        Ollama over the default transport, and only while thinking is disabled.
+        Chat is deliberately left on the compatible surface: it wants prose, and
+        a model's reasoning costs latency it does not need to pay.
+
+        ``num_predict`` carries the caller's budget across, so the truncation
+        contract (``answer_was_truncated``) holds on this path too.
+        """
+        if not structured:
+            return None
+        if not self.ollama_url or self.transport is not _default_transport:
+            return None
+        if not ollama_disable_thinking():
+            return None
+        budget = payload.get("max_tokens")
+        body: dict[str, Any] = {
+            "model": self.model,
+            "messages": [dict(message) for message in payload.get("messages", ())],
+            "stream": False,
+            "think": False,
+        }
+        if isinstance(budget, int) and budget > 0:
+            body["options"] = {"num_predict": budget}
+        return body
 
     @property
     def _manages_ollama_lifecycle(self) -> bool:
@@ -134,6 +172,10 @@ class OpenAICompatibleLLMProvider:
                 )
             except Exception as exc:  # pragma: no cover - defensive only
                 logger.debug("Ollama lifecycle check skipped: %s", exc)
+        # ``json_mode`` is a NovaControl-facing hint, never a wire field: it
+        # says "this call wants a structured answer", which is what decides
+        # whether the native thinking-free endpoint is the better one.
+        structured = bool(kwargs.pop("json_mode", False))
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [dict(message) for message in messages],
@@ -152,21 +194,53 @@ class OpenAICompatibleLLMProvider:
             if budget > 0:
                 payload["max_tokens"] = budget
         payload.update(kwargs)
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        # LOCAL REASONING MODELS need the NATIVE endpoint, not just a flag. A
+        # reasoning-capable model spends its reply budget on its thinking, so a
+        # capped request can come back with NO answer at all — measured on
+        # qwen3:8b (CPU-only) with this project's real understanding prompt:
+        #
+        #   /v1/chat/completions, max_tokens 700   115.4s, 0 chars of answer
+        #   /api/chat, think=false                 13.9s, valid JSON
+        #
+        # The OpenAI-compatible surface ignores ``think`` (it separates the
+        # reasoning instead), so the flag alone does not fix anything; matching
+        # the endpoint to the capability does. Only the real local transport is
+        # redirected — an injected transport stands in for the whole HTTP
+        # surface and must keep seeing the shape it was written for.
+        native = self._ollama_native_payload(payload, structured=structured)
+        url = (
+            f"{self.ollama_url.rstrip('/')}/api/chat"
+            if native is not None
+            else f"{self.base_url}{self.chat_path}"
+        )
+        outgoing = native if native is not None else payload
         # The sync transport blocks on the socket; run it off the event loop so a
         # slow LLM response never freezes the rest of the local app.
         try:
-            response = await asyncio.to_thread(
-                self.transport,
-                f"{self.base_url}{self.chat_path}",
-                {
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                payload,
-            )
+            response = await asyncio.to_thread(self.transport, url, headers, outgoing)
         except Exception as exc:
-            self.last_error = f"{type(exc).__name__}: {exc}"
-            raise
+            if native is None:
+                self.last_error = f"{type(exc).__name__}: {exc}"
+                raise
+            # An Ollama too old to know ``think`` must not cost the caller its
+            # answer: retry the documented OpenAI-compatible surface once.
+            logger.debug("Native Ollama chat failed (%s); using the compatible surface", exc)
+            try:
+                response = await asyncio.to_thread(
+                    self.transport, f"{self.base_url}{self.chat_path}", headers, payload
+                )
+            except Exception as retry_exc:
+                self.last_error = f"{type(retry_exc).__name__}: {retry_exc}"
+                raise retry_exc from exc
+            native = None
+        # Captured before the reply is interpreted: the timings describe THIS
+        # call, and a backend that reported none must not leave the previous
+        # call's numbers standing.
+        self.last_timings = _ollama_timings(response)
         self.usage["requests"] += 1
         usage = response.get("usage") or {}
         for field in ("prompt_tokens", "completion_tokens", "total_tokens"):
@@ -174,10 +248,26 @@ class OpenAICompatibleLLMProvider:
             if isinstance(value, int):
                 self.usage[field] += value
         choices = response.get("choices", [])
-        if not choices:
+        if choices:
+            message = choices[0].get("message", {})
+            self.last_finish_reason = str(choices[0].get("finish_reason") or "")
+        elif "message" in response:
+            # Native Ollama: {"message": {...}, "done_reason": "stop"|"length"}.
+            # ``length`` means the budget ran out, which is what
+            # answer_was_truncated reports — the same contract as the
+            # OpenAI-shaped reply, so callers cannot tell the two apart.
+            message = response.get("message") or {}
+            self.last_finish_reason = str(response.get("done_reason") or "")
+            for field, key in (("prompt_tokens", "prompt_eval_count"), ("completion_tokens", "eval_count")):
+                value = response.get(key)
+                if isinstance(value, int):
+                    self.usage[field] += value
+            if isinstance(response.get("prompt_eval_count"), int) and isinstance(
+                response.get("eval_count"), int
+            ):
+                self.usage["total_tokens"] += int(response["prompt_eval_count"]) + int(response["eval_count"])
+        else:
             return ""
-        message = choices[0].get("message", {})
-        self.last_finish_reason = str(choices[0].get("finish_reason") or "")
         content = str(message.get("content", ""))
         if not content and self.answer_was_truncated:
             # Report the reasoning-only exhaustion instead of returning an empty
@@ -319,6 +409,52 @@ def _request_timeout() -> float:
     except ValueError:
         return _DEFAULT_REQUEST_TIMEOUT
     return value if value > 0 else _DEFAULT_REQUEST_TIMEOUT
+
+
+_NANOSECONDS_PER_MS = 1_000_000.0
+
+
+def _ollama_timings(response: Mapping[str, Any]) -> dict[str, float]:
+    """Ollama's own reply timings, in milliseconds, with derived rates.
+
+    Ollama reports nanoseconds for bringing the weights in, reading the prompt
+    and decoding the answer. Converting them here is what makes the fallback
+    path measurable instead of guessed: load is the cost of residency, prefill
+    tells us what has to happen before the first token can appear, and the
+    decode phase alone gives tokens per second.
+
+    Only fields the server actually reported are returned. A backend silent
+    about its timing reports nothing rather than a fabricated zero, so a
+    consumer can always tell "instant" from "unmeasured".
+    """
+
+    def _ms(key: str) -> float | None:
+        value = response.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            return round(float(value) / _NANOSECONDS_PER_MS, 3)
+        return None
+
+    timings: dict[str, float] = {}
+    load = _ms("load_duration")
+    prefill = _ms("prompt_eval_duration")
+    decode = _ms("eval_duration")
+    total = _ms("total_duration")
+    if load is not None:
+        timings["model_load_ms"] = load
+    if prefill is not None:
+        timings["prompt_eval_ms"] = prefill
+    if decode is not None:
+        timings["decode_ms"] = decode
+    if total is not None:
+        timings["total_inference_ms"] = total
+    if prefill is not None:
+        # The weights must be resident and the prompt read before a single token
+        # can appear, so load + prefill is the honest time-to-first-token.
+        timings["first_token_ms"] = round((load or 0.0) + prefill, 3)
+    tokens = response.get("eval_count")
+    if isinstance(tokens, int) and tokens > 0 and decode:
+        timings["tokens_per_second"] = round(tokens / (decode / 1000.0), 2)
+    return timings
 
 
 def _default_transport(url: str, headers: dict[str, str], payload: dict[str, Any]) -> dict[str, Any]:
@@ -715,6 +851,22 @@ def ollama_unload_on_switch() -> bool:
     """
     raw = os.environ.get("NOVACONTROL_OLLAMA_UNLOAD_ON_SWITCH", "").strip().lower()
     return raw not in {"0", "false", "no", "off"}
+
+
+def ollama_disable_thinking() -> bool:
+    """Whether local Ollama calls ask the model NOT to emit its reasoning.
+
+    Every NovaControl local call wants a short structured answer, and a
+    reasoning-capable model that spends its budget thinking returns nothing at
+    all (measured: qwen3:8b, 115s, zero characters of answer). Ollama honours
+    ``think: false`` where the model's template supports it and ignores the
+    flag elsewhere, so leaving it on costs nothing.
+
+    NOVACONTROL_OLLAMA_ALLOW_THINKING=true restores the previous behaviour, for
+    the cases where the reasoning itself is what the caller wants.
+    """
+    raw = os.environ.get("NOVACONTROL_OLLAMA_ALLOW_THINKING", "").strip().lower()
+    return raw not in {"1", "true", "yes", "on"}
 
 
 def ollama_keep_alive() -> str:

@@ -36,6 +36,16 @@ _DEFAULT_VERIFY = 0.70
 _DEFAULT_MULTI_STEP = 0.88
 _DEFAULT_LEXICAL = 0.62
 _DEFAULT_REFERENCE = 0.74
+# Calibrated floor for acting on an embedding match — the confidence AFTER the
+# multi-signal arithmetic, not the raw similarity. Measured leave-one-out over
+# the shipped exemplar corpus (200 phrases, 46 intents, index rebuilt without
+# the query): 41% precision at 0.50, 48% at 0.55, 62% at 0.60 (8% of phrases),
+# 67% at 0.70, 80% at 0.80. The knee is at 0.60, so that is the default: a
+# wrong intent is expensive (it selects a tool), so the layer acts only where
+# the arithmetic says it is right more often than not. Raise it for stricter
+# behaviour, lower it when a real embedding backend is configured — this number
+# describes the local hashing space, not embeddings in general.
+_DEFAULT_SEMANTIC = 0.60
 
 
 class Route(StrEnum):
@@ -106,8 +116,10 @@ class _SettingsLike(Protocol):
     multi_step_confidence: float
     lexical_confidence: float
     reference_confidence: float
+    semantic_confidence: float
     allow_llm: bool
     lexical_matching: bool
+    semantic_matching: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,8 +137,10 @@ class NluThresholds:
     multi_step_confidence: float = _DEFAULT_MULTI_STEP
     lexical_confidence: float = _DEFAULT_LEXICAL
     reference_confidence: float = _DEFAULT_REFERENCE
+    semantic_confidence: float = _DEFAULT_SEMANTIC
     allow_llm: bool = True
     lexical_matching: bool = True
+    semantic_matching: bool = True
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.verify_confidence <= self.fast_confidence <= 1.0:
@@ -159,9 +173,15 @@ class NluThresholds:
             reference_confidence=_float_env(
                 env, "NOVACONTROL_NLU_REFERENCE_CONFIDENCE", defaults.reference_confidence
             ),
+            semantic_confidence=_float_env(
+                env, "NOVACONTROL_NLU_SEMANTIC_CONFIDENCE", defaults.semantic_confidence
+            ),
             allow_llm=_bool_env(env, "NOVACONTROL_NLU_ALLOW_LLM", defaults.allow_llm),
             lexical_matching=_bool_env(
                 env, "NOVACONTROL_NLU_LEXICAL_MATCHING", defaults.lexical_matching
+            ),
+            semantic_matching=_bool_env(
+                env, "NOVACONTROL_NLU_SEMANTIC_MATCHING", defaults.semantic_matching
             ),
         )
 
@@ -174,8 +194,10 @@ class NluThresholds:
             multi_step_confidence=settings.multi_step_confidence,
             lexical_confidence=settings.lexical_confidence,
             reference_confidence=settings.reference_confidence,
+            semantic_confidence=settings.semantic_confidence,
             allow_llm=settings.allow_llm,
             lexical_matching=settings.lexical_matching,
+            semantic_matching=settings.semantic_matching,
         )
 
     @classmethod
@@ -192,8 +214,12 @@ class NluThresholds:
             reference_confidence=_float_value(
                 data, "reference_confidence", defaults.reference_confidence
             ),
+            semantic_confidence=_float_value(
+                data, "semantic_confidence", defaults.semantic_confidence
+            ),
             allow_llm=_bool_value(data, "allow_llm", defaults.allow_llm),
             lexical_matching=_bool_value(data, "lexical_matching", defaults.lexical_matching),
+            semantic_matching=_bool_value(data, "semantic_matching", defaults.semantic_matching),
         )
 
     # -- policy ---------------------------------------------------------------
@@ -304,8 +330,10 @@ class NluThresholds:
             "multi_step_confidence": self.multi_step_confidence,
             "lexical_confidence": self.lexical_confidence,
             "reference_confidence": self.reference_confidence,
+            "semantic_confidence": self.semantic_confidence,
             "allow_llm": self.allow_llm,
             "lexical_matching": self.lexical_matching,
+            "semantic_matching": self.semantic_matching,
         }
 
 

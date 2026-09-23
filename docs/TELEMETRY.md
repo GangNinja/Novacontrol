@@ -88,3 +88,39 @@ rebuilt on every tick.
 * The **System** panel keeps the deep system actions (health, hardening,
   package, task management). Telemetry is the live read-out; System is the
   operations panel.
+
+## Interpretation telemetry (what understood a request)
+
+A separate, in-memory record covers the *language* side rather than the machine
+side. It is the self-improvement feed for the Global Intelligence Layer and is
+read through `GET /intelligence`, never through `/system/telemetry`.
+
+One record per request, carrying only safe operational metadata:
+
+| field | meaning |
+|---|---|
+| `request_id` | `req-<intent id[:12]>` — the same id returned to the client in the NLU payload, so an outcome can be reported against it |
+| `timestamp` | when the request was understood |
+| `normalized` | the request after normalization (the text the layer actually matched) |
+| `intent` | the selected intent |
+| `confidence` | the blended reading, with its parts under `confidence_parts` |
+| `nlu_method` / `strategy` | which layer understood it: `fast_path`, `fuzzy`, `learned_variant`, `contextual`, `lexical`, `embedding`, `composite`, `multi_intent`, `semantic` |
+| `used_model` | whether a language model was consulted |
+| `route` | where it went: `fast`, `verify`, `llm`, `vision`, `clarify` |
+| `tool` | the executor the intent reaches |
+| `complexity` | SIMPLE / MODERATE / COMPLEX from the complexity detector |
+| `latency_ms` | understanding cost, with per-layer attribution under `layer_ms` |
+| `outcome` | **added after execution**: `success`, or `failure` with `outcome_detail` holding the exception type |
+
+Escalations are recorded separately with the model's own reported timings (load,
+first token, decode rate, true inference total). A cloud provider reports none of
+those, and the aggregate stays empty rather than inventing zeroes.
+
+**The honesty contract for this record.** An outcome that was never reported is
+**absent**, not counted as a success — "understood, then failed" is a fact worth
+seeing, so the field cannot default to good news. Routes are counted where the
+request actually went: a request that needs an image is recorded as `vision`
+even though the words alone resolved to nothing and a question was also asked.
+And nothing here is chain-of-thought: no model reasoning, no prompts and no
+replies are stored — only the selected component, the resolved intent, the
+measured confidence, the cost and the outcome.
