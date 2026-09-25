@@ -19,7 +19,7 @@ from novacontrol.application import NovaControlApplication
 from novacontrol.core.events import Event
 from novacontrol.explore import ExploreRequest
 from novacontrol.explore.trending import TrendingTopicsProvider
-from novacontrol.planning import PlanningEngine, WorkflowExecutor
+from novacontrol.planning import PlanningEngine
 from novacontrol.release import ReleaseHardeningChecker, RuntimePackageBuilder, SystemHealthMonitor
 from novacontrol.settings import ApprovalMode
 from novacontrol.telemetry import SystemTelemetry
@@ -371,6 +371,33 @@ def create_app() -> Any:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @app.get("/models/status")
+    async def models_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """What the model runtime holds right now, and the memory policy.
+
+        The chat model and the vision model both compete for the same RAM on
+        this machine, so the manager is exclusive by default: the panel asks
+        here rather than each surface probing the runtime itself.
+        """
+        return await nova.model_status()
+
+    @app.post("/models/load")
+    async def models_load(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Load a model, unloading whatever must go first to make room."""
+        try:
+            return await nova.load_model(str(payload.get("model", "")))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/models/unload")
+    async def models_unload(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Release one model, or every resident model when none is named."""
+        return await nova.unload_model(str(payload.get("model", "")))
+
     @app.post("/chat/clear")
     async def chat_clear(_principal: str = Depends(require_auth)) -> dict[str, Any]:
         """Wipe the conversation: server memory AND the shared transcript."""
@@ -519,11 +546,39 @@ def create_app() -> Any:
 
     @app.post("/plan")
     async def plan(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
-        workflow_plan = PlanningEngine().create_plan(str(payload["goal"]))
+        """Plan a goal: steps, tools, effects, dependencies and how each is checked.
+
+        The planner is the application's own compiler (Phase 4), so a plan here
+        and a plan the agent loop follows are the same plan. ``execute`` walks
+        it; steps that change something still need confirmation, and this
+        endpoint cannot grant it — use ``/plan/run`` to approve steps explicitly.
+        """
+        workflow_plan = nova.plan_for(str(payload["goal"]))
         response: dict[str, Any] = {"plan": workflow_plan.to_dict()}
         if payload.get("execute"):
-            response["workflow"] = (await WorkflowExecutor().execute(workflow_plan)).to_dict()
+            workflow = await nova.workflow_executor.execute(workflow_plan)
+            response["workflow"] = workflow.to_dict()
+            response["state"] = workflow.state()
         return response
+
+    @app.post("/plan/run")
+    async def plan_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Run a goal end to end through the agent loop, and say what was proven.
+
+        ``approved`` names the steps this caller authorizes; nothing else may
+        run a step that needs confirmation. The response carries the phase
+        trace, the plan, the workflow and — deliberately — the steps that could
+        NOT be verified.
+        """
+        goal = str(payload.get("goal", "")).strip()
+        if not goal:
+            raise HTTPException(status_code=422, detail="A goal is required.")
+        approved = payload.get("approved") or ()
+        if not isinstance(approved, list | tuple):
+            raise HTTPException(status_code=422, detail="approved must be a list of step ids.")
+        return await nova.run_plan(goal, approved=[str(step_id) for step_id in approved])
 
     @app.post("/plan/code")
     async def plan_code(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:

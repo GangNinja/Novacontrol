@@ -142,12 +142,17 @@ class VisionController:
 
     # -- perception ------------------------------------------------------------
 
-    async def describe_screen(self) -> dict[str, Any]:
+    async def describe_screen(self, *, question: str = "") -> dict[str, Any]:
         """Capture and understand the current screen.
 
         The screenshot runs under the auto-approved gateway: the Describe Screen
         click (or authenticated API call) is the approval, and a capture is
         read-only toward the desktop.
+
+        ``question`` is what the user asked about the screen, when they asked
+        something specific ("why isn't the button working?"). It is passed to
+        the vision model so the pixels are read for the reason they were
+        captured; a plain capture leaves it empty and gets the checklist.
         """
         from novacontrol.application_helpers import ApprovedApprovalGateway
         from novacontrol.core.security import DenyByDefaultApprovalGateway
@@ -178,7 +183,10 @@ class VisionController:
             )
             return output
 
-        understanding = await self._understand("vision_screen.png")
+        asked = " ".join(str(question or "").split())
+        if asked:
+            output["question"] = asked
+        understanding = await self._understand("vision_screen.png", question=asked)
         output["summary"] = understanding
         # Human-readable line for renderers and API consumers (the `summary`
         # object is structured; `message` is what a person reads).
@@ -194,16 +202,23 @@ class VisionController:
             output["message"] = "Screen captured, but no windows were detected by the probe."
         return output
 
-    async def _understand(self, screenshot_path: str) -> dict[str, Any]:
+    async def _understand(self, screenshot_path: str, *, question: str = "") -> dict[str, Any]:
         """Understand a screenshot with the LLM when available, probes otherwise."""
         if self.has_vision_model:
             try:
                 from novacontrol.vision.multimodal import MultimodalVisionProcessor
 
                 processor = MultimodalVisionProcessor(llm_provider=self._llm_provider)
-                understanding = await processor.understand_screen(screenshot_path)
+                understanding = await processor.understand_screen(
+                    screenshot_path, question=question
+                )
                 if understanding.summary:
-                    return {"source": "vision_model", "summary": understanding.summary}
+                    return {
+                        "source": "vision_model",
+                        "summary": understanding.summary,
+                        "question": question,
+                        "question_answered": bool(question),
+                    }
             except Exception as exc:  # fall through to probes, but note why
                 self.record_bug(
                     f"Vision model understand_screen failed: {exc}",
@@ -216,10 +231,16 @@ class VisionController:
         except Exception:
             lines = None
         windows = (lines or [])[:8]
+        # The probe reads window titles, not pixels, so a question about the
+        # screen is NOT answered here — and saying so is the whole point of this
+        # branch. ``question_answered`` is False because a caller that cannot
+        # tell the difference would report a probe as an answer.
         return {
             "source": "window_probe",
             "summary": "Visible windows (probe; no vision model wired): " + ("; ".join(windows) if windows else "none detected"),
             "windows": windows,
+            "question": question,
+            "question_answered": False,
         }
 
     # -- guided action -----------------------------------------------------------

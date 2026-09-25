@@ -196,6 +196,16 @@ class IntentCatalog:
         definition = self._index.get(intent)
         return definition.confidence_floor if definition is not None else _DEFAULT_FLOOR
 
+    def tools_for(self, intent: IntentName) -> tuple[str, ...]:
+        """The tools this intent reaches, in preference order.
+
+        One accessor for a question several layers ask — telemetry records the
+        first of them, the decision layer names it, and a capability picker
+        lists them all — so "which tool would this run" has a single answer.
+        """
+        definition = self._index.get(intent)
+        return definition.tools if definition is not None else ()
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "total": len(self.definitions),

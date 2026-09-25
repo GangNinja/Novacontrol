@@ -40,6 +40,7 @@ The Phase 12 API subsystem provides REST and WebSocket entrypoints through FastA
 - `POST /train`: Run bounded autonomous local learning iterations. *(frontend: web panel `renderLearning`)*
 - `POST /brain/decide`: Trace an utterance through the routing gates with a rung preview. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /plan`: Create and optionally execute a plan. *(frontend: web panel `renderBuild`)*
+- `POST /plan/run`: Run a goal through the agent loop; steps needing approval must be named. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /plan/code`: Plan a coding task: language-aware steps plus a drafted code artifact. *(frontend: web panel `renderBuild`)*
 - `POST /build/save`: Save a drafted Build artifact to the build_workspace folder on disk. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /command/plan`: Plan a natural desktop or phone command. *(frontend: web panel `renderCommand`)*

@@ -96,6 +96,88 @@ class NluSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class DecisionSettings:
+    """Which provider decides what to DO with an understood request.
+
+    ``local`` is the default and the only provider a default install ever uses:
+    the decision layer is deterministic, offline and complete on its own. An
+    external provider can be named here, but it is an ADVISOR — it may suggest a
+    route, never an executor — and it is consulted only when ``allow_remote``
+    opts in, so nothing leaves the machine by accident.
+    """
+
+    provider: str = "local"
+    jev_endpoint: str = ""
+    jev_timeout_s: float = 2.0
+    allow_remote: bool = False
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "jev_endpoint": self.jev_endpoint,
+            "jev_timeout_s": self.jev_timeout_s,
+            "allow_remote": self.allow_remote,
+        }
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> DecisionSettings:
+        defaults = cls()
+        provider = str(data.get("provider", defaults.provider) or defaults.provider).strip().lower()
+        return cls(
+            provider=provider or defaults.provider,
+            jev_endpoint=str(data.get("jev_endpoint", defaults.jev_endpoint) or "").strip(),
+            jev_timeout_s=_float_value(data.get("jev_timeout_s"), defaults.jev_timeout_s),
+            allow_remote=_bool_setting(data, "allow_remote", defaults.allow_remote),
+        )
+
+
+#: Ceilings for the plan layer's loops. A loop bound that can be configured to
+#: "very large" is a loop that cannot be depended on to stop, so a configured
+#: value above these is ignored rather than honoured. They mirror the plan
+#: layer's own limits (``planning.models.MAX_STEP_ATTEMPTS`` and the agent
+#: loop's cycle ceiling), and a test pins them together so they cannot drift.
+MAX_PLAN_CYCLES = 10
+MAX_PLAN_ATTEMPTS = 10
+
+
+@dataclass(frozen=True, slots=True)
+class PlanningSettings:
+    """How far execution may go before it stops and says what happened.
+
+    ``max_step_attempts`` counts TOTAL attempts at one step, so 2 is "try, then
+    try once more" — enough for a flaky network, not enough to grind on a
+    permanent failure. ``max_cycles`` bounds the agent loop's whole
+    understand-decide-plan-execute-verify cycle. Both are small on purpose:
+    repetition is what an unrecoverable failure looks like when nobody is
+    counting.
+    """
+
+    max_cycles: int = 2
+    max_step_attempts: int = 2
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "max_cycles": self.max_cycles,
+            "max_step_attempts": self.max_step_attempts,
+        }
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> PlanningSettings:
+        defaults = cls()
+        return cls(
+            max_cycles=_count_setting(
+                data, "max_cycles", defaults.max_cycles, maximum=MAX_PLAN_CYCLES
+            ),
+            max_step_attempts=_count_setting(
+                data,
+                "max_step_attempts",
+                defaults.max_step_attempts,
+                maximum=MAX_PLAN_ATTEMPTS,
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ModuleSettings:
     enabled: bool = True
     options: Mapping[str, Any] = field(default_factory=dict)
@@ -108,6 +190,8 @@ class NovaControlConfig:
     redis: RedisSettings = field(default_factory=RedisSettings)
     security: SecuritySettings = field(default_factory=SecuritySettings)
     nlu: NluSettings = field(default_factory=NluSettings)
+    decision: DecisionSettings = field(default_factory=DecisionSettings)
+    planning: PlanningSettings = field(default_factory=PlanningSettings)
     modules: Mapping[str, ModuleSettings] = field(default_factory=dict)
 
     @classmethod
@@ -132,6 +216,8 @@ class NovaControlConfig:
             redis=RedisSettings(**_mapping(data.get("redis", {}))),
             security=SecuritySettings(**_mapping(data.get("security", {}))),
             nlu=NluSettings.from_mapping(_mapping(data.get("nlu", {}))),
+            decision=DecisionSettings.from_mapping(_mapping(data.get("decision", {}))),
+            planning=PlanningSettings.from_mapping(_mapping(data.get("planning", {}))),
             modules=modules,
         )
 
@@ -201,6 +287,42 @@ class NovaControlConfig:
                     os.getenv("NOVACONTROL_NLU_SEMANTIC_MATCHING"), default=base.nlu.semantic_matching
                 ),
             ),
+            decision=replace(
+                base.decision,
+                # "local" unless an operator names something else: the decision
+                # layer must never require an external service to work.
+                provider=(
+                    os.getenv(
+                        "NOVACONTROL_DECISION_PROVIDER", base.decision.provider
+                    ).strip().lower()
+                    or base.decision.provider
+                ),
+                jev_endpoint=os.getenv(
+                    "NOVACONTROL_DECISION_JEV_ENDPOINT", base.decision.jev_endpoint
+                ).strip(),
+                jev_timeout_s=_seconds_value(
+                    os.getenv("NOVACONTROL_DECISION_JEV_TIMEOUT"), base.decision.jev_timeout_s
+                ),
+                allow_remote=_parse_bool(
+                    os.getenv("NOVACONTROL_DECISION_ALLOW_REMOTE"),
+                    default=base.decision.allow_remote,
+                ),
+            ),
+            planning=replace(
+                base.planning,
+                # Bounds on loops: an unusable value keeps the default, and a
+                # value above the ceiling is clamped to it rather than obeyed.
+                max_cycles=_count_value(
+                    os.getenv("NOVACONTROL_PLANNING_MAX_CYCLES"),
+                    base.planning.max_cycles,
+                    maximum=MAX_PLAN_CYCLES,
+                ),
+                max_step_attempts=_count_value(
+                    os.getenv("NOVACONTROL_PLANNING_MAX_STEP_ATTEMPTS"),
+                    base.planning.max_step_attempts,
+                    maximum=MAX_PLAN_ATTEMPTS,
+                ),
+            ),
         )
 
 
@@ -218,6 +340,38 @@ def _parse_bool(value: str | None, *, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _count_value(value: str | None, default: int, *, maximum: int) -> int:
+    """Parse a positive whole-number setting, clamped to its ceiling.
+
+    Unusable input (not a number, zero, negative) keeps the default; a number
+    above the ceiling is clamped, because "stop after 10 000 cycles" is not a
+    configuration, it is an unbounded loop written down.
+    """
+    if value is None or not str(value).strip():
+        return default
+    try:
+        parsed = int(str(value).strip())
+    except ValueError:
+        return default
+    if parsed < 1:
+        return default
+    return min(parsed, maximum)
+
+
+def _count_setting(data: Mapping[str, Any], key: str, default: int, *, maximum: int) -> int:
+    """The mapping-side twin of :func:`_count_value`."""
+    value = data.get(key)
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed < 1:
+        return default
+    return min(parsed, maximum)
+
+
 def _parse_float(value: str | None, *, default: float) -> float:
     """Parse a 0..1 setting, ignoring unusable input rather than failing boot."""
     if value is None or not value.strip():
@@ -227,6 +381,28 @@ def _parse_float(value: str | None, *, default: float) -> float:
     except ValueError:
         return default
     return parsed if 0.0 <= parsed <= 1.0 else default
+
+
+def _seconds_value(value: str | None, default: float) -> float:
+    """Parse a timeout in seconds; unusable input keeps the default."""
+    if value is None or not value.strip():
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _float_value(value: Any, default: float) -> float:
+    """Parse an unconstrained float setting (timeouts, sizes) from config."""
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
 
 
 def _float_setting(data: Mapping[str, Any], key: str, default: float) -> float:

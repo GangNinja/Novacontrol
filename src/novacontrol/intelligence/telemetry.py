@@ -67,6 +67,9 @@ class _Stats:
     routes: Counter[str] = field(default_factory=Counter)
     escalations: Counter[str] = field(default_factory=Counter)
     outcomes: Counter[str] = field(default_factory=Counter)
+    decisions: Counter[str] = field(default_factory=Counter)
+    decision_providers: Counter[str] = field(default_factory=Counter)
+    decision_fallbacks: int = 0
     latency_ms: list[float] = field(default_factory=list)
     # Per-field samples of the provider's own timings (load, prefill/decode,
     # tokens/second). Kept as a list per field so the summary can report an
@@ -162,6 +165,51 @@ class InterpretationTelemetry:
             **measured,
         })
 
+    def record_decision(
+        self,
+        *,
+        route: str,
+        decision_type: str = "",
+        capability: str = "",
+        model: str = "",
+        provider: str = "local",
+        reason_code: str = "",
+        fallback: bool = False,
+        requires_planning: bool = False,
+        requires_confirmation: bool = False,
+        latency_ms: float = 0.0,
+        request_id: str = "",
+    ) -> None:
+        """Record what the decision layer chose, and who chose it.
+
+        Separate from the resolution record because it answers a different
+        question: understanding says WHICH intent was meant, the decision says
+        what NovaControl then did about it — and how often it had to leave the
+        deterministic path, or fall back from a configured provider to the
+        local one. Safe metadata only: no reasoning, no prompts, no text.
+        """
+        self._stats.decisions[route] += 1
+        self._stats.decision_providers[provider] += 1
+        if fallback:
+            self._stats.decision_fallbacks += 1
+        self._sample(
+            {
+                "kind": "decision",
+                "route": route,
+                "decision_type": decision_type,
+                "capability": capability,
+                "model": model,
+                "provider": provider,
+                "reason_code": reason_code,
+                "fallback": fallback,
+                "requires_planning": requires_planning,
+                "requires_confirmation": requires_confirmation,
+                "latency_ms": round(latency_ms, 3),
+                "request_id": request_id,
+                "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
+            }
+        )
+
     def record_outcome(self, *, request_id: str, success: bool, detail: str = "") -> None:
         """Report what happened AFTER understanding: carried out, or not.
 
@@ -172,14 +220,25 @@ class InterpretationTelemetry:
         means "not reported" rather than "succeeded".
         """
         self._stats.outcomes["success" if success else "failure"] += 1
+        # Prefer the RESOLUTION sample. The outcome answers "was the understood
+        # request carried out", and the decision record beside it answers a
+        # different question — what NovaControl chose to do about it. Attaching
+        # to whichever sample happens to be the newest would move the fact the
+        # day a second record started sharing the same request id.
+        target: dict[str, Any] | None = None
         for sample in reversed(self._stats.samples):
-            if sample.get("request_id") == request_id and "kind" in sample:
-                if sample.get("outcome"):
-                    break  # already reported; the first word is the true one
-                sample["outcome"] = "success" if success else "failure"
-                if detail:
-                    sample["outcome_detail"] = detail
+            if sample.get("request_id") != request_id or "kind" not in sample:
+                continue
+            if sample.get("outcome"):
+                return  # already reported; the first word is the true one
+            if sample.get("kind") == "resolution":
+                target = sample
                 break
+            target = target if target is not None else sample
+        if target is not None:
+            target["outcome"] = "success" if success else "failure"
+            if detail:
+                target["outcome_detail"] = detail
 
     def record_clarification(
         self, *, question: str, normalized: str = "", route: str = ""
@@ -244,6 +303,9 @@ class InterpretationTelemetry:
                 if values
             },
             "outcomes": dict(s.outcomes.most_common()),
+            "decisions": dict(s.decisions.most_common()),
+            "decision_providers": dict(s.decision_providers.most_common()),
+            "decision_fallbacks": s.decision_fallbacks,
             "clarifications": s.clarifications,
             "unknown_intents": s.unknown,
             "failed_entity_resolutions": s.failed_entities,
@@ -281,6 +343,11 @@ class InterpretationTelemetry:
             findings.append(
                 f"Understanding escalates to a language model for {escalations / total:.0%} of requests — "
                 "add intent rules or exemplars for the frequent phrasings."
+            )
+        if s.decision_fallbacks:
+            findings.append(
+                f"The configured decision provider did not answer {s.decision_fallbacks} "
+                "time(s); requests were decided locally instead."
             )
         if s.latency_ms:
             avg = sum(s.latency_ms) / len(s.latency_ms)

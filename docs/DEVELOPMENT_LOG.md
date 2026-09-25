@@ -702,20 +702,168 @@ with no context at all, the single word *"resume"* reads as `media_control` via
 the exemplar matcher (a legitimate media command) rather than asking. With any
 context present it resumes the remembered task instead.
 
-## 17. Where things stand
+## 17. Phases 3–7: deciding, planning, selecting, looking, loading
 
-- **Scale**: ~72,000 lines (37.2k Python source across 192 modules, 20.5k tests,
+Five layers landed on top of the understanding stack. The rule each one was
+built to obey: **it can refuse the next step, and it cannot grant itself one.**
+
+**Phase 3 — the Decision Engine** (`decision/`: models, routing, providers,
+engine). A new package between Context/Memory and everything that executes,
+answering *what should NovaControl do with this?* It resolves a route
+(`direct_tool`, `system_tools`, `local_capability`, `planner`, `agent`,
+`local_llm`, `cloud`, `vision`, `chat`, `clarify`), the capability, the model,
+the actions and the requirement flags, with a stable `reason_code` (callers
+branch on the why, never on prose) and a templated sentence for humans. It
+executes nothing and holds no conversation state — the same intent plus the same
+environment gives the same decision, which is what makes the fast path testable.
+
+The cheapest-first hierarchy is the whole point: an image request goes to vision
+**before** clarification (asking a better question cannot answer a question about
+a picture), a system reading is measured rather than modelled, and a model is
+reached only when the lightweight layers already declined, the complexity
+assessment asked for one, or part of the request was never read at all.
+
+`INTENT_HANDLERS` moved out of the application into `decision/routing.py`,
+because "this intent is carried out by that subsystem" **is** a decision rather
+than application policy; `NovaControlApplication._GIL_ROUTES` remains as a view
+of it, so existing callers keep working against one source of truth.
+
+**Jev as an optional provider, not a dependency.** `build_decision_provider()`
+maps configuration onto a provider and returns `None` for the local one — which
+is every default install. The external provider is constructed only when an
+endpoint *and* consent are configured, posts a **redacted** summary (intent,
+action, flags, complexity, environment: no raw or normalized text, no entities,
+no history), and every field of the reply is validated against the local
+vocabularies. Three rules survived review: an unknown route is **refused**
+rather than mapped; the handler is always resolved locally, so a remote service
+can suggest a route but never name an executor; and caution is monotone —
+`_validate` ORs the intent's own `requires_confirmation` with the provider's
+answer, because a provider that could clear it would be holding authorization.
+A declining provider is not a failure: it answers locally and reports
+`provider_fallback`, while a *switched-off* provider is simply the answer and
+reports nothing (otherwise a default install would look like it was recovering
+on every request).
+
+**Phase 5 — intelligent tool selection** (`tools/selection.py`). "Which tool
+would this reach?" was a single lookup. It is now `ToolSelector`, a pure
+function that assembles candidates from three surfaces that can disagree — the
+catalog's declared tools in preference order, the capability's executor, and the
+live tool registry — and scores them on declared order, registration,
+**entity completeness** and risk. Measured on the shipped taxonomy:
+
+```
+"Open Chrome."                  desktop_controller  declared 1.00  no confirm
+"What's my RAM usage?"          system_monitor      declared 1.00  no confirm
+"Delete the file report.pdf"    file_manager        executor 0.75  CONFIRM
+"Find my NovaControl project…"  file_manager        executor 0.45  missing: file
+```
+
+Two design calls are load-bearing. A missing required entity *multiplies* the
+score (0.6) rather than disqualifying the tool, because an incomplete step is
+exactly what the approval prompt is for. And a registered tool is offered as a
+candidate only when its schema **says** it serves the intent or the catalog
+already names it — a registered-but-unrelated name is ignored, because guessing
+from a name is how a selector starts running the wrong thing. The selector
+executes nothing; `requires_confirmation` can only be raised by it, never
+cleared. The engine names the tool on every decision (including one an external
+provider produced) and records `tool_source`, `tool_confidence`, `tool_reason`
+and the candidate list.
+
+**Phase 4 — the decision reaches the planner.** The planning handler and the
+agent loop now receive `request.context["decision"]` beside the structured
+intent, and `/plan` payloads carry both the decision and a rebuilt selection, so
+a plan path can say which tool a step would reach without re-reading the
+sentence. A reading the handler cannot reconstruct yields an **empty** selection
+rather than a guessed one.
+
+**Phase 6 — the vision pipeline answers the question asked** (and the text model
+is still never handed an image). `understand_screen(source, question=…)` puts the
+user's words first and keeps the checklist, because answering "why isn't the
+button working" needs the visible error text too. `describe_screen(question=…)`
+threads it end to end. What counts as a question is decided before capture: the
+NLU goal when present, the raw text otherwise, and nothing for a bare *"look at
+the screen"* — where the words are the instruction rather than a question about
+the picture. And the honesty rule held: with no vision model wired, the window
+probe now returns `question_answered: false` with the reason, instead of a
+window-title list presented as an answer to a question about pixels.
+
+**Phase 7 — model + hardware lifecycle.** The `ModelManager` surface
+(`is_loaded`, `get_active_model`, `get_available_memory`, `get_model_status`,
+`load_model`, `unload_model`, `unload_all`, `ensure_exclusive`) is exposed as
+`GET /models/status`, `POST /models/load`, `POST /models/unload`, backed by the
+application's own `model_status`/`load_model`/`unload_model`. Exclusivity is the
+default on this 16 GB box, the plan carries the measured figures it was decided
+from, unmeasurable memory reports `None` rather than zero, and no NPU
+acceleration path is claimed that was not measured.
+
+**Verification pass over Phase 3.** The decision engine was then re-checked
+against the four examples its own spec names, measured on this box with the
+local-model switch off, and three real defects surfaced — each one now fixed
+with a test that would have caught it:
+
+- *The second metric was dropped.* *"Check my RAM and CPU"* routed correctly to
+  `system_tools` / `system_monitoring`, but the reading carried only
+  `memory_status`, so half the question went unanswered. A status reading is now
+  expanded by the NLU layer into every metric it named (`_expand_status_metrics`,
+  whitelisted against the metric vocabulary before anything is read) and the
+  application answers one templated sentence per metric. Measured: *"check my
+  RAM and CPU"* → `['memory_status', 'cpu_status']`, 159.8 ms; the single-metric
+  *"what's my RAM usage?"* is unchanged at 74.5 ms.
+- *Work was answered with a question.* The spec's *"Find my NovaControl project,
+  inspect the latest changes and fix the failing tests"* came back as `clarify`:
+  the NLU layer asks for confirmation when it cannot confirm a catalogue reading,
+  and the decision layer deferred to that. A request that names work — needs a
+  model, needs a planner, or has unresolved entities — is now never answered with
+  a question; it escalates. Measured: `local_llm`, `requires_planning=True`,
+  `qwen3:8b`; with no model configured, the same route with an honest "no model
+  is configured" note; *"open it"* still clarifies, because that genuinely is
+  ambiguous.
+- *A broken context layer cost routing.* The decision engine's context snapshot
+  is now defensive — a raising or absent resolver means no context, not a failed
+  decision — and context is reported as an input (`context_available`,
+  `context_resolved`) without copying its contents into the decision.
+
+**Validation at this point**: full suite **1280 passed / 12 skipped** (1621
+subtests, Windows); mypy clean on both the linux and win32 views (199 modules);
+`docs/API.md` in sync; ruff clean on every file this work added, with the
+pre-existing findings in the touched files unchanged (212 findings in the
+modified files, before and after). Four new suites:
+`tests/test_decision_engine.py` (62), `tests/test_tool_selection.py` (32),
+`tests/test_vision_pipeline.py` (16) and `tests/test_model_lifecycle.py` (22).
+
+## 18. Where things stand
+
+- **Scale**: ~76,000 lines (39.6k Python source across 199 modules, 21.5k tests,
   9.4k web UI, remainder markdown/scripts/config).
-- **Validation at the tip**: full suite **1148 passed / 12 skipped** (Windows);
-  mypy clean on both the linux and win32 views; `docs/API.md` in sync. The CI
-  matrix last went green on `4dc67c2` (run #13), before the Phase 2 work.
+- **Validation at the tip**: full suite **1433 passed / 12 skipped** (1628
+  subtests, Windows); mypy clean on both the linux and win32 views (209 modules);
+  `docs/API.md` in sync. CI last went green on `efb309f`, which carries
+  everything through section 16.
 - **History**: the vision work of section 12 is committed as `8a203e6`, the
   hybrid NLU layer of section 13 as `d44e0a3`, and the log entry covering both as
-  `4dc67c2`. The Phase 2 work of section 14, the fixes and embedding layer of
-  section 15, and the verification fixes of section 16 are **uncommitted** in the
-  working tree.
-- **Open threads**: the Phase 2 and section 15 changes have not been through CI
-  yet; the embedding layer's floor (0.60) is measured against the *local*
+  `4dc67c2`; the Phase 2 work of sections 14–16 went green in CI as `efb309f`.
+  The five layers of section 17 (decision engine, tool selection, planning
+  bridge, vision question, model lifecycle), the Phase 4 planner of section 19
+  and the Phase 5 tool layer of section 20 — with the `decision/` package they
+  live in — land as one commit on `main`, the first state in which the layers
+  below the understanding stack are tracked rather than only working-tree.
+- **Open threads**: the five layers of section 17, the Phase 4 planner and the
+  Phase 5 tool layer reach CI for the first time with that commit; the plan compiler's clause recognition is a
+  deterministic pattern set, so a goal phrased outside it lands on a reasoning
+  step rather than a wrong action (deliberate, and the reason a real model is
+  still the escalation path); the desktop step runner reaches the machine
+  through the approval-gated tool executor, and no desktop tool is registered on
+  a default install, so a plan that opens an application currently reports
+  "nothing can carry this out" rather than opening it — the honest wiring gap,
+  not a silent success;
+  the tool selector's confidence numbers are earned from declared order,
+  registration and entity completeness rather than from measured task outcomes
+  (the telemetry now records the selection, so that calibration is possible);
+  the Jev provider has an HTTP round-trip test against a local server but no
+  live service has ever answered it; the vision question is delivered to the
+  model but has not been measured end to end on this box, because the local
+  vision model is reasoning-only (see below); the embedding layer's floor (0.60)
+  is measured against the *local*
   hashing vector space, so a deployment configuring a real embedding backend
   should re-measure and lower it; nineteen
   taxonomy intents (file operations, device controls, the code family) are
@@ -731,3 +879,323 @@ context present it resumes the remembered task instead.
   vision model on this machine is reasoning-only and should be swapped for a
   non-reasoning VL build; NovaLink M1 (companion transport) is designed and
   ready to build when scheduled.
+
+## 19. Phase 4: the planner, the agent loop, and what verification means
+
+The decision layer answers *what should we do with this request*. Phase 4 is the
+layer after it: given that answer and the goal, what are the actual STEPS, in
+what order, with which tool, and — the part every automation system eventually
+skips — how will each result be CHECKED.
+
+**The plan is a graph, and the spec's example is the test.** *"Open VS Code,
+open my NovaControl project, run the tests and tell me what failed"* is not four
+steps, because the sentence contains prerequisites nobody said out loud. The
+compiler emits exactly the seven the specification names — locate project, open
+VS Code, open project, execute tests, collect output, analyse failures,
+summarise result — each naming an action, a tool or capability, parameters,
+dependencies, an expected result, a verification and a status. `StepEffect`
+(READ_ONLY / LOCAL_WRITE / DESTRUCTIVE / EXTERNAL / SYSTEM) is what makes the
+safety rules enforceable rather than aspirational: it decides whether a step may
+run in parallel, whether its result must be verified, and whether it may ever be
+retried. The model REFUSES to let a non-read-only step declare itself
+parallel-safe, so "run this concurrently" cannot be opted into by an action that
+changes something.
+
+**Execution walks waves.** Everything whose dependencies are satisfied becomes
+ready together, and runs concurrently only when every step in the wave is
+read-only and none names the same explicit resource. The tool-name rule was the
+first attempt and was wrong: one read-only tool (the system monitor) legitimately
+serves CPU, RAM and GPU readings at once, while two steps about the same file are
+not independent even if both only read it — so the guard is about the thing being
+touched. A step that changes something waits for the previous such step (a write
+must not overtake a write), a failure blocks everything downstream, and a plan
+walked with no executor bound reports `executed: false` rather than a completed
+workflow nobody performed.
+
+**Verification is the difference between "it returned" and "it worked".** A step
+is COMPLETED only after its check PASSED; a step that ran and could not be
+checked is UNVERIFIED, which is neither a failure nor a success, and those steps
+are listed in `unverified_steps` and carried into the final answer instead of
+being rounded up. Checks read evidence — a file, an artifact, an exit code, the
+captured output, an observed change, a named callable — and return INCONCLUSIVE
+when they genuinely cannot tell. `EXIT_CODE` learned three readings of `expect`:
+an int (a build must exit 0), a collection (a suite may exit 0 or 1), and `None` —
+"any code" — because for *"run the tests and tell me what failed"* a non-zero exit
+IS the result while still needing to be captured for the analysis.
+
+**Recovery is a decision with a reason, not a hope.** `RecoveryAdvisor`
+classifies the failure from its own message and picks RETRY, MODIFY_PARAMETERS,
+ESCALATE or STOP. Destructive and external actions are never retried
+automatically (a delete that half-succeeded, run again, deletes something else),
+a refusal is never retried (only a person can change it), a missing prerequisite
+escalates to the model rather than looping, and a rejected parameter set is
+REPAIRED rather than repeated — the repair is only applied when it cannot change
+meaning (a quoted number becomes a number; an argument the tool explicitly
+rejected is dropped; a missing required value is never invented). Retry limits
+are configurable, and `RetryPolicy` refuses to be built above a ceiling, so an
+unbounded loop is unrepresentable rather than merely unlikely. The repair path
+uses the retry BUDGET rather than the "is this kind worth repeating" set, since a
+corrected attempt is not the same attempt again.
+
+**The agent loop owns the sequence, and cannot skip the last two phases.**
+UNDERSTAND → DECIDE → PLAN → EXECUTE → OBSERVE → VERIFY → CONTINUE/RETRY/
+ESCALATE → FINAL RESPONSE, on a bounded cycle count (`max_cycles`). A decision
+that says "ask first" ends the run before anything is planned; a step that needs
+confirmation runs only when the caller approved that step id — with no approval
+channel wired it is DENIED rather than attempted, and a tool refusal is a DENIAL
+rather than a failure. Retrying is possible only because a `replan` callable was
+given, which is why the loop cannot spin: it needs help to continue. Every phase
+is one of the application's own methods (the same decision engine, the same
+compiler, the same executor), so the loop has no opinion about tools or models
+and the whole thing runs end to end in a test on five fake callables.
+
+**Wiring.** `NovaControlApplication` builds one `PlanCompiler` (tool lookup into
+the intent catalogue) and one `WorkflowExecutor` whose step handler is the only
+route from a plan to the machine: deterministic actions by name (metric readings,
+locate, collect, analyse, summarise) and everything else through the
+approval-gated `ToolExecutor`. `POST /plan` returns the compiled plan and its
+state; `POST /plan/run` runs the goal through the agent loop with an explicit
+`approved` list of step ids and returns the phase trace, the plan, the workflow
+and the unverified steps. A named check (`metric_read`: did the reading report a
+value, or say why it could not measure one?) makes a read-only plan genuinely
+verified rather than merely unchecked.
+
+**Verified against its own requirements, and four defects fixed.** Re-running the
+specification's cases against the finished layer found four things, each one now
+pinned by a test:
+
+  * **A plan could contain two steps with ONE id.** An id is a slug of a title,
+    so a sentence that repeats a clause produces the same id twice — and two
+    steps with one id are one step as far as execution is concerned: one outcome
+    overwrites the other, and the plan can report COMPLETED while a step it
+    listed was never accounted for. `Plan` now refuses to be built with repeated
+    ids; a test proves the compiler cannot trip the guard (`"open chrome and
+    open chrome"` compiles to `open-application`, `open-application-2`).
+  * **A step whose dependency is not in the plan at all was reported as "a
+    dependency failed"** — sending the reader to look for a failure that never
+    happened. A blocked step now separates the two cases and NAMES the missing
+    dependency (`FailureKind.MISSING_DEPENDENCY`), because a dangling dependency
+    is a defect in the plan, not a runtime failure.
+  * **A plan with nothing failed in it could still report `failed`**, with the
+    summary "a step failed". A plan whose steps were never attempted — a dangling
+    dependency, or a dependency cycle — is reported as BLOCKED, and the sentence
+    says what did not happen (*"The plan did not run: Collect was not attempted:
+    it depends on a step that is not in this plan"*) instead of inventing a
+    failure. A real failure still reports FAILED, with the failing step
+    `failed`, its dependent `blocked`, and the reason named.
+  * **The plan layer's loop bounds were constants in the wiring**: two attempts
+    per step and two agent-loop cycles, changeable only by editing the
+    application. They are configuration now — `planning.max_cycles`,
+    `planning.max_step_attempts`, `NOVACONTROL_PLANNING_MAX_CYCLES`,
+    `NOVACONTROL_PLANNING_MAX_STEP_ATTEMPTS`, plus a `planning:` section in
+    `configs/default.yaml` — read once at construction and handed to the
+    compiler, the executor AND the agent loop, because a limit only some paths
+    honour is not a limit. Unusable input keeps the default and a value above the
+    plan layer's own ceiling is clamped rather than obeyed (a ceiling that can be
+    configured away is not a ceiling), with a test pinning the two ceilings to
+    each other so they cannot drift.
+
+**Validation**: full suite **1347 passed / 12 skipped** (1628 subtests,
+Windows, 5:02); mypy clean on both the linux and win32 views (203 modules);
+`docs/API.md` regenerated and in sync (66 routes, the new one declared in
+`ApiSurface` *and* in the route-consumer table, which is what the parity tests
+enforce); `tests/test_planner_phase4.py` adds **63 tests** covering
+the specification's plan step for step, clause recognition, derived dependencies
+and parallel groups, concurrent readings, a shared resource refusing
+concurrency, writes serialised, blocked dependents, bounded retries (including a
+destructive step never retried), every verification method and the
+inconclusive-is-not-a-pass rule, parameter repair, the classification table,
+denial-without-a-channel, a permission error read as a denial, the agent loop's
+phase order, clarification executing nothing, escalation, the cycle bound, and
+the application's own planning path end to end, and the configured loop bounds.
+`tests/test_config.py` covers the same bounds from the config side (mapping,
+environment, clamping, unusable input). Ruff reports **no new findings** in any
+file this work touched (the two E501s in `planning/engine.py` are pre-existing
+and left alone).
+
+## 20. Phase 5: finding the right tool, and the four rules after it
+
+Phase 4 taught the system to plan with tools. Phase 5 is about the question the
+plan silently assumed someone had already answered: *which* tool, out of
+seventeen, and how does anything know?
+
+**Every tool is described, once, by everything that knows it.** A tool was a
+name, a schema and a callable — enough to run one and not enough to search for
+one. Worse, three surfaces each knew a different part of the truth and nothing
+joined them: the intent catalogue knew which tool carries out each intent (and
+the phrases a person actually says), the capability registry knew the executor
+and the risk, and the runtime registry knew what was really registered with
+which permission scopes. `tools/metadata.py` adds the missing half —
+description, category, capabilities, input and output schema, risk, permissions,
+examples, tags, and a caching contract — and `tools/catalog.py` builds ONE
+catalogue of seventeen tools from the four sources (declarations included), with
+two rules that keep it honest: risk becomes the HIGHEST any source claims, and
+`registered` is true only when a callable exists. A capability this build can
+dispatch but has not wired up is reported as exactly that rather than hidden or
+pretended ready — the same honesty the planner's tool errors already had.
+
+**Discovery replaces a list with an answer.** Handing a model every tool
+definition is not just expensive, it is *worse* than expensive: the names
+(`system_monitor`, `explore_service`) say almost nothing about what a user
+meant, so a model given seventeen of them picks by name recognition.
+`tools/discovery.py` ranks the catalogue against the request with the lightweight
+machinery the NLU layer already had — no new dependency, embedding support still
+optional (a caller with a model passes it as the embedder):
+
+  * **lexical**: the query's content words, weighted by the SQUARE of their
+    rarity in the tool corpus, scored as the fraction of the query's meaning a
+    tool covers;
+  * **semantic**: cosine over hashed word/bigram/character-ngram features, the
+    same deterministic offline vector space `intelligence/semantic.py` uses.
+
+Both numbers are reported on every match, so a surprising ranking can be
+explained rather than argued about. Measured on the shipped corpus
+(`Which programs are consuming most of my memory?` → `system_monitor` **0.73**,
+`what is chewing up my ram` → `system_monitor` **0.70** (the paraphrase case the
+semantic half exists for), `send a text to alex` → `phone_controller` **0.77**,
+`research the brics summit` → `explore_service` **0.77**, `what is 15% of 240` →
+`scratch_brain` **0.75**, `take a screenshot and tell me what button is broken` →
+`vision_pipeline` **0.45**). The model escalation is shown this shortlist only.
+
+**Four defects the tests found, in the order they appeared:**
+
+  * **Plain IDF ranked the browser above the system monitor** for *"what is
+    chewing up my ram"*: the term `up` happens to appear in more tool documents
+    than `ram` does, and a linear weight could not say which of the two the
+    request was ABOUT. Squaring the rarity fixed the ranking (0.70 vs 0.22) —
+    the same reasoning that makes inverse-document-frequency work at all, pushed
+    further where the corpus is small and the vocabulary narrow.
+  * **The floor was too permissive at 0.18**, which returned *"book me a flight
+    to mars"* (0.23 — a browser can search, it cannot book) and *"write a poem
+    about the sea"* (0.19, from a tag that happened to overlap) as candidates.
+    Calibrated to 0.25, where every request the system can genuinely serve sits
+    (0.45+) and those two do not — because *"no tool fits this"* is a real
+    answer, and it is what stops a planner reaching for something unrelated just
+    to have one.
+  * **The normalizer's line cap was not a size cap.** Capping the NUMBER of
+    lines retained assumed lines are short; a single 9000-character blob on one
+    line (minified output, one-line JSON) left the "bounded" result at **18 kB**.
+    `max_line_chars` bounds each retained line, and `truncated` now reports the
+    cut even when the line count was fine.
+  * **A Python traceback's most informative line was invisible**, and the
+    summary it fell back to was the oldest line of the output. `\berror\b` does
+    not match `ValueError` or `AssertionError` — there is no word boundary
+    inside the name — so the pattern missed exactly what a traceback is for;
+    and for a failure with no matched line, the summary was the FIRST line of
+    the retained tail (*"line one"* for a three-line failure) rather than the
+    last thing the command said. Both fixed, and a command that *succeeded* no
+    longer gets an invented error summary from its final output line.
+
+**A call is validated, its result bounded, and its answer reused only when that
+is safe.** The pipeline is `ToolCall → schema validation → permission validation
+→ cache → execution → normalization → (cache store)`, and the strictness is the
+point: an **undeclared argument is refused** rather than passed to the
+implementation, `{"command": ""}` is refused because it runs nothing and reports
+success, a type name no schema can satisfy fails when the schema is CONSTRUCTED,
+and every problem is reported at once. Caching is opt-in per tool *and per
+operation*: only a tool may declare its result reusable (`cache_ttl_s`), no
+metadata means no caching, `volatile_values` names the readings that change
+between calls (a cached CPU percentage is a lie nobody can see, so
+`cache_refusal` says why it was measured instead of remembered), failures,
+denials and empty results are never stored, and the cache is bounded with LRU
+eviction. Normalization maps a ten-thousand-line test run to an exit code, a
+one-line summary, the relevant lines and a `lines`/`truncated` count — counting
+what it dropped — while leaving a small result exactly as it was.
+
+**Wiring.** `NovaControlApplication` builds the catalogue (intents +
+capabilities + registry), the retriever, the cache and a normalizing executor
+once, exposes `discover_tools()` / `discovered_tools()` / `tools_status()` (the
+last is folded into `status()`), and passes the discovered shortlist into the
+model escalation prompt. Nothing new became reachable by accident: discovery
+names tools, the executor still runs them, and the approval layer is untouched —
+a cached result is only returned for a call that passed the same checks as
+before.
+
+**Verified against its requirements, and seven more defects fixed.** Re-reading
+the layer against the specification clause by clause found things the first pass
+had left nominal:
+
+  * **Both schemas were empty on all seventeen tools.** The specification lists
+    an input and an output schema as metadata; the fields existed and carried
+    nothing, so a model was offered a tool with no call shape and no idea what
+    came back. Input schemas are now DERIVED from the required and optional
+    entities the intent catalogue already records for the intents a tool carries
+    out (`desktop_controller` expects `application` because `open_application`
+    requires one); output schemas are declared contracts, and `system_monitor`'s
+    — metric, value, unit, summary — is what the metric path really returns.
+  * **The pipeline had no live path.** Validation, caching and normalization
+    were each tested in isolation and never exercised by the running system,
+    because the runtime registry was empty on a default install. Three read-only
+    tools are now registered for real — `machine_facts`, `capabilities` and
+    `installed_applications`, backed by the readers this application already owns
+    — which makes the stages reachable and makes the specification's own caching
+    examples (OS information, hardware information, installed applications,
+    system capabilities) actual work. All four named operations are therefore
+    covered, and each of the three tools answers from the machine itself —
+    `installed_applications` reads the same index `open <app>` resolves against,
+    so what it lists can actually be launched. The catalogue now describes the
+    **twenty** tools this build ships, every one of them with both schemas.
+  * **The first version of `machine_facts` failed on its first call**, with
+    `TypeError: 'HardwareTelemetry' object is not callable`: `_hardware_status`
+    is a property (the reader is created once so CPU deltas have a baseline),
+    and calling it would have built a second reader with no baseline. The
+    integration test that runs the tool through the app's executor is what
+    caught it.
+  * **The cacheable tool was returning live numbers.** `machine_facts` reported
+    free disk space and uptime while declaring a ten-minute cache lifetime — a
+    cached answer that would be wrong the moment it was reused, and the exact
+    failure the specification warns about. It now returns stable facts only
+    (capacity, not free space; no uptime), and a test asserts the cached payload
+    carries none of `disk_free_bytes`, `uptime_seconds`, `used_bytes` or
+    `percent`. Live readings stay with `system_monitor`, which declares them
+    volatile.
+  * **A request made only of function words matched nothing.** *"What can you
+    do?"* has no content words, so both the lexical and the semantic layer saw
+    an empty query and every tool scored zero — including the `capabilities`
+    tool whose own declared example IS that phrase. When there is nothing to
+    weigh, the query is now compared directly against the phrases each tool
+    declares (character-trigram overlap), so it lands at 0.67 while *"can you
+    help me?"* still returns no tool at all.
+  * **A tool whose arguments only the capability registry knew had no call shape
+    at all.** `file_manager` executes five file capabilities, each requiring a
+    `file`, but the hand-written intent entries for `find_file`, `delete_file`
+    and the rest record a required entity and name **no tool** — so the
+    intent-first derivation found nothing to derive from and the tool that edits
+    files was offered with zero arguments. The same defect as the empty schemas,
+    surviving in the one corner the first fix did not reach. An input schema is
+    now derived from BOTH surfaces the catalogue already merges: the intents a
+    tool carries out and the capabilities it executes. `file_manager` expects a
+    `file` (with an optional `folder` for a move), `desktop_controller` gains the
+    `level` a volume or brightness change needs, and an invariant test fails
+    wherever a capability requires an argument the tool does not offer.
+  * **A docstring was duplicated.** `_registry_contributions` carried its
+    docstring twice; the second copy was a dead string statement left behind by
+    an edit, describing a rule it did not enforce. Removed — and the rule it
+    stated is now pinned by a test instead: a registry contribution is neutral
+    on `read_only`, so registering a tool can never make a read-only tool look
+    like a write.
+
+  One design fault surfaced with them: the registry contribution set
+  `read_only=False` as its "unknown" default, and because the merge ANDs that
+  claim, a declared read-only tool looked like a write and could never be
+  cached. Contributions are now neutral on that field — caching still needs a
+  declared `cache_ttl_s`, which no contribution can supply, so nothing became
+  cacheable by accident.
+
+  **Two empty fields are meaningful, and are now pinned as invariants.**
+  `capabilities` is empty exactly for tools that are no registered capability's
+  executor (the introspection tools), and `permissions` is empty for tools that
+  touch nothing the approval layer gates; a test fails if either emptiness
+  appears where the registry says otherwise.
+
+**Validation**: full suite **1433 passed / 12 skipped** (1628 subtests,
+Windows, 3:24); mypy clean on both the linux and win32 views (**209 modules**,
+six new); `docs/API.md` in sync (no new routes — the layer is reachable through
+the application and `status()`, and a route would need the `ApiSurface` +
+route-consumer declarations the parity tests enforce). Two new suites,
+`tests/test_tool_discovery.py` (50) and `tests/test_tool_pipeline.py` (36),
+covering the metadata surface, catalogue assembly from every source (including a
+capability whose risk must win and a registry tool that must be marked
+available), the specification's discovery example, paraphrase, filters, the
+floor, determinism and result caching, strict validation, normalization limits,
+and the cache's four refusals. Ruff is clean on every file this work added.

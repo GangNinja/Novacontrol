@@ -153,6 +153,12 @@ class ApiSurface:
                 ApiRoute("POST", "/train", "Run bounded autonomous local learning iterations.", authenticated=True),
                 ApiRoute("POST", "/brain/decide", "Trace an utterance through the routing gates with a rung preview.", authenticated=True),
                 ApiRoute("POST", "/plan", "Create and optionally execute a plan.", authenticated=True),
+                ApiRoute(
+                    "POST",
+                    "/plan/run",
+                    "Run a goal through the agent loop; steps needing approval must be named.",
+                    authenticated=True,
+                ),
                 ApiRoute("POST", "/plan/code", "Plan a coding task: language-aware steps plus a drafted code artifact.", authenticated=True),
                 ApiRoute("POST", "/build/save", "Save a drafted Build artifact to the build_workspace folder on disk.", authenticated=True),
                 ApiRoute("POST", "/command/plan", "Plan a natural desktop or phone command.", authenticated=True),

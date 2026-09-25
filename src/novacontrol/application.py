@@ -9,7 +9,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from typing import Any, TypeAlias, cast
 from uuid import uuid4
 
@@ -42,14 +42,23 @@ from novacontrol.browser import BrowserAutomationController, BrowserAutomationMo
 from novacontrol.core.activity import RecentActivityLog
 from novacontrol.core.buglog import BugLog
 from novacontrol.core.chat_transcript import ChatTranscriptStore
+from novacontrol.core.config import NovaControlConfig
 from novacontrol.core.events import Event, EventBus
 from novacontrol.core.runtime import EventDrivenRuntime
 from novacontrol.core.security import ApprovalDecision, ApprovalRequest, DenyByDefaultApprovalGateway
 from novacontrol.desktop import DesktopAutomationController, DesktopAutomationModule, LocalDesktopRunner
 from novacontrol.desktop.vision import VisionController
 from novacontrol.explore import ExploreModule, ExploreRequest, ExploreService, set_explore_cache_provider
+from novacontrol.decision import (
+    Decision,
+    DecisionEngine,
+    DecisionEnvironment,
+    DecisionRoute,
+    INTENT_HANDLERS,
+    build_decision_provider,
+)
 from novacontrol.intelligence import GlobalInputIntelligence, UnderstandResult
-from novacontrol.intelligence.intent import IntentName, RiskLevel
+from novacontrol.intelligence.intent import IntentName, RiskLevel, StructuredIntent, resolve_intent
 from novacontrol.intelligence.telemetry import request_id_for
 from novacontrol.integrations import (
     CLOUD_LLM_PRESETS,
@@ -68,7 +77,20 @@ from novacontrol.knowledge import KnowledgeBase
 from novacontrol.memory import MemoryManager, MemoryModule, MemoryNamespace, SqliteMemoryStore
 from novacontrol.persistence import JsonStateStore
 from novacontrol.phone import PhoneControlController, PhoneControlModule
-from novacontrol.planning import PlanningEngine, PlanningModule, WorkflowExecutor
+from novacontrol.planning import (
+    AgentLoop,
+    DeterministicVerifier,
+    Plan,
+    PlanCompiler,
+    PlanStep,
+    PlanningEngine,
+    PlanningModule,
+    RetryPolicy,
+    StepContext,
+    VerificationSpec,
+    WorkflowExecutor,
+    WorkflowResult,
+)
 from novacontrol.planning.engine import steps_id
 from novacontrol.plugins import PluginMarketplaceModule
 from novacontrol.projects import ProjectManager
@@ -78,11 +100,37 @@ from novacontrol.settings import BRAIN_MODES, SettingsManager
 from novacontrol.skills import SkillRegistry
 from novacontrol.tasks import TaskCenter, TaskRecordStatus
 from novacontrol.telemetry.hardware import HardwareTelemetry
-from novacontrol.tools import ToolExecutor, ToolModule, ToolRegistry
+from novacontrol.tools import (
+    FunctionTool,
+    OutputNormalizer,
+    ToolExecutor,
+    ToolModule,
+    ToolParameter,
+    ToolRegistry,
+    ToolRequest,
+    ToolResultCache,
+    ToolRetriever,
+    ToolSchema,
+    ToolSelector,
+    ToolStatus,
+    build_tool_catalog,
+    tool_descriptions,
+)
 from novacontrol.vision import VisionModule
 from novacontrol.voice import VoiceModule
 
 _APPROVAL_TTL_SECONDS = 300.0  # A planned desktop action must be approved within 5 minutes.
+
+# "Look at the screen" with no question in it. These phrases are the
+# INSTRUCTION to capture, not a question about the capture, so passing them to
+# the vision model would ask it to answer the words the user already used to
+# ask for the picture. Anything more specific is a real question and travels.
+_VISION_BARE_LOOK = re.compile(
+    r"^\s*(?:please\s+)?(?:can you\s+|could you\s+|would you\s+)?"
+    r"(?:look at|check|see|analy[sz]e|describe|read|what(?:'s| is) on|what do you see on)"
+    r"(?: the)?(?: my)?(?: current)?(?: screen| screenshot| image| picture| window| desktop)"
+    r"[\s.!?]*$"
+)
 
 # Which live metrics each status intent needs. Deliberately per-intent: asking
 # "how much RAM do I have" must not pay for a GPU or network probe.
@@ -94,6 +142,253 @@ _STATUS_METRICS: dict[str, tuple[str, ...]] = {
     "network_status": ("network",),
     "system_status": ("cpu", "memory", "storage", "battery", "uptime"),
 }
+
+# Which intent's sentence describes each metric. A request that named several
+# metrics ("check my RAM and CPU") reads them all from one probe and answers
+# each in the sentence that intent already owns, rather than inventing a
+# combined format for a case the single-metric paths must keep unchanged.
+_METRIC_KINDS: dict[str, str] = {
+    "memory": "memory_status",
+    "cpu": "cpu_status",
+    "gpu": "gpu_status",
+    "battery": "battery_status",
+    "network": "network_status",
+}
+
+#: Reader attribute for each metric intent — the inverse of the map above, so a
+#: plan step that names an intent ("memory_status") can read the right probe
+#: ("memory") without a second lookup table to keep in step.
+_READER_FOR_INTENT: dict[str, str] = {kind: name for name, kind in _METRIC_KINDS.items()}
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Phase 4: what a plan step may ask to have checked
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _metric_read_check(spec: VerificationSpec, output: Mapping[str, Any]) -> tuple[bool, str]:
+    """Did the reading actually report a reading?
+
+    A metric that is unavailable IS a successful reading when the failure is
+    stated: a GPU-less machine answering "there is no GPU" has answered the
+    question. What fails this check is a reading that reports neither a value
+    nor a reason — silence dressed up as a measurement.
+    """
+    readings = output.get("metrics")
+    if not isinstance(readings, dict) or not readings:
+        return False, "the step reported no readings at all"
+    silent = [
+        str(name)
+        for name, value in readings.items()
+        if not isinstance(value, dict) or "available" not in value
+    ]
+    if silent:
+        return False, f"these readings report neither a value nor a reason: {', '.join(silent)}"
+    return True, "every reading reports either a value or why it could not be measured"
+
+
+#: The named checks this installation can perform for a plan. A plan may ask
+#: for one by name; a name that is not here is reported INCONCLUSIVE, never
+#: assumed to have passed.
+_PLAN_VERIFICATIONS: dict[
+    str, Callable[[VerificationSpec, Mapping[str, Any]], tuple[bool, str]]
+] = {
+    "metric_read": _metric_read_check,
+}
+
+#: Lines in captured output that name a failure worth reporting back.
+_FAILURE_LINE = re.compile(
+    r"\b(fail(?:ed|ure|ures|ing)?|error|assert\w*|traceback|exception)\b", re.I
+)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Phase 4: the describing steps a plan implies
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _collect_step_output(step: PlanStep, context: StepContext) -> dict[str, Any]:
+    """Capture what the step this one depends on produced.
+
+    Collecting is a step of its own because the output must be captured ONCE
+    and named: a plan that re-ran a command to look at its output again would be
+    a plan that ran the command twice.
+    """
+    upstream = context.output_of(step.depends_on)
+    text = str(upstream.get("stdout") or upstream.get("output") or upstream.get("summary") or "")
+    exit_code = upstream.get("exit_code")
+    detail = f"Captured {len(text)} characters of output"
+    if exit_code is not None:
+        detail = f"{detail} (exit code {exit_code})"
+    return {
+        "summary": f"{detail}.",
+        "captured": text,
+        "exit_code": exit_code,
+        "from": list(step.depends_on),
+        # The state that was observed is the output itself; "changed" is what
+        # the state verification reads, so it says whether anything arrived.
+        "changed": bool(text) or exit_code is not None,
+    }
+
+
+def _analyze_step_output(step: PlanStep, context: StepContext) -> dict[str, Any]:
+    """Read the captured output and name what failed — deterministically.
+
+    No model is involved, and none is needed: a test log says which tests
+    failed, and matching the lines that say so is both faster and checkable.
+    When nothing matches, that is reported as what it is rather than as a clean
+    bill of health.
+    """
+    upstream = context.output_of(step.depends_on)
+    text = str(upstream.get("captured") or "")
+    exit_code = upstream.get("exit_code")
+    failures = [line.strip() for line in text.splitlines() if _FAILURE_LINE.search(line)][:20]
+    if not text:
+        summary = "There was no captured output to analyse."
+    elif failures:
+        sample = "; ".join(failures[:5])
+        summary = f"{len(failures)} line(s) look like failures: {sample}"
+    elif exit_code == 0:
+        summary = "The command exited 0 and nothing in its output looks like a failure."
+    else:
+        summary = (
+            f"The command exited {exit_code}, but no failing line was recognised "
+            "in its output."
+        )
+    return {"summary": summary, "failures": failures, "exit_code": exit_code}
+
+
+def _summarize_step_output(step: PlanStep, context: StepContext) -> dict[str, Any]:
+    """The last step: say what happened, from what the earlier steps reported."""
+    upstream = context.output_of(step.depends_on)
+    summary = str(upstream.get("summary") or "")
+    if not summary:
+        summary = "The plan finished without producing anything to report."
+    return {
+        "summary": summary,
+        "answer": summary,
+        "steps_reported": len(context.outputs),
+    }
+
+
+#: Depth and breadth caps for the bounded project search. A "find my project"
+#: step must not walk an entire home directory: it looks in the places projects
+#: actually live, to a shallow depth, and reports honestly when it finds nothing.
+_PROJECT_SEARCH_DEPTH = 3
+_PROJECT_SEARCH_VISITS = 4000
+_PROJECT_SEARCH_SKIP = frozenset(
+    {"node_modules", ".git", ".venv", "venv", "__pycache__", ".kilo", "site-packages"}
+)
+
+
+def _find_project_directory(name: str) -> str | None:
+    """Find a directory whose name matches ``name``, in the usual places."""
+    needle = name.strip().lower()
+    if not needle:
+        return None
+    home = Path.home()
+    roots = [
+        Path.cwd(),
+        home / "Desktop",
+        home / "OneDrive" / "Desktop",
+        home / "Documents",
+        home / "projects",
+        home / "source",
+        home / "repos",
+    ]
+    visited = 0
+    for root in roots:
+        if not root.is_dir():
+            continue
+        if needle in root.name.lower():
+            return str(root)
+        queue: list[tuple[Path, int]] = [(root, 0)]
+        while queue:
+            current, depth = queue.pop(0)
+            if depth >= _PROJECT_SEARCH_DEPTH:
+                continue
+            try:
+                entries = sorted(current.iterdir())
+            except OSError:
+                continue
+            for entry in entries:
+                visited += 1
+                if visited > _PROJECT_SEARCH_VISITS:
+                    return None
+                if not entry.is_dir() or entry.name.startswith("."):
+                    continue
+                if entry.name in _PROJECT_SEARCH_SKIP:
+                    continue
+                if needle in entry.name.lower():
+                    return str(entry)
+                queue.append((entry, depth + 1))
+    return None
+
+
+def _escalation_text(goal: str, workflow: WorkflowResult) -> str:
+    """What is said when a run needs reasoning and no model is configured."""
+    head = f'I could not finish "{goal}" on this machine.'
+    body = "\n".join(
+        f"- {step_id}: {message}" for step_id, message in workflow.errors.items()
+    )
+    return (
+        f"{head}\n{body or f'- {workflow.summary}'}\n"
+        "This step needs reasoning I cannot do locally, so it is reported rather than guessed at."
+    )
+
+
+def _escalation_prompt(
+    goal: str,
+    workflow: WorkflowResult,
+    tools: Sequence[Mapping[str, Any]] = (),
+) -> str:
+    """The question handed to the model when a plan fails for want of reasoning.
+
+    ``tools`` is the DISCOVERED shortlist for this goal, never the whole tool
+    list: a model asked to choose between every tool a system owns picks by name
+    recognition, and the names say least about what a request meant. An empty
+    shortlist is stated as such rather than left to be inferred from silence —
+    "no tool fits this" is information the model needs.
+    """
+    details = "\n".join(
+        f"- {step_id}: {message}" for step_id, message in workflow.errors.items()
+    )
+    if tools:
+        lines = []
+        for entry in tools:
+            availability = "available" if entry.get("available") else "not installed"
+            arguments = ", ".join(entry.get("parameters", {})) or "no arguments"
+            lines.append(
+                f"- {entry.get('name')}: {entry.get('description')} "
+                f"({availability}; takes: {arguments})"
+            )
+        tool_section = "Tools that could carry this out:\n" + "\n".join(lines) + "\n"
+    else:
+        tool_section = (
+            "No tool in this installation fits this goal, so say so if that is the cause.\n"
+        )
+    return (
+        "A plan I was executing failed, and the failure needs reasoning rather than another try.\n"
+        f"Goal: {goal}\n"
+        f"What happened:\n{details or workflow.summary}\n"
+        f"{tool_section}"
+        "Explain the most likely cause and the smallest change that would let this goal succeed. "
+        "Be specific and brief."
+    )
+
+
+def _status_message(kind: str, metric_names: tuple[str, ...], readings: dict[str, Any]) -> str:
+    """One sentence per metric the request named — deterministically.
+
+    A single metric keeps the exact sentence it always had; several are joined
+    in the order the user said them, because "you're using 10.9 GB of RAM. CPU
+    usage is 31% right now." answers both halves of the question that the
+    one-metric path used to answer halfway.
+    """
+    kinds = [_METRIC_KINDS[name] for name in metric_names if name in _METRIC_KINDS]
+    if len(kinds) <= 1:
+        return _system_status_message(kind, readings)
+    return " ".join(_system_status_message(item, readings) for item in kinds)
 
 
 def _format_gigabytes(value: object) -> str:
@@ -186,6 +481,7 @@ def _nlu_payload(
     understood: UnderstandResult,
     decision: BrainDecision,
     brain: NovaBrain,
+    layer: Decision | None = None,
 ) -> dict[str, Any]:
     """Safe operational metadata about how the request was understood.
 
@@ -212,6 +508,11 @@ def _nlu_payload(
         "requires_confirmation": understanding.requires_confirmation,
         "handler": decision.intent.value,
         "handler_reason": decision.reason,
+        # What the DECISION layer chose to do about the understanding above:
+        # the route, the executor key it resolved to, what the work therefore
+        # needs, and a templated sentence. Safe operational metadata only — the
+        # same fields the status surface reads, never reasoning.
+        "decision": layer.to_dict() if layer is not None else {},
         # The id the telemetry record carries, so what the client sees and what
         # the outcome is reported against are the same request.
         "request_id": request_id_for(understanding.id),
@@ -301,6 +602,11 @@ class NovaControlApplication:
     _DEFAULT_DATA_DIR = Path("data")
 
     def __init__(self, *, data_dir: str | Path | None = None) -> None:
+        # Configuration is read ONCE, at construction, and the layers below are
+        # built from it: a limit that only some paths honour is a limit that is
+        # not really there. Environment variables are the override channel, so
+        # nothing here needs a code change to be tuned.
+        self.config = NovaControlConfig.from_environment()
         self.event_bus = EventBus(continue_on_error=True)
         self.runtime = EventDrivenRuntime(self.event_bus)
         # Server-side recent-activity journal: every completed command, research
@@ -381,13 +687,37 @@ class NovaControlApplication:
         # synthesis — while llm/auto keep whatever boot resolved.
         self._sync_explore_provider()
         self.planning = PlanningEngine()
-        self.workflow_executor = WorkflowExecutor()
         self.agent_registry = AgentRegistry()
         for agent in build_default_agents():
             self.agent_registry.register(agent)
         self.coordinator = CoordinatorAgent()
         self.tools = ToolRegistry()
-        self.tool_executor = ToolExecutor(self.tools)
+        # The executor itself is built once the tool CATALOGUE exists (below):
+        # validation, caching and normalization all read the same metadata, so
+        # the thing that runs tools is constructed after the thing that
+        # describes them.
+        # ── Phase 4: the planner and the plan executor ───────────────────────
+        # The compiler turns a decision plus a goal into steps that name a tool,
+        # an effect, an expected result and a way to be checked. The executor
+        # runs them in dependency order and reports what could NOT be verified.
+        # Both reach the machine through ONE step runner, which is also the only
+        # place a plan can start real work — so there is no route from a plan to
+        # an action that skips the approval layer wired below.
+        self.plan_compiler = PlanCompiler(
+            tool_lookup=self._tool_for_intent_name,
+            retry_policy=RetryPolicy(max_attempts=self.config.planning.max_step_attempts),
+        )
+        self.plan_verifier = DeterministicVerifier(callables=_PLAN_VERIFICATIONS)
+        # Step ids this caller has EXPLICITLY approved for the current run. Empty
+        # by default: a step that needs confirmation and has not been approved is
+        # denied rather than attempted, because silence is not consent.
+        self.approved_plan_steps: set[str] = set()
+        self.workflow_executor = WorkflowExecutor(
+            step_handler=self._run_plan_step,
+            verifier=self.plan_verifier,
+            retry_policy=RetryPolicy(max_attempts=self.config.planning.max_step_attempts),
+            confirmation=self._confirm_plan_step,
+        )
         self.skills = SkillRegistry()
         self.scheduler = (
             InMemoryScheduler.from_dict(self.state_store.read("scheduler"))
@@ -451,6 +781,70 @@ class NovaControlApplication:
         # layers cannot parse) and keeps its own rolling interaction context.
         self.intelligence = GlobalInputIntelligence(
             completion_provider=self.brain.completion_provider,
+        )
+        # ── Decision engine (Phase 3) ────────────────────────────────
+        # Between understanding and execution: which machinery does this request
+        # deserve — a deterministic capability, a subsystem handler, the planner,
+        # the agentic loop, the vision pipeline, the local model or the cloud —
+        # and what does it therefore need. It executes NOTHING; the approval
+        # layer is untouched. Local by default, and an external provider is only
+        # ever an advisor (see decision/providers.py).
+        decision_config = self.config.decision
+        # Phase 5: ONE selector, shared by the decision layer and the planning
+        # path, so "which tool would carry this out" has a single answer wherever
+        # it is asked. It reads the same catalog the understanding layer plans
+        # from, plus the live tool registry, and names a tool but never runs one.
+        self.tool_selector = ToolSelector(
+            catalog=self.intelligence.catalog,
+            capabilities=self.intelligence.capabilities,
+            # Live, not a snapshot: tools registered after boot (a plugin, a
+            # restored artifact) must be selectable without a restart.
+            registered=lambda: tuple(entry.tool.name for entry in self.tools.list()),
+        )
+        # ── Phase 5: tool metadata, discovery and the execution pipeline ─────
+        # ONE catalogue describes every tool this build knows about — declared
+        # entries, plus what the intent catalogue, the capability registry and
+        # the runtime registry each contribute — and ONE retriever ranks it
+        # against a request. The planner and the model escalation are given the
+        # few tools that FIT the request rather than all of them: a list of
+        # seventeen names is not a choice, it is a lottery.
+        self._register_read_only_tools()
+        self.tool_catalog = build_tool_catalog(
+            intents=self.intelligence.catalog,
+            capabilities=self.intelligence.capabilities,
+            registry=self.tools,
+        )
+        self.tool_retriever = ToolRetriever(self.tool_catalog)
+        self.tool_cache = ToolResultCache()
+        self.tool_executor = ToolExecutor(
+            self.tools,
+            catalog=self.tool_catalog,
+            cache=self.tool_cache,
+            normalizer=OutputNormalizer(),
+        )
+        self.decision = DecisionEngine(
+            capabilities=self.intelligence.capabilities,
+            provider=build_decision_provider(
+                decision_config.provider,
+                endpoint=decision_config.jev_endpoint,
+                timeout_s=decision_config.jev_timeout_s,
+                allow_remote=decision_config.allow_remote,
+            ),
+            requested_provider=decision_config.provider,
+            selector=self.tool_selector,
+        )
+        # The agent loop drives the phases in order and cannot skip the last
+        # two: results are verified, and anything unverified travels into the
+        # final response instead of being rounded up to success. It has no
+        # opinion about tools or models — every phase is one of this
+        # application's own methods.
+        self.agent_loop = AgentLoop(
+            understand=self.intelligence.understand_async,
+            decide=self._decide_for_agent,
+            plan=self._plan_for_agent,
+            execute=self.workflow_executor.execute,
+            escalate=self._escalate_plan_run,
+            max_cycles=self.config.planning.max_cycles,
         )
 
         # ── Agentic architecture (agentcore) ─────────────────────────
@@ -896,61 +1290,12 @@ class NovaControlApplication:
 
     # The ONE place raw language is interpreted. Every handler below consumes
     # the structured intent this produces — no subsystem re-parses text.
-    _GIL_ROUTES: dict[IntentName, str] = {
-        # Device / J.A.R.V.I.S surface.
-        IntentName.OPEN_APPLICATION: "desktop",
-        IntentName.CLOSE_APPLICATION: "desktop",
-        IntentName.OPEN_FOLDER: "desktop",
-        IntentName.TAKE_SCREENSHOT: "desktop",
-        IntentName.TYPE_TEXT: "desktop",
-        IntentName.PRESS_KEY: "desktop",
-        IntentName.PHONE_OPEN_APP: "phone",
-        IntentName.PHONE_SEND_TEXT: "phone",
-        IntentName.PHONE_CALL: "phone",
-        IntentName.PHONE_SCREENSHOT: "phone",
-        IntentName.PHONE_CONNECT: "phone",
-        IntentName.PHONE_STATUS: "phone",
-        IntentName.NAVIGATE: "browser",
-        IntentName.SEARCH_WEB: "browser",
-        IntentName.EXTRACT_PAGE: "browser",
-        IntentName.FILL_FORM: "browser",
-        # Knowledge / research surface.
-        IntentName.RESEARCH: "explore",
-        IntentName.ANSWER_QUESTION: "chat",
-        IntentName.SUMMARIZE: "explore",
-        IntentName.COMPARE: "explore",
-        IntentName.GENERATE_REPORT: "explore",
-        IntentName.CHAT: "chat",
-        # Planning / automation surface.
-        IntentName.PLAN_TASK: "plan",
-        IntentName.CREATE_AUTOMATION: "plan",
-        IntentName.RUN_AUTOMATION: "plan",
-        IntentName.SCHEDULE_TASK: "plan",
-        # Memory / project / improvement surface (system status stays with the
-        # brain, whose chat already reports status with full context).
-        IntentName.REMEMBER: "memory",
-        IntentName.RECALL: "memory",
-        IntentName.CREATE_PROJECT: "project",
-        IntentName.IMPROVE_SELF: "self_improvement",
-        IntentName.AGENTIC_TASK: "agent",
-        # System status: measured on this machine and answered without a model.
-        IntentName.SYSTEM_STATUS: "system",
-        IntentName.CPU_STATUS: "system",
-        IntentName.MEMORY_STATUS: "system",
-        IntentName.GPU_STATUS: "system",
-        IntentName.BATTERY_STATUS: "system",
-        IntentName.NETWORK_STATUS: "system",
-        # Composite browser work routes to the real browser controller.
-        IntentName.BROWSER_ACTION: "browser",
-        # Visual understanding goes to the vision pipeline (a dedicated VLM),
-        # never to a text-only chat model.
-        IntentName.SCREENSHOT_ANALYSIS: "vision",
-        # Language-only intents stay with the chat handler, which already knows
-        # how to answer them locally (scratch) or through the configured model.
-        IntentName.CONVERSATION: "chat",
-        IntentName.GENERAL_QUESTION: "chat",
-        IntentName.CALCULATE: "chat",
-    }
+    # Intent -> executor key. The table itself lives in the decision layer
+    # (decision/routing.py), because "this intent is carried out by that
+    # subsystem" IS a decision rather than application policy. This is a view of
+    # it, under the name existing callers and tests already use, so there is
+    # still exactly one table.
+    _GIL_ROUTES: dict[IntentName, str] = INTENT_HANDLERS
 
     # Handler keys used by _GIL_ROUTES -> BrainIntent values (the legacy
     # handler table). One adapter keeps the two vocabularies decoupled.
@@ -968,6 +1313,91 @@ class NovaControlApplication:
         "system": BrainIntent.SYSTEM_STATUS,
         "vision": BrainIntent.VISION,
     }
+
+    # ── Model + hardware lifecycle ──────────────────────────────────────
+
+    async def model_status(self) -> dict[str, Any]:
+        """Resident models, available memory, and the exclusivity policy.
+
+        This machine has 16 GB of RAM and a chat model and a vision model each
+        want a large slice of it, so the manager is exclusive by default: one
+        model resident at a time. The probe talks to the runtime, so it runs in
+        a worker thread — a status call must never stall the event loop.
+        """
+        manager = self.intelligence.model_manager
+        status = await asyncio.to_thread(manager.get_model_status)
+        return {
+            **status.to_dict(),
+            "exclusive": manager.exclusive,
+            "chat_model": self.brain.model_name,
+            "vision_model": str(self.vision_llm_status().get("model", "") or ""),
+            "local_models": list(await asyncio.to_thread(manager.get_models)),
+        }
+
+    async def load_model(self, model: str) -> dict[str, Any]:
+        """Load one model, freeing room FIRST when the measurement requires it.
+
+        One place requests a load, so the memory rule lives here rather than in
+        every caller: another model being resident is a reason to unload it,
+        never a reason to hold both.
+        """
+        name = model.strip()
+        if not name:
+            raise ValueError("A model name is required.")
+        result = await asyncio.to_thread(self.intelligence.model_manager.load_model, name)
+        return result.to_dict()
+
+    async def unload_model(self, model: str = "") -> dict[str, Any]:
+        """Release one model, or every resident model when none is named.
+
+        "Free the RAM" has to be one call: unloading a model that is not named
+        is the actual intent when someone asks for memory back.
+        """
+        manager = self.intelligence.model_manager
+        name = model.strip()
+        if name:
+            released = await asyncio.to_thread(manager.unload_model, name)
+            return {"unloaded": bool(released), "models": [name] if released else []}
+        released_names = await asyncio.to_thread(manager.unload_all)
+        return {"unloaded": True, "models": list(released_names)}
+
+    def _tool_for_intent(self, intent: IntentName) -> str:
+        """The tool an intent would reach, or "" when none is registered.
+
+        The catalog is the single source: the NLU records the tool it resolved,
+        and the decision layer names the same one, so "what would run" cannot
+        disagree between the readout and the routing.
+        """
+        tools = self.intelligence.catalog.tools_for(intent)
+        return tools[0] if tools else ""
+
+    def _decision_environment(self) -> DecisionEnvironment:
+        """What this machine can actually route TO, described to the decision layer.
+
+        The decision engine never reaches into the application to ask "is a model
+        configured?" — a decision made against assumed hardware is how a request
+        ends up queued behind a model that was never installed. The application
+        describes its providers here instead, and the engine stays a pure
+        function of what it was told.
+
+        Deliberately cheap and side-effect free: this runs on EVERY understood
+        request, so it reads configuration the providers already hold and probes
+        nothing. Resident-model state changes on its own schedule and belongs to
+        the Model Manager's status surface, not to a per-request decision.
+        """
+        cloud = self.cloud_llm_status()
+        vision = self.vision_llm_status()
+        # A local model can be configured AND a cloud key saved: the mode decides
+        # which one answers, so both are reported and the mode travels with them.
+        local_model = self.brain.model_name if self.brain.model_configured else ""
+        return DecisionEnvironment(
+            local_model=local_model,
+            cloud_model=str(cloud.get("model", "") or ""),
+            cloud_configured=bool(cloud.get("configured")),
+            vision_model=str(vision.get("model", "") or ""),
+            vision_available=bool(vision.get("configured")),
+            mode=str(getattr(self.brain, "mode", "auto")),
+        )
 
     async def handle_request(self, text: str) -> ApplicationResponse:
         """Route a natural-language request through the available subsystems.
@@ -992,8 +1422,41 @@ class NovaControlApplication:
         # exact phrasing (normalization, typo tolerance, references,
         # multi-intent). Fallback: the legacy brain classifier.
         understood = await self.intelligence.understand_async(text)
+        # DECISION ENGINE: given what was understood, decide what to DO with it —
+        # a deterministic capability, a subsystem handler, the planner, the
+        # agentic loop, the vision pipeline, a language model, or one clarifying
+        # question — and what that therefore needs. Deterministic and offline by
+        # default, and it executes NOTHING: the approval layer still gates every
+        # action, and an external provider can only ever advise a route.
+        decision_started = time.perf_counter()
+        decision_layer = await self.decision.decide_async(
+            understood.intent,
+            context=self.intelligence.context,
+            environment=self._decision_environment(),
+            strategy=understood.strategy,
+        )
+        self.intelligence.telemetry.record_decision(
+            route=decision_layer.route.value,
+            decision_type=decision_layer.decision_type.value,
+            capability=decision_layer.selected_capability,
+            model=decision_layer.selected_model,
+            provider=decision_layer.provider,
+            reason_code=decision_layer.reason_code.value,
+            fallback=bool(decision_layer.metadata.get("provider_fallback")),
+            requires_planning=decision_layer.requires_planning,
+            requires_confirmation=decision_layer.requires_confirmation,
+            latency_ms=(time.perf_counter() - decision_started) * 1000.0,
+            request_id=request_id_for(understood.intent.id),
+        )
         gil_intent = understood.intent.intent if understood.strategy != "clarification" else None
         handler_key = self._GIL_ROUTES.get(gil_intent) if gil_intent is not None else None
+        # The decision layer is authoritative where it names an executor the
+        # intent alone cannot: a request that needs an image LOOKED AT belongs to
+        # the vision pipeline even when the text layers left the intent
+        # unresolved — its route is `vision`, and asking a question cannot answer
+        # a question about a picture.
+        if decision_layer.route is DecisionRoute.VISION and handler_key != "vision":
+            handler_key = "vision"
         brain_intent = self._GIL_HANDLER_KEYS.get(handler_key) if handler_key is not None else None
         if brain_intent is not None:
             decision = BrainDecision(
@@ -1019,11 +1482,18 @@ class NovaControlApplication:
             decision = self.brain.decide(request)
 
         # Handlers receive the STRUCTURED understanding alongside the raw text,
-        # so no capability has to re-parse the sentence to know what was asked.
+        # so no capability has to re-parse the sentence to know what was asked —
+        # and the DECISION beside it, so the planner and the agent loop execute
+        # what was decided (which executor, which tool, whether sequencing is
+        # required) instead of re-deriving it from the words.
         understanding = understood.intent
         request = BrainRequest(
             text=text,
-            context={**request.context, "nlu": understanding.to_dict()},
+            context={
+                **request.context,
+                "nlu": understanding.to_dict(),
+                "decision": decision_layer.to_dict(),
+            },
         )
         handler = self._HANDLERS.get(decision.intent)
         # Whether the request was actually CARRIED OUT is known here, not in the
@@ -1049,7 +1519,10 @@ class NovaControlApplication:
         # The request-understanding block travels with every response: safe
         # operational metadata only (what understood it, the intent, the
         # confidence, the cost) — never chain-of-thought or model reasoning.
-        payload = {**payload, "nlu": _nlu_payload(understanding, understood, decision, self.brain)}
+        payload = {
+            **payload,
+            "nlu": _nlu_payload(understanding, understood, decision, self.brain, decision_layer),
+        }
         response = await self.brain.shape_response(request, decision, payload)
         self.tasks.update(task.id, TaskRecordStatus.COMPLETED, progress=1.0, result=response.to_dict())
         # Record the turn in the SHARED transcript so every client renders the
@@ -1093,11 +1566,376 @@ class NovaControlApplication:
         return "explore", payload
 
     async def _handle_plan(self, request: BrainRequest, text: str) -> tuple[str, dict[str, Any]]:
-        plan = self.planning.create_plan(text)
+        plan = self.plan_for(text, decision=request.context.get("decision"))
         payload: dict[str, Any] = {"plan": plan.to_dict()}
+        # Phase 4 + 5: the plan runs with the DECISION and the SELECTION beside
+        # it, so a client can show which tool a step would reach and whether the
+        # decision asked for sequencing or confirmation — without the planner
+        # re-reading the sentence to work either out.
+        decision = request.context.get("decision")
+        if isinstance(decision, dict):
+            payload["decision"] = decision
+        understanding = request.context.get("nlu")
+        if isinstance(understanding, dict):
+            payload["selection"] = self._selection_for(request, understanding)
+        # Phase 5: the tools that FIT this goal, discovered rather than dumped.
+        # Reported beside the plan so the choice a step made can be checked
+        # against what the tool layer thought the request was about — discovery
+        # informs, it never rewrites a step's tool, because a tool that merely
+        # looks related is not one that was asked for.
+        payload["tools"] = self.discover_tools(text, limit=3)
         if not plan.needs_clarification:
-            payload["workflow"] = (await self.workflow_executor.execute(plan)).to_dict()
+            workflow = await self.workflow_executor.execute(plan)
+            payload["workflow"] = workflow.to_dict()
+            # The plan's own state, published with it: a caller can see per-step
+            # status, what was verified, and what was left unconfirmed.
+            payload["state"] = workflow.state()
         return "planning", payload
+
+    # ── Phase 4: planning, executing and escalating ──────────────────────
+
+    def plan_for(self, goal: str, *, decision: object | None = None) -> Plan:
+        """The plan for a goal — from the compiler, with the old engine as fallback.
+
+        The compiler produces steps that name a tool, an effect and a way to be
+        checked. It is also deliberately conservative: a goal it cannot
+        recognise still yields a reasoning step rather than an empty plan, and
+        only a decision that says "ask first" produces a clarification.
+        PlanningEngine remains the fallback for the plain "turn this sentence
+        into ordered steps" path other callers use.
+        """
+        plan = self.plan_compiler.compile(goal, decision=decision)
+        if plan.steps or plan.needs_clarification:
+            return plan
+        legacy = self.planning.create_plan(goal)
+        return Plan(
+            goal=legacy.goal,
+            steps=tuple(
+                PlanStep(
+                    title=step.title,
+                    description=step.description,
+                    depends_on=step.depends_on,
+                    id=step.id,
+                )
+                for step in legacy.steps
+            ),
+            needs_clarification=legacy.needs_clarification,
+        )
+
+    async def run_plan(self, goal: str, *, approved: Sequence[str] = ()) -> dict[str, Any]:
+        """Run a goal through the whole agent loop, and report what happened.
+
+        ``approved`` names the steps the caller has authorized. It is the ONLY
+        way a step that needs confirmation may run: the loop cannot approve its
+        own plan, and a step that was not named is denied rather than attempted.
+        """
+        self.approved_plan_steps = {str(step_id) for step_id in approved}
+        try:
+            run = await self.agent_loop.run(goal)
+        finally:
+            self.approved_plan_steps = set()
+        return run.to_dict()
+
+    async def _decide_for_agent(self, understood: Any) -> Decision:
+        """The decision phase of the loop: the same engine the request path uses."""
+        return await self.decision.decide_async(
+            understood.intent,
+            context=self.intelligence.context,
+            environment=self._decision_environment(),
+            strategy=understood.strategy,
+        )
+
+    def _plan_for_agent(self, goal: str, understood: Any, decision: Decision) -> Plan:
+        """The plan phase: compile from the goal AND the decision about it."""
+        return self.plan_for(goal, decision=decision)
+
+    async def _escalate_plan_run(self, goal: str, plan: Plan, workflow: WorkflowResult) -> str:
+        """Hand a failed run to the model when one is configured.
+
+        Only reasoning problems reach here — a refusal does not, because no
+        amount of thinking grants a permission a person declined. Without a
+        model the escalation is reported as what it is rather than dressed up
+        as an answer. The escalation joins the conversation on purpose: it is
+        part of what the user asked for, and its outcome is theirs to see.
+        """
+        if not self.brain.model_configured:
+            return _escalation_text(goal, workflow)
+        # Discovery, not a dump: the model is shown the handful of tools that fit
+        # THIS goal, chosen by the same retriever the planner consults.
+        prompt = _escalation_prompt(goal, workflow, self.discovered_tools(goal))
+        try:
+            response = await self.brain.chat(BrainRequest(text=prompt, context=self.status()))
+        except Exception as exc:  # a failed escalation is reported, never hidden
+            detail = f"{type(exc).__name__}: {exc}"
+            return f"{_escalation_text(goal, workflow)}\n(Model escalation failed: {detail})"
+        return str(response.summary or _escalation_text(goal, workflow))
+
+    def _tool_for_intent_name(self, name: str) -> str:
+        """The registered tool for an intent NAME, for the plan compiler."""
+        try:
+            return self._tool_for_intent(IntentName(name))
+        except ValueError:
+            return ""
+
+    # ── Phase 5: discovery, normalization, caching ────────────────────────
+
+    def _register_read_only_tools(self) -> None:
+        """Register the read-only introspection tools this build can really run.
+
+        Until now the registry was empty on a default install, so the pipeline's
+        later stages — validation, caching, normalization — had no path that
+        exercised them in production even though each was tested in isolation.
+        These three are the specification's own examples of work worth caching
+        (OS information, hardware information, installed applications, system
+        capabilities), backed by the readers this application already owns rather
+        than by new machinery.
+
+        All three return ONLY stable facts. ``machine_facts`` reports total memory and
+        disk CAPACITY, never free space or uptime: a tool whose declared cache
+        lifetime is ten minutes must not return a number that changes in one, or
+        the cache becomes the lie it exists to avoid. Free space and uptime are
+        live readings and stay with ``system_monitor``, which declares them
+        volatile — this split is the whole reason the caching contract is worth
+        having.
+        """
+        self.tools.register(
+            FunctionTool(
+                "machine_facts",
+                ToolSchema(
+                    "machine_facts",
+                    "Report stable facts about this machine.",
+                    parameters=(
+                        ToolParameter("scope", "string", description="all|host|storage"),
+                    ),
+                ),
+                self._machine_facts_payload,
+            )
+        )
+        self.tools.register(
+            FunctionTool(
+                "capabilities",
+                ToolSchema("capabilities", "List what this installation can do."),
+                self._capabilities_payload,
+            )
+        )
+        self.tools.register(
+            FunctionTool(
+                "installed_applications",
+                ToolSchema(
+                    "installed_applications",
+                    "List the applications installed on this machine.",
+                    parameters=(
+                        ToolParameter(
+                            "filter", "string", description="substring to match"
+                        ),
+                    ),
+                ),
+                self._installed_applications_payload,
+            )
+        )
+
+    def _machine_facts_payload(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        """Stable machine facts, from the reader the metric path already uses."""
+        scope = str(arguments.get("scope") or "all").strip().lower()
+        # ``_hardware_status`` is a property, deliberately: the reader is created
+        # once so CPU deltas have a baseline, and calling it would make a second
+        # reader with no baseline. Getting that wrong is how the first version of
+        # this tool failed with "'HardwareTelemetry' object is not callable".
+        reader = self._hardware_status
+        host = reader.host()
+        payload: dict[str, Any] = {
+            "scope": scope,
+            "platform": host.get("platform", ""),
+            "platform_release": host.get("platform_release", ""),
+            "cpu_model": host.get("cpu_model", ""),
+            "cpu_count": host.get("cpu_count"),
+            "python": host.get("python", ""),
+        }
+        if scope in ("all", "memory"):
+            memory = reader.memory()
+            # Totals only. Used and available bytes move between calls, and this
+            # result may be reused for ten minutes.
+            payload["total_memory_bytes"] = memory.get("total_bytes")
+            payload["memory_available"] = memory.get("available", False)
+        if scope in ("all", "storage"):
+            storage = reader.storage()
+            payload["disk_total_bytes"] = storage.get("total_bytes")
+            payload["disk_available"] = storage.get("available", False)
+        return payload
+
+    def _capabilities_payload(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        """The capability table, as the registry holds it."""
+        del arguments
+        entries = [
+            {
+                "capability": capability.capability,
+                "intent": capability.intent.value,
+                "description": capability.description,
+                "risk": capability.risk.value,
+                "executor": capability.executor,
+                "environments": list(capability.supported_environments),
+            }
+            for capability in self.intelligence.capabilities.all()
+        ]
+        return {"capabilities": entries, "count": len(entries)}
+
+    def _installed_applications_payload(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        """The installed applications, from the index used to open them by name.
+
+        The same index the desktop controller resolves "open <app>" against, so
+        this answers with what can actually be launched rather than with a second
+        opinion about it. Display names, not the casefolded keys the resolver
+        matches on: a Start Menu shortcut and a registry ``App Paths`` entry both
+        carry the real name in the file stem, so presenting it invents nothing.
+        """
+        from novacontrol.desktop.controller import _app_index
+
+        needle = str(arguments.get("filter") or "").strip().casefold()
+        index = _app_index()
+        names: list[str] = []
+        seen: set[str] = set()
+        for key in sorted(index):
+            display = Path(index[key]).stem or key
+            folded = display.casefold()
+            if folded in seen:
+                continue
+            seen.add(folded)
+            if needle and needle not in folded:
+                continue
+            names.append(display)
+        return {"applications": names, "count": len(names), "available": bool(index)}
+
+    def discover_tools(self, query: str, *, limit: int = 3) -> list[dict[str, Any]]:
+        """The tools that could carry this request, best first, with scores.
+
+        The readout the specification's discovery stage exists for: a caller —
+        a planner, a model escalation, a person reading the UI — gets a few
+        candidates and the evidence for them instead of every tool definition.
+        """
+        return [match.to_dict() for match in self.tool_retriever.search(query, limit=limit)]
+
+    def discovered_tools(self, query: str, *, limit: int = 3) -> tuple[dict[str, Any], ...]:
+        """The same shortlist in the compact shape a prompt may carry."""
+        names = self.tool_retriever.prompt_tools(query, limit=limit)
+        return tool_descriptions(self.tool_catalog, names)
+
+    def tools_status(self) -> dict[str, Any]:
+        """What the tool layer knows, what it found, and what it reused."""
+        return {
+            "catalog": {
+                "tools": len(self.tool_catalog),
+                "registered": len(self.tool_catalog.registered()),
+                "categories": self.tool_catalog.categories(),
+            },
+            "discovery": self.tool_retriever.to_dict(),
+            "cache": self.tool_executor.cache_report(),
+        }
+
+    def _confirm_plan_step(self, step: PlanStep) -> bool:
+        """Is this step authorized? Only an explicit approval from the caller counts."""
+        return step.id in self.approved_plan_steps
+
+    async def _run_plan_step(self, step: PlanStep, context: StepContext) -> dict[str, Any]:
+        """Carry out one plan step, or refuse to pretend it was carried out.
+
+        The deterministic work this application can genuinely perform is handled
+        here by action name. Everything else goes to the tool registry through
+        the approval-gated executor; a step naming a tool this installation does
+        not have RAISES, which the recovery advisor turns into an escalation,
+        because a plan that quietly reports success for a step nobody ran is the
+        exact failure this layer exists to prevent.
+        """
+        action = step.action
+        if action.startswith("read_"):
+            return self._read_metric_step(step)
+        if action == "collect_output":
+            return _collect_step_output(step, context)
+        if action == "analyze_result":
+            return _analyze_step_output(step, context)
+        if action == "summarize_result":
+            return _summarize_step_output(step, context)
+        if action == "locate_project":
+            return await self._locate_project_step(step)
+        if action == "reason":
+            raise RuntimeError(
+                f"No executor carries reasoning locally, so step {step.id!r} "
+                "needs escalation."
+            )
+        return await self._dispatch_plan_step(step)
+
+    def _read_metric_step(self, step: PlanStep) -> dict[str, Any]:
+        """A live reading from this machine — never from a model."""
+        intent = str(step.parameters.get("metric") or "system_status")
+        reader = self._hardware_status
+        metric_name = _READER_FOR_INTENT.get(intent)
+        names = (metric_name,) if metric_name else _STATUS_METRICS["system_status"]
+        readings = {name: getattr(reader, name)() for name in names}
+        kind = intent if intent in _STATUS_METRICS else "system_status"
+        message = _status_message(kind, names, readings)
+        return {"summary": message, "message": message, "metrics": readings, "kind": kind}
+
+    async def _locate_project_step(self, step: PlanStep) -> dict[str, Any]:
+        """Find a named project on disk, in bounded places, off the event loop."""
+        project = str(step.parameters.get("project") or "").strip()
+        if not project:
+            raise RuntimeError("No project name was given, so there is nothing to locate.")
+        found = await asyncio.to_thread(_find_project_directory, project)
+        if found is None:
+            raise RuntimeError(f"No directory matching {project!r} was found in the usual places.")
+        return {"path": found, "summary": f"Found {project} at {found}."}
+
+    async def _dispatch_plan_step(self, step: PlanStep) -> dict[str, Any]:
+        """Send a step to its tool — through the executor that owns approvals."""
+        if not step.tool:
+            raise RuntimeError(
+                f"No executor is registered for action {step.action!r}, so it cannot run."
+            )
+        try:
+            self.tools.get(step.tool)
+        except KeyError as exc:
+            raise RuntimeError(
+                f"Tool {step.tool!r} is not registered on this installation."
+            ) from exc
+        result = await self.tool_executor.execute(
+            ToolRequest(
+                tool_name=step.tool,
+                arguments=dict(step.parameters),
+                reason=step.description,
+            )
+        )
+        if result.status is ToolStatus.DENIED:
+            raise PermissionError(result.error or f"Tool {step.tool!r} was not approved.")
+        if result.status is ToolStatus.FAILED:
+            raise RuntimeError(result.error or f"Tool {step.tool!r} failed.")
+        return dict(result.output)
+
+    def _selection_for(
+        self, request: BrainRequest, understanding: dict[str, Any]
+    ) -> dict[str, Any]:
+        """The tool selection for a plan, rebuilt from the structured reading.
+
+        Rebuilt rather than carried as an object because the handler receives a
+        payload: a selection that travelled as a dict is validated back into the
+        structured intent, so a plan path can never act on a shape it merely
+        assumed. A reading this handler cannot reconstruct yields an empty
+        selection, which is reported rather than guessed.
+        """
+        intent = understanding.get("intent")
+        resolved = resolve_intent(str(intent)) if intent else None
+        if resolved is None:
+            return {}
+        selection = self.tool_selector.select(
+            StructuredIntent(
+                raw_input=request.text,
+                normalized_input=str(understanding.get("normalized_input", "")),
+                intent=resolved,
+                action=str(understanding.get("action", "")),
+                entities=dict(understanding.get("entities", {}) or {}),
+                confidence=float(understanding.get("confidence", 0.0) or 0.0),
+                requires_confirmation=bool(understanding.get("requires_confirmation", False)),
+            )
+        )
+        return selection.to_dict()
 
     async def _handle_self_improvement(self, request: BrainRequest, text: str) -> tuple[str, dict[str, Any]]:
         return "self_improvement", self.self_improvement.plan(text).to_dict()
@@ -1176,12 +2014,25 @@ class NovaControlApplication:
         """
         understanding = request.context.get("nlu")
         kind = ""
+        named: tuple[str, ...] = ()
         if isinstance(understanding, dict):
             kind = str(understanding.get("intent", ""))
-        names = _STATUS_METRICS.get(kind, _STATUS_METRICS["system_status"])
+            # Every metric the READING said was asked for ("check my RAM and
+            # CPU" names two), so the answer covers the request instead of the
+            # first half of it. Whitelisted against the metric vocabulary, which
+            # is also the reader's own attribute set, so nothing else can be
+            # read from a payload.
+            parameters = understanding.get("parameters")
+            if isinstance(parameters, dict):
+                named = tuple(
+                    str(item) for item in (parameters.get("metrics") or ()) if str(item)
+                )
+        metric_names = tuple(
+            name for name in named if name in _METRIC_KINDS
+        ) or _STATUS_METRICS.get(kind, _STATUS_METRICS["system_status"])
         reader = self._hardware_status
-        metrics = {name: getattr(reader, name)() for name in names}
-        message = _system_status_message(kind, metrics)
+        metrics = {name: getattr(reader, name)() for name in metric_names}
+        message = _status_message(kind, metric_names, metrics)
         return "system", {
             "deterministic": True,
             "message": message,
@@ -1197,11 +2048,34 @@ class NovaControlApplication:
         the looking; the text chat model is never handed an image. When no vision
         model is wired, the controller reports what it could actually determine
         instead of inventing a description.
+
+        The user's own question travels with the capture: "describe the image on
+        screen" and "why isn't the button working?" are the same pixels and
+        different work, and a model handed the checklist alone answers the first
+        one either way.
         """
-        described = await self.vision.describe_screen()
+        described = await self.vision.describe_screen(question=self._vision_question(request))
+        described.setdefault("question_answered", bool(described.get("question")))
         payload: dict[str, Any] = dict(described)
         payload.setdefault("summary", str(payload.get("message", "")))
         return "vision", payload
+
+    @staticmethod
+    def _vision_question(request: BrainRequest) -> str:
+        """What the user asked about the picture, in their own words.
+
+        The NLU's goal when it read one (it is already the cleaned-up request),
+        the raw text otherwise — but never for a bare "look at this" phrasing,
+        where the words are the instruction rather than a question about the
+        screen and would only confuse the model.
+        """
+        understanding = request.context.get("nlu")
+        if isinstance(understanding, dict):
+            goal = str(understanding.get("goal", "") or "").strip()
+            if goal:
+                return goal
+        text = " ".join(request.text.split())
+        return "" if _VISION_BARE_LOOK.search(text.lower()) else text
 
     _HANDLERS: dict[BrainIntent, _Handler] = {
         BrainIntent.CLARIFY: _handle_clarify,
@@ -2086,6 +2960,7 @@ class NovaControlApplication:
             "runtime_started": self.runtime.state.started,
             "modules": self.runtime.module_names(),
             "skills": [skill.schema.name for skill in self.skills.list()],
+            "tools": self.tools_status(),
             "scheduled_tasks": len(self.scheduler.tasks()),
             "tracked_tasks": len(self.tasks.list()),
             # Trimmed views (no `result` blobs — a completed /ask embeds whole
@@ -2122,6 +2997,10 @@ class NovaControlApplication:
                 # answerable from the running system rather than from the source.
                 "thresholds": self.intelligence.thresholds.to_dict(),
                 "lexical_exemplars": self.intelligence.lexical.size,
+                # Which decision provider decides, and which one answers when it
+                # declines — a configured provider that silently stopped being
+                # used is visible here rather than inferred from behaviour.
+                "decision": self.decision.status(),
             },
         }
 

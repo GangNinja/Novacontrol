@@ -254,6 +254,56 @@ def _starts_with_verb(part: str) -> bool:
     return bool(part) and part.split(" ", 1)[0] in _KNOWN_VERBS
 
 
+# Imperative heads that mark a leftover clause as WORK rather than as a noun
+# phrase belonging to the clause before it ("check my RAM and CPU" must not
+# read as a second request). Used for exactly ONE purpose — deciding that a
+# partial reading dropped work — never for intent matching, which the registry
+# owns. It is deliberately a short list of verbs the intent taxonomy does not
+# yet carry: the recognised ones are already in ``_VERB_VOCABULARY``.
+_IMPERATIVE_HEADS = frozenset(
+    {
+        "inspect", "review", "analyse", "analyze", "examine", "audit",
+        "fix", "repair", "resolve", "debug", "diagnose", "troubleshoot",
+        "refactor", "improve", "optimize", "optimise", "clean", "tidy",
+        "update", "upgrade", "migrate", "document", "describe", "draft",
+        "investigate", "verify", "validate", "ensure", "confirm", "report",
+        "summarise", "summarize", "compare", "plan", "prepare", "organise",
+        "organize", "sort", "track", "monitor", "watch", "automate",
+    }
+)
+
+# The metrics a single status request can name more than one of, and the words
+# that name them. A reading that mentions several is asking for several
+# readings, and one telemetry probe answers all of them — so "check my RAM and
+# CPU" is ONE request with two metrics, not a second request the splitter would
+# have had to invent (which is why "and CPU" is deliberately not a step there),
+# and not half a request silently ignored, which is what it was.
+_NAMED_STATUS_METRICS: tuple[tuple[tuple[str, ...], str, IntentName], ...] = (
+    (("ram", "memory"), "memory", IntentName.MEMORY_STATUS),
+    (("cpu", "processor"), "cpu", IntentName.CPU_STATUS),
+    (("gpu", "graphics", "vram"), "gpu", IntentName.GPU_STATUS),
+    (("battery", "charge", "charging"), "battery", IntentName.BATTERY_STATUS),
+    (("network", "wifi", "internet", "connection"), "network", IntentName.NETWORK_STATUS),
+)
+
+#: The intents a multi-metric reading can be built from.
+_STATUS_READING_INTENTS: frozenset[IntentName] = frozenset(
+    {IntentName.SYSTEM_STATUS, *(item[2] for item in _NAMED_STATUS_METRICS)}
+)
+
+
+# Clause heads that introduce a QUESTION, not a task: "what is X and where is
+# Y" is one request for one answer.
+_QUESTION_HEADS = frozenset(
+    {
+        "what", "why", "how", "who", "whom", "whose", "when", "where",
+        "which", "is", "are", "was", "were", "am", "do", "does", "did",
+        "can", "could", "will", "would", "shall", "should", "may", "might",
+        "if", "whether",
+    }
+)
+
+
 def _split_message(value: str) -> dict[str, Any]:
     """Split "mom saying running late" into recipient + message."""
     match = _MESSAGE_SAY_RE.match(value)
@@ -320,6 +370,10 @@ class GlobalInputIntelligence:
         # What each layer cost on the request being handled, so "understanding
         # was slow" can be attributed to a layer instead of the whole pipeline.
         self._layer_costs: dict[str, float] = {}
+        # Clauses the decomposition dropped on THIS request (see
+        # ``_unread_clauses``): a reading that understood one action of a
+        # three-clause request must not be assessed as a one-step command.
+        self._clause_leftover: int = 0
         # Self-improvement feed: rolling record of how input is interpreted.
         self.telemetry = InterpretationTelemetry()
         # What NovaControl can do, by intent — the orchestrator's planning table.
@@ -405,13 +459,27 @@ class GlobalInputIntelligence:
                 return multi
             # Nothing resolved -> fall through to whole-input handling.
 
-        return self._understand_single(raw_text, normalized, started)
+        return self._understand_single(
+            raw_text, normalized, started, leftover=self._unread_clauses(steps)
+        )
 
     def _understand_single(
-        self, raw_text: str, normalized: str, started: float | None = None
+        self,
+        raw_text: str,
+        normalized: str,
+        started: float | None = None,
+        *,
+        leftover: int = 0,
     ) -> UnderstandResult:
-        """The layered pipeline for one clause: cheapest evidence first."""
+        """The layered pipeline for one clause: cheapest evidence first.
+
+        ``leftover`` is clause material this reading did NOT account for (see
+        ``_unread_clauses``); it travels to the assessor through the request,
+        because how much of a request was understood is as much a part of its
+        difficulty as what the sentence asks for.
+        """
         started = time.perf_counter() if started is None else started
+        self._clause_leftover = max(0, leftover)
 
         # REFERENCE KIND: "open that file" names a KIND, not a target. Answering
         # it from the phrase invents an application literally called "that
@@ -506,6 +574,39 @@ class GlobalInputIntelligence:
         return self._clarify_result(raw_text, normalized, started)
 
     # -- composition, routing, and bookkeeping ---------------------------------
+
+    def _unread_clauses(self, steps: list[str]) -> int:
+        """Clauses the decomposition dropped that are still WORK.
+
+        The decomposition gate needs TWO recognised verb clauses, so a request
+        carrying one understood action plus further imperative clauses ("Find my
+        NovaControl project, inspect the latest changes and fix the failing
+        tests") was read as a single sentence, assessed as ONE action and
+        reported SIMPLE: the rest of it was silently dropped, and the
+        deterministic path was invited to act on a third of the request.
+
+        Only clauses that follow the first, open with an imperative the taxonomy
+        does not carry, and are not readable by the cheap layers are counted. A
+        compound QUESTION is one request for one answer, and a noun phrase
+        belonging to the clause before it ("check my RAM and CPU") is not a
+        second request, so neither counts.
+        """
+        if len(steps) < 2:
+            return 0
+        unread = 0
+        for step in steps[1:]:
+            head = step.split(" ", 1)[0]
+            if head in _QUESTION_HEADS or head not in _IMPERATIVE_HEADS:
+                continue
+            if self.registry.match(step) is not None:
+                continue
+            if self.registry.variant_intent(step) is not None:
+                continue
+            match = self.lexical.best(step)
+            if match is not None and match.score >= self.thresholds.verify_confidence:
+                continue
+            unread += 1
+        return unread
 
     def _understand_multi(
         self, raw_text: str, normalized: str, steps: list[str], started: float
@@ -734,6 +835,10 @@ class GlobalInputIntelligence:
         learned_phrase: str = "",
     ) -> UnderstandResult:
         """Apply the routing policy, measure the cost, and record the outcome."""
+        # Leftover clause material from THIS request: a reading that understood
+        # one action out of three clauses is not a one-step command, and the
+        # assessor is where that difference has to be counted.
+        unresolved = max(unresolved, self._clause_leftover)
         # Per-layer attribution travels with the reading, so a latency report
         # can say WHICH step was slow instead of only how slow the request was.
         if self._layer_costs:
@@ -927,6 +1032,7 @@ class GlobalInputIntelligence:
     def _reset_layer_costs(self) -> None:
         """Start a fresh per-layer breakdown for the request being handled."""
         self._layer_costs = {}
+        self._clause_leftover = 0
 
     def _record(self, intent: StructuredIntent, strategy: str, *, learned_phrase: str = "") -> None:
         """Feed the self-improvement telemetry (and teach the variation).
@@ -1024,7 +1130,9 @@ class GlobalInputIntelligence:
             if multi is not None:
                 return multi
 
-        result = self._understand_single(raw_text, normalized, started)
+        result = self._understand_single(
+            raw_text, normalized, started, leftover=self._unread_clauses(steps)
+        )
         if result.strategy != "clarification" or not self.llm_available or _looks_technical(normalized):
             return result
         # Last resort before clarifying: ask the model (async-capable).
@@ -1321,6 +1429,7 @@ class GlobalInputIntelligence:
 
     def _post_process(self, intent: StructuredIntent) -> StructuredIntent:
         """Apply resolution, risk policy, entity requirements, and bookkeeping."""
+        intent = self._expand_status_metrics(intent)
         intent = self._resolve_entities(intent)
         intent = self._apply_requirements(intent)
         # Missing required entity -> one precise clarification question.
@@ -1345,6 +1454,41 @@ class GlobalInputIntelligence:
         self.context.remember_intent(intent.to_dict())
         self.context.remember_utterance(intent.normalized_input)
         return intent
+
+    def _expand_status_metrics(self, intent: StructuredIntent) -> StructuredIntent:
+        """Read EVERY metric a status request names, not just the first one.
+
+        "check my RAM and CPU" reads as a memory question with the CPU half
+        dropped, so the answer was half an answer and nothing said so. The
+        primary reading leads the action list and the names carry the metrics in
+        the order they were said, so the handler can answer all of them from one
+        probe and a client can see what was asked for.
+
+        Only runs for a reading that IS a status question, so a metric word in a
+        request about something else ("free up memory by closing chrome") is left
+        to the intent that owns it.
+        """
+        if intent.intent not in _STATUS_READING_INTENTS:
+            return intent
+        text = intent.normalized_input
+        found: list[tuple[str, IntentName]] = []
+        for words, metric, metric_intent in _NAMED_STATUS_METRICS:
+            if any(re.search(rf"\b{re.escape(word)}\b", text) for word in words):
+                found.append((metric, metric_intent))
+        if not found:
+            return intent
+        # The primary reading leads; the rest follow in the order they appear.
+        ordered = [item for item in found if item[1] is intent.intent] + [
+            item for item in found if item[1] is not intent.intent
+        ]
+        actions = tuple(dict.fromkeys([intent.intent.value, *(i.value for _, i in ordered)]))
+        metrics = tuple(dict.fromkeys(metric for metric, _ in ordered))
+        if actions == (intent.intent.value,) and metrics == (ordered[0][0],):
+            return intent
+        return intent.with_(
+            actions=actions,
+            parameters={**intent.parameters, "metrics": list(metrics)},
+        )
 
     def _resolve_entities(self, intent: StructuredIntent) -> StructuredIntent:
         """Split structured payloads and resolve placeholder entities from context."""

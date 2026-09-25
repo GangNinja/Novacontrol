@@ -50,12 +50,18 @@ class ScreenUnderstanding:
     summary: str
     windows: tuple[DetectedWindow, ...] = ()
     text: str = ""
+    #: What the pipeline could say ABOUT its own answer — chiefly whether a
+    #: question about the screen was actually answered, or declined because no
+    #: vision model is wired. Absent for a plain description, so nothing that
+    #: reads a summary before this field existed changes shape.
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "summary": self.summary,
             "windows": [window.to_dict() for window in self.windows],
             "text": self.text,
+            "metadata": dict(self.metadata),
         }
 
 

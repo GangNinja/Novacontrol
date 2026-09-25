@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from novacontrol.vision.models import (
     DetectedWindow,
@@ -19,8 +19,10 @@ class VisionProcessor(Protocol):
     async def ocr(self, source: str) -> OcrResult:
         """Extract text from an image, screen, or document source."""
 
-    async def understand_screen(self, source: str) -> ScreenUnderstanding:
-        """Summarize a screen capture."""
+    async def understand_screen(
+        self, source: str, *, question: str = ""
+    ) -> ScreenUnderstanding:
+        """Summarize a screen capture, optionally answering a question about it."""
 
     async def detect_windows(self, source: str) -> tuple[DetectedWindow, ...]:
         """Detect windows from a screen capture."""
@@ -71,11 +73,31 @@ class BasicScreenUnderstandingProcessor:
             text = Path(source).stem.replace("_", " ").replace("-", " ")
         return OcrResult(text=text, confidence=0.5 if text else 0.0)
 
-    async def understand_screen(self, source: str) -> ScreenUnderstanding:
+    async def understand_screen(
+        self, source: str, *, question: str = ""
+    ) -> ScreenUnderstanding:
+        """The dependency-free baseline: no pixels understood, so the question
+        is echoed rather than answered, and the metadata says which it is.
+
+        Answering a visual question without a vision model would mean inventing
+        an answer, which is the one thing this layer must never do. The question
+        is carried through so a caller can see that it reached the pipeline and
+        was declined for the honest reason.
+        """
         ocr_result = await self.ocr(source)
         windows = await self.detect_windows(source)
         summary = _summarize_text(ocr_result.text) if ocr_result.text else f"Screen source {source}"
-        return ScreenUnderstanding(summary=summary, windows=windows, text=ocr_result.text)
+        metadata: dict[str, Any] = {}
+        asked = " ".join(str(question or "").split())
+        if asked:
+            metadata = {
+                "question": asked,
+                "question_answered": False,
+                "reason": "no vision model wired; the screen was not read",
+            }
+        return ScreenUnderstanding(
+            summary=summary, windows=windows, text=ocr_result.text, metadata=metadata
+        )
 
     async def detect_windows(self, source: str) -> tuple[DetectedWindow, ...]:
         title = Path(source).stem.replace("_", " ").title() or "Unknown Window"

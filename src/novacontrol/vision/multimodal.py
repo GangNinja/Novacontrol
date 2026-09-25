@@ -59,28 +59,31 @@ class MultimodalVisionProcessor:
         except Exception:
             return await self._fallback.ocr(source)
 
-    async def understand_screen(self, source: str) -> ScreenUnderstanding:
-        """Understand a screen capture using LLM if available."""
+    async def understand_screen(
+        self, source: str, *, question: str = ""
+    ) -> ScreenUnderstanding:
+        """Understand a screen capture using LLM if available.
+
+        ``question`` is what the user actually asked about the screen ("why
+        isn't the button working?"). A generic screen description answers a
+        question nobody asked: the model has the pixels, and the one thing it
+        most needs to know is what to look FOR. When no question is given the
+        structured checklist is used, so an explicit Describe Screen click
+        behaves exactly as before.
+        """
         if not self.has_llm:
-            return await self._fallback.understand_screen(source)
+            return await self._fallback.understand_screen(source, question=question)
 
         try:
             image_data = _load_image_base64_for_vision(source)
             if not image_data:
-                return await self._fallback.understand_screen(source)
+                return await self._fallback.understand_screen(source, question=question)
 
-            prompt = (
-                "Analyze this screenshot. Describe:\n"
-                "1. What application(s) are visible\n"
-                "2. The current state/interface\n"
-                "3. Any errors, warnings, or important text\n"
-                "4. Any interactive elements (buttons, forms, menus)\n"
-                "Be concise but thorough."
-            )
+            prompt = _screen_prompt(question)
             result = await self._call_llm(prompt, image_data=image_data)
             return ScreenUnderstanding(summary=result, windows=(), text=result)
         except Exception:
-            return await self._fallback.understand_screen(source)
+            return await self._fallback.understand_screen(source, question=question)
 
     async def detect_windows(self, source: str) -> tuple[DetectedWindow, ...]:
         """Detect windows using LLM if available."""
@@ -207,6 +210,32 @@ class MultimodalVisionProcessor:
         if complete is None:
             raise RuntimeError("LLM provider has no complete method")
         return str(await complete(messages))
+
+
+def _screen_prompt(question: str) -> str:
+    """The vision prompt: the user's own question first, then the checklist.
+
+    The checklist stays even when a question is present, because the model is
+    being asked to be *useful*, not terse: answering "why isn't the button
+    working" needs the visible error text and the interactive elements, and a
+    model that only answers the literal question tends to omit them.
+    """
+    checklist = (
+        "Describe:\n"
+        "1. What application(s) are visible\n"
+        "2. The current state/interface\n"
+        "3. Any errors, warnings, or important text\n"
+        "4. Any interactive elements (buttons, forms, menus)\n"
+        "Be concise but thorough."
+    )
+    asked = " ".join(str(question or "").split())
+    if not asked:
+        return f"Analyze this screenshot. {checklist}"
+    return (
+        f"Analyze this screenshot and answer this question about it:\n{asked}\n\n"
+        f"Answer from what is actually visible, and say so when the screen does not "
+        f"show it. {checklist}"
+    )
 
 
 def _load_image_base64(path: str) -> str | None:

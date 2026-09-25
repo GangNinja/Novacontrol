@@ -14,6 +14,15 @@ security:
   require_approval_for_sensitive_actions: true
   audit_log_path: logs/audit.log
 
+# Loop bounds for the plan layer: how many times one step may run and how many
+# understand-decide-plan-execute-verify cycles the agent loop gets. Deliberately
+# small — enough to survive a transient failure, not enough to hide a permanent
+# one behind repetition. Environment overrides: NOVACONTROL_PLANNING_MAX_CYCLES,
+# NOVACONTROL_PLANNING_MAX_STEP_ATTEMPTS.
+planning:
+  max_cycles: 2
+  max_step_attempts: 2
+
 modules:
   api:
     enabled: true

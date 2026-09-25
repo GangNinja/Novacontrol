@@ -37,6 +37,10 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("POST", "/browser/plan"): "renderCommand",
     ("POST", "/browser/execute"): "renderCommand",
     ("POST", "/plan"): "renderBuild",
+    # The agent-loop run has no panel yet: API callers (and the CLI) consume the
+    # phase trace, the plan and the unverified list directly, and claiming a
+    # renderer here would put a control in the contract that does not exist.
+    ("POST", "/plan/run"): "no-render",
     ("POST", "/plan/code"): "renderBuild",
     ("POST", "/knowledge/teach"): "renderLearning",
     ("GET", "/knowledge"): "renderLearning",

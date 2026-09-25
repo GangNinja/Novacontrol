@@ -57,7 +57,7 @@ class ToolRegistry:
         self._tools: dict[str, RegisteredTool] = {}
 
     def register(self, tool: FunctionTool, schema: ToolSchema | None = None) -> None:
-        name = str(getattr(tool, "name"))
+        name = str(tool.name)
         tool_schema = schema or getattr(tool, "schema", None)
         if not isinstance(tool_schema, ToolSchema):
             raise TypeError(f"Tool {name!r} must provide a ToolSchema.")
