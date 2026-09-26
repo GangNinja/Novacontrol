@@ -23,6 +23,45 @@ planning:
   max_cycles: 2
   max_step_attempts: 2
 
+# Which vision model looks at pictures, and when it is consulted. The vision
+# model itself is configured where it lives (the Vision panel / data/vision_llm.json)
+# so this file only says WHETHER one may be used and which local model to prefer:
+#   provider: auto | none   (none refuses a VLM outright and answers from OCR)
+#   model:    a local model name to pin, empty = whatever is configured elsewhere
+# `prefer_ocr` keeps the cheap path first: read the image, answer from the text
+# when the text is enough, and only then pay for a model call.
+# Environment overrides: NOVACONTROL_VISION_PROVIDER, NOVACONTROL_VISION_MODEL,
+# NOVACONTROL_VISION_PREFER_OCR.
+vision:
+  provider: auto
+  model: ""
+  prefer_ocr: true
+
+# Model lifecycle and the capability table. The manager selects a model by what
+# it CAN DO (see src/novacontrol/models/profiles.py), never by its name, and
+# these are the few choices it cannot make for itself:
+#   keep_alive:       immediate | warm | while_active | never
+#                     (the RAM-conscious default is "warm" — hold the model,
+#                      release it once it has been idle for keep_warm_seconds)
+#   keep_warm_seconds: how long "warm" holds an idle model before releasing it.
+#                     0 = do not override the runtime's own residency, which is
+#                     its documented default rather than a number invented here.
+#   headroom_mb:      memory a load must leave free (clamped to 8192).
+#   declarations:     models this build has never heard of, so a local build is
+#                     selectable by what it can do without editing Python:
+#                       declarations:
+#                         - name: my-vlm:3b
+#                           capabilities: [text, vision, tool_calling]
+#                           context_length: 8192
+#                           parameters_b: 3
+# Environment overrides: NOVACONTROL_MODEL_KEEP_ALIVE,
+# NOVACONTROL_MODEL_KEEP_WARM_SECONDS, NOVACONTROL_MODEL_HEADROOM_MB.
+models:
+  keep_alive: warm
+  keep_warm_seconds: 0
+  headroom_mb: 512
+  declarations: []
+
 modules:
   api:
     enabled: true

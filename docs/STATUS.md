@@ -203,6 +203,16 @@ python -m novacontrol
 - Runnable demos through Phase 15
 - Remaining baseline modules implemented: skills, scheduler, projects, knowledge, automation, integrations
 
+## Completed Staged-Build Verification (Phases 1–7)
+
+- All seven staged objectives re-derived from the code and the docs, then driven through `handle_request`/`run_plan` with no local model installed
+- Phase 2 context resolution reaches execution: "open it" after "open chrome" plans `open chrome`, and a named close ("close it") plans the graceful window close instead of a shell command
+- Phase 4's own example now has an executor: `run_tests`/`run_command` steps locate the project, recognise its runner, run exec-form with a timeout, capture the output tail, and report the exit code to the verifier — gated on explicit approval of the step id
+- Four CI checks confirmed locally: tests on Python 3.12/3.13 (1594 passed / 12 skipped, 1665 subtests), `docs/API.md` sync, and mypy in both platform views (217 modules)
+- Residuals recorded in `DEVELOPMENT_LOG.md` §25: file operations understood but unwired, the legacy-classifier fallback still able to plan a literal reference, `nlu.model` reporting the provider name, and real VLM answer quality untestable without a vision model
+
 ## Next Work
 
-Focus on real external adapters, packaging, and deeper GUI/API polish.
+Focus on real external adapters, packaging, and deeper GUI/API polish — and on wiring
+the understood-but-unexecuted file operations (`find_file`, `read_file`, `list_files`,
+`write_file`) so "read report.pdf" reads the file instead of apologising.

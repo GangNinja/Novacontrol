@@ -137,8 +137,156 @@ model (`qwen2.5vl:3b`, `llava`, `moondream`). A `qwen3-vl` build that cannot
 stop thinking will consume its budget on reasoning regardless of the prompt, and
 the fallback path (OCR, landmarks) is what will actually click the element.
 
+---
+
+# Phase 6: the vision pipeline
+
+*The specification series whose Phase 3 is the decision engine, Phase 4 the
+planner and Phase 5 tool selection names vision as its Phase 6 — see
+[DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md) section 17. It is not the older
+roadmap's "Phase 6: Planning" in [PHASES.md](PHASES.md).*
+
+Vision is its own capability, not a mode of the text model. The primary
+`qwen3`-class chat model is **never** handed an image: a separate manager,
+provider and result type do the looking.
+
+```
+Screenshot / image
+  -> VisionManager        capture, read, decide, structure
+  -> VisionProvider       the VLM, replaceable, configuration-chosen
+  -> VisionResult         structured, bounded, provenance attached
+  -> Planner              steps are compiled against what was seen
+```
+
+## Components
+
+| Piece | Module | What it owns |
+| --- | --- | --- |
+| `VisionRequest` | `vision/models.py` | one question about one image: source, question, task, `prefer_ocr`, `allow_vlm`, `target` |
+| `VisionResult` | `vision/models.py` | the documented structured shape plus `answered` / `escalated` / `metadata` provenance |
+| `VisionManager` | `vision/manager.py` | the OCR-first decision and the structuring; provider and OCR engine injected, both hot-swappable |
+| `VisionProvider` | `vision/providers.py` | the seam: `name`, `model`, `available`, `see(prompt, image_path)` |
+| `NullVisionProvider` | `vision/providers.py` | the honest default — `available = False`, no invented description |
+| `CompletionVisionProvider` | `vision/providers.py` | wraps any completion provider (local Ollama VLM, cloud preset, test double) |
+| `OcrEngine` | `vision/ocr.py` | the cheap half: `TextFileOcrEngine` then the existing Windows OCR, with real coordinates |
+| `VisionActionProposal` | `vision/proposals.py` | what *could* be done about what was seen — nothing executes |
+
+The provider is chosen by configuration (`vision.provider` / `vision.model`, and
+`NOVACONTROL_VISION_*` overrides), so Qwen3-VL, Gemma vision, another local VLM
+or a cloud endpoint is a wiring change. The existing capability gate
+(`provider_supports_vision`) still applies: a text-only chat model resolves to
+`NullVisionProvider` instead of being trusted to invent coordinates.
+
+## Routing
+
+The NLU/decision layers set `requires_vision` — and route to `vision` — for an
+attached image, a supplied screenshot, or a request that explicitly needs visual
+understanding:
+
+| Request | `requires_vision` | route | task |
+| --- | --- | --- | --- |
+| "What is this error?" | true | `vision` | `UNDERSTAND` |
+| "Where is the login button?" | true | `vision` | `LOCATE` |
+| "Read the text in this screenshot." | true | `vision` | `OCR` |
+| "Open Chrome." | false | `direct_tool` | — |
+| "Open Chrome." **with an image attached** | true | `vision` | `UNDERSTAND` |
+
+"Fix this error" stays a coding request: it is about the error, not about a
+picture of it.
+
+An attached picture is a FACT, not an inference. `POST /ask` takes an optional
+`image` path, `handle_request(..., image=...)` passes it on, and the
+understanding layer is told `has_image=True` rather than left to read the
+wording — so *"what is this?"* with a picture needs eyes while the same words
+without one stay the plain question they are. The pipeline then reads THAT image
+instead of capturing the desktop, because a screenshot would answer about the
+wrong pixels when the user attached the one they meant.
+
+`requires_vision` can only ever be ADDED by these rules, never removed: a caller
+cannot phrase its way out of needing eyes.
+
+## OCR before VLM
+
+Every request is read before it is interpreted. `task_for_question()` picks the
+cheap path from the words, and the manager only escalates when the text cannot
+answer:
+
+| Question | Task | Path |
+| --- | --- | --- |
+| "Read the text in this screenshot." | `OCR` | OCR only — the model is never called |
+| "What is this error?" | `UNDERSTAND` | OCR if the text covers the question's content words, else the model |
+| "Where is the login button?" | `LOCATE` | OCR when the read words carry POSITIONS (the label's coordinates are the answer); the model otherwise |
+
+`text_answers_question()` is the gate for an understand question, and
+`question_coverage()` is the confidence it reports — a measured fraction of the
+question's content words the text actually contains, not a band someone chose. A
+text-only request (`allow_vlm=False`) answers from OCR or says it needs eyes; it
+never guesses.
+
+A **locate** question is answered from the text only when the text carries a
+position: `_locate_from_words()` looks for the label's own content words (control
+nouns like "button" are dropped, longest word first) among the words the reader
+PLACED, and a match with no geometry is no match — a plain text file knows its
+words and not where they were drawn, so answering from it would return the
+origin as a click target. The region it returns quotes the reader's own
+coordinates (bounds *and* centre), and the confidence is what finding a word is
+worth (0.5), never a figure the pipeline did not earn.
+
+## The structured result
+
+```json
+{
+  "image_type": "application_screenshot",
+  "detected_text": ["..."],
+  "ui_elements": [{"label": "Login", "kind": "button", "bounds": {"x": 0, "y": 0, "width": 0, "height": 0}}],
+  "errors": ["..."],
+  "relevant_regions": [{"label": "...", "x": 0, "y": 0}],
+  "summary": "...",
+  "confidence": 0.91,
+  "metadata": {"answer_source": "ocr", "escalated": false, "question_answered": true}
+}
+```
+
+The model's reasoning is never part of this: `metadata` carries *provenance*
+(which reader answered, whether the model was consulted, whether the question was
+actually answered) and nothing else. `answered` is the honest bit — no model
+wired, an unreadable image, or a question that needs eyes produces a result that
+says so rather than a summary that reads like an answer. It travels at the top
+level of the `/ask` payload as well as in `metadata`, because a client should
+not have to dig to see that nothing answered the question.
+
+Two rules keep the summary and the confidence honest:
+
+* **The locate contract's JSON is a wire format, not a sentence.** When a model
+  answers in the contract without a `summary`, the pipeline builds one from what
+  was determined — *"Login is visible at (500, 250) on a 0-1000 grid."*, *"No
+  logout button is visible in the image."*, *"The element was reported as
+  visible, but no position was given."* A person is never shown the raw object.
+* **A confidence is either measured or named as unquantified.** A figure the
+  model reports is used as given (`confidence_basis: model-reported`); an
+  answered-but-unquantified answer quotes one named placeholder with
+  `confidence_basis: none`; a "not visible" answer is `0.0`, because there is no
+  position to be confident about and a middle figure beside an empty region list
+  reads as a located element.
+
+## Computer use (designed, not enabled)
+
+```
+screenshot -> understand UI -> identify target -> action proposal
+  -> permission/safety -> click/type -> screenshot again -> verify
+```
+
+Steps 1 and 6–8 exist and are approval-gated; steps 2–3 are this manager; step 5
+is the approval gateway every side-effecting action already passes through. Only
+step 4 is new, and `vision/proposals.py` stops there: `VisionActionProposal`
+carries `requires_approval = True` as a constant (not a field a caller can flip),
+and there is deliberately no function that clicks. A proposal is only produced
+when the target was seen WITH geometry to act on — a model that says "probably
+top-right" without a point produces no proposal at all.
+
 ## Future Adapters
 
 OpenCV, EasyOCR, cloud vision models beyond the registered presets, and
 screen/window APIs can implement the `VisionProcessor` interface without
-changing the core runtime.
+changing the core runtime. A new VLM needs only the `VisionProvider` protocol —
+one method — and a config entry.

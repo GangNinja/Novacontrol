@@ -672,6 +672,31 @@ class JarvisDesktopCommandTests(unittest.TestCase):
         # The parser folds case before matching, and the on-disk folder search
         # compares whole words, so the lowercased name still finds the folder.
         self.assertEqual(steps[0].target, "novacontrol")
+
+    def test_a_named_app_closes_through_the_window_close_step(self) -> None:
+        """"close chrome" must be a graceful window close, not a shell command.
+
+        The fallback planned an EXECUTE_SCRIPT of the whole sentence, so
+        approving "close chrome" would have run "close chrome" in a shell. A
+        named close belongs to the same STOP_APP step "stop that" already uses.
+        """
+        from novacontrol.desktop.controller import (
+            DesktopAutomationController,
+            parse_desktop_command,
+        )
+        from novacontrol.desktop.models import DesktopActionType
+
+        for phrase in ("close chrome", "quit notepad", "exit spotify", "stop steam"):
+            with self.subTest(command=phrase):
+                steps = parse_desktop_command(phrase)
+                self.assertEqual([step.kind for step in steps], ["stop"])
+                self.assertEqual(steps[0].target, phrase.split()[-1])
+        # A bare 'close it' still means the last app, not an app called 'it'.
+        self.assertEqual(parse_desktop_command("close it")[0].target, "")
+        controller = DesktopAutomationController(runner=RecordingRunner())
+        workflow, _, _ = controller.plan_command("close chrome")
+        self.assertEqual(workflow.actions[0].type, DesktopActionType.STOP_APP)
+        self.assertEqual(workflow.actions[0].target, "chrome")
         steps = parse_desktop_command("open the report project")
         self.assertEqual(steps[0].kind, "open_folder")
         self.assertEqual(steps[0].target, "report")

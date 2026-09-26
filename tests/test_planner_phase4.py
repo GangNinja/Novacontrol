@@ -40,6 +40,7 @@ from novacontrol.planning import (
     VerificationStatus,
     WorkflowExecutor,
 )
+from novacontrol.planning.executor import StepContext
 from novacontrol.planning.recovery import repair_parameters
 
 #: The plan the Phase 4 specification gives as its example.
@@ -1036,6 +1037,91 @@ class ApplicationPlannerTests(unittest.IsolatedAsyncioTestCase):
                 "summarize-result",
             ],
         )
+
+    def _command_step(self, command: str) -> PlanStep:
+        return PlanStep(
+            title="Run command",
+            description=f"Run the command: {command}",
+            action="run_command",
+            parameters={"command": command},
+            verification=VerificationSpec(
+                method=VerificationMethod.EXIT_CODE,
+                expect=None,
+                description="the command ran and reported an exit code",
+            ),
+        )
+
+    async def test_a_command_step_is_refused_without_explicit_approval(self) -> None:
+        step = self._command_step("python -c print(42)")
+        plan = Plan(goal="run a command", steps=(step,))
+
+        result = await self.app.workflow_executor.execute(plan)
+
+        outcome = result.step_results[step.id]
+        self.assertEqual(outcome.status, PlanStepStatus.DENIED)
+        self.assertIsNotNone(outcome.error)
+        self.assertIn("approval", outcome.error.message if outcome.error else "")
+
+    async def test_an_approved_command_step_runs_and_is_verified(self) -> None:
+        step = self._command_step("python -c print(42)")
+        plan = Plan(goal="run a command", steps=(step,))
+        self.app.approved_plan_steps = {step.id}
+        try:
+            result = await self.app.workflow_executor.execute(plan)
+        finally:
+            self.app.approved_plan_steps = set()
+
+        outcome = result.step_results[step.id]
+        self.assertEqual(outcome.status, PlanStepStatus.COMPLETED)
+        self.assertTrue(outcome.verified)
+        self.assertEqual(outcome.output.get("exit_code"), 0)
+        self.assertIn("42", str(outcome.output.get("stdout", "")))
+
+    async def test_an_approved_test_step_runs_the_located_projects_suite(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            project = Path(raw)
+            (project / "tests").mkdir()
+            (project / "pyproject.toml").write_text(
+                "[project]\nname = 'probe'\nversion = '0'\n", encoding="utf-8"
+            )
+            (project / "tests" / "test_ok.py").write_text(
+                "def test_ok() -> None:\n    assert 1 + 1 == 2\n", encoding="utf-8"
+            )
+            step = PlanStep(
+                title="Run tests",
+                description="Execute the test suite: run the tests",
+                action="run_tests",
+                parameters={"scope": "tests"},
+                verification=VerificationSpec(
+                    method=VerificationMethod.EXIT_CODE,
+                    expect=None,
+                    description="the suite ran and reported an exit code",
+                ),
+            )
+            self.app.approved_plan_steps = {step.id}
+            try:
+                output = await self.app._run_plan_step(
+                    step, StepContext(outputs={"locate-project": {"path": str(project)}})
+                )
+            finally:
+                self.app.approved_plan_steps = set()
+
+        self.assertEqual(output["command"], "python -m pytest")
+        self.assertEqual(output["exit_code"], 0)
+        self.assertIn("1 passed", str(output["stdout"]))
+
+    async def test_a_test_step_without_approval_never_starts_a_process(self) -> None:
+        step = PlanStep(
+            title="Run tests",
+            description="Execute the test suite: run the tests",
+            action="run_tests",
+            parameters={"scope": "tests"},
+        )
+
+        with self.assertRaises(PermissionError) as caught:
+            await self.app._run_plan_step(step, StepContext())
+
+        self.assertIn("approval", str(caught.exception))
 
 
 class ApiContractTests(unittest.TestCase):

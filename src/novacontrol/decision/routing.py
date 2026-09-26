@@ -102,6 +102,17 @@ CONVERSATION_INTENTS: frozenset[IntentName] = frozenset(
     {IntentName.CONVERSATION, IntentName.CHAT, IntentName.CALCULATE}
 )
 
+#: Handlers whose work is SEQUENCED already: the planner and the agent loop,
+#: and the device/browser controllers that order their own multi-step commands.
+#: A decision that says a request "must be planned" can be carried out by one of
+#: these and by nothing else — chat answers and explore researches, one step
+#: each — so this is the set that decides whether a sequencing requirement can
+#: be honoured by the executor that was otherwise chosen. Defined here, beside
+#: the table that names the handlers, so there is one list rather than two.
+SEQUENCING_HANDLERS: frozenset[str] = frozenset(
+    {"desktop", "phone", "browser", "plan", "agent", "project", "self_improvement"}
+)
+
 #: Work that is planned and sequenced rather than executed in one step.
 PLANNING_INTENTS: frozenset[IntentName] = frozenset(
     {

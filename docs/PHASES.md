@@ -159,3 +159,18 @@ Complete in this repository state.
 - API documentation
 - Deployment guide
 - Release readiness checker
+
+## Verification
+
+Each phase ends with passing tests and updated documentation, and the staged
+intelligence build (foundation → understanding/context → decision engine → planner →
+tool discovery → vision → model/hardware manager) has been re-verified against the
+running request path: every claim was re-derived from the code and driven through
+`handle_request`/`run_plan` on a machine with no model installed, rather than read
+off the layer that makes it. [DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md) §25 carries the
+clause-by-clause result, the two live-path defects the pass found and fixed (context
+references now reach the plan that acts on them; a plan's `run_tests`/`run_command`
+steps have a real, approval-gated executor), and the residuals that remain open.
+
+CI enforces four checks on every push: the test matrix on Python 3.12 and 3.13, the
+API-reference sync check, and mypy in both the linux and windows platform views.

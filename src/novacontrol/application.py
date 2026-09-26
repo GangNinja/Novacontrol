@@ -5,7 +5,11 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import os
 import re
+import shlex
+import shutil
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,10 +58,13 @@ from novacontrol.decision import (
     DecisionEngine,
     DecisionEnvironment,
     DecisionRoute,
+    DecisionType,
     INTENT_HANDLERS,
+    SEQUENCING_HANDLERS,
     build_decision_provider,
 )
 from novacontrol.intelligence import GlobalInputIntelligence, UnderstandResult
+from novacontrol.intelligence.model_manager import OllamaBackend
 from novacontrol.intelligence.intent import IntentName, RiskLevel, StructuredIntent, resolve_intent
 from novacontrol.intelligence.telemetry import request_id_for
 from novacontrol.integrations import (
@@ -72,9 +79,16 @@ from novacontrol.integrations import (
     ollama_models,
     validate_cloud_key,
 )
-from novacontrol.integrations.llm import _redact_key
+from novacontrol.integrations.llm import _redact_key, provider_supports_vision
 from novacontrol.knowledge import KnowledgeBase
 from novacontrol.memory import MemoryManager, MemoryModule, MemoryNamespace, SqliteMemoryStore
+from novacontrol.models import (
+    KeepAliveSettings,
+    ModelLoadOutcome,
+    ModelManager,
+    ModelProfile,
+    ModelRegistry,
+)
 from novacontrol.persistence import JsonStateStore
 from novacontrol.phone import PhoneControlController, PhoneControlModule
 from novacontrol.planning import (
@@ -116,7 +130,17 @@ from novacontrol.tools import (
     build_tool_catalog,
     tool_descriptions,
 )
-from novacontrol.vision import VisionModule
+from novacontrol.vision import (
+    NullVisionProvider,
+    VisionManager,
+    VisionModule,
+    VisionProvider,
+    VisionRequest,
+    VisionResult,
+    VisionTaskKind,
+    task_for_question,
+)
+from novacontrol.vision.providers import build_vision_provider as build_vision_pipeline_provider
 from novacontrol.voice import VoiceModule
 
 _APPROVAL_TTL_SECONDS = 300.0  # A planned desktop action must be approved within 5 minutes.
@@ -279,6 +303,132 @@ _PROJECT_SEARCH_VISITS = 4000
 _PROJECT_SEARCH_SKIP = frozenset(
     {"node_modules", ".git", ".venv", "venv", "__pycache__", ".kilo", "site-packages"}
 )
+
+
+def _command_with_resolved_references(understanding: object, text: str) -> str:
+    """``text`` with a context-resolved reference restated as its real target.
+
+    "open it" is a sentence about a pronoun. The reading resolves the pronoun
+    (application=chrome) and records WHICH words were references; the desktop
+    and browser parsers cannot resolve anything, so planning the raw words
+    launches a program called "it". Only a request that IS the reference is
+    restated: a chain keeps its own words, because one template cannot carry
+    its other clauses.
+    """
+    if not isinstance(understanding, dict) or not understanding.get("references"):
+        return text
+    template = _REFERENCE_COMMANDS.get(str(understanding.get("intent") or ""))
+    if template is None:
+        return text
+    phrase, key = template
+    entities = understanding.get("entities")
+    target = str(entities.get(key) or "").strip() if isinstance(entities, dict) else ""
+    if not target:
+        return text
+    normalized = str(understanding.get("normalized_input") or text).strip().lower()
+    if " and " in normalized:
+        return text
+    return phrase.format(**{key: target})
+
+
+#: Intents whose target the reading may have RESOLVED from context ("open it"),
+#: restated as a command the native parsers accept. The resolution happens in
+#: the understanding layer, so these templates are the only thing that carries
+#: it into planning.
+_REFERENCE_COMMANDS: dict[str, tuple[str, str]] = {
+    IntentName.OPEN_APPLICATION.value: ("open {application}", "application"),
+    IntentName.CLOSE_APPLICATION.value: ("close {application}", "application"),
+    IntentName.OPEN_FOLDER.value: ("open folder {folder}", "folder"),
+    IntentName.NAVIGATE.value: ("navigate to {url}", "url"),
+    IntentName.SEARCH_WEB.value: ("search the web for {query}", "query"),
+}
+
+
+#: How long a plan's own command may run before it is stopped. A real project's
+#: suite is the slow case, so it gets the longer bound; both are hard
+#: wall-clock limits, so a hung command cannot hold the run open forever.
+_TEST_TIMEOUT_SECONDS = 600.0
+_COMMAND_TIMEOUT_SECONDS = 120.0
+#: How much of a command's output travels with the result. The analysis step
+#: reads the END of a log (a test summary is there), so the tail is kept.
+_OUTPUT_TAIL_CHARS = 8000
+
+
+def _argv_for_command(command: str) -> list[str]:
+    """The literal argv a shell command names, split WITHOUT a shell.
+
+    The no-shell invariant holds here too: a command a plan asked for becomes
+    tokens executed exec-form, so a metacharacter cannot chain a second command
+    past the one that was approved. Windows quoting is not POSIX quoting, so
+    the split follows the platform it runs on.
+    """
+    return shlex.split(command, posix=os.name != "nt")
+
+
+def _test_argv(project: str, scope: str) -> tuple[list[str], str] | None:
+    """The argv that runs ``project``'s tests, or None when none is recognisable.
+
+    Recognising the runner — rather than guessing one — is the difference
+    between running the project's own suite and running whatever happens to be
+    installed: a Node project gets ``npm test``, a Python project gets pytest
+    from the interpreter that owns this process, and anything else is reported
+    as unrecognised instead of guessed at.
+    """
+    root = Path(project)
+    npm = shutil.which("npm")
+    if (root / "package.json").is_file() and npm:
+        return [npm, "test"], "npm test"
+    scope_path = root / scope
+    looks_python = (
+        (root / "pytest.ini").is_file()
+        or (root / "pyproject.toml").is_file()
+        or (root / "setup.cfg").is_file()
+        or (root / "tests").is_dir()
+        or scope_path.exists()
+    )
+    if not looks_python:
+        return None
+    argv = [sys.executable, "-m", "pytest", "-q"]
+    if scope_path.exists():
+        argv.append(scope)
+    return argv, "python -m pytest"
+
+
+def _output_tail(text: str) -> str:
+    """The last part of a command's output — where a test summary lives."""
+    if len(text) <= _OUTPUT_TAIL_CHARS:
+        return text
+    return "...\n" + text[-_OUTPUT_TAIL_CHARS:]
+
+
+async def _run_approved_process(
+    argv: Sequence[str], *, cwd: str, timeout: float
+) -> tuple[int, str, str]:
+    """Run one already-approved command exec-form and capture its output."""
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"{argv[0]!r} is not installed, so the command could not run."
+        ) from exc
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+    except TimeoutError:
+        process.kill()
+        await process.wait()
+        raise RuntimeError(
+            f"The command did not finish within {timeout:g} seconds and was stopped."
+        ) from None
+    return (
+        int(process.returncode or 0),
+        _output_tail((stdout or b"").decode("utf-8", errors="replace")),
+        _output_tail((stderr or b"").decode("utf-8", errors="replace")),
+    )
 
 
 def _find_project_directory(name: str) -> str | None:
@@ -775,6 +925,47 @@ class NovaControlApplication:
         # small text chat model can still wire llava for vision. Restored from
         # the persisted config at the end of __init__ (_restore_vision_provider).
         self._vision_provider: object | None = None
+        # ── Phase 7: the model manager ─────────────────────────────────────
+        # ONE place answers "which model should serve this, and is there room
+        # for it?". It is built BEFORE the vision pipeline on purpose: the
+        # vision provider below asks it which model declares VISION, so the
+        # manager is on the request path rather than beside it.
+        #
+        # Its provider is the SAME ``OllamaBackend`` the lifecycle layer drives
+        # (``intelligence/model_manager.py``), imported rather than re-written:
+        # a second implementation of "list/load/unload/size" would be a second
+        # set of bugs. No ``lifecycle`` is passed because the manager's own load
+        # already performs the eviction the lifecycle would — in the order the
+        # specification asks for, with the protection the lifecycle lacks: a
+        # model an ACTIVE task is using is refused, never unloaded underneath it.
+        model_config = self.config.models
+        self.model_manager = ModelManager(
+            OllamaBackend(),
+            registry=ModelRegistry(
+                [
+                    ModelProfile.from_mapping(declaration)
+                    for declaration in model_config.declarations
+                    if str(declaration.get("name", "")).strip()
+                ]
+            ),
+            keep_alive=KeepAliveSettings.from_mapping(model_config.keep_alive_settings()),
+            headroom_bytes=model_config.headroom_bytes,
+        )
+        # ── Phase 6: the vision pipeline ─────────────────────────────────
+        # ONE manager owns "what is in this image?": OCR first (cheap and
+        # deterministic), the model only when the text cannot answer it, and a
+        # structured result either way. Its provider is resolved from
+        # configuration, which is what makes the VLM a plug rather than a
+        # dependency — see vision/providers.py and configs' `vision` section.
+        self.vision_manager = VisionManager(
+            provider=self._vision_pipeline_provider(),
+            prefer_ocr=self.config.vision.prefer_ocr,
+        )
+        # The last structured result, kept so a follow-up ("now summarise it",
+        # "click that button") plans against what was SEEN rather than against
+        # the prose a person read. This is the "structured vision result ->
+        # planner" hand-off: one bounded object, replaced each time.
+        self._last_vision_result: VisionResult | None = None
         # THE Global Intelligence Layer — the single language brain every
         # entry point consumes before any subsystem sees raw text. It shares
         # the brain's LLM provider (semantic fallback only when deterministic
@@ -1253,6 +1444,77 @@ class NovaControlApplication:
         self.vision.set_llm_provider(provider)
         # 3. The agentcore perception engine.
         self.agentic.perception._provider = provider
+        # 4. The Phase 6 pipeline — re-resolved through configuration, so an
+        #    operator who set `vision.provider: none` keeps that refusal even
+        #    while a model is installed for the desktop's own element location.
+        self.vision_manager.set_provider(self._vision_pipeline_provider())
+
+    def _vision_pipeline_provider(self) -> VisionProvider:
+        """The vision provider the pipeline should use, from configuration.
+
+        The preference order is the whole design, so it is written down once:
+
+        1. ``vision.provider: none`` wins over everything. A deployment that
+           must not run a vision model says so, and installing one for the
+           desktop's element locator must not quietly change that.
+        2. A dedicated vision model an operator configured — it exists precisely
+           because the chat brain is usually a text model that cannot see.
+        3. A LOCAL model pinned by name in configuration.
+        4. Whatever the MODEL MANAGER selects for a capability requirement of
+           ``{VISION}`` — the capability registry, not a name. The runtime is
+           asked what it actually offers first, so an undeclared vision build
+           that was pulled five minutes ago is selectable, and a text-only
+           build that merely LOOKS multimodal is not (see
+           ``models/profiles.py``); the pool is what is installed, so a model
+           that is not there cannot be chosen.
+        5. Whatever the chat brain happens to be. On a default install that is
+           the Echo fallback, which resolves to the honest null provider.
+
+        Nothing here can make a text model into a vision model: the capability
+        gate in ``build_vision_provider`` refuses one, so a machine with only a
+        text brain reports ``available: false`` instead of inventing what a
+        screenshot contains.
+        """
+        settings = self.config.vision
+        if settings.provider == "none":
+            return NullVisionProvider()
+        if self._vision_provider is not None:
+            return build_vision_pipeline_provider(self._vision_provider)
+        if settings.model:
+            local = build_ollama_provider(model=settings.model)
+            if local is not None and provider_supports_vision(local):
+                return build_vision_pipeline_provider(
+                    local, name="ollama", model=settings.model
+                )
+        selected = self._selected_vision_model()
+        if selected:
+            local = build_ollama_provider(model=selected)
+            # A SECOND gate, deliberately: the manager chose by declared and
+            # runtime-reported capability, and this checks the built provider
+            # really can carry an image. Selection says what SHOULD see; only the
+            # provider can say what does.
+            if local is not None and provider_supports_vision(local):
+                return build_vision_pipeline_provider(
+                    local, name="ollama", model=selected
+                )
+        return build_vision_pipeline_provider(self.brain.completion_provider)
+
+    def _selected_vision_model(self) -> str:
+        """The model the capability registry picks for a vision requirement.
+
+        Called once, while the pipeline is being wired: the runtime is asked to
+        describe its models (bounded — see ``refresh_capabilities``), the
+        registry is reconciled with the answers, and the smallest model that
+        declares ``VISION`` wins. Returns "" when the runtime is unreachable or
+        nothing declares vision, which is what leaves the decision to the
+        remaining fallbacks rather than pinning a model that is not there.
+        """
+        try:
+            self.model_manager.refresh_capabilities()
+            selection = self.model_manager.select_for_request(requires_vision=True)
+        except Exception:  # pragma: no cover - a probe must never block boot
+            return ""
+        return selection.model if selection.route == "local" else ""
 
     def _restore_vision_provider(self) -> None:
         """Boot-time restore of a persisted vision model (never raises)."""
@@ -1326,13 +1588,73 @@ class NovaControlApplication:
         """
         manager = self.intelligence.model_manager
         status = await asyncio.to_thread(manager.get_model_status)
+        # Phase 7's readout, measured off the event loop: what is resident, what
+        # the machine has, and which model the capability registry would choose
+        # for each kind of work. The lifecycle layer above still reports the
+        # runtime's own view, so the two can be compared rather than trusted.
+        health = await asyncio.to_thread(self.model_manager.health)
+        # The keep-alive sweep runs HERE, in a worker thread, on the status read
+        # every client already polls — there is no timer thread in this process,
+        # and inventing one would be a second policy nobody asked for. Under the
+        # default policy (no idle window) it returns before touching the runtime,
+        # so an unconfigured install pays nothing; a deployment that configured
+        # "keep it warm for N minutes" gets the release applied the next time
+        # anyone asks about the models (and on every explicit load).
+        expired = await asyncio.to_thread(self.model_manager.enforce_keep_alive)
         return {
             **status.to_dict(),
             "exclusive": manager.exclusive,
+            "keep_alive_expired": list(expired),
             "chat_model": self.brain.model_name,
             "vision_model": str(self.vision_llm_status().get("model", "") or ""),
             "local_models": list(await asyncio.to_thread(manager.get_models)),
+            "pipeline": await asyncio.to_thread(self._vision_pipeline_report),
+            "manager": health,
+            "selections": await asyncio.to_thread(self._model_routing_report),
         }
+
+    def _vision_pipeline_report(self) -> dict[str, Any]:
+        """Which model the vision pipeline is actually wired to, and which one
+        the capability registry would choose for it.
+
+        Two different facts, reported side by side on purpose: the FIRST is what
+        the next screenshot will be read by (resolved at boot and swappable by an
+        operator), the SECOND is what a fresh resolution would pick now. A
+        disagreement means a model was installed or removed since boot, which is
+        exactly what an operator looking at this panel needs to see.
+        """
+        status = dict(self.vision_manager.status())
+        return {
+            "vision_model": self._selected_vision_model(),
+            "pipeline_model": str(getattr(self.vision_manager.provider, "model", "") or ""),
+            "provider": str(getattr(self.vision_manager.provider, "name", "") or ""),
+            "available": bool(getattr(self.vision_manager.provider, "available", False)),
+            "reader": str(status.get("reader", "") or ""),
+            "prefer_ocr": self.config.vision.prefer_ocr,
+        }
+
+    def _model_routing_report(self) -> dict[str, Any]:
+        """What the manager would choose for each kind of work, right now.
+
+        The four questions the specification's example flows ask, answered from
+        capabilities and measured resources: nothing, plain reasoning, vision,
+        and the strongest local model. ``route`` says whether the answer is a
+        local model, the cloud, or nothing — the three outcomes a caller has to
+        distinguish.
+        """
+        report: dict[str, Any] = {}
+        for label, kwargs in (
+            ("reasoning", {"needs_reasoning": True}),
+            ("coding", {"needs_coding": True}),
+            ("vision", {"requires_vision": True}),
+            ("vision_tools", {"requires_vision": True, "needs_tools": True}),
+            ("strongest", {"needs_reasoning": True, "latency_preference": "quality"}),
+        ):
+            try:
+                report[label] = self.model_manager.select_for_request(**kwargs).to_dict()
+            except Exception:  # pragma: no cover - a readout must never throw
+                report[label] = {}
+        return report
 
     async def load_model(self, model: str) -> dict[str, Any]:
         """Load one model, freeing room FIRST when the measurement requires it.
@@ -1344,8 +1666,32 @@ class NovaControlApplication:
         name = model.strip()
         if not name:
             raise ValueError("A model name is required.")
-        result = await asyncio.to_thread(self.intelligence.model_manager.load_model, name)
-        return result.to_dict()
+        # Phase 7: route a load through the MANAGER, so an explicit request gets
+        # the same measured, verified treatment as an automatic one — the
+        # registry supplies the profile whose footprint the fit check uses, room
+        # is made when the measurement says so, and the runtime is asked
+        # afterwards whether the model is really there. Without this the endpoint
+        # and the automatic path would be two policies over one machine.
+        with self.intelligence.telemetry.stage("model_load"):
+            outcome = await asyncio.to_thread(self.model_manager.load, name)
+        steps = [dict(step) for step in outcome.steps]
+        # The response keeps the shape callers already read and adds the
+        # manager's record of the six steps, so a refusal can be explained with
+        # the measurements behind it rather than a single sentence.
+        return {
+            "model": outcome.model,
+            "loaded": outcome.loaded,
+            "evicted": list(outcome.evicted),
+            "reason": outcome.reason,
+            "available_memory_bytes": outcome.available_memory_bytes,
+            "fits_after_evict": next(
+                (step.get("fits") for step in steps if step.get("step") == "estimate"),
+                None,
+            ),
+            "verified": outcome.verified,
+            "refused": outcome.refused,
+            "manager": outcome.to_dict(),
+        }
 
     async def unload_model(self, model: str = "") -> dict[str, Any]:
         """Release one model, or every resident model when none is named.
@@ -1353,13 +1699,15 @@ class NovaControlApplication:
         "Free the RAM" has to be one call: unloading a model that is not named
         is the actual intent when someone asks for memory back.
         """
-        manager = self.intelligence.model_manager
+        # Through the MANAGER for the same reason a load is: it is the layer that
+        # knows which models a task is currently using, so it is the layer that
+        # can refuse to pull one out from under a running task. The lifecycle
+        # layer below would unload whatever it was handed.
         name = model.strip()
+        released = await asyncio.to_thread(self.model_manager.unload, name)
         if name:
-            released = await asyncio.to_thread(manager.unload_model, name)
-            return {"unloaded": bool(released), "models": [name] if released else []}
-        released_names = await asyncio.to_thread(manager.unload_all)
-        return {"unloaded": True, "models": list(released_names)}
+            return {"unloaded": bool(released), "models": list(released)}
+        return {"unloaded": True, "models": list(released)}
 
     def _tool_for_intent(self, intent: IntentName) -> str:
         """The tool an intent would reach, or "" when none is registered.
@@ -1399,7 +1747,7 @@ class NovaControlApplication:
             mode=str(getattr(self.brain, "mode", "auto")),
         )
 
-    async def handle_request(self, text: str) -> ApplicationResponse:
+    async def handle_request(self, text: str, *, image: str = "") -> ApplicationResponse:
         """Route a natural-language request through the available subsystems.
 
         The Global Intelligence Layer understands first (normalization, typo
@@ -1408,20 +1756,40 @@ class NovaControlApplication:
         response, so task records, conversation memory, and the response
         envelope stay identical to the legacy flow. Only what the GIL leaves
         unresolved reaches the legacy `brain.decide` classifier.
+
+        ``image`` is a picture that travelled WITH the request — a file path a
+        client attached, not a screen to capture. Its presence is a fact the
+        understanding layer is told rather than left to infer from the wording,
+        so *"what is this?"* arrives needing eyes while *"what is this?"* with
+        nothing attached is read as the plain question it is. The vision
+        handler then reads THAT image instead of taking a screenshot.
         """
         await self.memory.remember(
             MemoryNamespace.CONVERSATION,
             f"request-{len((await self.memory.retrieve(MemoryNamespace.CONVERSATION, '', limit=100)))}",
             {"text": text}, text=text, importance=0.2,
         )
-        request = BrainRequest(text=text, context=self.status())
+        attached = str(image or "").strip()
+        request = BrainRequest(
+            text=text,
+            context={**self.status(), **({"image": attached} if attached else {})},
+        )
         task = self.tasks.create(text, kind="ask")
         self.tasks.update(task.id, TaskRecordStatus.RUNNING, progress=0.1)
+        # Phase 7 telemetry: ONE trace per request, opened before understanding
+        # and closed after the response is shaped. RAM is sampled at both ends by
+        # the caller (this layer owns the monitor), so what a request cost in
+        # memory is a measured fact rather than an average of samples that were
+        # taken for another purpose.
+        trace = self.intelligence.telemetry.begin_request(
+            ram_before=self.model_manager.monitor.available_ram_bytes()
+        )
 
         # GLOBAL INPUT INTELLIGENCE: choose the capability from meaning, not
         # exact phrasing (normalization, typo tolerance, references,
         # multi-intent). Fallback: the legacy brain classifier.
-        understood = await self.intelligence.understand_async(text)
+        with self.intelligence.telemetry.stage("nlu"):
+            understood = await self.intelligence.understand_async(text, has_image=bool(attached))
         # DECISION ENGINE: given what was understood, decide what to DO with it —
         # a deterministic capability, a subsystem handler, the planner, the
         # agentic loop, the vision pipeline, a language model, or one clarifying
@@ -1429,12 +1797,13 @@ class NovaControlApplication:
         # default, and it executes NOTHING: the approval layer still gates every
         # action, and an external provider can only ever advise a route.
         decision_started = time.perf_counter()
-        decision_layer = await self.decision.decide_async(
-            understood.intent,
-            context=self.intelligence.context,
-            environment=self._decision_environment(),
-            strategy=understood.strategy,
-        )
+        with self.intelligence.telemetry.stage("decision"):
+            decision_layer = await self.decision.decide_async(
+                understood.intent,
+                context=self.intelligence.context,
+                environment=self._decision_environment(),
+                strategy=understood.strategy,
+            )
         self.intelligence.telemetry.record_decision(
             route=decision_layer.route.value,
             decision_type=decision_layer.decision_type.value,
@@ -1450,13 +1819,56 @@ class NovaControlApplication:
         )
         gil_intent = understood.intent.intent if understood.strategy != "clarification" else None
         handler_key = self._GIL_ROUTES.get(gil_intent) if gil_intent is not None else None
-        # The decision layer is authoritative where it names an executor the
-        # intent alone cannot: a request that needs an image LOOKED AT belongs to
-        # the vision pipeline even when the text layers left the intent
-        # unresolved — its route is `vision`, and asking a question cannot answer
-        # a question about a picture.
+        # The decision layer is authoritative on the EXECUTOR, not only on the
+        # route. Two cases where the intent alone cannot name one:
+        #   * an intent the routing table does not list at all. No entry means
+        #     "no subsystem claims this intent", which is NOT the same as "this
+        #     request has no executor" — the decision may have chosen the planner
+        #     precisely because the reading decomposed into several clauses;
+        #   * an image that must be LOOKED AT: its route is `vision`, and asking a
+        #     question cannot answer a question about a picture.
+        # Handling neither here is what silently dropped the second and third
+        # clause of a multi-clause request: the decision said "plan these three
+        # steps" and the handler lookup said "unknown", so the request became
+        # whatever the legacy classifier guessed from its FIRST clause.
+        decided_handler = str(getattr(decision_layer, "handler", "") or "")
+        # ...UNLESS the decision is simply "the model will handle this". Rule 3's
+        # bare reasoning fallback says no subsystem claims the reading and language
+        # handling should take it, which is exactly the case the assistant's own
+        # classifier knows more about than the word "chat" does — so it keeps the
+        # legacy path rather than being funnelled into a chat reply.
+        bare_reasoning_fallback = (
+            decision_layer.decision_type is DecisionType.REASONING
+            and decided_handler == "chat"
+        )
+        if (
+            handler_key is None
+            and not bare_reasoning_fallback
+            and decided_handler in self._GIL_HANDLER_KEYS
+        ):
+            handler_key = decided_handler
         if decision_layer.route is DecisionRoute.VISION and handler_key != "vision":
             handler_key = "vision"
+        # A decision that says the request must be SEQUENCED cannot be carried out
+        # by a handler that does one thing. The reader decomposed the sentence into
+        # several actions and the planner is the layer that orders them — so when
+        # the executor the layers landed on cannot sequence (chat answers, explore
+        # researches: one step each) and the decision says the work needs planning,
+        # the planning handler takes it. This is the third of the specification's
+        # example flows: *"find the project, run the tests and explain why they
+        # fail"* is three actions, and answering it with a chat reply performs one
+        # of them and silently drops the other two.
+        #
+        # Narrow on purpose: ONE action with a sequencing requirement (a single
+        # composite browser command, a plain question the assessment called hard)
+        # keeps the executor it has — those handlers either sequence internally or
+        # do not need to, and re-routing them would be churn.
+        if (
+            decision_layer.requires_planning
+            and len(tuple(getattr(decision_layer, "actions", ()) or ())) > 1
+            and handler_key not in SEQUENCING_HANDLERS
+        ):
+            handler_key = "plan"
         brain_intent = self._GIL_HANDLER_KEYS.get(handler_key) if handler_key is not None else None
         if brain_intent is not None:
             decision = BrainDecision(
@@ -1511,6 +1923,15 @@ class NovaControlApplication:
                 success=False,
                 detail=type(exc).__name__,
             )
+            # A request that FAILED was still a request: measuring only the
+            # happy path is how a latency average ends up describing the one
+            # case nobody complains about.
+            self._record_request(
+                trace,
+                decision_layer=decision_layer,
+                understanding=understanding,
+                success=False,
+            )
             raise
         self.intelligence.telemetry.record_outcome(
             request_id=request_id_for(understanding.id), success=True
@@ -1519,11 +1940,14 @@ class NovaControlApplication:
         # The request-understanding block travels with every response: safe
         # operational metadata only (what understood it, the intent, the
         # confidence, the cost) — never chain-of-thought or model reasoning.
-        payload = {
-            **payload,
-            "nlu": _nlu_payload(understanding, understood, decision, self.brain, decision_layer),
-        }
-        response = await self.brain.shape_response(request, decision, payload)
+        with self.intelligence.telemetry.stage("response"):
+            payload = {
+                **payload,
+                "nlu": _nlu_payload(
+                    understanding, understood, decision, self.brain, decision_layer
+                ),
+            }
+            response = await self.brain.shape_response(request, decision, payload)
         self.tasks.update(task.id, TaskRecordStatus.COMPLETED, progress=1.0, result=response.to_dict())
         # Record the turn in the SHARED transcript so every client renders the
         # same thread (the UI used to keep its own per-browser copy).
@@ -1538,7 +1962,48 @@ class NovaControlApplication:
         if gil_intent is not None:
             self.intelligence.context.remember_intent(understood.intent.to_dict())
             self.intelligence.context.remember_utterance(understood.intent.normalized_input)
+        self._record_request(
+            trace, decision_layer=decision_layer, understanding=understanding, success=True
+        )
         return ApplicationResponse(route, decision.intent.value, response.summary, payload)
+
+    def _record_request(
+        self,
+        trace: Any,
+        *,
+        decision_layer: Decision,
+        understanding: Any,
+        success: bool,
+    ) -> None:
+        """Close a request trace and file the row.
+
+        The row answers the specification's questions in one place: total
+        latency, where the time went, which model and provider were SELECTED (by
+        the decision engine, before any model ran), whether a model was needed
+        at all, and how much RAM the request moved. No prompt, no answer, no
+        reasoning — durations and identifiers only, because ``/status`` and
+        ``/intelligence`` are reachable over HTTP.
+        """
+        route = decision_layer.route
+        # "Fast" is not "answered without the decision engine": it is a request
+        # carried out by the machine's own deterministic layers, which is what
+        # keeps the model completely out of the loop.
+        fast_path = route in {
+            DecisionRoute.DIRECT_TOOL,
+            DecisionRoute.SYSTEM_TOOLS,
+            DecisionRoute.LOCAL_CAPABILITY,
+        } and not bool(getattr(understanding, "used_model", False))
+        try:
+            self.intelligence.telemetry.end_request(
+                trace,
+                ram_after=self.model_manager.monitor.available_ram_bytes(),
+                model=decision_layer.selected_model,
+                provider=decision_layer.provider,
+                fast_path=fast_path,
+                success=success,
+            )
+        except Exception:  # pragma: no cover - telemetry must never break a request
+            self.intelligence.telemetry.end_request(trace)
 
     # ── Intent handlers ──────────────────────────────────
 
@@ -1546,8 +2011,89 @@ class NovaControlApplication:
         return "brain", {"message": "Please provide a little more detail."}
 
     async def _handle_chat(self, request: BrainRequest, text: str) -> tuple[str, dict[str, Any]]:
-        response = await self.brain.chat(request)
+        """Answer with the configured model, with its residency policy applied.
+
+        Phase 7 brackets the call: the local chat model is the one the manager
+        reports as ACTIVE, so it is recorded as IN USE for the duration — which is
+        what stops an eviction (a vision request making room for a VLM) from
+        unloading the weights underneath an answer that is still being written —
+        and the keep-alive policy decides what happens the moment it finishes.
+        Model-free answers (the scratch path, a machine with no model configured)
+        take no activity at all rather than a fake one.
+        """
+        model = self.brain.model_name if self.brain.model_configured else ""
+        if model:
+            self.model_manager.begin_activity(model)
+        try:
+            response = await self.brain.chat(request)
+        finally:
+            if model:
+                self.model_manager.release_after_use(model)
+            self._record_model_timings("chat", self.brain.completion_provider)
         return "chat", response.payload
+
+    # ── Phase 7: model residency on the request path ────────────────────
+
+    def _vision_pipeline_model(self) -> str:
+        """The LOCAL model the vision pipeline will call, or "".
+
+        Read from the wired provider rather than from configuration, because the
+        provider is what will actually be called: a cloud preset, the null
+        provider and a test double all report a name that is not a local
+        runtime's to load, and only the local Ollama backend is.
+        """
+        provider = self.vision_manager.provider
+        if str(getattr(provider, "name", "")) != "llm:ollama":
+            return ""
+        return str(getattr(provider, "model", "") or "")
+
+    async def _acquire_vision_model(self, model: str) -> ModelLoadOutcome | None:
+        """Make room for the vision model BEFORE it is used, or ``None``.
+
+        The specification's own switching example, on the automatic path: the
+        chat model is resident, a screenshot needs a VLM, so the manager measures,
+        unloads what it may, loads the vision model and verifies it. Only for a
+        local runtime this layer can actually drive — a cloud provider is loaded
+        by someone else and a model the runtime has never heard of is not
+        something the manager can make room for. Never raises: a resource
+        decision must not be the reason a request fails.
+        """
+        if not model:
+            return None
+        try:
+            return await asyncio.to_thread(self.model_manager.acquire, model)
+        except Exception:  # pragma: no cover - acquire is already defensive
+            return None
+
+    async def _release_model(self, model: str) -> None:
+        """Apply the keep-alive policy to a model whose use has finished."""
+        try:
+            await asyncio.to_thread(self.model_manager.release_after_use, model)
+        except Exception:  # pragma: no cover - a release must never throw
+            return
+
+    def _record_model_timings(
+        self, reason: str, provider: object | None
+    ) -> dict[str, float]:
+        """File the model's OWN timing breakdown for the call that just finished.
+
+        Phase 7's telemetry asks for first-token latency and generation rate, and
+        until now they were recorded only when the NLU gave up and escalated — so
+        the two figures described one path out of several and the model that
+        answered most requests reported nothing. The breakdown lives on the
+        provider that made the call, so it is read from there and filed under the
+        reason that produced it. Silence records nothing rather than a zero, and
+        a provider without measurements costs the request nothing.
+        """
+        measured = getattr(provider, "last_timings", None)
+        if not isinstance(measured, dict) or not measured:
+            return {}
+        try:
+            return self.intelligence.telemetry.record_model_timings(
+                reason=reason, timings=measured
+            )
+        except Exception:  # pragma: no cover - telemetry must never break a request
+            return {}
 
     async def _handle_explore(self, request: BrainRequest, text: str) -> tuple[str, dict[str, Any]]:
         report = await self.explore.research(
@@ -1584,6 +2130,14 @@ class NovaControlApplication:
         # informs, it never rewrites a step's tool, because a tool that merely
         # looks related is not one that was asked for.
         payload["tools"] = self.discover_tools(text, limit=3)
+        # Phase 6: when an image has ALREADY been read this turn, the plan is
+        # compiled with what was seen beside it, so a step about "that error"
+        # resolves against structured evidence (the error lines, the elements)
+        # rather than against a summary the planner would have to re-read. The
+        # result is evidence, never an instruction: it cannot add a step.
+        vision_evidence = self.vision_evidence()
+        if vision_evidence:
+            payload["vision"] = vision_evidence
         if not plan.needs_clarification:
             workflow = await self.workflow_executor.execute(plan)
             payload["workflow"] = workflow.to_dict()
@@ -1591,6 +2145,56 @@ class NovaControlApplication:
             # status, what was verified, and what was left unconfirmed.
             payload["state"] = workflow.state()
         return "planning", payload
+
+    # ── Phase 6: the vision pipeline, end to end ────────────────────────
+
+    async def analyze_image(
+        self,
+        source: str,
+        *,
+        question: str = "",
+        target: str = "",
+        task: VisionTaskKind | None = None,
+        prefer_ocr: bool | None = None,
+        allow_vlm: bool = True,
+    ) -> VisionResult:
+        """Read one image and return a STRUCTURED result — the pipeline's door.
+
+        This is the entry point every visual request goes through, whatever the
+        caller: the request path, the API, a test. It picks the task from the
+        question when the caller did not ("read the text" is OCR, "where is the
+        login button" is a locate), delegates to the manager, and records the
+        result so a later step can plan against what was seen.
+
+        The result is stored BEFORE it is returned, so a caller that raises on
+        the way out has still left the pipeline's own memory consistent.
+        """
+        asked = " ".join(str(question or "").split())
+        request = VisionRequest(
+            source=source,
+            question=asked,
+            task=task or task_for_question(asked, target=target),
+            target=" ".join(str(target or "").split()),
+            prefer_ocr=self.vision_manager.prefer_ocr if prefer_ocr is None else prefer_ocr,
+            allow_vlm=allow_vlm,
+        )
+        result = await self.vision_manager.analyze(request)
+        self._last_vision_result = result
+        return result
+
+    @property
+    def last_vision_result(self) -> VisionResult | None:
+        """The most recent structured result, for the planner and the status surface."""
+        return self._last_vision_result
+
+    def vision_evidence(self) -> dict[str, Any]:
+        """The last result as data, or nothing when no image has been read.
+
+        Nothing is a real answer: an empty shape would let a planner believe an
+        image was seen when none was.
+        """
+        result = self._last_vision_result
+        return result.to_dict() if result is not None else {}
 
     # ── Phase 4: planning, executing and escalating ──────────────────────
 
@@ -1604,7 +2208,8 @@ class NovaControlApplication:
         PlanningEngine remains the fallback for the plain "turn this sentence
         into ordered steps" path other callers use.
         """
-        plan = self.plan_compiler.compile(goal, decision=decision)
+        with self.intelligence.telemetry.stage("planning"):
+            plan = self.plan_compiler.compile(goal, decision=decision)
         if plan.steps or plan.needs_clarification:
             return plan
         legacy = self.planning.create_plan(goal)
@@ -1812,12 +2417,34 @@ class NovaControlApplication:
         a planner, a model escalation, a person reading the UI — gets a few
         candidates and the evidence for them instead of every tool definition.
         """
-        return [match.to_dict() for match in self.tool_retriever.search(query, limit=limit)]
+        with self.intelligence.telemetry.stage("tool_selection"):
+            matches = self.tool_retriever.search(query, limit=limit)
+        return [match.to_dict() for match in matches]
 
     def discovered_tools(self, query: str, *, limit: int = 3) -> tuple[dict[str, Any], ...]:
         """The same shortlist in the compact shape a prompt may carry."""
         names = self.tool_retriever.prompt_tools(query, limit=limit)
         return tool_descriptions(self.tool_catalog, names)
+
+    def models_status(self) -> dict[str, Any]:
+        """The model layer's readout, with NO runtime probe.
+
+        Deliberately probe-free: this travels in every BrainRequest context (see
+        :meth:`status`), so it reports what is already known — the capability
+        table with each row's provenance, the lifecycle policy, and the
+        selections and loads that have happened. The MEASURED figures (resident
+        models, free RAM, GPU/NPU) live in :meth:`model_status` and
+        ``/intelligence``, where the probe can run off the event loop.
+        """
+        manager = self.model_manager
+        return {
+            "provider": manager.provider_name(),
+            "keep_alive": manager.keep_alive.to_dict(),
+            "headroom_bytes": manager.headroom_bytes,
+            "registry": manager.registry_report(),
+            "telemetry": manager.telemetry.to_dict(),
+            "active_tasks": list(manager.active_models()),
+        }
 
     def tools_status(self) -> dict[str, Any]:
         """What the tool layer knows, what it found, and what it reused."""
@@ -1854,6 +2481,8 @@ class NovaControlApplication:
             return _analyze_step_output(step, context)
         if action == "summarize_result":
             return _summarize_step_output(step, context)
+        if action in ("run_command", "run_tests"):
+            return await self._run_command_step(step, context)
         if action == "locate_project":
             return await self._locate_project_step(step)
         if action == "reason":
@@ -1884,6 +2513,54 @@ class NovaControlApplication:
             raise RuntimeError(f"No directory matching {project!r} was found in the usual places.")
         return {"path": found, "summary": f"Found {project} at {found}."}
 
+    async def _run_command_step(self, step: PlanStep, context: StepContext) -> dict[str, Any]:
+        """Run a command a plan asked for — only with the caller's approval.
+
+        A step that runs a command runs code nobody reviewed line by line, so it
+        is gated exactly like this application's other privileged work: the
+        caller names the step in ``run_plan(approved=...)`` or it is refused.
+        The check lives HERE as well as in the executor order, because a step
+        handler is the last place that can decline to start a process — with no
+        approval there is nothing to explain away afterwards.
+        """
+        if not self._confirm_plan_step(step):
+            raise PermissionError(
+                f"{step.title} runs a command and needs explicit approval; "
+                "approve this step to let it run."
+            )
+        located = str(context.output_of(("locate-project",)).get("path") or "").strip()
+        if step.action == "run_tests":
+            if not located or not Path(located).is_dir():
+                raise RuntimeError("No project directory was located, so there is no suite to run.")
+            runner = _test_argv(located, str(step.parameters.get("scope") or "tests"))
+            if runner is None:
+                raise RuntimeError(
+                    f"No test runner I recognise was found in {located}, so nothing was run."
+                )
+            argv, label = runner
+            cwd = located
+            timeout = _TEST_TIMEOUT_SECONDS
+        else:
+            command = str(step.parameters.get("command") or "").strip()
+            if not command:
+                raise RuntimeError("No command text was given for this step.")
+            argv = _argv_for_command(command)
+            if not argv:
+                raise RuntimeError("The command was empty once split into arguments.")
+            label = command
+            cwd = located if located and Path(located).is_dir() else str(Path.cwd())
+            timeout = _COMMAND_TIMEOUT_SECONDS
+        exit_code, stdout, stderr = await _run_approved_process(argv, cwd=cwd, timeout=timeout)
+        return {
+            "command": label,
+            "argv": list(argv),
+            "cwd": cwd,
+            "exit_code": exit_code,
+            "stdout": stdout,
+            "stderr": stderr,
+            "summary": f"'{label}' finished with exit code {exit_code}.",
+        }
+
     async def _dispatch_plan_step(self, step: PlanStep) -> dict[str, Any]:
         """Send a step to its tool — through the executor that owns approvals."""
         if not step.tool:
@@ -1896,13 +2573,14 @@ class NovaControlApplication:
             raise RuntimeError(
                 f"Tool {step.tool!r} is not registered on this installation."
             ) from exc
-        result = await self.tool_executor.execute(
-            ToolRequest(
-                tool_name=step.tool,
-                arguments=dict(step.parameters),
-                reason=step.description,
+        with self.intelligence.telemetry.stage("tool_execution"):
+            result = await self.tool_executor.execute(
+                ToolRequest(
+                    tool_name=step.tool,
+                    arguments=dict(step.parameters),
+                    reason=step.description,
+                )
             )
-        )
         if result.status is ToolStatus.DENIED:
             raise PermissionError(result.error or f"Tool {step.tool!r} was not approved.")
         if result.status is ToolStatus.FAILED:
@@ -1941,13 +2619,25 @@ class NovaControlApplication:
         return "self_improvement", self.self_improvement.plan(text).to_dict()
 
     async def _handle_desktop(self, request: BrainRequest, text: str) -> tuple[str, dict[str, Any]]:
-        return "desktop_automation", self.plan_desktop_command(text)
+        """Plan what the reading RESOLVED, never just the words it read.
+
+        The understanding layer resolves "open it" to the application it stands
+        for; the desktop parser cannot, so planning the raw words launched a
+        program called "it". The resolved target is restated as the command the
+        parser already accepts (see ``_command_with_resolved_references``).
+        """
+        return "desktop_automation", self.plan_desktop_command(
+            _command_with_resolved_references(request.context.get("nlu"), text)
+        )
 
     async def _handle_phone(self, request: BrainRequest, text: str) -> tuple[str, dict[str, Any]]:
         return "phone_control", self.plan_phone_command(text)
 
     async def _handle_browser(self, request: BrainRequest, text: str) -> tuple[str, dict[str, Any]]:
-        return "browser_automation", self.plan_browser_command(text)
+        """Plan the resolved browser command, for the same reason as desktop."""
+        return "browser_automation", self.plan_browser_command(
+            _command_with_resolved_references(request.context.get("nlu"), text)
+        )
 
     async def _handle_memory(self, request: BrainRequest, text: str) -> tuple[str, dict[str, Any]]:
         # Teach path: "remember this/that: …" stores the fact as durable
@@ -2042,23 +2732,105 @@ class NovaControlApplication:
         }
 
     async def _handle_vision(self, request: BrainRequest, text: str) -> tuple[str, dict[str, Any]]:
-        """Capture and interpret the screen through the vision pipeline.
+        """Capture the screen and interpret it THROUGH THE VISION MANAGER.
 
-        The dedicated vision provider (a VLM configured in the Vision panel) does
-        the looking; the text chat model is never handed an image. When no vision
-        model is wired, the controller reports what it could actually determine
-        instead of inventing a description.
+        The order is the one Phase 6 exists for: capture, then READ (OCR, cheap
+        and deterministic), then — only when the text cannot answer the question
+        — the vision provider (a VLM configured in the Vision panel). The text
+        chat model is never handed an image; a machine with no vision model
+        still answers text questions and says so when it cannot.
 
         The user's own question travels with the capture: "describe the image on
         screen" and "why isn't the button working?" are the same pixels and
         different work, and a model handed the checklist alone answers the first
         one either way.
+
+        A picture that came WITH the request is read instead of the screen: an
+        attached image is what the question is about, and capturing the desktop
+        would answer about the wrong pixels when the user attached the one they
+        meant.
         """
-        described = await self.vision.describe_screen(question=self._vision_question(request))
-        described.setdefault("question_answered", bool(described.get("question")))
-        payload: dict[str, Any] = dict(described)
-        payload.setdefault("summary", str(payload.get("message", "")))
+        attached = str(request.context.get("image", "") or "").strip()
+        captured = (
+            {"screenshot": attached, "captured": True, "vision_model": True}
+            if attached
+            else await self.vision.capture_screen()
+        )
+        payload: dict[str, Any] = dict(captured)
+        if not payload.get("captured"):
+            payload.setdefault("summary", str(payload.get("message", "")))
+            payload.setdefault("question_answered", False)
+            return "vision", payload
+        question = self._vision_question(request)
+        # Phase 7: the RAM-aware load runs BEFORE the VLM is asked to look. An
+        # automatic request used to reach the runtime with the chat model still
+        # resident — the conflict this layer exists to resolve — because only the
+        # explicit load endpoint went through the manager. The acquisition is a
+        # no-op when the model is already there, and a REFUSAL is a measurement
+        # rather than a hiccup: the cheap path answers from the screen's text and
+        # says the model was not loaded, instead of paging the machine to run a
+        # model that does not fit.
+        model = self._vision_pipeline_model()
+        outcome = await self._acquire_vision_model(model)
+        allow_vlm = not (outcome is not None and outcome.refused)
+        if outcome is not None:
+            payload["model_lifecycle"] = outcome.to_dict()
+        try:
+            with self.intelligence.telemetry.stage("vision"):
+                result = await self.analyze_image(
+                    str(payload["screenshot"]), question=question, allow_vlm=allow_vlm
+                )
+        finally:
+            if outcome is not None:
+                await self._release_model(model)
+            self._record_model_timings("vision", self._vision_provider_source())
+        # The structured result IS the payload: image_type, detected_text,
+        # ui_elements, errors, relevant_regions, summary, confidence — the shape
+        # the planner and the UI read, rather than prose each re-parses.
+        payload.update(result.to_dict())
+        # The honest bit travels at the top level as well as inside metadata: a
+        # client should not have to dig to see that nothing answered the
+        # question, and the refusal case is exactly when that matters.
+        payload["answered"] = result.answered
+        payload["question_answered"] = bool(result.metadata.get("question_answered"))
+        payload["vision_model"] = self.vision_manager.provider.available
+        # `message` is what a person reads, and it is built from the result's OWN
+        # provenance so it can never claim more than was actually determined.
+        payload["message"] = self._vision_message(
+            result,
+            refused=outcome.reason if outcome is not None and outcome.refused else "",
+        )
         return "vision", payload
+
+    def _vision_provider_source(self) -> object | None:
+        """The completion provider behind the vision pipeline's provider, if any.
+
+        The pipeline wraps whatever can complete a multimodal message (see
+        ``vision/providers.py``), and the wrapper is the only object that knows
+        what it wrapped. The model's timing breakdown lives on the INNER provider,
+        so it is read from there rather than assumed to be the chat brain's.
+        """
+        return getattr(self.vision_manager.provider, "source", None)
+
+    def _vision_message(self, result: VisionResult, *, refused: str = "") -> str:
+        """One honest line about what was determined, and by what.
+
+        ``refused`` is the resource decision, when there was one: a machine that
+        could not fit the vision model must not present its OCR answer as though
+        no model was ever needed.
+        """
+        provenance = dict(result.metadata)
+        answered = bool(provenance.get("question_answered"))
+        if not result.answered:
+            reason = str(provenance.get("reason", "no answer"))
+            if refused:
+                reason = f"{reason}; the vision model was not loaded — {refused}"
+            return f"{result.summary} ({reason})"
+        if provenance.get("escalated"):
+            return f"Vision model report: {result.summary}"
+        if answered and result.metadata.get("question"):
+            return f"Answered from the screen's text: {result.summary}"
+        return result.summary or "Screen captured, but nothing could be read from it."
 
     @staticmethod
     def _vision_question(request: BrainRequest) -> str:
@@ -2961,6 +3733,10 @@ class NovaControlApplication:
             "modules": self.runtime.module_names(),
             "skills": [skill.schema.name for skill in self.skills.list()],
             "tools": self.tools_status(),
+            # Phase 7: which models this build knows, what each one can do and
+            # where that claim came from, the lifecycle policy in force, and how
+            # many selections and loads have gone each way.
+            "models": self.models_status(),
             "scheduled_tasks": len(self.scheduler.tasks()),
             "tracked_tasks": len(self.tasks.list()),
             # Trimmed views (no `result` blobs — a completed /ask embeds whole
@@ -2985,6 +3761,10 @@ class NovaControlApplication:
             "browser_adapter_available": PlaywrightBrowserRunner.is_available(),
             "self_improvement_available": True,
             "brain": self.brain_status(),
+            # What the vision pipeline would do right now: which reader would
+            # answer, which model (if any) would be consulted, and whether the
+            # cheap OCR path is tried first.
+            "vision_pipeline": dict(self.vision_manager.status()),
             "phone_bridge": self.phone.status().to_dict(),
             "settings": self.settings.to_dict(),
             # Global Intelligence Layer: interpretation health + the capability

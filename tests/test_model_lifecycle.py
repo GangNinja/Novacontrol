@@ -23,11 +23,27 @@ from typing import Any
 
 from novacontrol.application import NovaControlApplication
 from novacontrol.intelligence.model_manager import ModelManager
+from novacontrol.models import HardwareMonitor
+from novacontrol.models import ModelManager as Phase7ModelManager
 
 CHAT = "qwen3:8b"
 VISION = "qwen3-vl:4b"
-
 GIB = 1024**3
+
+
+class StatedMonitor(HardwareMonitor):
+    """A monitor whose memory figures are stated rather than measured."""
+
+    def __init__(self, available: int | None = 8 * GIB, total: int | None = 16 * GIB) -> None:
+        super().__init__(resident_models=lambda: ())
+        self._available = available
+        self._total = total
+
+    def available_ram_bytes(self) -> int | None:
+        return self._available
+
+    def total_ram_bytes(self) -> int | None:
+        return self._total
 
 
 class FakeBackend:
@@ -211,7 +227,23 @@ class ApplicationModelSurfaceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.app = NovaControlApplication()
         self.backend = FakeBackend()
+        # Both layers get the fake, because both are asked something: Phase 7's
+        # manager is the one the application LOADS and UNLOADS through (it is
+        # the layer that knows which models a task is using), and the lifecycle
+        # manager is the one the model LIST comes from. Pointing only one of
+        # them at the fake would leave the other talking to the real runtime.
         self.app.intelligence.model_manager = ModelManager(self.backend)
+        # A stated memory measurement too: the eviction rule is what is under
+        # test, and a suite whose answer depends on how much RAM the machine
+        # running it happens to have free is a suite that fails for the wrong
+        # reason.
+        # 2 GB free with a 5 GB model resident: the incoming 3 GB model cannot
+        # live beside it, so the application is expected to free room FIRST.
+        self.app.model_manager = Phase7ModelManager(
+            self.backend,
+            monitor=StatedMonitor(available=2 * GIB),
+            headroom_bytes=GIB // 2,
+        )
 
     async def asyncTearDown(self) -> None:
         await self.app.stop()

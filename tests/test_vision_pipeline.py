@@ -26,6 +26,7 @@ from novacontrol.application import NovaControlApplication
 from novacontrol.brain.models import BrainRequest
 from novacontrol.vision.multimodal import MultimodalVisionProcessor, _screen_prompt
 from novacontrol.vision.processors import BasicScreenUnderstandingProcessor
+from novacontrol.vision.providers import NullVisionProvider
 
 QUESTION = "why isn't the button working?"
 
@@ -169,34 +170,50 @@ class VisionQuestionSelectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_the_handler_sends_the_question_and_reports_the_outcome(
         self,
     ) -> None:
-        """Stubbed at the controller, so no screen is captured in a test."""
-        asked: list[str] = []
+        """Stubbed at the CAPTURE, so no screen is taken in a test.
 
-        class _StubVision:
-            async def describe_screen(self, *, question: str = "") -> dict[str, Any]:
-                asked.append(question)
-                return {"captured": True, "message": "stub"} if not question else {
-                    "captured": True,
-                    "question": question,
-                    "message": "stub",
-                }
+        The handler now goes through the vision manager (capture -> read ->
+        structure), so the stub returns a captured screen pointing at a file
+        the OCR engine can actually read — the question must still reach the
+        pipeline, and the payload must still report whether it was answered.
+        """
+        question = "what is this error?"
+        folder = Path(tempfile.mkdtemp())
+        # A .txt suffix, because that is the form the OCR engine can really read
+        # here — the point is the manager's route, not this machine's screen.
+        source = folder / "vision_screen.txt"
+        source.write_text("ValueError: something broke\n", encoding="utf-8")
+
+        class _StubCapture:
+            async def capture_screen(
+                self, *, save_path: str = "vision_screen.png"
+            ) -> dict[str, Any]:
+                del save_path
+                return {"screenshot": str(source), "captured": True, "vision_model": False}
 
         original = self.app.vision
-        self.app.vision = _StubVision()  # type: ignore[assignment]
+        original_provider = self.app.vision_manager.provider
+        self.app.vision = _StubCapture()  # type: ignore[assignment]
+        # No model, so the answer can only come from the text — and the test
+        # cannot reach a real endpoint on a machine that has one configured.
+        self.app.vision_manager.set_provider(NullVisionProvider())
         try:
             _route, payload = await self.app._handle_vision(
-                self._request("what error is showing?"), "what error is showing?"
+                self._request(question), question
             )
             _route, bare = await self.app._handle_vision(
                 self._request("describe the screen"), "describe the screen"
             )
         finally:
             self.app.vision = original
+            self.app.vision_manager.set_provider(original_provider)
 
-        self.assertEqual(asked, ["what error is showing?", ""])
-        self.assertEqual(payload["question"], "what error is showing?")
+        # The question travelled with the capture, into the pipeline's metadata.
+        self.assertEqual(payload["metadata"]["question"], question)
         self.assertTrue(payload["question_answered"])
-        self.assertNotIn("question", bare)
+        # A bare "look at the screen" is the instruction to capture, not a
+        # question, so nothing claims to have answered one.
+        self.assertNotIn("question", bare["metadata"])
         self.assertFalse(bare["question_answered"])
 
 

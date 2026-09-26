@@ -833,12 +833,13 @@ modified files, before and after). Four new suites:
 
 ## 18. Where things stand
 
-- **Scale**: ~76,000 lines (39.6k Python source across 199 modules, 21.5k tests,
-  9.4k web UI, remainder markdown/scripts/config).
-- **Validation at the tip**: full suite **1433 passed / 12 skipped** (1628
-  subtests, Windows); mypy clean on both the linux and win32 views (209 modules);
+- **Scale**: 52.2k Python source across **217 modules**, 26.8k lines of tests
+  across 90 files, 4.7k web UI, remainder markdown/scripts/config.
+- **Validation at the tip**: full suite **1574 passed / 12 skipped** (1661
+  subtests, Windows); mypy clean on both the linux and win32 views (217 modules);
   `docs/API.md` in sync. CI last went green on `efb309f`, which carries
-  everything through section 16.
+  everything through section 16; the commit of section 17–20 has not been
+  confirmed green from here (the Actions API rate-limited the check).
 - **History**: the vision work of section 12 is committed as `8a203e6`, the
   hybrid NLU layer of section 13 as `d44e0a3`, and the log entry covering both as
   `4dc67c2`; the Phase 2 work of sections 14–16 went green in CI as `efb309f`.
@@ -856,6 +857,13 @@ modified files, before and after). Four new suites:
   a default install, so a plan that opens an application currently reports
   "nothing can carry this out" rather than opening it — the honest wiring gap,
   not a silent success;
+  the Phase 6 vision pipeline has no API route of its own (the manager is
+  reached through the request path and `POST /ask`'s optional `image`,
+  `/vision/describe` and `/vision/click` remain the panel's endpoints), and its
+  provider is resolved at boot and hot-swappable through `set_provider` but has
+  not been measured against a real VLM on this box — the local vision model here
+  is reasoning-only, so the model branch of the pipeline is proven against fake
+  and failing providers rather than against a VL build that answers;
   the tool selector's confidence numbers are earned from declared order,
   registration and entity completeness rather than from measured task outcomes
   (the telemetry now records the selection, so that calibration is possible);
@@ -1199,3 +1207,466 @@ capability whose risk must win and a registry tool that must be marked
 available), the specification's discovery example, paraphrase, filters, the
 floor, determinism and result caching, strict validation, normalization limits,
 and the cache's four refusals. Ruff is clean on every file this work added.
+
+## 21. Phase 6: vision as its own capability
+
+Phase 6 of the specification series that begins with the decision engine in
+section 17 — the series whose Phase 3 is the decision engine, Phase 4 the
+planner and Phase 5 tool selection — asks for vision to stop being a mode of the
+text model. (This is not the older roadmap's "Phase 6: Planning", which is
+documented in [PHASES.md](PHASES.md) and [PLANNING.md](PLANNING.md).) The
+specification's architecture is `screenshot → VisionManager → VisionProvider →
+structured VisionResult → planner`, and the four named types exist with those
+names — but the part worth recording is the two defects the *specification*
+caught in the code that already looked finished, because both were cases where
+the pipeline was described in a docstring and not actually on the path.
+
+**The manager was built, wired, tested — and not in the pipeline.** `VisionManager`,
+`VisionProvider`, the OCR engine and the structured result all existed, the
+application constructed the manager and resolved its provider from
+configuration, `status()` reported it, and `tests/test_vision_manager.py` drove
+it end to end with a fake provider. What no test covered was the question the
+architecture diagram actually asks: *does a vision request go through it?* It
+did not. `_handle_vision` still called the older `VisionController.describe_screen`,
+which understands a screen with its own separate path — so the Phase 6 manager
+was a second opinion beside the real one, and every claim about "OCR first, the
+model only when needed" was true of a layer nothing reached. The fix is small
+and the reason it matters is not: the capture step was extracted from
+`describe_screen` as `capture_screen` (one approval-gated screenshot, not two
+implementations), and `_handle_vision` now captures through it and hands the
+file to the manager, so the handler returns the structured result rather than a
+prose summary. The seam each test stubbed moved with it: a pre-existing test
+that stubbed `describe_screen` is now stubbed at `capture_screen`, because that
+is the boundary that is actually on the path.
+
+**A model that was consulted and failed was recorded as never consulted.** When
+the provider raised, `_from_text` built the result with a literal
+`escalated=False` and `answer_source="ocr"`. Both are wrong in the same
+direction: the model *was* asked and could not answer, so the result credited
+the OCR reader with an answer nobody produced and hid that the model had been
+tried at all. `escalated` now means "a vision model was consulted" — which is
+what a caller needs in order to decide whether retrying is worth anything — and
+`answer_source` says who actually answered (`none` when nobody did). A live
+probe found this: a locate question against a configured-but-unusable provider
+returned `escalated: false`, which read as "we never needed the model" when the
+truth was "the model was needed and failed".
+
+**Three smaller honesty fixes, each surfaced by a test or a live probe.** The
+question `"what does this screenshot say?"` was not recognised as a text
+question (the pattern required *"the"*), so it escalated to a model for a task
+OCR answers for free. `TypeError: …` was not treated as a failure line, because
+`error` inside a class name has no word boundary — so the canonical screenshot a
+person actually asks about ("what is this error?") could be classified from its
+filename rather than from its content; exception-class names
+(`\w+(?:Error|Exception)`) are now recognised as failure lines. And the last one
+is the kind this log keeps finding: `"read the text in this screenshot"`
+returned `answered: true` beside `confidence: 0.0`. The confidence came from
+question coverage, but the words of a *request* are not claims about the image,
+so a perfect extraction scored zero. An extraction that produced text is now a
+complete answer to that request (1.0); anything else is still scored by how much
+of the question the text really covers, and an unanswered question is still 0.0.
+
+**What the pipeline does now, verified live.** Routing matches the
+specification's four examples exactly — *"What is this error?"*, *"Where is the
+login button?"* and *"Read the text in this screenshot."* all carry
+`requires_vision: true` and route to `vision`, while *"Open Chrome."* does not
+route to vision at all. Against a real source, *"what is this error?"* is
+answered from the text with `image_type: error_screenshot`, the error lines
+extracted, `answer_source: ocr`, `escalated: false` — no model call. The same
+source with *"where is the login button?"* takes the LOCATE path, escalates, and
+returns `answered: false` with the provider's own reason rather than a
+description that reads like an answer. A structured result then travels beside
+the plan (`payload["vision"]`), which is the "structured result → planner"
+arrow made real: a follow-up is compiled against the error lines and elements
+rather than against prose.
+
+**Computer use is designed and not enabled.** `vision/proposals.py` holds the
+eighth-step pipeline as data (`COMPUTER_USE_PIPELINE`), and
+`VisionActionProposal` carries `requires_approval = True` as a constant rather
+than a field — a component that can approve its own action is the one thing this
+layer must never be. `propose_click` returns `None` when nothing seen matches the
+target *or* when the match carries no geometry, because a click built on an
+unlocatable guess is exactly what must not happen; there is deliberately no
+function that clicks, and the caller takes the proposal to the existing
+approval gate. Nothing in this section executes a desktop action.
+
+**Validation**: full suite **1493 passed / 12 skipped** (1636 subtests, Windows,
+3:48); mypy clean on both the linux and win32 views (**213 modules**, four new);
+`docs/API.md` in sync (no new routes — the pipeline is reachable through the
+application, and a route would need the `ApiSurface` + route-consumer
+declarations the parity tests enforce). `tests/test_vision_manager.py` now has
+60 tests and `tests/test_vision_pipeline.py` 16, covering the provider boundary
+(a text-only provider is refused rather than trusted), the OCR engine chain,
+structuring, the OCR-first decision in every branch (text question, coverage
+question, locate, escalation, refusal, provider failure), the task read from the
+question, the documented result shape, provider hot-swap, routing, config
+resolution, and the application's own manager. Ruff is clean on every file this
+work touched (`desktop/vision.py`'s three pre-existing long lines are untouched).
+
+## 22. Phase 6 verified against its own specification
+
+The specification was re-read clause by clause against the code, and the layer
+that passed its own test suite still had five things to fix — three of them the
+same shape as the defect section 21 found: a capability that exists, is
+documented, is even unit-tested, and has **nothing on the live path** exercising
+it.
+
+**The `has_image` trigger had no caller anywhere in the codebase.** The
+specification's first routing trigger is *"an image is attached"*, and the
+understanding layer has supported exactly that since before this phase:
+`understand(raw, has_image=True)` calls `_apply_image_requirement`, which widens
+the requirement, re-derives the route from the widened requirement, and can only
+ever ADD vision. A repo-wide search found the parameter declared on three public
+methods and passed by **nobody** — the one caller of `understand_async` in the
+application passed text alone. So the rule held only for callers that did not
+exist, and an attached picture could not need eyes however it was phrased. It is
+now wired end to end: `handle_request(text, image=...)`, an optional `image`
+field on `POST /ask`, `has_image` supplied to the understanding layer, and the
+vision handler reading **that** image instead of capturing the desktop — because
+a screenshot would answer about the wrong pixels when the user attached the one
+they meant. A picture that cannot be read refuses with the reader's own reason
+rather than describing anything.
+
+**A locate question always paid for a model, even when the answer was in the
+text.** The specification's OCR-vs-VLM rule is *"can the task be solved from the
+extracted text? yes → use the OCR result"*, and the pipeline applied it to
+understanding and text questions but hard-wired it OFF for `LOCATE` — with a
+comment asserting that text cannot tell you where something is drawn. That is
+true of *text* and false of *OCR*: OCR words carry their own coordinates, so a
+label the reader placed IS the answer. The comment was describing a plain text
+extraction, not the engine the pipeline actually runs. `_locate_from_words()` now
+answers from the reader's geometry when the label's own content words (control
+nouns like "button" dropped, longest first) appear as placed words, and escalates
+otherwise — a match with no geometry is no match, because answering from it would
+return the origin as a click target. Confidence is what finding a word is worth
+(0.5), the same figure the element list quotes, so the two can never disagree.
+
+**A model's "not found" answer was reported as half-confident, and its summary
+was raw JSON.** `{"found": false}` produced `confidence: 0.5` beside an empty
+region list — a middle figure next to no located element reads as though one had
+been found, and `answered: true` (correct: the model looked and said it was not
+there) then carried the contract's own JSON as the sentence a person reads. The
+locate contract's object is a wire format, not prose: three cases now build a
+real sentence (*"Login is visible at (500, 250) on a 0-1000 grid."*, *"No logout
+button is visible in the image."*, *"The element was reported as visible, but no
+position was given."*), a "not visible" answer is `0.0`, and a model that answers
+without a figure of its own quotes one named placeholder with
+`confidence_basis: "none"` instead of a number nobody measured. The code also
+contradicted its own comment there ("or nothing" beside a hard-coded 0.5), which
+is now one function with the rule written once.
+
+**A refusal claimed the image had not been read while returning its text.** With
+no vision model wired, an image whose text WAS extracted produced the reason
+*"the image was not read"* — sending the caller a contradiction next to a
+non-empty `detected_text`. What did not happen is the PICTURE being looked at, so
+that is what it now says: *"no vision model is wired, so the pixels were not
+looked at."*
+
+**The honest bit was buried.** `answered` — the field that says whether anything
+actually answered the question — existed only inside `VisionResult.metadata` (as
+`question_answered`) instead of also riding at the top of the response payload,
+so the refusal case was the one a client had to dig for. It is now reported
+beside the structured result.
+
+**Verified clauses and the numbers.** Routing matches all four of the
+specification's examples with the task each picks — *"What is this error?"* →
+`requires_vision: true`, `vision`, `UNDERSTAND`; *"Where is the login button?"* →
+`vision`, `LOCATE`; *"Read the text in this screenshot."* → `vision`, `OCR`;
+*"Open Chrome."* → no vision, `direct_tool` — and *"Open Chrome."* **with an
+image attached** now needs eyes too. The pipeline is unchanged in what it
+guarantees: OCR first (`answer_source: ocr`, `escalated: false`, no model call
+for an error question against a real source), the model only when the text cannot
+answer, a structured result with no hidden reasoning, a provider that is a
+configuration-chosen plug, and computer use that stops at a proposal nothing
+executes.
+
+**Validation**: full suite **1503 passed / 12 skipped** (1642 subtests, Windows,
+3:47); mypy clean on both the linux and win32 views (**213 modules**);
+`docs/API.md` regenerated and in sync (the `/ask` description now names the
+optional `image`, which is a one-line change to the generated reference);
+`tests/test_vision_manager.py` is now 70 tests and `tests/test_vision_pipeline.py`
+16, covering the attached-image path at the application level (the pipeline reads
+the attachment, the desktop is not captured, the requirement is the fact rather
+than the wording), the OCR-locate decision in both directions (a placed label
+answers and never calls the provider; an unplaced or absent one escalates), the
+contract's sentences, the confidence rules, and that `vision.provider: none`
+refuses a vision model on the live path rather than only in the config file.
+Ruff is clean on every file this pass touched.
+
+## 23. Phase 7: which model, and is there room for it
+
+The phase exists because NovaControl must not assume one model handles
+everything, and must not decide which one to use by recognising a NAME. What
+shipped is a decision layer between "what does this request need?" and "what can
+this machine hold right now?" — `models/profiles.py` (capability registry),
+`models/hardware.py` (hardware monitor), `models/manager.py` (selection, loading,
+lifecycle, telemetry), wired into the application and reachable through
+`GET /intelligence` and `GET /models`.
+
+`qwen3:8b` appears in exactly one place in this codebase: the declaration table,
+as DATA. Selection is a set comparison against declared capabilities, and the
+runtime's own `/api/show` report is applied LAST and directionally — it ADDS a
+capability it confirms (an undeclared VLM pulled five minutes ago becomes
+selectable for a screenshot, which is how the dev box's `qwen3-vl:4b` reached the
+vision pipeline without one line of configuration), REMOVES one it can express
+and does not list (a text-only build named `llava` is not trusted with an image),
+and leaves the declaration alone when it says nothing (`coding` and
+`structured_output` are never removed by silence, because no runtime here has a
+word for them). A model that is not installed cannot be selected at all, because
+the pool is what the runtime offers.
+
+Loading is the specification's six steps, with the fit judged **twice**: whether
+the model can live alongside what is resident (if yes, nothing is unloaded —
+eviction is not a condition of loading, and a reload costs seconds), and whether
+it can live there once the models that MAY be unloaded are gone. A model an
+active task is using is never evicted and is not counted as room either; a
+resident model whose size the runtime did not report frees nothing. Step 6 is
+separate from `loaded`, and when verification cannot run the outcome says
+*"accepted but could not confirm"* rather than reporting a verified success.
+
+**The measurement found a bug the tests had been written around.** The first
+measured load on this machine showed a load being refused with the reason *"needs
+more memory than is free after unloading what could be unloaded"* — while nothing
+had been unloaded. The fit check had been `available >= needed + headroom`, i.e.
+it never counted the memory eviction would free, so a load that would have fit
+comfortably after making room was declined. That is the specification's own
+example flow (Qwen3 resident → vision request → unload → load the VLM) failing on
+the machine the layer exists for, with a reason that read plausibly the whole
+time. The check now computes the candidates, the freed bytes and
+`fits_after_evict` before deciding, refuses only when the model does not fit even
+then (naming what it would have unloaded), and names the in-use model when *that*
+is what blocks the room. Re-measured afterwards, the switch performs exactly as
+specified: loading `qwen3-vl:4b` evicted the resident chat model, verified in
+7.3 s, and a subsequent `qwen3:8b` load was refused by the arithmetic (4.87 GB
+needed, 2.06 GB free + 3.3 GB evictable < needed + 0.5 GB headroom) rather than
+by a policy.
+
+**The integration path found a second one, in the NLU rather than the manager.**
+Phase 7's Example 2 is *"What's using so much RAM?" → system tools → NO LLM*, and
+that phrasing resolved to nothing: the memory rule had no pattern for it, so the
+general answer rule claimed it and the request went to research, and the reply
+told the user NovaControl *"can't access your system directly"* while it reads
+this machine's RAM for a living. The RAM rule now carries the phrasing a person
+actually uses (`using so much ram`, `using all my memory`, `consuming most of my
+memory`, `chewing up my ram`, …) plus matching exemplars, and all four phrasings
+answer from this machine's own reading in ~27 ms with no model selected. The
+specific rule sits above the general one deliberately; an unrelated question
+("What is the capital of France?") is untouched.
+
+**A third, from the unit tests written for the phase:** `manager.select({"vision"})`
+— the spelling a caller naturally writes, and the one the tests used — crashed
+with `AttributeError: 'str' object has no attribute 'value'` inside the rejection
+path, because a `StrEnum` member equals its value so the set comparison worked
+and only the *reason formatting* failed. Capability requirements are now
+normalised at the boundary (`as_capabilities`), and an unrecognised name RAISES
+instead of being dropped: dropping is right for a config file, where a typo must
+not stop the process, and wrong for a requirement, where `{"visoin"}` would
+quietly become "nothing in particular" and be answered by a model that cannot
+see.
+
+**Telemetry** is one trace per request — per-stage durations (NLU, context,
+decision, planning, tool selection, tool execution, vision, model load,
+response), total latency, RAM before/after, the model and provider selected,
+fast-path usage — exposed through the existing `GET /intelligence` alongside the
+interpretation telemetry, with stages that never ran reported as `count: 0`
+rather than as an instant zero, and a request whose exception escapes before the
+handler filed as a failure by the next one so the count stays honest. Nothing in
+it carries a prompt, an answer or a chain of thought.
+
+**Measured on this machine** (16 GB RAM, Intel Arc, Intel NPU): capability probe
+**0.058 s** for 2 installed models; `qwen3-vl:4b` (3.07 GB measured) loaded and
+**verified in 7.3–8.0 s**; unload **31 ms**; RAM-aware refusal with the numbers
+rather than paging; NPU and GPU both reported as **not detected, with the
+reason**; deterministic requests measured end to end at **27–34 ms** (NLU 2.1 ms,
+decision 0.3 ms, response 0.1 ms) with a RAM delta under 2 MB; a request that
+went to research moved −5.6 GB as the runtime loaded a model behind it.
+
+**Files**: `models/{profiles,hardware,manager,__init__}.py` (new package),
+`core/config.py` + `configs/default.yaml` (`ModelSettings`, env overrides),
+`application.py` (manager built before the vision pipeline and consulted for its
+provider, `models_status` on the cheap readout and the measured `model_status`,
+load/unload routed through the manager, stage instrumentation),
+`api/app.py` (`/intelligence` gains the model block), `intelligence/telemetry.py`
+(stage + request telemetry), `intelligence/model_manager.py` (the backend can now
+describe its models), `intelligence/{rules,exemplars}.py` (Example 2's phrasings),
+`docs/MODELS.md` (new), `README.md`.
+
+**Tests added**: `tests/test_model_phase7.py` (60, capability registry,
+runtime-reported reconciliation, RAM-aware loading, keep-alive, hardware honesty,
+routing, switching, telemetry) and `tests/test_model_pipeline_phase7.py` (14, the
+four request flows, measured telemetry, the model surfaces, `/intelligence` at
+the HTTP level). `tests/test_model_lifecycle.py` gained a stated-memory monitor so
+its eviction assertions stop depending on how much RAM the machine running the
+suite happens to have free, and its application surface now injects the fake into
+the layer the application actually loads through.
+
+**Validation**: full suite **1574 passed / 12 skipped** (1661 subtests, Windows,
+4:36); mypy clean on both views (**217 modules**, four new); `docs/API.md` in
+sync; ruff clean on every file this section touched. **Remaining limitation**:
+Phase 7's Example 3 phrasing ("Find my NovaControl project, run the tests and
+explain why they fail.") still reaches the research pipeline rather than the
+agentic one — a decision-layer classification question that predates this phase,
+recorded here rather than papered over; the shorter "find my … project and run
+the tests" reaches the agent route, and either way the route is correctly not a
+fast path.
+
+## 24. Phase 7 verified against its own specification
+
+The audit found the same shape of defect the previous two phases did: capabilities
+that exist, are documented, are unit-tested, and have **nothing on the live path**
+exercising them. Six findings, all fixed, plus one dead helper removed.
+
+**1. The keep-alive policies were inert.** `immediate`, `warm`, `while_active` and
+`never` were parsed, reported in status — and enforced nowhere: `enforce_keep_alive`,
+`release_after_use`, `begin_activity` and `end_activity` had no caller outside the
+tests. Worse, `while_active` *was* `never` (both returned `False` from
+`release_after_use`), so a configured policy behaved exactly like a different one
+and nothing could tell. Now: the chat handler marks the local model in use for the
+duration of the answer it is writing and releases it after; the vision handler does
+the same through the new `acquire`; `while_active` releases once the last task
+using the model has finished; and the `warm` idle window is applied where the
+manager is asked about its state (the status read clients poll) and at the start of
+every load — no timer thread invented, and a `keep_warm_seconds: 0` deployment
+returns before touching the runtime.
+
+**2. An automatic request never went through the RAM-aware load.** `load` — the
+six steps, the measured fit, the eviction, the verification — was reachable only
+from `POST /models/load`. So a vision request reached the runtime with the chat
+model still resident: the exact conflict Phase 7 exists to resolve, on the exact
+flow its own example describes. `ModelManager.acquire` pairs the six steps with the
+activity that protects the model being acquired, and the vision handler uses it
+before the VLM is asked to look. A refusal is now a RESULT: the pipeline answers
+from the screen's text with `allow_vlm=False`, the payload carries the lifecycle
+record, and the message says the model was not loaded rather than presenting the
+OCR answer as though no model were ever needed.
+
+**3. Example 3 collapsed to its first clause.** *"Find my NovaControl project, run
+the tests and explain why they fail"* decomposes into three actions
+(`find_file`, `run_command`, `answer_question`) and its own assessment says
+`needs_planner` — but the intent table has no executor for the first two, so the
+decision fell through to the unhandled-capability branch and the application
+classified the request from its **first** clause. The tests were never run and the
+explanation was never written. Three narrow changes: the decision's rule 6 now
+plans a multi-action reading whose primary intent no subsystem dispatches; rule 3
+names the PLANNER (not `chat`) when the model is needed for several actions; and
+the application honours the decision's own handler when the intent table names
+none — while keeping the legacy classifier for the bare "let language handling deal
+with it" fallback, which is how `self_improvement` stays reachable. Measured on this
+machine: route `planning`, handler `plan`, **57 ms** and offline, where the same
+sentence previously took **44 s** down the research path and answered about the
+project's purpose instead of running its tests. The decision also now carries the
+sequencing requirement to the executor that can honour it when the handler it
+landed on cannot sequence at all — one shared `SEQUENCING_HANDLERS` set, defined
+once beside the routing table.
+
+**4. Context latency was never measured.** The stage was declared in
+`REQUEST_STAGES`, exposed on `/intelligence`, and permanently `count: 0` — a metric
+named in the specification and reported as never occurring. It is now timed in the
+understanding engine where the context layer actually does its work (resolving a
+reference against what is already known). Requests the cheap layers resolve without
+it honestly report "not reached" instead of a fabricated zero, which is also what
+the readout means everywhere else.
+
+**5. First-token latency and generation rate described one path only.** They were
+recorded exclusively through `record_escalation`, i.e. only when the NLU gave up and
+asked a model — so the model that answered most requests reported nothing, and
+filing chat timings through the same call would have inflated the escalation rate,
+the number the architecture is judged by. `record_model_timings` files the
+provider's own breakdown under the reason that produced it (`chat`, `vision`),
+separate from `escalations`, and the application reads `last_timings` from the
+provider that actually made the call (the vision pipeline's wrapper now exposes what
+it wrapped, so the inner provider's measurements are reachable without touching a
+private attribute).
+
+**6. Dead code.** `models/hardware.py`'s `describe_processes` had no caller; removed.
+
+**Gates**: full suite **1587 passed / 12 skipped** (1661 subtests, 4:03); mypy clean
+on both views (**217 modules**); `docs/API.md` in sync; no new ruff findings on any
+file touched (the repo's pre-existing baseline in `application.py`/`engine.py`/
+`rules.py` is unchanged and untouched). New tests, 84 collected across the two
+files together (`tests/test_model_phase7.py` 63, `tests/test_model_pipeline_phase7.py`
+21): a `ModelAcquisitionTests` class for the `acquire`/release pairing, eviction
+protection, the idle window applied on a load and `while_active` finally meaning
+what it says; two cases for `record_model_timings` (measured without claiming an
+escalation, and silent rather than zero when the backend reports none); the
+stage-name contract now checked across the engine as well as the application;
+a `ModelResidencyOnTheRequestPathTests` class covering the vision model acquired
+and released around the capture, a refusal skipping the VLM with the reason in the
+message, and the chat model marked in use for the duration of its answer; Example 3
+end to end (route, handler, plan, tool discovery); and the context stage asserted
+on both sides — populated where the layer is consulted, `count: 0` where it is not.
+
+## 25. Phases 1–7 verified against the running request path
+
+The earlier verifications checked phases 2, 3, 6 and 7 (`§16`, `§17`, `§22`, `§24`).
+This pass covers the whole staged build — 1 foundation, 2 understanding and context,
+3 the decision engine, 4 the planner, 5 tool discovery/validation/caching, 6 vision,
+7 model + hardware management — with the same rule every time: **a capability counts
+only if something on the live path exercises it.** Each claim was re-derived from the
+code and the docs, then driven through `handle_request`/`run_plan` with no local model
+installed, so nothing could pass by being explained rather than performed.
+
+**What works, measured.** "Open Chrome." → `desktop_automation`/`open_application`,
+0.9, fast path, no model. "What's my RAM usage?" → `system`/`memory_status`, a live
+reading ("12.0 GB of 15.4 GB, 77.8%") with no model. "Continue from where I stopped"
+→ one precise question on a fresh app, and after a request it replays the remembered
+intent. "Open Chrome and search YouTube for Python tutorials." → browser planning
+with `open_application`/`navigate`/`search`. "Look at this screenshot and tell me why
+I can't log in." → the vision route, with the honesty note that no VLM is wired
+rather than an invented answer. Discovery: "Which programs are consuming most of my
+memory?" → `system_monitor` (0.73), "what can you do?" → `capabilities` (0.67), "can
+you help me?" → no tool at all; the cache refuses volatile payloads and the floor is
+0.25. Phase 7's acquisition, eviction protection, traces and telemetry behave as
+`§24` recorded. The context layer resolves pronouns at its own layer: after "Open
+Chrome.", `understand("open it")` is `open_application` with `application: chrome`.
+
+**1. Two defects on the phase 2 → 4 seam: the resolved reference never reached the
+plan.** The understanding layer resolved "open it" to chrome correctly — and the
+desktop/browser handlers re-parsed the raw words anyway, so the plan said
+`target: "it"` and the workflow would have launched a program called "it".
+`close it` was worse: the parser had no named-close branch at all, so it planned
+`EXECUTE_SCRIPT: "close it"`. Both are fixed at the seam rather than duplicated per
+handler: `_command_with_resolved_references` restates a *reference-only* request as
+the command the native parsers accept (`open it` → `open chrome`), a chain keeps its
+own words because one template cannot carry its other clauses, and
+`parse_desktop_command` gained a named-close branch (`close|quit|exit|kill|stop
+<app>` → the same graceful `STOP_APP` window close `stop that` already used). Live
+again: "open it" → `open chrome` (`open_application`, target `chrome`); "close it" →
+`close chrome` (`stop_app`, target `chrome`).
+
+**2. Phase 4's own example could plan the work but not perform it.** The compiler's
+`run-tests` and `run-command` steps named no tool — `IntentName.RUN_COMMAND` carries
+no `tools=` — so `_run_plan_step` raised `RuntimeError: No executor is registered for
+action 'run_tests'`, and the flagship goal "find my project, run the tests and
+explain why they fail" failed at its central step with an internal error. The step
+handler now runs them for real: preset argv, exec-form (`create_subprocess_exec`, the
+repo's no-shell invariant), a hard wall-clock timeout, output captured from the tail
+where a test summary actually is, and exit code reported to the verifier. A test step
+locates the project first and recognises its runner (`npm test`, else `pytest` via
+`sys.executable`; anything unrecognised is reported rather than guessed at). None of
+it starts without explicit approval: the handler refuses with a `PermissionError`
+unless the caller named the step in `run_plan(approved=...)` — the same gate the
+destructive steps already pass and the same one `POST /plan/run` exposes — so the
+request path now reports "needs explicit approval" instead of a bug, and an approved
+run completes and verifies.
+
+**Residuals, recorded rather than papered over.** (a) `read_file`/`list_files` are
+understood — "read report.pdf" reads as `read_file`, 0.85 — but no handler exists, so
+the reply is chat's "I currently can't access or read files", and the declared
+`file_manager` tool is still unregistered; wiring real file capabilities is a
+separate piece of work, not a leak in this one. (b) The legacy classifier fallback
+can still plan a literal reference ("open that folder" with nothing in context plans
+a folder named "that") when the GIL's clarification does not win the route. (c)
+Escalated requests report `nlu.model == "scratch"` — that is the provider's name
+standing in for the model's; cosmetic. (d) A real VLM's answer quality still cannot
+be validated on this machine (no vision model installed), as `§22`/`§24` recorded.
+
+**Gates**: full suite **1594 passed / 12 skipped** (1665 subtests, 6:29); mypy clean
+(**217 modules**); `docs/API.md` in sync; no new ruff findings in any line this work
+added (the pre-existing baseline is untouched). Seven new tests:
+`ResolvedReferenceReachesThePlannerTests` drives "open it" and "close it" through
+`handle_request` and asserts the planned target (the old test only checked
+`engine.understand`, which is exactly why the seam could break unnoticed); the desktop
+suite pins the named-close branch; and `test_planner_phase4.py` adds the four rules
+for command steps — refused without approval, runs and verifies with it, runs the
+located project's real suite, and never starts a process the caller did not approve.

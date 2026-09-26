@@ -111,14 +111,18 @@ def parse_desktop_command(command: str) -> list[DesktopStep]:
         "open steam and go to library" -> [open steam, navigate steam→library]
         "open steam and go library and launch gta v" -> [open steam, navigate, click 'play/launch gta v']
         "stop that" -> [stop '']
+        "close chrome" -> [stop 'chrome']  (a named app to close)
     """
     lower = command.lower().strip()
     steps: list[DesktopStep] = []
 
     # 'stop that' / 'stop' / 'close it' — cancel the last launched app. Handled
     # before any splitting so it survives chains like '... and then stop'.
-    if re.fullmatch(r"(?:stop|cancel)(?:\s+(?:that|it|this|the app|everything))?[.!]?,?", lower) or re.fullmatch(
-        r"(?:stop|close|kill)(?:\s+that)?", lower
+    # 'close it'/'kill it' belong here too: with no name and no context to
+    # resolve, "it" means the last app, and this is the last app's own step.
+    if re.fullmatch(
+        r"(?:stop|cancel|close|kill)(?:\s+(?:that|it|this|the app|everything))?[.!]?,?",
+        lower,
     ):
         return [DesktopStep(kind="stop")]
 
@@ -195,11 +199,19 @@ def parse_desktop_command(command: str) -> list[DesktopStep]:
             steps.append(DesktopStep(kind="screenshot"))
         else:
             app_match = re.match(r"(?:open|launch|start|run)\s+(.+)", main_part)
+            # 'close chrome' / 'quit notepad' / 'exit spotify' / 'stop steam' — a
+            # NAMED app to close, planned as the same graceful window close as
+            # 'stop that'. Without this branch they fell through to the execute
+            # fallback and ran "close chrome" as a shell command.
+            close_match = re.match(r"(?:close|quit|exit|kill|stop)\s+(?:the\s+|my\s+)?(.+)", main_part)
             if app_match:
                 target = app_match.group(1).strip()
                 target = re.sub(r"\s*(please|for me|on my computer|on my laptop|on the computer)\s*$", "", target)
                 if target:
                     steps.append(DesktopStep(kind="open", target=target))
+            elif close_match:
+                target = re.sub(r"\s*(please|for me|now)\s*$", "", close_match.group(1).strip())
+                steps.append(DesktopStep(kind="stop", target=target))
             elif re.match(r"click\s+(?:on\s+)?(.+)", main_part):
                 # Standalone vision-guided click ("click file", "click the submit button").
                 click_match = re.match(r"click\s+(?:on\s+)?(.+)", main_part)

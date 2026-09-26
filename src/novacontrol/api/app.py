@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -285,7 +286,7 @@ def create_app() -> Any:
 
     @app.post("/ask")
     async def ask(payload: AskRequest, _principal: str = Depends(require_auth)) -> dict[str, Any]:
-        response = await nova.handle_request(payload.request)
+        response = await nova.handle_request(payload.request, image=payload.image)
         return response.to_dict()
 
     @app.post("/brain/mode")
@@ -748,14 +749,30 @@ def create_app() -> Any:
     @app.get("/intelligence")
     async def intelligence_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
         """Global Intelligence Layer health: interpretation telemetry (including
-        per-layer latency, routing and escalation counts), the self-improvement
-        findings it produced, the capability registry, and the live confidence
-        thresholds the routing policy is currently using."""
+        per-layer latency, per-stage duration, request memory and routing and
+        escalation counts), the self-improvement findings it produced, the
+        capability registry, and the live confidence thresholds the routing
+        policy is currently using.
+
+        The MODEL half joins them here (Phase 7): the capability table with the
+        provenance of every claim, the lifecycle policy in force, and what the
+        manager has actually done — loads, evictions, refusals, switching
+        latency. The runtime probe runs in a worker thread, because this endpoint
+        is reachable from the UI and a status call must never stall the loop.
+        """
         return {
             "telemetry": nova.intelligence.telemetry.to_dict(),
             "findings": nova.intelligence.telemetry.improvement_findings(),
             "capabilities": nova.intelligence.capabilities.to_dict(),
             "thresholds": nova.intelligence.thresholds.to_dict(),
+            "models": {
+                **nova.models_status(),
+                "runtime": await asyncio.to_thread(nova.model_manager.health),
+                "hardware": await asyncio.to_thread(
+                    nova.model_manager.monitor.headroom_report
+                ),
+                "selection": await asyncio.to_thread(nova._model_routing_report),
+            },
             "lexical": {"exemplars": nova.intelligence.lexical.size},
             # What the optional embedding layer is (a backend, an index size) and
             # how it has actually been used (cache hits), so "semantic matching"

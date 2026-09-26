@@ -51,6 +51,7 @@ from novacontrol.decision.routing import (
     CONVERSATION_INTENTS,
     KNOWLEDGE_INTENTS,
     PLANNING_INTENTS,
+    SEQUENCING_HANDLERS,
     SYSTEM_READING_INTENTS,
     VISION_INTENTS,
     handler_for,
@@ -63,10 +64,11 @@ from novacontrol.intelligence.intent import CapabilityRegistry, IntentName
 _COMPOSITE_HANDLERS = frozenset({"agent", "plan", "explore", "chat", "vision"})
 
 #: Handlers whose work can need sequencing. A single action under one of these
-#: is still a direct call; two or more is planning.
-_PLANNER_HANDLERS = frozenset(
-    {"desktop", "phone", "browser", "plan", "agent", "project", "self_improvement"}
-)
+#: is still a direct call; two or more is planning. The set itself lives in
+#: ``routing.py`` beside the table that names the handlers, because the
+#: application needs the same list to decide whether the executor it was given
+#: can honour a sequencing requirement at all.
+_PLANNER_HANDLERS = SEQUENCING_HANDLERS
 
 #: The user-facing grouping, which is coarser than the capability registry on
 #: purpose: the registry names one capability per intent, while a status
@@ -262,7 +264,30 @@ class LocalDecisionProvider:
             )
 
         # 6. Several steps, or a shape that needs sequencing.
-        if handler in _PLANNER_HANDLERS and (
+        #
+        #    The first gate is "this intent's own executor can plan". It is
+        #    widened by ``multi_step`` for the request that decomposed into
+        #    several actions and for which the intent table names NO executor at
+        #    all — because "no subsystem claims this intent" is not the same
+        #    answer as "this request asks for nothing": it says the reader split
+        #    the sentence into work and the table has no entry for the first
+        #    piece. *"Find my NovaControl project, run the tests and explain why
+        #    they fail"* is three actions (``find_file``, ``run_command``,
+        #    ``answer_question``), its own assessment says ``needs_planner``, and
+        #    the table has no handler for any of the first two — so before this
+        #    the request fell through to the unhandled-capability branch, was
+        #    classified from its FIRST clause, and the tests and the explanation
+        #    it also asked for never happened. Performing one clause of a request
+        #    that stated three is not a conservative reading; it is a dropped
+        #    request.
+        #
+        #    Deliberately NOT widened beyond that: a multi-action reading whose
+        #    primary intent DOES have an executor keeps the route it has today
+        #    (a system reading stays a system reading, a composite browser task
+        #    keeps the browser), so this cannot re-route work that already lands
+        #    somewhere sensible.
+        multi_step = not handler and len(actions) > 1
+        if (handler in _PLANNER_HANDLERS or multi_step) and (
             intent.intent in PLANNING_INTENTS
             or self._needs_sequencing(request, actions)
             or handler in _COMPOSITE_HANDLERS
@@ -272,7 +297,7 @@ class LocalDecisionProvider:
                 request,
                 decision_type=DecisionType.PLANNING,
                 route=DecisionRoute.PLANNER,
-                handler=handler,
+                handler=handler or "plan",
                 selected_capability=capability_name,
                 selected_model=self._planner_model(request.environment),
                 requires_planning=True,
@@ -402,11 +427,17 @@ class LocalDecisionProvider:
                 "This needs language understanding, and no model is configured on this "
                 "machine yet."
             )
+        # What the model is needed FOR decides which handler carries it out. A
+        # request the reader split into SEVERAL actions is asking for those
+        # actions, not for prose about them: naming ``chat`` there would have the
+        # assistant answer about work it never did. A single-action reading keeps
+        # the language handler, which is what the fallback path has always meant.
+        multi_step = len(actions) > 1
         return self._decision(
             request,
             decision_type=DecisionType.REASONING,
             route=route,
-            handler=handler or "chat",
+            handler=handler or ("plan" if multi_step else "chat"),
             selected_capability=capability_name,
             selected_model=model,
             requires_planning=self._needs_sequencing(request, actions) or request.needs_planner,

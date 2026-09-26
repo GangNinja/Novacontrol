@@ -9,8 +9,11 @@ feeds the self-improvement engine's sandboxed planning.
 
 from __future__ import annotations
 
+import time
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -19,6 +22,24 @@ from typing import Any
 # already exists for actions). Everything counts, only the last samples are
 # kept verbatim.
 _MAX_SAMPLES = 50
+
+#: The stages a request passes through, in the order a request experiences them.
+#: Named here so an instrumentation call cannot invent a stage name that no
+#: reader knows about, and so the summary lists a stage that was never reached
+#: as empty rather than omitting it. Tool selection and tool execution are
+#: separate because they fail for different reasons — a miss is a discovery
+#: problem, a slow call is an executor one.
+REQUEST_STAGES: tuple[str, ...] = (
+    "nlu",
+    "context",
+    "decision",
+    "planning",
+    "tool_selection",
+    "tool_execution",
+    "vision",
+    "model_load",
+    "response",
+)
 
 # The timing fields a local model reports about its own work, in the order a
 # request experiences them. Only fields the backend actually reported appear in
@@ -44,6 +65,22 @@ def request_id_for(intent_id: str) -> str:
     return f"req-{intent_id[:12]}"
 
 
+def _latency_block(values: list[float]) -> dict[str, Any]:
+    """Count, average, p95 and max for a sample list — or an honest empty block.
+
+    ``avg`` is ``None`` rather than 0.0 when nothing was measured, so no reader
+    can mistake "never measured" for "instant".
+    """
+    if not values:
+        return {"count": 0, "avg": None, "p95": None, "max": None}
+    return {
+        "count": len(values),
+        "avg": round(sum(values) / len(values), 3),
+        "p95": round(_percentile(values, 0.95), 3),
+        "max": round(max(values), 3),
+    }
+
+
 def _percentile(values: list[float], fraction: float) -> float:
     """Nearest-rank percentile of a small sample (no numpy dependency)."""
     if not values:
@@ -51,6 +88,31 @@ def _percentile(values: list[float], fraction: float) -> float:
     ordered = sorted(values)
     index = max(0, min(len(ordered) - 1, int(round(fraction * (len(ordered) - 1)))))
     return ordered[index]
+
+
+@dataclass(slots=True)
+class _RequestTrace:
+    """One request's stages, open while it is being served.
+
+    Held in a ContextVar rather than passed through every call, because the
+    layers being timed (the planner, the tool executor, the vision handler) must
+    not have to thread a timing object through their own signatures to be
+    measurable — the seams are instrumented with ``stage`` and this is where the
+    numbers land.
+    """
+
+    started: float
+    ram_before: int | None = None
+    stages: dict[str, float] = field(default_factory=dict)
+    closed: bool = False
+
+    def record(self, name: str, seconds: float) -> None:
+        self.stages[name] = self.stages.get(name, 0.0) + max(0.0, float(seconds))
+
+
+_active_trace: ContextVar[_RequestTrace | None] = ContextVar(
+    "novacontrol_request_trace", default=None
+)
 
 
 @dataclass(slots=True)
@@ -77,6 +139,23 @@ class _Stats:
     model_timings: dict[str, list[float]] = field(
         default_factory=lambda: {name: [] for name in _TIMING_FIELDS}
     )
+    #: Which calls produced those measurements (chat, vision, understanding), so
+    #: a timing average is attributable rather than anonymous.
+    model_timing_sources: Counter[str] = field(default_factory=Counter)
+    #: Per-stage latencies, milliseconds-scaled seconds, kept as rolling samples
+    #: so the summary can report an average and a p95 rather than a last value.
+    stages: dict[str, list[float]] = field(
+        default_factory=lambda: {name: [] for name in REQUEST_STAGES}
+    )
+    #: Completed requests, bounded like every other sample list.
+    requests: list[dict[str, Any]] = field(default_factory=list)
+    #: Requests that never needed a language model. Counted separately from the
+    #: routes the decision layer reports, because "the request was served without
+    #: the model" is the outcome the whole architecture is arranged around.
+    fast_paths: int = 0
+    #: Total request latency samples, and how much RAM each one moved.
+    totals_ms: list[float] = field(default_factory=list)
+    ram_deltas: list[int] = field(default_factory=list)
 
 
 class InterpretationTelemetry:
@@ -164,6 +243,47 @@ class InterpretationTelemetry:
             "latency_ms": round(latency_ms, 3),
             **measured,
         })
+
+    def record_model_timings(
+        self,
+        *,
+        reason: str = "",
+        timings: Mapping[str, float] | None = None,
+    ) -> dict[str, float]:
+        """Record a model call's OWN timing breakdown, without claiming an escalation.
+
+        :meth:`record_escalation` carries timings too, but it means something
+        else: the NLU gave up and asked a model. A chat answer or a vision call
+        is not an escalation, and counting one as the other inflates the
+        escalation rate — the number the whole architecture is judged by. So the
+        measurements arrive here, attributed to the reason that produced them,
+        while ``escalations`` stays what it says.
+
+        Returns what was actually measured, so a caller can log the same figures
+        it filed. An empty or absent breakdown records nothing: a backend that
+        reports no timing must stay visibly unmeasured rather than appear as
+        instant.
+        """
+        measured = {
+            name: round(float(timings[name]), 3)
+            for name in _TIMING_FIELDS
+            if timings is not None
+            and isinstance(timings.get(name), (int, float))
+            and timings[name] > 0
+        }
+        if not measured:
+            return {}
+        for name, value in measured.items():
+            self._stats.model_timings[name].append(value)
+            del self._stats.model_timings[name][:-_MAX_SAMPLES]
+        self._stats.model_timing_sources[reason or "unspecified"] += 1
+        self._sample({
+            "kind": "model_timings",
+            "reason": reason,
+            "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
+            **measured,
+        })
+        return measured
 
     def record_decision(
         self,
@@ -275,6 +395,101 @@ class InterpretationTelemetry:
             "normalized": normalized,
         })
 
+    # -- per-request timing ----------------------------------------------------
+
+    @contextmanager
+    def stage(self, name: str) -> Iterator[None]:
+        """Time one stage of a request, whether or not a request is being traced.
+
+        Usable with no trace open (a CLI call, a background sweep): the aggregate
+        is always updated, and the per-request row is updated when there is one.
+        """
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.record_stage(name, time.perf_counter() - started)
+
+    def record_stage(self, stage: str, seconds: float) -> None:
+        """Record one stage's duration."""
+        elapsed = max(0.0, float(seconds))
+        samples = self._stats.stages.setdefault(str(stage), [])
+        samples.append(elapsed)
+        del samples[:-_MAX_SAMPLES]
+        trace = _active_trace.get()
+        if trace is not None:
+            trace.record(str(stage), elapsed)
+
+    def begin_request(self, *, ram_before: int | None = None) -> _RequestTrace:
+        """Open a trace for the request about to be served.
+
+        ``ram_before`` is measured by the CALLER (it owns the hardware monitor)
+        and passed in, so this module never grows a dependency on the machine.
+
+        A trace left open by a previous request is filed as a FAILURE first. A
+        request that never reached its own reporting point produced no response,
+        and writing it down keeps the request count equal to the number of
+        requests — which is the only thing that makes the averages mean
+        anything.
+        """
+        dangling = _active_trace.get()
+        if dangling is not None:
+            self.end_request(dangling, success=False)
+        trace = _RequestTrace(started=time.perf_counter(), ram_before=ram_before)
+        _active_trace.set(trace)
+        return trace
+
+    def end_request(
+        self,
+        trace: _RequestTrace,
+        *,
+        ram_after: int | None = None,
+        model: str = "",
+        provider: str = "",
+        fast_path: bool = False,
+        success: bool | None = None,
+    ) -> dict[str, Any]:
+        """Close a trace and record the request as one row.
+
+        The row carries what the specification asks a request to be judged by:
+        where the time went, which model and provider were selected, whether the
+        model was needed at all, the outcome, and how much memory the request
+        moved. It carries NO chain of thought and no prompt text — durations and
+        identifiers only, because this surface is reachable over HTTP.
+        """
+        if trace.closed:
+            return {}  # reported once, and the first report is the true one
+        trace.closed = True
+        elapsed_ms = max(0.0, (time.perf_counter() - trace.started) * 1000.0)
+        _active_trace.set(None)
+        self._stats.totals_ms.append(elapsed_ms)
+        del self._stats.totals_ms[:-_MAX_SAMPLES]
+        if fast_path:
+            self._stats.fast_paths += 1
+        delta: int | None = None
+        if trace.ram_before is not None and ram_after is not None:
+            delta = int(ram_after) - int(trace.ram_before)
+            self._stats.ram_deltas.append(delta)
+            del self._stats.ram_deltas[:-_MAX_SAMPLES]
+        row: dict[str, Any] = {
+            "total_ms": round(elapsed_ms, 3),
+            "stages_ms": {
+                name: round(seconds * 1000.0, 3) for name, seconds in trace.stages.items()
+            },
+            "model": model,
+            "provider": provider,
+            "fast_path": bool(fast_path),
+            "ram_before_bytes": trace.ram_before,
+            "ram_after_bytes": ram_after,
+            "ram_delta_bytes": delta,
+            "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
+        }
+        if success is not None:
+            row["success"] = bool(success)
+        self._stats.requests.append(row)
+        del self._stats.requests[:-_MAX_SAMPLES]
+        return row
+
     # -- read surfaces (self-improvement feed) ---------------------------------
 
     def to_dict(self) -> dict[str, Any]:
@@ -302,6 +517,10 @@ class InterpretationTelemetry:
                 for name, values in s.model_timings.items()
                 if values
             },
+            # Which model calls produced those measurements. Separate from the
+            # escalation count on purpose: a chat answer reporting its own
+            # first-token latency is not an escalation.
+            "model_timing_calls": dict(s.model_timing_sources.most_common()),
             "outcomes": dict(s.outcomes.most_common()),
             "decisions": dict(s.decisions.most_common()),
             "decision_providers": dict(s.decision_providers.most_common()),
@@ -310,6 +529,31 @@ class InterpretationTelemetry:
             "unknown_intents": s.unknown,
             "failed_entity_resolutions": s.failed_entities,
             "clarification_rate": self._rate(s.clarifications),
+            # Where the time went, per stage, and the request as a whole. A stage
+            # that never ran reports count 0 instead of a zero-millisecond
+            # average, so "not reached" and "instant" stay distinguishable.
+            "stages_ms": {
+                name: _latency_block(values) for name, values in sorted(s.stages.items())
+            },
+            "requests": {
+                "count": len(s.requests),
+                "fast_paths": s.fast_paths,
+                "fast_path_rate": (
+                    round(s.fast_paths / len(s.requests), 3) if s.requests else 0.0
+                ),
+                "total_ms": _latency_block(s.totals_ms),
+                "ram_delta_bytes": {
+                    "count": len(s.ram_deltas),
+                    "avg": (
+                        int(sum(s.ram_deltas) / len(s.ram_deltas))
+                        if s.ram_deltas
+                        else None
+                    ),
+                    "min": min(s.ram_deltas) if s.ram_deltas else None,
+                    "max": max(s.ram_deltas) if s.ram_deltas else None,
+                },
+                "recent": list(s.requests[-10:]),
+            },
             "recent_samples": list(s.samples[-self._max_samples:]),
         }
 
@@ -323,25 +567,31 @@ class InterpretationTelemetry:
         rate = self._rate(s.clarifications)
         if rate > 0.3:
             findings.append(
-                f"High clarification rate ({rate:.0%}): consider adding intent rules or learned variants."
+                f"High clarification rate ({rate:.0%}): consider adding intent "
+                "rules or learned variants."
             )
         if s.unknown > 0:
             findings.append(
-                f"{s.unknown} input(s) resolved to no known intent — review recent samples for a new rule."
+                f"{s.unknown} input(s) resolved to no known intent — review recent "
+                "samples for a new rule."
             )
         if s.failed_entities > 0:
             findings.append(
-                f"{s.failed_entities} entity resolution(s) failed — improve context tracking or ask narrower questions."
+                f"{s.failed_entities} entity resolution(s) failed — improve context "
+                "tracking or ask narrower questions."
             )
         fuzzy = s.strategies.get("fuzzy", 0)
-        if fuzzy > sum(s.resolved.values()) * 0.25:
+        resolved = sum(s.resolved.values())
+        if fuzzy > resolved * 0.25:
             findings.append(
-                f"Fuzzy matching dominates ({fuzzy} of {sum(s.resolved.values())}) — add canonical phrasings to the registry."
+                f"Fuzzy matching dominates ({fuzzy} of {resolved}) — add canonical "
+                "phrasings to the registry."
             )
         escalations = sum(s.escalations.values())
         if total and escalations / total > 0.3:
             findings.append(
-                f"Understanding escalates to a language model for {escalations / total:.0%} of requests — "
+                "Understanding escalates to a language model for "
+                f"{escalations / total:.0%} of requests — "
                 "add intent rules or exemplars for the frequent phrasings."
             )
         if s.decision_fallbacks:
@@ -354,15 +604,16 @@ class InterpretationTelemetry:
             p95 = _percentile(s.latency_ms, 0.95)
             if p95 > 50.0:
                 findings.append(
-                    f"Understanding latency p95 is {p95:.0f} ms (avg {avg:.0f} ms) — check whether a "
-                    "model call is happening on the hot path."
+                    f"Understanding latency p95 is {p95:.0f} ms (avg {avg:.0f} ms) — "
+                    "check whether a model call is happening on the hot path."
                 )
         return findings
 
     # -- internals ---------------------------------------------------------------
 
     def _rate(self, count: int) -> float:
-        total = sum(self._stats.resolved.values()) + self._stats.clarifications + self._stats.unknown
+        stats = self._stats
+        total = sum(stats.resolved.values()) + stats.clarifications + stats.unknown
         return count / total if total else 0.0
 
     def _sample(self, entry: dict[str, Any]) -> None:

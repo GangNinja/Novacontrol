@@ -31,12 +31,17 @@ from novacontrol.integrations.llm import (
     _OLLAMA_MEMORY_HEADROOM_BYTES,
     detect_ollama,
     ollama_available_memory_bytes,
+    ollama_model_capabilities,
     ollama_model_size_bytes,
     ollama_models,
     ollama_resident_models,
     unload_ollama_model,
     warm_ollama_model,
 )
+
+
+#: How long the runtime is given to describe one model's capabilities.
+_CAPABILITY_PROBE_TIMEOUT = 0.5
 
 
 class ModelBackend(Protocol):
@@ -66,6 +71,10 @@ class ModelBackend(Protocol):
 
     def model_size_bytes(self, model: str) -> int | None:
         """A model's footprint — resident when loaded, else on disk."""
+        ...  # pragma: no cover - protocol
+
+    def capabilities(self, model: str) -> tuple[str, ...] | None:
+        """The runtime's own capability words for a model, or ``None``."""
         ...  # pragma: no cover - protocol
 
 
@@ -99,6 +108,25 @@ class OllamaBackend:
 
     def model_size_bytes(self, model: str) -> int | None:
         return ollama_model_size_bytes(model, self.base_url)
+
+    def capabilities(self, model: str) -> tuple[str, ...] | None:
+        """What the runtime says this model can do (``None`` = it did not say).
+
+        ``/api/show`` is the one authoritative capability source available: a
+        name is a guess and a config file is a claim, while this is the runtime
+        reporting what the weights accept. ``None`` — unreachable, not pulled, or
+        an older build with no capability metadata — is deliberately distinct
+        from an empty answer, so a caller keeps its own evidence instead of
+        being told the model can do nothing.
+        """
+        # A short timeout on purpose: this is asked once per installed model and
+        # the answer is only ever an IMPROVEMENT on what is already declared, so
+        # a runtime that is slow to describe its models must not be allowed to
+        # hold up anything. (``ollama_models`` keeps the same discipline.)
+        reported = ollama_model_capabilities(
+            model, self.base_url, timeout=_CAPABILITY_PROBE_TIMEOUT
+        )
+        return None if reported is None else tuple(sorted(reported))
 
 
 @dataclass(frozen=True, slots=True)

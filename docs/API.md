@@ -13,7 +13,7 @@ The Phase 12 API subsystem provides REST and WebSocket entrypoints through FastA
 - `GET /system/telemetry`: Live machine telemetry for the Command Center (CPU, memory, storage, GPU, network, battery, temperature). *(frontend: web panel `renderTelemetry`)*
 - `GET /system/harden`: Release hardening report. *(frontend: web panel `renderHealth`)*
 - `GET /system/package`: Runtime package manifest. *(frontend: web panel `renderGeneric`)*
-- `POST /ask`: Route a natural-language request through NovaControl. *(frontend: web panel `renderChatResult`)*
+- `POST /ask`: Route a natural-language request through NovaControl; an optional `image` path attaches a picture for the vision pipeline to read. *(frontend: web panel `renderChatResult`)*
 - `POST /brain/mode`: Switch the chat brain between auto, llm, scratch, and cloud. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /brain/mode`: Inspect the active brain mode and provider. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /brain/cloud/presets`: List cloud LLM provider presets (no secrets). *(frontend: no web panel - API/CLI or infrastructure)*

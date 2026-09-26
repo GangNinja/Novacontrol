@@ -142,6 +142,45 @@ class VisionController:
 
     # -- perception ------------------------------------------------------------
 
+    async def capture_screen(self, *, save_path: str = "vision_screen.png") -> dict[str, Any]:
+        """Capture the screen, and nothing else.
+
+        Extracted from ``describe_screen`` so the Phase 6 pipeline can capture
+        through the SAME approval-gated path and then hand the file to the
+        vision manager, instead of having two ways to take a screenshot. The
+        screenshot runs under the auto-approved gateway: the Describe Screen
+        click (or authenticated API call) is the approval, and a capture is
+        read-only toward the desktop.
+        """
+        from novacontrol.application_helpers import ApprovedApprovalGateway
+        from novacontrol.core.security import DenyByDefaultApprovalGateway
+        from novacontrol.desktop.models import DesktopAction, DesktopActionType
+
+        action = DesktopAction(
+            type=DesktopActionType.TAKE_SCREENSHOT,
+            target="screenshot",
+            description="Capture the current screen for vision analysis.",
+            parameters={"save_path": save_path},
+        )
+        self.desktop.approval_gateway = ApprovedApprovalGateway()
+        try:
+            result = await self.desktop.execute_action(action)
+        finally:
+            self.desktop.approval_gateway = DenyByDefaultApprovalGateway()
+        output: dict[str, Any] = {
+            "screenshot": save_path,
+            "captured": result.status.value == "completed",
+            "vision_model": self.has_vision_model,
+        }
+        if result.status.value != "completed":
+            output["error"] = result.error
+            self.record_bug(
+                f"Screen capture failed: {result.error}",
+                where="vision: capture_screen",
+                details={"error": result.error},
+            )
+        return output
+
     async def describe_screen(self, *, question: str = "") -> dict[str, Any]:
         """Capture and understand the current screen.
 
@@ -154,33 +193,8 @@ class VisionController:
         the vision model so the pixels are read for the reason they were
         captured; a plain capture leaves it empty and gets the checklist.
         """
-        from novacontrol.application_helpers import ApprovedApprovalGateway
-        from novacontrol.core.security import DenyByDefaultApprovalGateway
-        from novacontrol.desktop.models import DesktopAction, DesktopActionType
-
-        action = DesktopAction(
-            type=DesktopActionType.TAKE_SCREENSHOT,
-            target="screenshot",
-            description="Capture the current screen for vision analysis.",
-            parameters={"save_path": "vision_screen.png"},
-        )
-        self.desktop.approval_gateway = ApprovedApprovalGateway()
-        try:
-            result = await self.desktop.execute_action(action)
-        finally:
-            self.desktop.approval_gateway = DenyByDefaultApprovalGateway()
-        output: dict[str, Any] = {
-            "screenshot": "vision_screen.png",
-            "captured": result.status.value == "completed",
-            "vision_model": self.has_vision_model,
-        }
-        if result.status.value != "completed":
-            output["error"] = result.error
-            self.record_bug(
-                f"Screen capture failed: {result.error}",
-                where="vision: describe_screen",
-                details={"error": result.error},
-            )
+        output = await self.capture_screen()
+        if not output.get("captured"):
             return output
 
         asked = " ".join(str(question or "").split())

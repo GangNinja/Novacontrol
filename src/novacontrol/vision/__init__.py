@@ -1,19 +1,57 @@
 """Vision subsystem."""
 
+from novacontrol.vision.manager import (
+    VisionManager,
+    classify_image_type,
+    extract_errors,
+    question_coverage,
+    read_json_object,
+    task_for_question,
+    text_answers_question,
+)
 from novacontrol.vision.models import (
     DetectedWindow,
     DocumentUnderstanding,
     ImageObservation,
     OcrResult,
     ScreenUnderstanding,
+    VisionElement,
+    VisionImageType,
+    VisionRequest,
+    VisionResult,
+    VisionTaskKind,
     VisionTaskType,
 )
 from novacontrol.vision.multimodal import MultimodalVisionProcessor
+from novacontrol.vision.ocr import (
+    ChainOcrEngine,
+    NullOcrEngine,
+    OcrEngine,
+    OcrWord,
+    TextFileOcrEngine,
+    WindowsOcrEngine,
+    default_ocr_engine,
+    group_lines,
+)
 from novacontrol.vision.processors import (
     BasicDocumentUnderstandingProcessor,
     BasicImageUnderstandingProcessor,
     BasicScreenUnderstandingProcessor,
     VisionProcessor,
+)
+from novacontrol.vision.proposals import (
+    COMPUTER_USE_PIPELINE,
+    VisionActionProposal,
+    pipeline_description,
+    propose_click,
+)
+from novacontrol.vision.providers import (
+    CompletionVisionProvider,
+    NullVisionProvider,
+    VisionProvider,
+    VisionProviderError,
+    build_vision_provider,
+    provider_status,
 )
 from novacontrol.vision.runtime import VisionModule
 
@@ -21,13 +59,43 @@ __all__ = [
     "BasicDocumentUnderstandingProcessor",
     "BasicImageUnderstandingProcessor",
     "BasicScreenUnderstandingProcessor",
+    "COMPUTER_USE_PIPELINE",
+    "ChainOcrEngine",
+    "CompletionVisionProvider",
     "DetectedWindow",
     "DocumentUnderstanding",
     "ImageObservation",
     "MultimodalVisionProcessor",
+    "NullOcrEngine",
+    "NullVisionProvider",
+    "OcrEngine",
     "OcrResult",
+    "OcrWord",
     "ScreenUnderstanding",
+    "TextFileOcrEngine",
+    "VisionActionProposal",
+    "VisionElement",
+    "VisionImageType",
+    "VisionManager",
     "VisionModule",
     "VisionProcessor",
+    "VisionProvider",
+    "VisionProviderError",
+    "VisionRequest",
+    "VisionResult",
+    "VisionTaskKind",
     "VisionTaskType",
+    "WindowsOcrEngine",
+    "build_vision_provider",
+    "classify_image_type",
+    "default_ocr_engine",
+    "extract_errors",
+    "group_lines",
+    "pipeline_description",
+    "propose_click",
+    "provider_status",
+    "question_coverage",
+    "read_json_object",
+    "task_for_question",
+    "text_answers_question",
 ]

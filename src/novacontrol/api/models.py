@@ -17,13 +17,25 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 
 class AskRequest(BaseModel):
-    """POST /ask — one natural-language request."""
+    """POST /ask — one natural-language request, optionally with a picture.
+
+    ``image`` is a path to a picture that travels WITH the request (a file the
+    client attached), which is a different thing from asking for the screen: it
+    makes the request need eyes — ``requires_vision`` — and the vision pipeline
+    reads THAT image rather than capturing the desktop.
+    """
 
     model_config = ConfigDict(
-        json_schema_extra={"examples": [{"request": "open chrome"}]}
+        json_schema_extra={
+            "examples": [
+                {"request": "open chrome"},
+                {"request": "what is this error?", "image": "captures/trace.png"},
+            ]
+        }
     )
 
     request: str
+    image: str = ""
 
     @field_validator("request")
     @classmethod
@@ -31,6 +43,11 @@ class AskRequest(BaseModel):
         if not value.strip():
             raise ValueError("request must not be empty or whitespace")
         return value
+
+    @field_validator("image")
+    @classmethod
+    def _image_is_a_path_or_nothing(cls, value: str) -> str:
+        return value.strip()
 
 
 class BrainDecideRequest(BaseModel):
@@ -126,7 +143,13 @@ class ApiSurface:
                 ApiRoute("GET", "/system/telemetry", "Live machine telemetry for the Command Center (CPU, memory, storage, GPU, network, battery, temperature)."),
                 ApiRoute("GET", "/system/harden", "Release hardening report."),
                 ApiRoute("GET", "/system/package", "Runtime package manifest."),
-                ApiRoute("POST", "/ask", "Route a natural-language request through NovaControl.", authenticated=True),
+                ApiRoute(
+                    "POST",
+                    "/ask",
+                    "Route a natural-language request through NovaControl; an optional `image` path "
+                    "attaches a picture for the vision pipeline to read.",
+                    authenticated=True,
+                ),
                 ApiRoute("POST", "/brain/mode", "Switch the chat brain between auto, llm, scratch, and cloud.", authenticated=True),
                 ApiRoute("GET", "/brain/mode", "Inspect the active brain mode and provider.", authenticated=True),
                 ApiRoute("GET", "/brain/cloud/presets", "List cloud LLM provider presets (no secrets).", authenticated=True),

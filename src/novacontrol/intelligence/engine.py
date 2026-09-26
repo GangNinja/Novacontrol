@@ -101,6 +101,28 @@ _VISION_VERB = re.compile(
     r"tell me what|what is (?:on|in)|what's (?:on|in)|whats (?:on|in))\b",
     re.IGNORECASE,
 )
+# The subject-and-verb pair above catches a request that NAMES a visual source.
+# People asking about what is on their screen usually do not: "what is this
+# error?" and "where is the login button?" both point at a picture without ever
+# saying the word. The two patterns below are that pointer — an asked question
+# about a SPECIFIC visible thing — and they require the question form so a
+# coding request ("fix this error") is not read as a request about a picture.
+_VISION_QUESTION = re.compile(
+    r"\b(?:what|why|where|how|which|who|explain|describe|read|tell me|show)"
+    r"\b",
+    re.IGNORECASE,
+)
+_VISION_POINTED = re.compile(
+    r"\b(?:this|that|these|those)\s+(?:error|errors|message|warning|dialog"
+    r"|popup|button|icon|window|page|form|field|menu|image|picture|screenshot"
+    r"|text|label|box|list|table|chart|screen|toolbar|panel|tab)\b",
+    re.IGNORECASE,
+)
+_VISION_LOCATE = re.compile(
+    r"\b(?:where|find|locate)\b[^.!?]{0,40}?\b(?:button|icon|menu|field"
+    r"|link|tab|checkbox|input|toolbar|dropdown|search bar|text box)\b",
+    re.IGNORECASE,
+)
 
 # Intents answered from live sources rather than from the local model.
 _WEB_INTENTS = frozenset(
@@ -420,7 +442,20 @@ class GlobalInputIntelligence:
 
     # -- public API -----------------------------------------------------------
 
-    def understand(self, raw: str) -> UnderstandResult:
+    def understand(self, raw: str, *, has_image: bool = False) -> UnderstandResult:
+        """Understand a request — optionally one that arrived WITH an image.
+
+        ``has_image`` is the caller saying a picture travelled with the text,
+        which is evidence the words cannot carry: *"what is this?"* is a
+        question about a screenshot when one is attached and a question about
+        nothing in particular when none is. The flag can only ADD the vision
+        requirement, never remove one, so a caller cannot phrase its way out of
+        needing eyes.
+        """
+        result = self._understand_text(raw)
+        return self._apply_image_requirement(result) if has_image else result
+
+    def _understand_text(self, raw: str) -> UnderstandResult:
         started = time.perf_counter()
         self._reset_layer_costs()
         raw_text = str(raw or "").strip()
@@ -536,7 +571,16 @@ class GlobalInputIntelligence:
             return self._finalize(intent, "learned_variant", started)
 
         # CONTEXTUAL: bare entity / reference / continuation input.
-        contextual = self._understand_contextual(raw_text, normalized)
+        # CONTEXT layer, timed as its own stage because the specification asks
+        # for context latency separately from understanding: this is the one step
+        # that consults what is already known (the last application, the active
+        # project, a pending intent) to decide whether the sentence can be
+        # resolved from state rather than from its own words. Recorded through the
+        # same telemetry the request trace is open on, so the figure lands in the
+        # per-request row and in the aggregate beside every other stage — instead
+        # of the stage being named in the readout and permanently empty.
+        with self.telemetry.stage("context"):
+            contextual = self._understand_contextual(raw_text, normalized)
         if contextual is not None:
             resolved = self._post_process(contextual.intent)
             return self._finalize(resolved, contextual.strategy, started, learned_phrase=normalized)
@@ -1096,7 +1140,14 @@ class GlobalInputIntelligence:
             return ""
         return definition.tools[0]
 
-    async def understand_async(self, raw: str) -> UnderstandResult:
+    async def understand_async(
+        self, raw: str, *, has_image: bool = False
+    ) -> UnderstandResult:
+        """Async twin of :meth:`understand`, image flag included."""
+        result = await self._understand_text_async(raw)
+        return self._apply_image_requirement(result) if has_image else result
+
+    async def _understand_text_async(self, raw: str) -> UnderstandResult:
         """Async understand for event-loop contexts.
 
         Same layered flow as :meth:`understand`, but the semantic fallback can
@@ -1526,17 +1577,51 @@ class GlobalInputIntelligence:
         entities = {k: v for k, v in entities.items() if v not in (None, "")}
         return intent.with_(entities=entities)
 
-    def _apply_requirements(self, intent: StructuredIntent) -> StructuredIntent:
+    def _apply_image_requirement(self, result: UnderstandResult) -> UnderstandResult:
+        """An image came with the request, so the request needs eyes.
+
+        Applied AFTER reading rather than folded into it, because the words are
+        often enough to understand the request and never enough to establish
+        that it was about a picture. The route is RE-DERIVED from the widened
+        requirement instead of patched onto the old one, so the auditable "why
+        this route" stays true of the intent it describes.
+        """
+        intent = result.intent.with_(requires_vision=True)
+        intent = self._apply_route(intent, steps=max(1, len(intent.actions)))
+        return UnderstandResult(
+            intent=intent,
+            strategy=result.strategy,
+            alternatives=result.alternatives,
+            intents=result.intents,
+        )
+
+    def _apply_requirements(
+        self, intent: StructuredIntent, *, has_image: bool = False
+    ) -> StructuredIntent:
         """Derive what the request NEEDS — from the capability registry.
 
         The registry is the single source of truth for what a capability
         requires and how risky it is, so these flags cannot drift away from
         what the planner and the approval layer believe.
+
+        ``has_image`` is the caller stating that a picture arrived with the
+        request. It is a fact rather than an inference, so it decides on its
+        own; the wording patterns below exist for callers that have no image to
+        point at and must read the sentence instead.
         """
         capability = self.capabilities.best(intent.intent)
-        requires_vision = intent.intent is IntentName.SCREENSHOT_ANALYSIS or (
-            bool(_VISION_SUBJECT.search(intent.normalized_input))
-            and bool(_VISION_VERB.search(intent.normalized_input))
+        normalized = intent.normalized_input
+        asked_about_something_visible = bool(_VISION_QUESTION.search(normalized)) and (
+            bool(_VISION_POINTED.search(normalized)) or bool(_VISION_LOCATE.search(normalized))
+        )
+        requires_vision = (
+            has_image
+            or intent.intent is IntentName.SCREENSHOT_ANALYSIS
+            or (
+                bool(_VISION_SUBJECT.search(normalized))
+                and bool(_VISION_VERB.search(normalized))
+            )
+            or asked_about_something_visible
         )
         # Phrase hints ("latest", "online") only mean "consult the web" for a
         # KNOWLEDGE intent. "am I online" is a network reading, not a search.

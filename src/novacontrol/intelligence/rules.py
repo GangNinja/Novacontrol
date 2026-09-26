@@ -81,7 +81,19 @@ def default_rules() -> tuple[IntentRule, ...]:
                       "available memory", "what is using my ram", "what's using my ram",
                       "what is consuming my ram", "what's consuming my ram", "using my ram",
                       "using my memory", "eat my memory", "eating my memory", "memory almost full",
-                      "out of memory", "most ram", "most memory"),
+                      "out of memory", "most ram", "most memory",
+                      # "What's using so much RAM?" is the shape a person actually
+                      # uses, and it is also the one every general answer rule
+                      # matches ("what is using …") and turns into a web research
+                      # question. The reading is a local fact, so it has to win
+                      # here, where the specific rule sits above the general one.
+                      "using so much ram", "using so much memory", "using so much of my memory",
+                      "using all my memory", "using all my ram",
+                      "using up my memory", "using up my ram",
+                      "consuming most of my memory", "consuming most of my ram",
+                      "consuming the most memory", "consuming the most ram",
+                      "using the most memory", "using the most ram",
+                      "chewing up my memory", "chewing up my ram", "hogging my memory"),
             confidence=0.92,
         ),
         IntentRule(

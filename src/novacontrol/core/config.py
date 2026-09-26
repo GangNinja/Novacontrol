@@ -178,6 +178,157 @@ class PlanningSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class VisionSettings:
+    """Which vision model looks at pictures, and when it is consulted at all.
+
+    The point of these settings is that the vision model is a PLUG, not a
+    dependency: NovaControl must never be built around one VLM. ``provider``
+    says whether a vision model may be used — ``auto`` (the default) uses
+    whatever is wired, ``none`` refuses one outright and answers from OCR alone,
+    which is the honest setting for a deployment that must not run one.
+
+    ``model`` pins a LOCAL model by name (an Ollama vision build such as
+    ``qwen2.5vl:3b``). Empty means "whatever is configured elsewhere" — the
+    dedicated vision model chosen in the Vision panel, or the brain's own
+    provider. The order of preference is deliberate: an operator's explicit
+    choice wins over this file, and this file wins over the chat brain, because
+    the chat brain is usually a text model that cannot see.
+
+    ``prefer_ocr`` keeps the cheap path first (see ``vision/manager.py``): read
+    the image, answer from the text when the text is enough, and only then pay
+    for a model call.
+    """
+
+    provider: str = "auto"
+    model: str = ""
+    prefer_ocr: bool = True
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "model": self.model,
+            "prefer_ocr": self.prefer_ocr,
+        }
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> VisionSettings:
+        defaults = cls()
+        provider = str(data.get("provider", defaults.provider) or defaults.provider).strip().lower()
+        if provider not in _VISION_PROVIDERS:
+            # An unknown provider keeps the default rather than failing boot:
+            # a typo must not be the reason the vision layer is unreachable.
+            provider = defaults.provider
+        return cls(
+            provider=provider,
+            model=str(data.get("model", defaults.model) or "").strip(),
+            prefer_ocr=_bool_setting(data, "prefer_ocr", defaults.prefer_ocr),
+        )
+
+
+#: The provider vocabulary. Small on purpose: the vision model itself is
+#: configured where it lives (the Vision panel / the persisted model store), and
+#: these only say whether one may be used.
+_VISION_PROVIDERS = frozenset({"auto", "none"})
+
+#: Headroom ceiling for a model load, in megabytes. Half of this machine's RAM
+#: is the largest reserve that still leaves the desktop room to run; above that
+#: the setting is not a reserve, it is a refusal to load anything.
+MAX_MODEL_HEADROOM_MB = 8192
+
+#: The longest a model may be kept warm before idle release, in seconds. One
+#: hour: past that the model has been idle long enough that the reload is the
+#: smaller cost, on a machine whose whole problem is memory pressure.
+MAX_MODEL_KEEP_WARM_SECONDS = 3600
+
+
+@dataclass(frozen=True, slots=True)
+class ModelSettings:
+    """How models are kept resident, and what the operator declares about them.
+
+    Three knobs, each answering a question the model manager cannot answer for
+    itself, and each defaulting to the RAM-conscious end of its range:
+
+    ``keep_alive`` is the lifecycle POLICY — ``immediate`` (release as soon as
+    the operation returns), ``warm`` (hold it, release after
+    ``keep_warm_seconds`` idle), ``while_active`` (hold while a task that
+    selected it runs), ``never``. The vocabulary and its meaning live in
+    ``models/manager.py``; the value is carried as a string and validated there,
+    so there is one list of policy names rather than two that can drift. Left
+    unrecognised it keeps the default and reports the miss (see
+    ``KeepAliveSettings.honoured``) instead of quietly doing something else.
+
+    ``keep_warm_seconds`` defaults to 0, which is NOT "release immediately" —
+    it means "do not override the runtime's own residency", because that number
+    is the runtime's to choose and inventing one here would be a guess wearing a
+    configuration's clothes.
+
+    ``headroom_mb`` is how much memory a load must leave free. It is in
+    megabytes rather than bytes because this is a human decision, and clamped to
+    :data:`MAX_MODEL_HEADROOM_MB` because an unbounded reserve is an unbounded
+    refusal to load.
+
+    ``declarations`` lets configuration describe a model this build has never
+    heard of — its capabilities, its context window, its size — so a local build
+    is selectable by what it can do without editing Python. Each entry is a
+    mapping in :class:`~novacontrol.models.profiles.ModelProfile` shape.
+    """
+
+    keep_alive: str = "warm"
+    keep_warm_seconds: int = 0
+    headroom_mb: int = 512
+    declarations: tuple[Mapping[str, Any], ...] = ()
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "keep_alive": self.keep_alive,
+            "keep_warm_seconds": self.keep_warm_seconds,
+            "headroom_mb": self.headroom_mb,
+            "declarations": [dict(declaration) for declaration in self.declarations],
+        }
+
+    @property
+    def headroom_bytes(self) -> int:
+        return max(0, int(self.headroom_mb)) * 1024 * 1024
+
+    def keep_alive_settings(self) -> dict[str, Any]:
+        """The mapping ``models.manager.KeepAliveSettings`` expects.
+
+        ``idle_seconds`` is only meaningful for the ``warm`` policy, so it is
+        passed only there: handing a duration to ``immediate`` would suggest a
+        delay that policy does not have.
+        """
+        settings: dict[str, Any] = {"policy": self.keep_alive}
+        if self.keep_alive.strip().lower().replace("-", "_") == "warm":
+            settings["idle_seconds"] = self.keep_warm_seconds
+        return settings
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> ModelSettings:
+        defaults = cls()
+        raw = data.get("declarations", ())
+        declarations: tuple[Mapping[str, Any], ...] = ()
+        if isinstance(raw, Mapping):
+            declarations = (raw,)
+        elif isinstance(raw, (list, tuple)):
+            declarations = tuple(item for item in raw if isinstance(item, Mapping))
+        return cls(
+            keep_alive=str(data.get("keep_alive", defaults.keep_alive) or defaults.keep_alive)
+            .strip()
+            .lower(),
+            keep_warm_seconds=_count_setting(
+                data,
+                "keep_warm_seconds",
+                defaults.keep_warm_seconds,
+                maximum=MAX_MODEL_KEEP_WARM_SECONDS,
+            ),
+            headroom_mb=_count_setting(
+                data, "headroom_mb", defaults.headroom_mb, maximum=MAX_MODEL_HEADROOM_MB
+            ),
+            declarations=declarations,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ModuleSettings:
     enabled: bool = True
     options: Mapping[str, Any] = field(default_factory=dict)
@@ -192,6 +343,8 @@ class NovaControlConfig:
     nlu: NluSettings = field(default_factory=NluSettings)
     decision: DecisionSettings = field(default_factory=DecisionSettings)
     planning: PlanningSettings = field(default_factory=PlanningSettings)
+    vision: VisionSettings = field(default_factory=VisionSettings)
+    models: ModelSettings = field(default_factory=ModelSettings)
     modules: Mapping[str, ModuleSettings] = field(default_factory=dict)
 
     @classmethod
@@ -218,6 +371,8 @@ class NovaControlConfig:
             nlu=NluSettings.from_mapping(_mapping(data.get("nlu", {}))),
             decision=DecisionSettings.from_mapping(_mapping(data.get("decision", {}))),
             planning=PlanningSettings.from_mapping(_mapping(data.get("planning", {}))),
+            vision=VisionSettings.from_mapping(_mapping(data.get("vision", {}))),
+            models=ModelSettings.from_mapping(_mapping(data.get("models", {}))),
             modules=modules,
         )
 
@@ -271,7 +426,8 @@ class NovaControlConfig:
                     os.getenv("NOVACONTROL_NLU_FAST_CONFIDENCE"), default=base.nlu.fast_confidence
                 ),
                 verify_confidence=_parse_float(
-                    os.getenv("NOVACONTROL_NLU_VERIFY_CONFIDENCE"), default=base.nlu.verify_confidence
+                    os.getenv("NOVACONTROL_NLU_VERIFY_CONFIDENCE"),
+                    default=base.nlu.verify_confidence,
                 ),
                 semantic_confidence=_parse_float(
                     os.getenv("NOVACONTROL_NLU_SEMANTIC_CONFIDENCE"),
@@ -284,7 +440,8 @@ class NovaControlConfig:
                     os.getenv("NOVACONTROL_NLU_LEXICAL_MATCHING"), default=base.nlu.lexical_matching
                 ),
                 semantic_matching=_parse_bool(
-                    os.getenv("NOVACONTROL_NLU_SEMANTIC_MATCHING"), default=base.nlu.semantic_matching
+                    os.getenv("NOVACONTROL_NLU_SEMANTIC_MATCHING"),
+                    default=base.nlu.semantic_matching,
                 ),
             ),
             decision=replace(
@@ -321,6 +478,46 @@ class NovaControlConfig:
                     os.getenv("NOVACONTROL_PLANNING_MAX_STEP_ATTEMPTS"),
                     base.planning.max_step_attempts,
                     maximum=MAX_PLAN_ATTEMPTS,
+                ),
+            ),
+            models=replace(
+                base.models,
+                # The policy NAME is not validated here: the vocabulary lives in
+                # models/manager.py, and an unrecognised value keeps the default
+                # while being reported as unhonoured rather than silently
+                # becoming "warm".
+                keep_alive=(
+                    os.getenv(
+                        "NOVACONTROL_MODEL_KEEP_ALIVE", base.models.keep_alive
+                    ).strip().lower()
+                    or base.models.keep_alive
+                ),
+                keep_warm_seconds=_count_value(
+                    os.getenv("NOVACONTROL_MODEL_KEEP_WARM_SECONDS"),
+                    base.models.keep_warm_seconds,
+                    maximum=MAX_MODEL_KEEP_WARM_SECONDS,
+                ),
+                headroom_mb=_count_value(
+                    os.getenv("NOVACONTROL_MODEL_HEADROOM_MB"),
+                    base.models.headroom_mb,
+                    maximum=MAX_MODEL_HEADROOM_MB,
+                ),
+            ),
+            vision=replace(
+                base.vision,
+                # "none" is a real answer here, so an unknown value must not
+                # silently become "auto": a deployment that switched the model
+                # off would otherwise get it back by typo.
+                provider=_vision_provider_setting(
+                    os.getenv("NOVACONTROL_VISION_PROVIDER"), base.vision.provider
+                ),
+                model=(
+                    os.getenv("NOVACONTROL_VISION_MODEL", base.vision.model).strip()
+                    or base.vision.model
+                ),
+                prefer_ocr=_parse_bool(
+                    os.getenv("NOVACONTROL_VISION_PREFER_OCR"),
+                    default=base.vision.prefer_ocr,
                 ),
             ),
         )
@@ -370,6 +567,14 @@ def _count_setting(data: Mapping[str, Any], key: str, default: int, *, maximum: 
     if parsed < 1:
         return default
     return min(parsed, maximum)
+
+
+def _vision_provider_setting(value: str | None, default: str) -> str:
+    """The configured vision provider, ignoring anything outside the vocabulary."""
+    if value is None:
+        return default
+    candidate = value.strip().lower()
+    return candidate if candidate in _VISION_PROVIDERS else default
 
 
 def _parse_float(value: str | None, *, default: float) -> float:

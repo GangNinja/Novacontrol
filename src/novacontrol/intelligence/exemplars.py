@@ -159,6 +159,10 @@ _EXEMPLARS: tuple[tuple[IntentName, tuple[str, ...]], ...] = (
             "is my memory almost full",
             "show applications using the most ram",
             "what is using all my memory",
+            "what's using so much ram",
+            "what is using so much of my memory",
+            "which programs are consuming most of my memory",
+            "what is chewing up my ram",
         ),
     ),
     (
