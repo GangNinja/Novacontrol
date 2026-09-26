@@ -140,6 +140,16 @@ class VerificationMethod(StrEnum):
     STATE_OBSERVED = "state_observed"
     #: A callable registered with the verifier, named by ``target``.
     CALLABLE = "callable"
+    #: Is the window/app actually open? "Open VS Code" is only done when the
+    #: window can be observed, which a successful launch call does not prove.
+    WINDOW_EXISTS = "window_exists"
+    #: Can the endpoint be reached? For anything that leaves the machine.
+    NETWORK_REACHABLE = "network_reachable"
+    #: What the tool itself REPORTED, read from its output. The weakest evidence
+    #: there is — a report is the claim under test — but it is the only thing
+    #: available for a tool whose effect is not observable from here, and it is
+    #: reported as a reported result rather than promoted to an observation.
+    RESULT_REPORTED = "result_reported"
 
 
 class VerificationStatus(StrEnum):
@@ -272,7 +282,17 @@ class VerificationSpec:
 
 @dataclass(frozen=True, slots=True)
 class VerificationResult:
-    """What the check actually found. Never rounded up."""
+    """What the check actually found. Never rounded up.
+
+    ``expectation``/``observed`` are the original pair and are unchanged; the
+    fields after ``evidence`` are the structured view of the same check, added
+    so a caller that needs to REPORT (a UI row, an audit line, a recovery
+    decision) does not have to parse prose back out of a reason string.
+
+    ``success`` is an alias of ``passed``/``verified`` on purpose, and it is
+    still only true for a definite PASS: an inconclusive result is a real
+    outcome, and rounding it up is the one thing this class exists to prevent.
+    """
 
     status: VerificationStatus
     method: VerificationMethod
@@ -280,15 +300,41 @@ class VerificationResult:
     observed: str = ""
     reason: str = ""
     evidence: Mapping[str, Any] = field(default_factory=dict)
+    #: WHICH verifier produced this (a method name, a strategy name, a tool's
+    #: own check). Empty for a result nobody has stamped, never guessed.
+    verifier: str = ""
+    #: What the check looked FOR, and what it FOUND, as values rather than as
+    #: the sentence in ``expectation``/``observed``.
+    expected_state: str = ""
+    actual_state: str = ""
+    #: How much the verdict may be relied on (0.0-1.0). An inconclusive result
+    #: carries 0.0 rather than "medium": a check that could not be made has no
+    #: confidence to report.
+    confidence: float = 0.0
+    #: The refusal text when the CHECK itself could not run (a probe that
+    #: raised, a malformed expectation). Distinct from a failed check.
+    error: str = ""
+    #: Anything else the check learned, for the report — never for the verdict.
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def passed(self) -> bool:
         return self.status is VerificationStatus.PASS
 
     @property
+    def success(self) -> bool:
+        """The specification's name for :attr:`passed` — still only a PASS."""
+        return self.status is VerificationStatus.PASS
+
+    @property
     def verified(self) -> bool:
         """True only for a definite pass: inconclusive is not a pass."""
         return self.status is VerificationStatus.PASS
+
+    def with_(self, **changes: Any) -> VerificationResult:
+        from dataclasses import replace
+
+        return replace(self, **changes)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -298,6 +344,13 @@ class VerificationResult:
             "observed": self.observed,
             "reason": self.reason,
             "evidence": dict(self.evidence),
+            "success": self.success,
+            "verifier": self.verifier,
+            "expected_state": self.expected_state,
+            "actual_state": self.actual_state,
+            "confidence": round(self.confidence, 3),
+            "error": self.error,
+            "metadata": dict(self.metadata),
         }
 
 

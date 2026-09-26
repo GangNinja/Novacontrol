@@ -1670,3 +1670,336 @@ added (the pre-existing baseline is untouched). Seven new tests:
 suite pins the named-close branch; and `test_planner_phase4.py` adds the four rules
 for command steps — refused without approval, runs and verifies with it, runs the
 located project's real suite, and never starts a process the caller did not approve.
+
+## 26. Phase 8: reliability, recovery and safety
+
+The staged build could decide, plan, select tools, look and load models. What it
+could not yet do was *stay honest under failure*: `VerificationResult` could not say
+who checked what, a plan step that named no check was reported unverified and left
+there, recovery had an advisor but no engine, task state was a status anything could
+overwrite, and permission checks lived in each caller. Phase 8 adds the four
+subsystems the specification asks for in a new `novacontrol/reliability/` package —
+and every one of them **extends an abstraction that already existed** rather than
+replacing it, which is why no call site anywhere had to change to keep working.
+
+**8.1 `VerificationEngine` subclasses `DeterministicVerifier`.** The seven methods
+already there (file, artifact, exit code, output, process, observed state, callable)
+are untouched; three were added — `WINDOW_EXISTS`, `NETWORK_REACHABLE`,
+`RESULT_REPORTED` — with the window and network probes injectable exactly like the
+process probe, and "cannot tell" where a probe is not wired. What the engine adds is
+the decision of *which* check applies, in order of authority: the step's own
+`verification` (never overridable), then a strategy registered for the TOOL, then the
+check the action implies (`write_file` + a path → the file exists; `open_application`
++ an application → the process is there; `run_command` → an exit code was reported),
+and SKIPPED rather than a manufactured pass when nothing applies.
+`VerificationResult` gained `success`, `verifier`, `expected_state`, `actual_state`,
+`confidence`, `error` and `metadata` **additively** (`to_dict` keeps every old key),
+stamped once at construction because a stamp cannot correct itself afterwards.
+Confidence is per evidence strength and is 0.0 for any unknown: a tool's own
+``success: true`` is the claim under test, so `RESULT_REPORTED` reads it and reports
+0.6, never as an observation. The application's `plan_verifier` is now the engine, so
+the existing `CALLABLE` checks still run and a step that named no check is checked
+against the state it claims to have changed: in the suite, that turns a write whose
+file is not there from UNVERIFIED into FAILED (`verification_failed`).
+
+**8.2 `RecoveryEngine` decides with the advisor that was already there.**
+`RecoveryAdvisor` keeps the rules; the engine adds analysis, alternatives,
+confirmation and a hard ceiling. The order is safety-first and non-negotiable:
+a destructive or external step STOPS whatever went wrong (checked before the denial
+rule, so "who could approve it" never becomes a route to repeating it); a denial asks
+a person when a confirmation channel exists and otherwise stops with "no one to ask";
+a registered or built-in alternative is offered **only** for a structural
+`MISSING_DEPENDENCY` — a transient failure needs the same step again, and rerouting a
+refused action would smuggle it past the decision that refused it — and a built-in is
+filtered against the LIVE tool registry, asked as a question because the registry is
+still empty at startup. Repairs come from `repair_parameters`, escalation is offered
+only where a target exists, and the attempt budget is the plan's `RetryPolicy`, whose
+own ceiling makes an unbounded loop unrepresentable. A run that could not be checked
+(or that attached no check at all) is reported **executed and unconfirmed** instead of
+being retried — the same reading the executor gives an unverified step — and
+`RecoveryPlan.as_decision()` converts a plan into the executor's own vocabulary, so
+the bridge to `WorkflowExecutor` is data rather than a second recovery loop.
+
+**8.3 `TaskStateMachine` makes the legal moves data.** Eleven states, an explicit
+`ALLOWED_TRANSITIONS` table, `FAILED`/`CANCELLED` reachable from every working state
+(a crash and a cancellation can happen at any point) and no transition out of a
+terminal one — which is what stops a cancelled task being marked COMPLETED.
+An illegal transition raises `InvalidTransitionError` naming both states and what WAS
+allowed, rather than overwriting. `TaskSnapshot` carries everything the specification
+lists (ids, parent, previous state, timestamps, current step, retry count, error,
+both request flags, metadata) and every change is announced to an injected observer —
+the seam Phase 9's event bus plugs into, kept as a parameter so this module needs no
+event system to be correct.
+
+**8.4 `TaskController`: cancellation is a request, not a kill.** Commands are matched
+as whole phrases, because substring matching on "stop" would make every request a way
+to kill the running job — "stop this task" cancels, "stop the music" is not a task
+command, and "status" is answered. A cancellation flags the task and is honoured at
+the next CHECKPOINT: a RUNNING task keeps the attempt in flight (half a write is worse
+than a whole one) while a PENDING or PAUSED one — nothing in flight — moves to
+CANCELLED at once, and an operation that genuinely supports interruption registers a
+cancel hook to be told. A pause sets the flag AND moves the state, because either one
+alone leaves a runner that ignores it looking busy; resuming releases the checkpoint,
+returns to the state that was interrupted rather than jumping to RUNNING, and reports
+the step it resumed from. Checkpoints survive both, which is what makes "resume from
+the correct place" true rather than aspirational.
+
+**8.5 `PermissionManager` is the one layer.** The vocabulary already existed
+(`core.security.RiskLevel` is the same four levels) and `ToolMetadata` already carried
+a risk and a permission set, so what was added is the arbitration and the missing
+declaration fields (`required_permission`, `requires_confirmation`, `reversible`,
+`destructive`, `external_side_effect`), folded through `merged()` so merged metadata
+takes the STRICTEST answer — one source calling an action irreversible is enough.
+Resolution is ordered and reports its source: a registered declaration, then the
+tool's own metadata, then the verb (`delete` → HIGH destructive, `send` → HIGH
+external, `purchase` → CRITICAL, `open`/`create`/`get` → LOW, `write`/`modify` →
+MEDIUM), then LOW. Irreversibility asks for a person on its own whatever the level
+says, because "low risk" is a claim about likelihood and `reversible` is a claim about
+whether a mistake can be undone. The destructiveness rows are checked first, so
+``delete_order`` is a delete and not an order to place. `ToolExecutor` gained an
+optional `risk` collaborator: with none it behaves exactly as before, and with one a
+HIGH-risk tool that declared no scopes is put to a person instead of running
+unannounced — the hole the centralized layer exists to close. The application wires
+it, and exposes `reliability_status()` so what can be checked, recovered, controlled
+and refused is readable rather than inferred.
+
+**Kept deliberately.** No new routes, no new event system, and both recovery engines
+remain: `agentcore.RecoveryEngine` diagnoses a failed AGENT ACTION against a fresh UI
+state, while the reliability one recovers a PLAN STEP under the plan's retry policy
+(imported under an alias in `application.py` so it cannot shadow the first). The
+window probe ships as "cannot tell", because enumerating windows belongs to the
+desktop layer that already does it; an installation that wants window verification
+injects a probe instead of this module shelling out to PowerShell on every check.
+
+**Also fixed on the way: the CI failure at `9bfe82b`.** The hosted run failed only in
+the pytest jobs, on `test_an_unreadable_attachment_refuses_instead_of_describing`. It
+was not flake: the test attached a missing file and expected the provider's wording
+``could not read an image at …``, which only the provider path produces. A machine
+with a vision model wired reaches it; the runner has none, so the refusal took the
+"no vision model is wired" branch and answered with `_no_text_reason()`. The refusal
+now names the file when the FILE cannot be read at all (checked before asking which
+engine is installed, with one shared wording from `unreadable_image_message`) and
+still reports a text gap when a readable image holds none — so the same attachment is
+described the same way on every host. Two tests were added (one pinning the CI
+condition by forcing the provider unavailable, one for the readable-but-empty case)
+and `test_no_ocr_and_no_model_reports_which_failure_it_was` now passes a real file,
+because that branch is about a file that was read.
+
+**Gates**: full suite **1667 passed / 12 skipped** (1671 subtests, 4:28); mypy clean in
+both platform views (**223 modules**); `docs/API.md` in sync; ruff clean on every file
+touched (no new findings). 71 new tests in `tests/test_reliability.py`, covering each
+clause of the phase's test list: successful and failed verification, retry, recovery,
+the retry limit, task state transitions, invalid transitions, pause, resume,
+cancellation, permission denial, confirmation requirement, destructive-action
+blocking, and backward compatibility (the plain verifier and the executor without the
+risk layer are asserted to behave exactly as before).
+
+## 27. Phase 8 verified against its own specification
+
+This audit asked a different question from the earlier phases. Not "is each clause
+implemented" — the clause tests above answer that — but "is it reachable from the
+thing a person runs". So every clause was driven through `NovaControlApplication`:
+the verifier the plan executor actually calls, the controller a typed "pause"
+reaches, the risk layer every tool passes through. Four defects fell out. Three were
+in this phase's own code; the fourth was a regression this phase's wiring introduced
+into a tool that had worked before. Each fix has a test that fails without it.
+
+**1. Cancelling a parked task crashed the runner.** A pause is honoured by *waiting*
+at the checkpoint until a resume releases it. A cancellation woke the same waiter,
+but moved the task to CANCELLED first — and the woken checkpoint then asked the
+machine to start running, which a terminal state refuses. The caller that had simply
+asked NovaControl to stop a paused task got
+`InvalidTransitionError: Task … cannot go from cancelled to running`, and a runner
+catching only `TaskCancelled` would have died instead of stopping. Reproduced first
+(hold a runner at its checkpoint, cancel, watch it raise), then fixed: the checkpoint
+re-checks after it is woken, raising `TaskCancelled` for a cancellation and returning
+without starting anything for a task that is already terminal. Nothing was in flight
+while the task was parked, so no cancellation hook runs — there is nothing to
+interrupt.
+
+**2. A resume reported a continuation that was not going to happen.** `cancel()` on a
+RUNNING task is a *request*: the run stops at its next checkpoint, by design. In the
+window before that checkpoint a `resume` answered "accepted — the task was not paused;
+it is still running", and then the task cancelled itself. The command now refuses and
+says which decision is pending: "Task has a cancellation pending, so it was not
+resumed; it will stop at its next checkpoint." A status readout that promises
+continuation for work that is already ending is the same small lie as reporting a
+success nobody observed.
+
+**3. A check that FAILED was reported as never having run.** In `_run_step` the
+failure path built its outcome without the verification, so a step whose check came
+back no reported `verification_result: "not_run"` — the one verdict this phase exists
+to make impossible to confuse with a pass. The last attempt's verification now travels
+with the failure (method, expectation, observed, reason, confidence and all), and is
+cleared by an attempt that raised, so a stale check from an earlier attempt is never
+presented as evidence about the attempt that actually failed. "A call is not a
+completion" is only a rule if the check that disproved it is visible in the report.
+
+**4. The risk layer denied a plain read.** `installed_applications` is declared
+`risk=LOW, read_only=True` in the shipped catalogue, and it was refused: the verb
+derivation read the tool's NAME as a verb, saw the letters of "install", and returned
+MEDIUM from the install/modify row — then, being the highest source, outranked the
+tool's own declaration. The executor's new risk collaborator put the tool to the
+approval gateway, which denies by default, so "list the applications installed on
+this machine" came back DENIED. Two pre-existing tests in `test_tool_discovery.py`
+caught it, which is exactly what backward compatibility means in practice. The verb is
+now read off the ACTION, and off the tool's name only when nothing declared the tool
+at all (an undeclared `wipe_disk` still derives HIGH). The rule this phase added — a
+tool's neutral metadata must not mask the danger of the single action being attempted
+— is unchanged: `file_manager` + `delete_file` still resolves HIGH and still refuses
+without approval.
+
+**What the audit confirmed, unchanged.** The specification's own example runs on the
+application's executor in all three readings: launch + process found → COMPLETED with
+`PROCESS_RUNNING` evidence; launch + process absent → FAILED with
+`VERIFICATION_FAILED`; no probe able to tell → UNVERIFIED, counted in
+`unverified_steps`, never rounded up. `verify_tool` checks a result with no plan step.
+A step's own check outranks a registered tool strategy. Recovery retries a transient
+failure until it works, never repeats a destructive step, respects the policy ceiling
+when asked for more, filters a built-in alternative against the LIVE registry (so a
+reroute into another missing tool is reported as "no different way" instead), and asks
+a person for a denial then stops when they say no. Pause holds a runner and does not
+let it walk on; resume continues from the checkpoint it held; cancellation raises
+`TaskCancelled`, keeps the history, and does not revive. The risk table in the
+specification holds row for row, and the approval gate that was already here still
+refuses an unapproved SYSTEM step without this phase routing around it.
+
+**Kept.** Nothing was removed to make any of this pass, and no default behaviour
+changed: a task with no cancellation pending resumes exactly as before, an undeclared
+tool name still derives its verb, and an executor with no risk layer still behaves as
+it always did. The one behavioural change is the fix above.
+
+**Gates**: full suite **1703 passed / 12 skipped** (1678 subtests, 4:50, up from the
+1667 in §26 — the two `test_tool_discovery.py` failures were the regression, and the
+rest is new coverage); mypy clean in both platform views (**223 modules**);
+`docs/API.md` in sync; ruff reports no new findings (101 in `application.py` before and
+after this section's changes, all pre-existing). `tests/test_reliability.py` now holds
+**107** tests: the 71 unit tests plus 34 that drive the application through
+`ApplicationReliabilityWiringTests`, because a subsystem that exists, is tested and is
+not wired in is not a delivered feature.
+## 28. Phase 9 verified against its own specification
+
+Phase 9 asked for two things: an internal event bus so components stop knowing about each
+other, and a capability registry so the system can answer "what can I do?" — plus
+discovery, so that question can be asked about a TASK rather than about the whole
+inventory. Both already existed in this codebase in a smaller form (`core.events.EventBus`,
+`intelligence.intent.CapabilityRegistry`), and both were extended, because a second bus or
+a second registry would have been the exact duplication this phase exists to remove.
+
+**The vocabulary is now a contract.** `EventType` names all twenty-two lifecycle moments
+the specification lists, `EVENT_PAYLOAD_FIELDS` says which fields each one promises, and
+`Event.__post_init__` refuses an event that does not carry them — the publisher bug that
+would otherwise have been a missing key three layers away in a handler is now a raise at
+the call site. The bus keeps its original contract and gained a bounded in-memory history
+(the journal stays the durable record) and an `emit()` door that cannot raise because a
+SUBSCRIBER failed.
+
+**Every event is published from the live path, and that is tested.** A request announces
+`intent.detected`, `context.resolved`, `decision.created`, `task.started` and
+`task.completed`; a plan announces `plan.created` with its step ids; the task state
+machine's observer turns transitions into `task.paused` / `task.resumed` /
+`task.cancelled` / `task.completed` / `task.failed`; the tool executor announces
+`tool.started` and its outcome through one injected sink; the plan executor announces
+`verification.started` / `completed` and `recovery.started` / `completed` around the
+checks it actually makes; the model manager announces loads and releases; the vision
+pipeline announces the image it read and whether anything answered. `tool.selected`
+reaches the ONE selector through an observer, so the decision path and the planning path
+both announce without either knowing the bus exists.
+
+**Correlation is not left to the callers.** A `ContextVar` holds the request being
+served, so a tool call or a check made three layers down carries the REQUEST's
+correlation id — one thread of work can be followed end to end — while work started
+outside any request carries none. `asyncio` copies the context when a task is created,
+which is why no publisher has to thread an id around and why nothing has to be reset.
+
+**The registry answers about the machine, not about the vocabulary.** A capability
+declares the twelve metadata fields the specification names, and the fields it does NOT
+know (its tools, its examples, its category) are resolved from the catalogues the
+registry is attached to, at query time. Availability is earned: a missing model or a
+missing tool makes a capability UNAVAILABLE with the reason, a capability needing a model
+nobody can probe is UNKNOWN (never "available"), and a real gap — a plan step that asks
+for reasoning with no executor behind it — is declared unavailable rather than
+advertised. Tool capabilities are projected from the live catalogue on every read rather
+than snapshotted at boot. `discover()` ranks candidates with the evidence for each score
+(`the task names system.get_ram`, `tag(s) matched: failing, project`), leaves unavailable
+capabilities out unless they are asked for, and runs nothing: finding a capability is
+never permission to use it.
+
+**The two layers that already had capability knowledge now read it instead.** The
+decision engine reports the matched `capability_id` and its availability beside the route
+it chose; the tool selector reports availability on every candidate and on the chosen
+selection, with `degraded` set when the tool it picked cannot run here yet. Neither
+re-routes on availability on purpose — that is a property of the MACHINE, and a decision
+that changed with the state of an unrelated install would send the same words two
+different ways. What changes is what they SAY.
+
+### What the verification found
+
+Driving the phase through the application (not through its parts) turned up eight
+defects. Each has a test that fails without its fix.
+
+1. **`tool.selected` never fired — silently.** The payload key was `source`, and every
+   event already carries a `source` (the publisher's own name), so `Event.of` raised
+   `TypeError: got multiple values for keyword argument 'source'`. The selector's
+   observer wrapper caught it, so nothing was announced and nothing complained. The field
+   is now `selection_source`; the three reserved envelope names are documented on `emit`
+   and on the synchronous announce helper; and an observer that raises is now LOGGED with
+   its traceback rather than swallowed, because the next publisher bug of this shape has
+   to be findable.
+2. **The vision events had the same collision, and a worse one.** `vision.started`
+   carried an image as `source` (renamed to `image`), and the announcement was made
+   before the question it echoed had been computed — an `UnboundLocalError` on every
+   attached-image request. The announcement now follows the capture and the question,
+   which is also what it claims.
+3. **The ranking rule "the task names this capability" never fired for a dotted id.** It
+   compared the id against tokenized words, and tokenizing splits `system.get_ram` into
+   `system` + `get_ram`. It now reads the query as written, so naming a capability wins
+   over sharing a word with one — the rule the docstring always promised.
+4. **A metadata row enriched nothing.** `_CAPABILITY_METADATA["run_command"]` described
+   `developer.run_command`, a capability no subsystem registers: dead knowledge of the
+   kind this phase removes. The row is gone, and the application declares the action it
+   really carries out (`developer.run_command`, MEDIUM risk, `process.execute`).
+5. **The tool inventory was a boot snapshot.** Tools were registered as capabilities
+   once, at startup, so a tool that became runnable later would have been invisible to
+   "what can you do?". They are now projected from the attached catalogue on every query,
+   and the application attaches rather than feeds, which leaves ONE source for the tool
+   set.
+6. **The tool selector reported nothing about availability.** A caller about to approve a
+   tool had no way to see that the capability behind it needed a model this machine does
+   not have. Candidates, the selection and its `to_dict()` now carry it.
+7. **A latent `AttributeError`.** Making `Capability.intent` optional (tools and actions
+   have none) surfaced `capability.intent.value` in the `capabilities` tool payload, which
+   would have raised for any projected capability that ever reached it. It reports `""`
+   for "no intent" now.
+8. **A shared mutable routing table.** `_HANDLERS` was a CLASS attribute, so a test that
+   injected a handler re-routed every other application in the process — which is exactly
+   how it was found (sixteen failures in `test_web_api.py`, all from one test's
+   injection). Each application now takes its own copy at construction.
+
+### Kept
+
+Nothing was removed to make any of this pass. The bus keeps `publish` / `subscribe` /
+`unsubscribe` and its strict-mode `EventDeliveryError`; `for_intent` / `best` still answer
+about DECLARED capabilities only (an action this application carries out is machinery,
+not a verb a request routes to); a registry with no model probe still says UNKNOWN rather
+than guessing; discovery is still deterministic and offline; and the API's existing
+`/intelligence` payload is unchanged — the new `/capabilities` and
+`/capabilities/discover` routes are additive, and `docs/API.md` is regenerated.
+
+The specification's illustrative capability ids are honoured where this installation
+really has them: `system.get_ram`, `browser.open_url`, `browser.search`,
+`filesystem.read`, `filesystem.write`, `developer.run_tests`. Three are deliberately
+absent as capability ids — `developer.git_status`, `developer.read_logs` and
+`developer.inspect_dependencies` — because there is no git support in this build, and
+reading a log file and checking dependencies ARE `filesystem.read` and a
+`developer.run_command` respectively. The registry says what this machine can do; it does
+not restate the specification's vocabulary for the sake of matching it.
+
+### Gates
+
+Full suite **1796 passed / 12 skipped** (1686 subtests, 4:14), up from 1703 in §27:
+`tests/test_events.py` now 24 tests (was 3), `tests/test_capability_registry.py` 46,
+`tests/test_lifecycle_events.py` 21, and 5 more in `test_web_api.py` for the two new
+routes. mypy clean in both platform views (**223 modules**); `docs/API.md` in sync (68
+routes); ruff at or below the pre-existing baseline on every touched file — 196 E501
+before and after, and one FEWER unused import than `HEAD`.

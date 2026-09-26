@@ -23,6 +23,18 @@ ruff check .
 mypy src
 ```
 
+CI runs four checks on every push and pull request (`.github/workflows/ci.yml`), all of them reproducible locally:
+
+```powershell
+$env:PYTHONPATH='src'
+python -m pytest tests/ -q                                  # matrix: Python 3.12 and 3.13
+python scripts/generate_api_reference.py --check            # docs/API.md matches the route registry
+python -m mypy src                                          # linux view
+python -m mypy src --platform win32                         # windows view
+```
+
+The API-reference check is the reason a new route is not done when it answers: register it in `novacontrol/api/app.py`, add it to the `ApiSurface` in `api/models.py`, declare how the web UI consumes it in `api/route_consumers.py`, then run `python scripts/generate_api_reference.py` to regenerate `docs/API.md`.
+
 ## Coding Standards
 
 - Keep feature modules decoupled from each other.

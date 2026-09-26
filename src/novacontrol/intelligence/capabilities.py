@@ -5,14 +5,25 @@ optional entities, risk, executor, and how success is verified — so planning
 and confirmation policy are derived from this registry instead of hard-coded
 per call site. ONE source of truth shared by JARVIS, research, automation,
 browser, desktop, phone, and future agents.
+
+Phase 9.2 added the metadata that makes a capability *discoverable* — a dotted
+id, tags and examples a task can match on, the models it needs, its inputs and
+outputs, its permissions. That metadata lives in :data:`_CAPABILITY_METADATA`
+and is merged in by :func:`default_capabilities`, so the entries below stay
+readable and nothing has to be restated: a capability that declares no tools
+inherits the ones its intent names in the catalog, and one with no category
+inherits the namespace of the subsystem that implements it.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
+from typing import Any
+
 from novacontrol.intelligence.intent import Capability, IntentName, RiskLevel
 
 
-def default_capabilities() -> tuple[Capability, ...]:
+def _declared_capabilities() -> tuple[Capability, ...]:
     """Capabilities derived from the intent rules — the executor and verifier
     names mirror the subsystems that already implement each intent."""
     return (
@@ -399,4 +410,476 @@ def default_capabilities() -> tuple[Capability, ...]:
             risk=RiskLevel.LOW, executor="chat_brain", verifier="response_verifier",
             supported_environments=("desktop",),
         ),
+        # ── Filesystem verbs the rules already understand but nobody had ──
+        # named here: reading, writing and listing a file were reachable by
+        # intent and had no capability entry, so "what can you do with files?"
+        # had no honest answer. Risk follows the specification's table: reading
+        # is LOW, creating is LOW, and only modifying/deleting is above it.
+        Capability(
+            capability="read_file", intent=IntentName.READ_FILE,
+            description="Read a file and show what is in it.",
+            required=("file",), risk=RiskLevel.LOW,
+            executor="file_manager", verifier="file_content_verifier",
+            supported_environments=("desktop",),
+        ),
+        Capability(
+            capability="write_file", intent=IntentName.WRITE_FILE,
+            description="Create or overwrite a file with given content.",
+            required=("file",), optional=("content",), risk=RiskLevel.LOW,
+            executor="file_manager", verifier="file_exists_verifier",
+            supported_environments=("desktop",),
+        ),
+        Capability(
+            capability="list_files", intent=IntentName.LIST_FILES,
+            description="List the files in a folder.",
+            optional=("folder",), risk=RiskLevel.LOW,
+            executor="file_manager", verifier="file_exists_verifier",
+            supported_environments=("desktop",),
+        ),
+        Capability(
+            capability="system_info", intent=IntentName.SYSTEM_INFO,
+            description="Report this machine's specifications.",
+            risk=RiskLevel.LOW, executor="system_monitor", verifier="telemetry_verifier",
+            supported_environments=("desktop",),
+        ),
     )
+
+
+#: Phase 9.2: what a capability declares about itself for discovery, keyed by
+#: capability name. Everything left out is DERIVED — the id from the executor's
+#: namespace, the tools and examples from the intent catalog — so this is an
+#: enrichment table, never a second registry that could drift out of step.
+#:
+#: ``tags`` are the words a task uses, not the words a capability uses: someone
+#: asking about a *failing project* does not say "project_analysis".
+_CAPABILITY_METADATA: dict[str, dict[str, Any]] = {
+    # -- filesystem ---------------------------------------------------------
+    "read_file": {
+        "capability_id": "filesystem.read",
+        "tags": ("read", "file", "files", "log", "logs", "content", "contents", "report"),
+        "examples": (
+            "Read report.pdf.",
+            "Show me what is in main.py.",
+            "What does the build log say?",
+        ),
+        "outputs": ("text",),
+    },
+    "write_file": {
+        "capability_id": "filesystem.write",
+        "tags": ("write", "create", "save", "file", "output", "note", "notes", "report"),
+        "examples": ("Write this to report.txt.", "Create a notes file.", "Save the summary."),
+        "inputs": ("file", "content"),
+        "outputs": ("path",),
+    },
+    "list_files": {
+        "capability_id": "filesystem.list",
+        "tags": ("list", "files", "folder", "directory", "contents"),
+        "examples": ("List the files in my Downloads folder.", "What is in this folder?"),
+        "outputs": ("files",),
+    },
+    "find_file": {
+        "capability_id": "filesystem.find",
+        "tags": ("find", "locate", "file", "folder", "where", "project"),
+        "examples": ("Find my NovaControl project.", "Where is report.pdf?"),
+        "outputs": ("path",),
+    },
+    "modify_file": {
+        "capability_id": "filesystem.modify",
+        "tags": ("edit", "modify", "change", "patch", "source", "code", "file"),
+        "examples": ("Update the config file.", "Change the version in pyproject.toml."),
+        "outputs": ("path",),
+    },
+    "delete_file": {
+        "capability_id": "filesystem.delete",
+        "tags": ("delete", "remove", "file", "trash"),
+        "examples": ("Delete the old build folder.",),
+    },
+    "move_file": {
+        "capability_id": "filesystem.move",
+        "tags": ("move", "file", "folder", "rename", "into"),
+        "examples": ("Move report.pdf into Documents.",),
+    },
+    "copy_file": {
+        "capability_id": "filesystem.copy",
+        "tags": ("copy", "duplicate", "file", "backup"),
+        "examples": ("Copy the report into my backup folder.",),
+    },
+    # -- browser ------------------------------------------------------------
+    "navigate": {
+        "capability_id": "browser.open_url",
+        "tags": ("open", "url", "website", "site", "page", "navigate", "go"),
+        "examples": ("Open youtube.com.", "Go to the GitHub page.", "Open my dashboard."),
+        "outputs": ("page",),
+    },
+    "search_web": {
+        "capability_id": "browser.search",
+        "tags": ("search", "web", "google", "look", "up", "query", "find", "online"),
+        "examples": ("Search the web for the latest Python release.", "Google the weather."),
+        "inputs": ("query",),
+        "outputs": ("results", "answer"),
+    },
+    "extract_page": {
+        "capability_id": "browser.extract_page",
+        "tags": ("extract", "scrape", "content", "page", "results", "links"),
+        "examples": ("Pull the links off this page.",),
+        "outputs": ("content", "links"),
+    },
+    "browser_action": {
+        "capability_id": "browser.act",
+        "tags": ("browser", "click", "type", "scroll", "site", "page"),
+        "examples": ("Click the login button on this page.",),
+    },
+    "fill_form": {
+        "capability_id": "browser.fill_form",
+        "tags": ("fill", "form", "field", "submit", "enter", "browser"),
+        "examples": ("Fill in the search box with my address.",),
+    },
+    # -- system -------------------------------------------------------------
+    "system_info": {
+        "capability_id": "system.info",
+        "tags": ("system", "machine", "hardware", "spec", "specs", "ram", "cpu", "gpu"),
+        "examples": ("What are this machine's specs?", "How much RAM do I have?"),
+        "outputs": ("value",),
+    },
+    "system_status": {
+        "capability_id": "system.status",
+        "tags": ("system", "status", "health", "load", "busy", "cpu", "ram"),
+        "examples": ("How is the system doing?", "Is the machine under load?"),
+        "outputs": ("value",),
+    },
+    "cpu_status": {
+        "capability_id": "system.cpu",
+        "tags": ("cpu", "processor", "load", "usage", "busy"),
+        "examples": ("What is my CPU usage?", "How busy is the processor?"),
+        "outputs": ("value",),
+    },
+    "memory_status": {
+        "capability_id": "system.get_ram",
+        "tags": ("ram", "memory", "usage", "free", "used"),
+        "examples": ("How much RAM is free?", "Is my memory full?"),
+        "outputs": ("value",),
+    },
+    "gpu_status": {
+        "capability_id": "system.gpu",
+        "tags": ("gpu", "graphics", "vram", "card"),
+        "examples": ("How much VRAM is in use?",),
+        "outputs": ("value",),
+    },
+    "battery_status": {
+        "capability_id": "system.battery",
+        "tags": ("battery", "charge", "power", "percent", "plugged"),
+        "examples": ("What is my battery level?",),
+        "outputs": ("value",),
+    },
+    "network_status": {
+        "capability_id": "system.network",
+        "tags": ("network", "wifi", "internet", "connection", "online"),
+        "examples": ("Am I connected to the network?",),
+        "outputs": ("value",),
+    },
+    # -- developer ------------------------------------------------------------
+    "project_analysis": {
+        "capability_id": "developer.inspect_project",
+        "tags": (
+            "project", "python", "code", "codebase", "failing", "fails", "failure",
+            "broken", "build", "tests", "logs", "dependencies", "structure", "inspect",
+            "analyze", "analyse", "review",
+        ),
+        "examples": (
+            "Check why my Python project is failing.",
+            "Why does the build break?",
+            "Review this project's structure.",
+        ),
+        "required_models": ("chat",),
+        "inputs": ("goal",),
+        "outputs": ("report",),
+    },
+    "code_debugging": {
+        "capability_id": "developer.debug",
+        "tags": (
+            "debug", "failing", "failure", "error", "errors", "traceback", "exception",
+            "stack", "bug", "fix", "tests",
+        ),
+        "examples": ("Why is my test failing?", "Debug this traceback.", "Fix this error."),
+        "required_models": ("chat",),
+        "outputs": ("report",),
+    },
+    "code_generation": {
+        "capability_id": "developer.write_code",
+        "tags": ("write", "generate", "code", "function", "script", "implement", "new"),
+        "examples": ("Write a Python function that parses this.", "Scaffold a Flask app."),
+        "required_models": ("chat",),
+        "outputs": ("code",),
+    },
+    "code_explanation": {
+        "capability_id": "developer.explain_code",
+        "tags": ("explain", "code", "function", "understand", "what", "walk"),
+        "examples": ("Explain what this function does.",),
+        "required_models": ("chat",),
+        "outputs": ("text",),
+    },
+    # ``developer.run_command`` is deliberately absent: running a command is a
+    # step the APPLICATION's plan executor carries out, so the application
+    # declares it (see ``NovaControlApplication._declare_actions``). A row here
+    # would be metadata for a capability nothing registers — which is how a
+    # table starts describing a system that does not exist.
+    # -- vision, desktop, senses ---------------------------------------------
+    "screenshot_analysis": {
+        "capability_id": "vision.analyze_screen",
+        "tags": ("screenshot", "screen", "look", "see", "error", "dialog", "image"),
+        "examples": ("What does this error say?", "Look at my screen."),
+        "required_models": ("vision",),
+        "outputs": ("text", "answer"),
+    },
+    "take_screenshot": {
+        "capability_id": "desktop.screenshot",
+        "tags": ("screenshot", "capture", "screen", "save"),
+        "examples": ("Take a screenshot.",),
+        "outputs": ("path",),
+    },
+    "open_application": {
+        "capability_id": "desktop.open_application",
+        "tags": ("open", "launch", "start", "run", "application", "app", "program", "editor"),
+        "examples": ("Open VS Code.", "Launch Chrome.", "Start Spotify."),
+        "outputs": ("window",),
+    },
+    "close_application": {
+        "capability_id": "desktop.close_application",
+        "tags": ("close", "quit", "exit", "application", "app", "window"),
+        "examples": ("Close Chrome.",),
+    },
+    "open_folder": {
+        "capability_id": "desktop.open_folder",
+        "tags": ("open", "folder", "directory", "explorer", "files"),
+        "examples": ("Open my Downloads folder.",),
+    },
+    "type_text": {
+        "capability_id": "desktop.type_text",
+        "tags": ("type", "type text", "dictate", "write", "into", "field"),
+        "examples": ("Type this into the form.",),
+    },
+    "press_key": {
+        "capability_id": "desktop.press_key",
+        "tags": ("press", "key", "keyboard", "shortcut", "hotkey", "enter", "escape"),
+        "examples": ("Press enter.", "Hit control s."),
+    },
+    "volume_control": {
+        "capability_id": "desktop.volume",
+        "tags": ("volume", "sound", "louder", "quieter", "mute", "audio"),
+        "examples": ("Turn the volume down.", "Mute the sound."),
+    },
+    "brightness_control": {
+        "capability_id": "desktop.brightness",
+        "tags": ("brightness", "screen", "dim", "brighter", "darker"),
+        "examples": ("Turn the brightness down.",),
+    },
+    "media_control": {
+        "capability_id": "desktop.media",
+        "tags": ("play", "pause", "music", "song", "track", "next", "previous", "media"),
+        "examples": ("Pause the music.", "Play the next track."),
+    },
+    # -- language, research, memory ------------------------------------------
+    "answer_question": {
+        "capability_id": "chat.answer",
+        "tags": ("answer", "question", "explain", "how", "what", "why"),
+        "examples": ("What is a race condition?", "Explain async in Python."),
+        "required_models": ("chat",),
+        "outputs": ("answer",),
+    },
+    "chat": {
+        "capability_id": "chat.chat",
+        "tags": ("chat", "talk", "hello", "hey", "thanks"),
+        "examples": ("Hello there.", "Thanks, that helped."),
+        "required_models": ("chat",),
+        "outputs": ("response",),
+    },
+    "conversation": {
+        "capability_id": "chat.conversation",
+        "tags": ("chat", "conversation", "small", "talk", "hello"),
+        "examples": ("How are you doing today?",),
+        "required_models": ("chat",),
+        "outputs": ("response",),
+    },
+    "general_question": {
+        "capability_id": "chat.question",
+        "tags": ("question", "general", "ask", "know", "about"),
+        "examples": ("What can you do?",),
+        "required_models": ("chat",),
+        "outputs": ("answer",),
+    },
+    "research": {
+        "capability_id": "research.web",
+        "tags": ("research", "investigate", "compare", "sources", "study", "web"),
+        "examples": ("Research the best laptops for Python.",),
+        "required_models": ("chat",),
+        "outputs": ("report",),
+    },
+    "summarize": {
+        "capability_id": "research.summarize",
+        "tags": ("summarize", "summary", "shorten", "gist", "brief"),
+        "examples": ("Summarize this article.",),
+        "required_models": ("chat",),
+        "outputs": ("summary",),
+    },
+    "compare": {
+        "capability_id": "research.compare",
+        "tags": ("compare", "versus", "difference", "better", "between"),
+        "examples": ("Compare FastAPI and Flask.",),
+        "required_models": ("chat",),
+        "outputs": ("report",),
+    },
+    "generate_report": {
+        "capability_id": "research.report",
+        "tags": ("report", "write", "draft", "paper", "document"),
+        "examples": ("Write a report on this topic.",),
+        "required_models": ("chat",),
+        "outputs": ("report",),
+    },
+    "calculate": {
+        "capability_id": "compute.calculate",
+        "tags": ("calculate", "math", "sum", "multiply", "percent", "arithmetic"),
+        "examples": ("What is 15% of 240?", "Multiply 42 by 7."),
+        "outputs": ("value",),
+    },
+    "remember": {
+        "capability_id": "memory.remember",
+        "tags": ("remember", "note", "save", "fact", "memory"),
+        "examples": ("Remember that my editor is VS Code.",),
+    },
+    "recall": {
+        "capability_id": "memory.recall",
+        "tags": ("recall", "remember", "what", "did", "memory", "forget"),
+        "examples": ("What did I tell you about my editor?",),
+        "outputs": ("facts",),
+    },
+    # -- planning, automation, projects, self-improvement ---------------------
+    "plan_task": {
+        "capability_id": "planning.plan",
+        "tags": ("plan", "steps", "workflow", "break", "down", "task"),
+        "examples": ("Plan how to migrate this project.",),
+        "required_models": ("chat",),
+        "outputs": ("plan",),
+    },
+    "agentic_task": {
+        "capability_id": "agents.agentic_task",
+        "tags": ("agent", "agents", "multi", "step", "delegate", "complex"),
+        "examples": ("Take care of setting up this project.",),
+        "required_models": ("chat",),
+        "outputs": ("result",),
+    },
+    "create_automation": {
+        "capability_id": "automation.create",
+        "tags": ("automation", "automate", "rule", "whenever", "workflow", "create"),
+        "examples": ("Create an automation that backs up my notes.",),
+        "outputs": ("workflow",),
+    },
+    "run_automation": {
+        "capability_id": "automation.run",
+        "tags": ("automation", "run", "trigger", "workflow"),
+        "examples": ("Run my backup automation.",),
+        "outputs": ("result",),
+    },
+    "schedule_task": {
+        "capability_id": "scheduler.schedule",
+        "tags": ("schedule", "later", "every", "tomorrow", "remind", "timer"),
+        "examples": ("Remind me to run the tests tomorrow at 9.",),
+        "outputs": ("job",),
+    },
+    "create_project": {
+        "capability_id": "project.create",
+        "tags": ("project", "scaffold", "new", "create", "initialise", "initialize"),
+        "examples": ("Create a new Python project called nova.",),
+        "outputs": ("path",),
+    },
+    "improve_self": {
+        "capability_id": "self_improvement.propose",
+        "tags": ("improve", "yourself", "self", "refactor", "better", "upgrade"),
+        "examples": ("Improve how you handle long requests.",),
+        "required_models": ("chat",),
+        "outputs": ("proposal",),
+    },
+    # -- phone ----------------------------------------------------------------
+    "phone_connect": {
+        "capability_id": "phone.connect",
+        "tags": ("phone", "connect", "pair", "bridge", "adb", "usb"),
+        "examples": ("Connect to my phone.",),
+    },
+    "phone_status": {
+        "capability_id": "phone.status",
+        "tags": ("phone", "status", "paired", "device", "battery"),
+        "examples": ("Is my phone connected?",),
+    },
+    "phone_send_text": {
+        "capability_id": "phone.send_text",
+        "tags": ("text", "message", "sms", "send", "phone", "tell"),
+        "examples": ("Text Sam that I am running late.",),
+    },
+    "phone_call": {
+        "capability_id": "phone.call",
+        "tags": ("call", "phone", "dial", "ring"),
+        "examples": ("Call Sam.",),
+    },
+    "phone_screenshot": {
+        "capability_id": "phone.screenshot",
+        "tags": ("phone", "screenshot", "screen", "capture"),
+        "examples": ("Take a screenshot on my phone.",),
+    },
+    "phone_open_app": {
+        "capability_id": "phone.open_app",
+        "tags": ("phone", "open", "app", "application", "launch"),
+        "examples": ("Open WhatsApp on my phone.",),
+    },
+}
+
+
+#: Which entity kinds an input/output pair is about, so a capability that
+#: declares neither still reports something honest: the entities its rules
+#: extract ARE its inputs, and its verifier names what it produces.
+_OUTPUT_KINDS: dict[str, tuple[str, ...]] = {
+    "file_exists_verifier": ("path",),
+    "file_content_verifier": ("text",),
+    "file_absent_verifier": ("path",),
+    "content_verifier": ("content",),
+    "page_state_verifier": ("page",),
+    "application_state_verifier": ("window",),
+    "telemetry_verifier": ("value",),
+    "report_verifier": ("report",),
+    "response_verifier": ("response",),
+    "memory_verifier": ("facts",),
+    "plan_verifier": ("plan",),
+    "workflow_verifier": ("workflow",),
+    "schedule_verifier": ("job",),
+    "project_verifier": ("path",),
+    "preview_gate_verifier": ("proposal",),
+    "math_verifier": ("value",),
+    "phone_state_verifier": ("state",),
+    "bridge_status_verifier": ("status",),
+}
+
+
+def _enrich(capability: Capability) -> Capability:
+    """Apply the declared metadata, then fill what a capability did not declare.
+
+    Filling is deliberately shallow and provable: a capability's inputs are the
+    entities its rules extract, and its outputs are what its verifier checks —
+    both already stated above, neither restated. Anything that would be a guess
+    stays empty.
+    """
+    metadata = dict(_CAPABILITY_METADATA.get(capability.capability, {}))
+    inputs = tuple(metadata.pop("inputs", ()))
+    outputs = tuple(metadata.pop("outputs", ()))
+    enriched = replace(capability, **metadata)
+    return replace(
+        enriched,
+        supported_inputs=enriched.supported_inputs
+        or inputs
+        or (*enriched.required, *enriched.optional),
+        supported_outputs=enriched.supported_outputs
+        or outputs
+        or _OUTPUT_KINDS.get(enriched.verifier, ()),
+    )
+
+
+def default_capabilities() -> tuple[Capability, ...]:
+    """The shipped capabilities, with their discovery metadata filled in."""
+    return tuple(_enrich(capability) for capability in _declared_capabilities())

@@ -102,6 +102,25 @@ class ToolMetadata:
     #: Argument name -> the values of it that change by the second. An operation
     #: named here is never cached, however read-only it is.
     volatile_values: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    # ── the risk declaration (Phase 8.5) ────────────────────────────────────
+    #: The ONE scope this tool's sensitivity is about, when a caller needs a
+    #: single answer (``permissions`` above remains the full set the approval
+    #: layer gates on). None means "not stated", never "no permission needed".
+    required_permission: PermissionScope | None = None
+    #: Whether a person must say yes before it runs, when this build's policy
+    #: asks. Derived for a tool that declares nothing from its risk level, so
+    #: an undeclared tool cannot quietly become a high-risk action.
+    requires_confirmation: bool = False
+    #: Whether the action can be undone. False is what stops an automatic retry
+    #: of a half-finished operation — running it again completes something that
+    #: was never finished, not undoes it.
+    reversible: bool = True
+    #: Whether it can delete or overwrite something a person would miss.
+    destructive: bool = False
+    #: Whether it changes something outside this machine (a message sent, an
+    #: order placed). Never auto-retried, and never assumed to have failed
+    #: safely: an external action that errored may still have happened.
+    external_side_effect: bool = False
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -110,6 +129,11 @@ class ToolMetadata:
             raise ValueError("cache_ttl_s must not be negative.")
 
     # -- derived ----------------------------------------------------------------
+
+    @property
+    def risk_level(self) -> RiskLevel:
+        """The specification's name for :attr:`risk` — the same value."""
+        return self.risk
 
     def requires_approval(self) -> bool:
         """Whether the executor would ask a person before running this.
@@ -200,6 +224,14 @@ class ToolMetadata:
             read_only=self.read_only and other.read_only,
             cache_ttl_s=max(self.cache_ttl_s, other.cache_ttl_s),
             volatile_values=_merge_volatile(self.volatile_values, other.volatile_values),
+            required_permission=self.required_permission or other.required_permission,
+            requires_confirmation=self.requires_confirmation or other.requires_confirmation,
+            # Reversibility is the one field that gets STRICTER when sources
+            # disagree: a single source calling an action irreversible is
+            # enough, because the other sources only ever saw part of it.
+            reversible=self.reversible and other.reversible,
+            destructive=self.destructive or other.destructive,
+            external_side_effect=self.external_side_effect or other.external_side_effect,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -220,6 +252,14 @@ class ToolMetadata:
             "cache_ttl_s": self.cache_ttl_s,
             "volatile_values": {key: list(value) for key, value in self.volatile_values.items()},
             "requires_approval": self.requires_approval(),
+            "risk_level": self.risk.value,
+            "required_permission": (
+                self.required_permission.value if self.required_permission else None
+            ),
+            "requires_confirmation": self.requires_confirmation,
+            "reversible": self.reversible,
+            "destructive": self.destructive,
+            "external_side_effect": self.external_side_effect,
         }
 
 

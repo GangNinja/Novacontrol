@@ -870,6 +870,72 @@ if __name__ == "__main__":
 # ── Vision + bugs + auto-approve API (JARVIS batch) ─────────────────────────
 
 
+class CapabilityApiTests(_IsolatedApiTestCase):
+    """Phase 9.2/9.3 over HTTP: the inventory, and the discovery question."""
+
+    def test_the_inventory_lists_every_source_with_availability(self) -> None:
+        response = self._client.get("/capabilities")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+
+        self.assertGreater(payload["count"], 0)
+        sources = {item["source"] for item in payload["capabilities"]}
+        self.assertIn("declared", sources)
+        self.assertIn("action", sources)
+        for item in payload["capabilities"]:
+            self.assertIn("availability", item)
+            self.assertIn("risk_level", item)
+        self.assertIn("unavailable", payload["registry"])
+
+    def test_discovery_answers_the_specifications_question(self) -> None:
+        response = self._client.get(
+            "/capabilities/discover", params={"query": "Check why my Python project is failing."}
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+
+        found = [match["capability_id"] for match in payload["matches"]]
+        self.assertIn("developer.inspect_project", found)
+        self.assertEqual(found[0], "developer.inspect_project")
+        self.assertTrue(payload["matches"][0]["reasons"])
+        self.assertEqual(payload["count"], len(payload["matches"]))
+
+    def test_discovery_answers_with_nothing_rather_than_everything(self) -> None:
+        payload = self._client.get(
+            "/capabilities/discover", params={"query": "zzzz qqqq", "limit": 4}
+        ).json()
+
+        self.assertEqual(payload["matches"], [])
+
+    def test_an_unavailable_capability_can_be_asked_for_and_says_why(self) -> None:
+        payload = self._client.get(
+            "/capabilities/discover",
+            params={"query": "reason", "include_unavailable": True, "limit": 20},
+        ).json()
+
+        reasoning = [
+            match for match in payload["matches"] if match["capability_id"] == "system.reason"
+        ]
+        self.assertTrue(reasoning)
+        self.assertFalse(reasoning[0]["available"])
+        self.assertIn("reasoning", reasoning[0]["unavailable_reason"])
+
+    def test_discovery_can_be_filtered_by_intent_and_category(self) -> None:
+        by_intent = self._client.get(
+            "/capabilities/discover", params={"query": "ram", "intent": "memory_status"}
+        ).json()
+        by_category = self._client.get(
+            "/capabilities/discover", params={"query": "ram", "category": "system"}
+        ).json()
+
+        self.assertEqual(
+            [match["capability_id"] for match in by_intent["matches"]], ["system.get_ram"]
+        )
+        self.assertIn(
+            "system.get_ram", [match["capability_id"] for match in by_category["matches"]]
+        )
+
+
 class VisionAndBugsApiTests(_IsolatedApiTestCase):
     def test_vision_status_reports_model_and_bugs(self) -> None:
         response = self._client.get("/vision/status")

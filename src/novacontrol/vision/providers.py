@@ -140,7 +140,7 @@ class CompletionVisionProvider:
 
         image_data = _load_image_base64_for_vision(image_path)
         if not image_data:
-            raise VisionProviderError(f"could not read an image at {image_path}")
+            raise VisionProviderError(unreadable_image_message(image_path))
         complete = getattr(self._provider, "complete", None)
         if complete is None:
             raise VisionProviderError("the vision provider has no complete method")
@@ -149,6 +149,18 @@ class CompletionVisionProvider:
         except Exception as exc:  # noqa: BLE001 - classified, then reported
             raise VisionProviderError(f"vision call failed: {exc}") from exc
         return str(answer or "").strip()
+
+
+def unreadable_image_message(image_path: str) -> str:
+    """The one wording for "this file could not be read at all".
+
+    Shared rather than repeated: the provider raises it when the bytes cannot be
+    prepared, and the manager refuses with it when there is no provider to try.
+    A machine with no vision model must describe a missing attachment in the
+    same words as a model that was asked and could not open it, otherwise the
+    same request is reported differently depending on what the host installed.
+    """
+    return f"could not read an image at {image_path}"
 
 
 def _vision_messages(prompt: str, image_data: str) -> list[dict[str, Any]]:

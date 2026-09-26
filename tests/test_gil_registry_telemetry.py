@@ -66,10 +66,22 @@ class CapabilityRegistryTests(unittest.TestCase):
         payload = registry.to_dict()
         self.assertGreaterEqual(len(payload["capabilities"]), 30)
         first = payload["capabilities"][0]
+        # Phase 9.2 grew this contract: the original nine keys are still here and
+        # still mean what they meant, plus the metadata a capability is now
+        # discovered by (id, category, tools, inputs/outputs, permissions,
+        # availability, examples, tags, source).
         self.assertEqual(
             sorted(first.keys()),
-            ["capability", "description", "executor", "intent", "optional", "required", "risk", "supported_environments", "verifier"],
+            [
+                "availability", "availability_reason", "capability", "capability_id",
+                "category", "description", "examples", "executor", "intent", "name",
+                "optional", "permissions", "required", "required_models", "risk",
+                "risk_level", "source", "supported_environments", "supported_inputs",
+                "supported_outputs", "tags", "tools", "verifier",
+            ],
         )
+        self.assertEqual(payload["count"], len(payload["capabilities"]))
+        self.assertGreaterEqual(payload["registry"]["total"], 30)
 
 
 class StandardResultTests(unittest.TestCase):

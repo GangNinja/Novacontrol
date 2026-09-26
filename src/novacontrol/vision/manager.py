@@ -38,6 +38,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from novacontrol.intelligence.semantic import content_words
@@ -54,6 +55,7 @@ from novacontrol.vision.providers import (
     VisionProvider,
     VisionProviderError,
     provider_status,
+    unreadable_image_message,
 )
 
 #: Lines that look like a machine telling a person something went wrong. Used for
@@ -503,7 +505,7 @@ class VisionManager:
                 reason=(
                     "no vision model is wired, so the pixels were not looked at"
                     if lines
-                    else self._no_text_reason()
+                    else self._refusal_reason(request.source)
                 ),
                 basis="no-vision-provider",
             )
@@ -804,6 +806,37 @@ class VisionManager:
         if not self._ocr.available:
             return f"no OCR engine is available (tried {self._ocr.name})"
         return "no readable text was found in the image"
+
+    def _refusal_reason(self, source: str) -> str:
+        """Why nothing answered, checked in the honest order.
+
+        "No readable text was found" is only a true statement about a picture
+        that was THERE: a missing file, a directory, or a path the process
+        cannot open is a fact about the file, and it is the same fact on every
+        machine. Asking which engine is installed first made the same missing
+        attachment read as "no readable text" on a host without a vision model
+        and as "could not read an image" on one with it — the host's install
+        deciding what the result claims about the user's file.
+        """
+        if _source_is_a_file(source):
+            return self._no_text_reason()
+        return unreadable_image_message(source)
+
+
+def _source_is_a_file(source: str) -> bool:
+    """Whether ``source`` is on disk to be read at all.
+
+    Deliberately NOT a test of whether any reader can decode it: a text file
+    attached as an image is read by the text engine, and whether an engine
+    supports a format is the engine's question to answer. This answers the one
+    question that comes first — is there a file here.
+    """
+    if not source.strip():
+        return False
+    try:
+        return Path(source).is_file()
+    except OSError:  # pragma: no cover - a path the OS will not even stat
+        return False
 
 
 def _label_terms(label: str) -> tuple[str, ...]:

@@ -29,6 +29,7 @@ alternative is a selector that can approve its own choice.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -42,6 +43,13 @@ from novacontrol.intelligence.intent import (
     StructuredIntent,
 )
 from novacontrol.intelligence.registry import IntentCatalog
+
+_logger = logging.getLogger(__name__)
+
+
+#: Told about a completed selection. The selector stays stateless and bus-free
+#: and simply hands the answer to whoever asked to see it.
+SelectionObserver = Callable[["ToolSelection"], None]
 
 
 #: Where a candidate came from — reported so a surprising choice is traceable
@@ -101,6 +109,12 @@ class ToolCandidate:
     requires_confirmation: bool = False
     missing_entities: tuple[str, ...] = ()
     reasons: tuple[str, ...] = ()
+    #: What the CAPABILITY registry says about the capability behind this
+    #: candidate (Phase 9.2). Reported, never used to reorder: the choice of
+    #: tool must not depend on whether this machine happens to have a model
+    #: installed, and a caller that must know is told rather than left to guess.
+    availability: str = ""
+    availability_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -115,6 +129,8 @@ class ToolCandidate:
             "requires_confirmation": self.requires_confirmation,
             "missing_entities": list(self.missing_entities),
             "reasons": list(self.reasons),
+            "availability": self.availability,
+            "availability_reason": self.availability_reason,
         }
 
 
@@ -140,6 +156,13 @@ class ToolSelection:
     #: stale selection from a fresh one without keeping its own bookkeeping.
     intent: IntentName | None = None
     evidence: dict[str, Any] = field(default_factory=dict)
+    #: What the capability registry says about the chosen tool's capability, and
+    #: whether that makes the choice degradable rather than wrong: a tool this
+    #: machine cannot run yet is still the right choice to REPORT, and the caller
+    #: needs to know before it asks.
+    availability: str = ""
+    availability_reason: str = ""
+    degraded: bool = False
 
     @property
     def dispatchable(self) -> bool:
@@ -158,6 +181,9 @@ class ToolSelection:
             "missing_entities": list(self.missing_entities),
             "reason": self.reason.value,
             "dispatchable": self.dispatchable,
+            "availability": self.availability,
+            "availability_reason": self.availability_reason,
+            "degraded": self.degraded,
             "intent": self.intent.value if self.intent is not None else "",
             "candidates": [candidate.to_dict() for candidate in self.candidates],
             "evidence": dict(self.evidence),
@@ -186,6 +212,7 @@ class ToolSelector:
         catalog: IntentCatalog | None = None,
         capabilities: CapabilityRegistry | None = None,
         registered: Sequence[str] | Callable[[], Sequence[str]] | None = None,
+        observer: SelectionObserver | None = None,
     ) -> None:
         self._catalog = catalog
         self._capabilities = capabilities
@@ -193,6 +220,11 @@ class ToolSelector:
         #: between requests, and a snapshot taken at construction would report
         #: yesterday's tools.
         self._registered = registered
+        #: Told about every selection this selector makes (Phase 9.1's
+        #: "tool.selected"). ONE seam rather than one per call site: the decision
+        #: layer and the planning path both go through ``select``, so both are
+        #: announced without either of them knowing this exists.
+        self._observer = observer
 
     # -- the one public question -------------------------------------------------
 
@@ -210,14 +242,16 @@ class ToolSelector:
         """
         candidates = self._candidates(intent)
         if not candidates:
-            return ToolSelection(
-                intent=intent.intent,
-                reason=SelectionReason.NO_TOOL,
-                evidence={
-                    "declared": 0,
-                    "registered": 0,
-                    "context_available": bool(context),
-                },
+            return self._announce(
+                ToolSelection(
+                    intent=intent.intent,
+                    reason=SelectionReason.NO_TOOL,
+                    evidence={
+                        "declared": 0,
+                        "registered": 0,
+                        "context_available": bool(context),
+                    },
+                )
             )
         # Highest score wins; a tie goes to the catalog's own preference order,
         # then to the name, so the answer never depends on dict ordering.
@@ -225,32 +259,70 @@ class ToolSelector:
             candidates,
             key=lambda item: (-item.score, item.order, item.name),
         )
-        return ToolSelection(
-            tool=chosen.name,
-            capability=chosen.capability,
-            executor=chosen.executor,
-            source=chosen.source,
-            confidence=chosen.score,
-            # Caution is monotone: the intent's own flag and the capability's
-            # risk both raise it, and nothing in this module can clear it.
-            requires_confirmation=bool(chosen.requires_confirmation),
-            missing_entities=chosen.missing_entities,
-            reason=self._reason_for(chosen),
-            candidates=tuple(candidates),
-            intent=intent.intent,
-            evidence={
-                "declared": sum(1 for item in candidates if item.source is ToolSource.DECLARED),
-                "registered": sum(1 for item in candidates if item.registered),
-                "candidate_count": len(candidates),
-                "context_available": bool(context),
-            },
+        return self._announce(
+            ToolSelection(
+                tool=chosen.name,
+                capability=chosen.capability,
+                executor=chosen.executor,
+                source=chosen.source,
+                confidence=chosen.score,
+                # Availability travels WITH the choice: the caller that is about
+                # to ask for approval is the one that needs to know the
+                # capability it is approving cannot run here yet.
+                availability=chosen.availability,
+                availability_reason=(
+                    chosen.availability_reason
+                    if chosen.availability not in ("", "available")
+                    else ""
+                ),
+                degraded=chosen.availability not in ("", "available"),
+                # Caution is monotone: the intent's own flag and the capability's
+                # risk both raise it, and nothing in this module can clear it.
+                requires_confirmation=bool(chosen.requires_confirmation),
+                missing_entities=chosen.missing_entities,
+                reason=self._reason_for(chosen),
+                candidates=tuple(candidates),
+                intent=intent.intent,
+                evidence={
+                    "declared": sum(
+                        1 for item in candidates if item.source is ToolSource.DECLARED
+                    ),
+                    "registered": sum(1 for item in candidates if item.registered),
+                    "candidate_count": len(candidates),
+                    "context_available": bool(context),
+                },
+            )
         )
+
+    def _announce(self, selection: ToolSelection) -> ToolSelection:
+        """Show the selection to the observer, then hand it straight back.
+
+        Returned rather than rebuilt, so what a watcher hears about IS the choice
+        the caller acts on. An observer that raises cannot take a selection with
+        it — the answer was already made — but the failure is LOGGED rather than
+        swallowed: a publisher that names a field the bus reserves, or forgets
+        one it promises, must be findable instead of mysteriously silent.
+        """
+        if self._observer is None:
+            return selection
+        try:
+            self._observer(selection)
+        except Exception as exc:  # noqa: BLE001 - announcing is not deciding
+            _logger.warning(
+                "Tool-selection observer failed for %r: %s: %s",
+                selection.tool or "(no tool)",
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
+        return selection
 
     # -- assembling the candidates ----------------------------------------------
 
     def _candidates(self, intent: StructuredIntent) -> list[ToolCandidate]:
         definition = self._catalog.get(intent.intent) if self._catalog is not None else None
         capability = self._capability(intent.intent)
+        availability, availability_reason = self._availability(capability)
         missing = self._missing_entities(intent, definition)
         risk = capability.risk if capability is not None else RiskLevel.LOW
         confirmation = bool(
@@ -279,6 +351,8 @@ class ToolSelector:
             score, entity_reason = self._apply_entities(score, missing)
             if entity_reason:
                 reasons.append(entity_reason)
+            if availability_reason:
+                reasons.append(availability_reason)
             candidates.append(
                 ToolCandidate(
                     name=token,
@@ -292,6 +366,8 @@ class ToolSelector:
                     requires_confirmation=confirmation,
                     missing_entities=missing,
                     reasons=tuple(reasons),
+                    availability=availability,
+                    availability_reason=availability_reason,
                 )
             )
 
@@ -312,6 +388,8 @@ class ToolSelector:
             reasons = [f"registered at runtime for {intent.intent.value}"]
             if entity_reason:
                 reasons.append(entity_reason)
+            if availability_reason:
+                reasons.append(availability_reason)
             candidates.append(
                 ToolCandidate(
                     name=token,
@@ -325,6 +403,8 @@ class ToolSelector:
                     requires_confirmation=confirmation,
                     missing_entities=missing,
                     reasons=tuple(reasons),
+                    availability=availability,
+                    availability_reason=availability_reason,
                 )
             )
 
@@ -340,6 +420,8 @@ class ToolSelector:
             reasons = ["the capability's declared executor; the catalog names no tool"]
             if entity_reason:
                 reasons.append(entity_reason)
+            if availability_reason:
+                reasons.append(availability_reason)
             candidates.append(
                 ToolCandidate(
                     name=executor,
@@ -353,6 +435,8 @@ class ToolSelector:
                     requires_confirmation=confirmation,
                     missing_entities=missing,
                     reasons=tuple(reasons),
+                    availability=availability,
+                    availability_reason=availability_reason,
                 )
             )
         return candidates
@@ -363,6 +447,24 @@ class ToolSelector:
         if self._capabilities is None:
             return None
         return self._capabilities.best(intent)
+
+    def _availability(self, capability: Capability | None) -> tuple[str, str]:
+        """What the registry says about the capability behind the candidates.
+
+        Absent evidence is reported as absent (""), never as availability: with
+        no registry wired there is nothing to say, and "unknown" dressed up as
+        "available" is exactly the rounding-up this phase exists to prevent.
+        """
+        if capability is None or self._capabilities is None:
+            return "", ""
+        try:
+            availability, reason = self._capabilities.availability_of(capability)
+        except Exception:  # pragma: no cover - a selector must never throw here
+            return "", ""
+        state = getattr(availability, "value", str(availability))
+        if state == "available":
+            return state, ""
+        return state, f"capability {capability.id} is {state}" + (f": {reason}" if reason else "")
 
     @staticmethod
     def _missing_entities(

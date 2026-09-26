@@ -149,6 +149,7 @@ class LocalDecisionProvider:
         capability_name = capability.capability if capability is not None else ""
         executor = capability.executor if capability is not None else ""
         group = self._group(handler, executor)
+        capability_availability, capability_reason = self._availability(capability)
         metadata: dict[str, Any] = {
             "strategy": request.strategy,
             "complexity": request.complexity,
@@ -158,6 +159,14 @@ class LocalDecisionProvider:
             "actions": list(actions),
             "capability_group": group,
             "capability_registered": capability is not None,
+            # Phase 9.2/9.3: which capability the registry matched, and whether
+            # this installation can actually run it now. Reported beside the
+            # route rather than used to re-route: availability is a property of
+            # the MACHINE, and a decision that changed with the state of an
+            # unrelated install would make the same request route two ways.
+            "capability_id": capability.id if capability is not None else "",
+            "capability_availability": capability_availability,
+            "capability_unavailable_reason": capability_reason,
             "dispatchable": bool(handler),
             # Context as an INPUT to the decision rather than decoration beside
             # it: whether a remembered snapshot was available, and whether this
@@ -515,6 +524,17 @@ class LocalDecisionProvider:
         if self._capabilities is None:
             return None
         return self._capabilities.best(intent)
+
+    def _availability(self, capability: Any) -> tuple[str, str]:
+        """The registry's own answer about a capability, or "" when it is silent."""
+        if capability is None or self._capabilities is None:
+            return "", ""
+        try:
+            availability, reason = self._capabilities.availability_of(capability)
+        except Exception:  # pragma: no cover - a decision must never throw here
+            return "", ""
+        state = getattr(availability, "value", str(availability))
+        return (state, reason if state != "available" else "")
 
     @staticmethod
     def _group(handler: str, executor: str) -> str:

@@ -35,6 +35,7 @@ from dataclasses import dataclass, field, replace
 from inspect import Parameter, isawaitable, signature
 from typing import Any
 
+from novacontrol.core.events import EventType
 from novacontrol.planning.models import (
     EFFECTS_NEVER_RETRIED,
     FailureKind,
@@ -95,6 +96,12 @@ ConfirmationChannel = Callable[[PlanStep], "bool | Awaitable[bool]"]
 #: Told about every finished step, in completion order (progress, telemetry).
 StepObserver = Callable[[StepOutcome], Awaitable[None] | None]
 
+#: Told what the executor is DOING as it happens — a check starting, what a
+#: check said, which recovery was chosen — as opposed to ``StepObserver``, which
+#: hears about finished steps. Phase 9's event bus plugs in here, and the
+#: executor never learns what is on the other end.
+StepAnnouncer = Callable[[str, Mapping[str, Any]], Awaitable[None] | None]
+
 #: The most steps that may share one wave. A cap keeps a wide plan from
 #: stampeding the machine it is running on.
 MAX_WAVE_SIZE = 4
@@ -128,6 +135,7 @@ class WorkflowExecutor:
         advisor: RecoveryAdvisor | None = None,
         confirmation: ConfirmationChannel | None = None,
         observer: StepObserver | None = None,
+        announcer: StepAnnouncer | None = None,
         max_wave_size: int = MAX_WAVE_SIZE,
     ) -> None:
         self.step_handler = step_handler or _default_step_handler
@@ -145,7 +153,19 @@ class WorkflowExecutor:
         self.advisor = advisor or RecoveryAdvisor(retry_policy=self.retry_policy)
         self.confirmation = confirmation
         self.observer = observer
+        self.announcer = announcer
         self.max_wave_size = max(1, max_wave_size)
+
+    async def _announce(self, type_: str, **payload: Any) -> None:
+        """Say what is happening, never letting the saying fail the doing."""
+        if self.announcer is None:
+            return
+        try:
+            said = self.announcer(type_, payload)
+            if isawaitable(said):
+                await said
+        except Exception:  # noqa: BLE001 - an announcement is not the work
+            return
 
     # -- public ---------------------------------------------------------------
 
@@ -281,6 +301,16 @@ class WorkflowExecutor:
                 )
 
         context = StepContext(plan_id=plan_id, outputs=dict(outputs or {}), attempts=attempts)
+        #: The check the LAST attempt produced, when it got as far as making one.
+        #: A failure that was a FAILED CHECK must carry the check's evidence: an
+        #: outcome reporting "not_run" for a step whose verification ran and said
+        #: no is not a gap in reporting, it is a false statement about the run.
+        #: Cleared by an attempt that raised, because a check that was never made
+        #: proves nothing about the attempt that actually failed.
+        last_verification: VerificationResult | None = None
+        #: The recovery action the LAST attempt was taken under, so its outcome
+        #: can be reported against the recovery that produced it.
+        recovering: str = ""
         while True:
             attempts += 1
             context = context.merge(attempts=attempts)
@@ -289,9 +319,17 @@ class WorkflowExecutor:
                 if isinstance(output, StepOutcome):
                     return _with_latency(output, started, attempts, recovery, step.tool)
                 payload = dict(output)
+                last_verification = None
             except PermissionError as exc:
                 # A refusal is not a failure: it is a decision, and the plan
                 # stops on it without retrying or rephrasing the question.
+                if recovering:
+                    await self._announce(
+                        EventType.RECOVERY_COMPLETED.value,
+                        step_id=step.id,
+                        outcome="refused",
+                        action=recovering,
+                    )
                 return StepOutcome(
                     step_id=step.id,
                     status=PlanStepStatus.DENIED,
@@ -306,21 +344,75 @@ class WorkflowExecutor:
                 error = self.advisor.classify(
                     step, f"{type(exc).__name__}: {exc}", denied=isinstance(exc, PermissionError)
                 )
+                if recovering:
+                    await self._announce(
+                        EventType.RECOVERY_COMPLETED.value,
+                        step_id=step.id,
+                        outcome="still_failing",
+                        action=recovering,
+                    )
+                    recovering = ""
                 payload = {}
+                last_verification = None
             else:
+                await self._announce(
+                    EventType.VERIFICATION_STARTED.value,
+                    step_id=step.id,
+                    attempt=attempts,
+                )
                 result = self.verifier.verify(effective, payload)
+                await self._announce(
+                    EventType.VERIFICATION_COMPLETED.value,
+                    step_id=step.id,
+                    status=result.status.value,
+                    method=result.method.value,
+                    confidence=result.confidence,
+                    attempt=attempts,
+                )
+                if recovering:
+                    await self._announce(
+                        EventType.RECOVERY_COMPLETED.value,
+                        step_id=step.id,
+                        outcome="recovered" if result.verified else "still_failing",
+                        action=recovering,
+                    )
+                    recovering = ""
                 failure = _failure_from(result, step, verification_policy)
                 if failure is None:
                     return _completed(step, payload, started, attempts, recovery, result)
                 error = failure
+                last_verification = result
                 payload = {}
 
             decision = self.advisor.advise(
                 step, error, attempts_made=attempts, retry_policy=policy
             )
             if decision.action is RecoveryAction.STOP:
-                return _failed(step, error, started, attempts, recovery, decision.reason)
+                if recovering:
+                    await self._announce(
+                        EventType.RECOVERY_COMPLETED.value,
+                        step_id=step.id,
+                        outcome="exhausted",
+                        action=recovering,
+                    )
+                return _failed(
+                    step, error, started, attempts, recovery, decision.reason,
+                    verification=last_verification,
+                )
+            await self._announce(
+                EventType.RECOVERY_STARTED.value,
+                step_id=step.id,
+                action=decision.action.value,
+                attempt=attempts,
+                reason=decision.reason,
+            )
             if decision.action is RecoveryAction.ESCALATE:
+                await self._announce(
+                    EventType.RECOVERY_COMPLETED.value,
+                    step_id=step.id,
+                    outcome="escalated",
+                    action=decision.action.value,
+                )
                 recovery.append(RecoveryAction.ESCALATE.value)
                 return _failed(
                     step,
@@ -337,18 +429,24 @@ class WorkflowExecutor:
                     recovery,
                     decision.reason,
                     escalated=True,
+                    verification=last_verification,
                 )
             if step.effect in EFFECTS_NEVER_RETRIED:
                 # Belt and braces: the advisor already refuses this, and the
                 # executor refuses it again, because this is the rule whose
                 # violation deletes something.
-                return _failed(step, error, started, attempts, recovery, decision.reason)
+                return _failed(
+                    step, error, started, attempts, recovery, decision.reason,
+                    verification=last_verification,
+                )
             if decision.action is RecoveryAction.MODIFY_PARAMETERS and decision.adjustments:
                 recovery.append(RecoveryAction.MODIFY_PARAMETERS.value)
                 repaired = {**effective.parameters, **decision.adjustments}
                 effective = effective.with_(parameters=repaired)
+                recovering = RecoveryAction.MODIFY_PARAMETERS.value
             else:
                 recovery.append(RecoveryAction.RETRY.value)
+                recovering = RecoveryAction.RETRY.value
             if decision.backoff_seconds:
                 await asyncio.sleep(decision.backoff_seconds)
 
@@ -654,7 +752,11 @@ def _failed(
     reason: str,
     *,
     escalated: bool = False,
+    verification: VerificationResult | None = None,
 ) -> StepOutcome:
+    """A step that did not succeed. ``verification`` is passed when a check
+    actually ran and is what failed; it stays None when the step never got as
+    far as being checked, which is a different fact."""
     message = error.message if error is not None else "The step failed without a reported reason."
     return StepOutcome(
         step_id=step.id,
@@ -666,6 +768,7 @@ def _failed(
             message,
             tool=step.tool,
         ),
+        verification=verification,
         attempts=attempts,
         latency_ms=_ms(started),
         recovery=tuple(recovery),

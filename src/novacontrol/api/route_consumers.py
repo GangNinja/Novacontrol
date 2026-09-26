@@ -88,6 +88,8 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("POST", "/vision/describe"): "renderGeneric",  # Vision panel Describe Screen
     ("POST", "/vision/click"): "renderGeneric",  # Vision panel guided click
     ("GET", "/intelligence"): "no-render",  # GIL telemetry (API/CLI surface; surfaced via /status)
+    ("GET", "/capabilities"): "no-render",  # capability browser for API/CLI callers
+    ("GET", "/capabilities/discover"): "no-render",  # 9.3: answers a question, runs nothing
     ("GET", "/bugs"): "no-render",  # Bug log rows rendered by app.js renderBugs, not run()
     ("POST", "/bugs/{bug_id}/fix"): "no-render",  # Mark-fixed row button re-fetches /bugs
     ("POST", "/bugs/clear-fixed"): "no-render",  # Clear Fixed button re-fetches /bugs

@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Callable, Coroutine, Mapping, Sequence
+from contextvars import ContextVar
 from typing import Any, TypeAlias, cast
 from uuid import uuid4
 
@@ -47,7 +48,7 @@ from novacontrol.core.activity import RecentActivityLog
 from novacontrol.core.buglog import BugLog
 from novacontrol.core.chat_transcript import ChatTranscriptStore
 from novacontrol.core.config import NovaControlConfig
-from novacontrol.core.events import Event, EventBus
+from novacontrol.core.events import Event, EventBus, EventType, task_event_name
 from novacontrol.core.runtime import EventDrivenRuntime
 from novacontrol.core.security import ApprovalDecision, ApprovalRequest, DenyByDefaultApprovalGateway
 from novacontrol.desktop import DesktopAutomationController, DesktopAutomationModule, LocalDesktopRunner
@@ -65,7 +66,14 @@ from novacontrol.decision import (
 )
 from novacontrol.intelligence import GlobalInputIntelligence, UnderstandResult
 from novacontrol.intelligence.model_manager import OllamaBackend
-from novacontrol.intelligence.intent import IntentName, RiskLevel, StructuredIntent, resolve_intent
+from novacontrol.intelligence.intent import (
+    CapabilityAvailability,
+    CapabilityRegistry,
+    IntentName,
+    RiskLevel,
+    StructuredIntent,
+    resolve_intent,
+)
 from novacontrol.intelligence.telemetry import request_id_for
 from novacontrol.integrations import (
     CLOUD_LLM_PRESETS,
@@ -84,6 +92,7 @@ from novacontrol.knowledge import KnowledgeBase
 from novacontrol.memory import MemoryManager, MemoryModule, MemoryNamespace, SqliteMemoryStore
 from novacontrol.models import (
     KeepAliveSettings,
+    ModelCapability,
     ModelLoadOutcome,
     ModelManager,
     ModelProfile,
@@ -93,7 +102,6 @@ from novacontrol.persistence import JsonStateStore
 from novacontrol.phone import PhoneControlController, PhoneControlModule
 from novacontrol.planning import (
     AgentLoop,
-    DeterministicVerifier,
     Plan,
     PlanCompiler,
     PlanStep,
@@ -106,6 +114,19 @@ from novacontrol.planning import (
     WorkflowResult,
 )
 from novacontrol.planning.engine import steps_id
+from novacontrol.reliability import (
+    PermissionManager,
+    TaskController,
+    TaskSnapshot,
+    TaskState,
+    VerificationEngine,
+)
+# Aliased on purpose. Two recovery engines exist and they work at different
+# levels: ``agentcore.RecoveryEngine`` (imported below) diagnoses a failed
+# AGENT ACTION against a fresh UI state, while this one recovers a PLAN STEP
+# under the plan's retry policy and its verification. Importing it under its
+# own name would shadow the agentcore one for the orchestrator wiring.
+from novacontrol.reliability import RecoveryEngine as StepRecoveryEngine
 from novacontrol.plugins import PluginMarketplaceModule
 from novacontrol.projects import ProjectManager
 from novacontrol.scheduler import InMemoryScheduler
@@ -224,6 +245,33 @@ _PLAN_VERIFICATIONS: dict[
 _FAILURE_LINE = re.compile(
     r"\b(fail(?:ed|ure|ures|ing)?|error|assert\w*|traceback|exception)\b", re.I
 )
+
+#: Which request is currently being served, as a context variable. Every event
+#: the work underneath a request causes — a tool call, a check, a recovery —
+#: carries the REQUEST's correlation id because of it, so one thread of work can
+#: be followed end to end instead of arriving as unrelated announcements.
+#:
+#: Deliberately never reset inside the request: ``asyncio`` copies the context
+#: when a task is created, so work STARTED by a request keeps its id (which is
+#: correct — that work is the request's), while work started outside any request
+#: sees the empty default.
+_CURRENT_REQUEST: ContextVar[str] = ContextVar("novacontrol_current_request", default="")
+
+#: The model roles a capability may require, mapped to the model capability that
+#: answers them. A role is spelled the way a capability declares it
+#: (``required_models=("chat",)``), and the mapping lives here so the two
+#: spellings cannot drift into two vocabularies.
+_MODEL_ROLE_CAPABILITIES: dict[str, ModelCapability] = {
+    "chat": ModelCapability.TEXT,
+    "text": ModelCapability.TEXT,
+    "reasoning": ModelCapability.REASONING,
+    "coding": ModelCapability.CODING,
+    "vision": ModelCapability.VISION,
+    "tools": ModelCapability.TOOL_CALLING,
+    "tool_calling": ModelCapability.TOOL_CALLING,
+    "structured_output": ModelCapability.STRUCTURED_OUTPUT,
+    "embeddings": ModelCapability.EMBEDDINGS,
+}
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -757,8 +805,17 @@ class NovaControlApplication:
         # not really there. Environment variables are the override channel, so
         # nothing here needs a code change to be tuned.
         self.config = NovaControlConfig.from_environment()
-        self.event_bus = EventBus(continue_on_error=True)
+        # Phase 9.1: the bus that carries the lifecycle vocabulary, with error
+        # isolation ON (one broken watcher must not fail the request that
+        # announced itself to it) and a bounded history so "what just happened?"
+        # is answerable without the durable journal.
+        self.event_bus = EventBus(continue_on_error=True, history=200)
         self.runtime = EventDrivenRuntime(self.event_bus)
+        # A COPY of the routing table, per application. The class attribute is
+        # the declaration; a shared mutable dict would let anyone who registers
+        # a handler (or a test that injects one) silently re-route every OTHER
+        # application in the process.
+        self._HANDLERS = dict(type(self)._HANDLERS)
         # Server-side recent-activity journal: every completed command, research
         # run, and learning cycle lands here, so the web timeline can be seeded
         # once and then fed live from /events/stream — no localStorage, no polling.
@@ -857,7 +914,13 @@ class NovaControlApplication:
             tool_lookup=self._tool_for_intent_name,
             retry_policy=RetryPolicy(max_attempts=self.config.planning.max_step_attempts),
         )
-        self.plan_verifier = DeterministicVerifier(callables=_PLAN_VERIFICATIONS)
+        # Phase 8.1: the verification ENGINE, not a second verifier. It is a
+        # DeterministicVerifier subclass, so every check registered above keeps
+        # working; what it adds is a check for the steps that attached none
+        # (a write is checked against the file, a command against its exit
+        # code) and a per-tool strategy registry for the tools that know how
+        # to check themselves. A step that states its own check still wins.
+        self.plan_verifier = VerificationEngine(callables=_PLAN_VERIFICATIONS)
         # Step ids this caller has EXPLICITLY approved for the current run. Empty
         # by default: a step that needs confirmation and has not been approved is
         # denied rather than attempted, because silence is not consent.
@@ -867,7 +930,27 @@ class NovaControlApplication:
             verifier=self.plan_verifier,
             retry_policy=RetryPolicy(max_attempts=self.config.planning.max_step_attempts),
             confirmation=self._confirm_plan_step,
+            announcer=self._step_announcement,
         )
+        # Phase 8.2: recovery around a single action, bounded by the same retry
+        # policy the executor uses and verified by the engine above. Its
+        # alternatives are filtered against the LIVE tool registry, which is
+        # why it is given a question to ask rather than a snapshot taken now —
+        # the registry is still empty at this point in startup.
+        self.recovery_engine = StepRecoveryEngine(
+            retry_policy=RetryPolicy(max_attempts=self.config.planning.max_step_attempts),
+            verifier=self.plan_verifier,
+            known_tools=lambda: tuple(entry.tool.name for entry in self.tools.list()),
+            confirmation_available=True,
+        )
+        # Phase 8.3/8.4: the task state machines and the pause/resume/cancel
+        # controller. Nothing here is wired to a runner yet: a task is only
+        # registered by the caller that starts one, so a control command can
+        # never act on work this process is not actually doing. Phase 9.1: the
+        # state machine's observer is where its transitions reach the bus, so a
+        # watcher learns about a pause from the transition itself rather than
+        # from whoever happened to issue the command.
+        self.task_control = TaskController(observer=self._task_transition)
         self.skills = SkillRegistry()
         self.scheduler = (
             InMemoryScheduler.from_dict(self.state_store.read("scheduler"))
@@ -991,6 +1074,9 @@ class NovaControlApplication:
             # Live, not a snapshot: tools registered after boot (a plugin, a
             # restored artifact) must be selectable without a restart.
             registered=lambda: tuple(entry.tool.name for entry in self.tools.list()),
+            # Phase 9.1: one observer on the ONE selector, so "tool.selected"
+            # is announced for the decision path and the planning path alike.
+            observer=self._tool_selected,
         )
         # ── Phase 5: tool metadata, discovery and the execution pipeline ─────
         # ONE catalogue describes every tool this build knows about — declared
@@ -1007,12 +1093,36 @@ class NovaControlApplication:
         )
         self.tool_retriever = ToolRetriever(self.tool_catalog)
         self.tool_cache = ToolResultCache()
+        # Phase 8.5: ONE risk/permission layer, reading the same catalogue the
+        # executor already gates on. The executor asks it what an action IS, so
+        # a tool that declares no permission scopes but is destructive or
+        # external is still put to a person instead of running unannounced.
+        self.risk = PermissionManager(catalog=self.tool_catalog)
         self.tool_executor = ToolExecutor(
             self.tools,
             catalog=self.tool_catalog,
             cache=self.tool_cache,
             normalizer=OutputNormalizer(),
+            risk=self.risk,
+            events=self._tool_event,
         )
+        # Phase 9.2/9.3: the capability registry is the ONE place that answers
+        # what this installation can do. It is the registry the intelligence
+        # layer already maintains — attached to the catalogues rather than
+        # restated — plus the tools from the catalogue (projected) and the plan
+        # actions this application can actually carry out, declared below.
+        self.capabilities: CapabilityRegistry = self.intelligence.capabilities
+        # Attached, not fed: the registry projects the tools the catalogue says
+        # are really here at QUERY time, so a tool that becomes runnable later
+        # needs no re-registration, and there is no second copy of the tool set
+        # that could disagree with the catalogue.
+        self.capabilities.attach(
+            catalog=self.intelligence.catalog,
+            tools=self.tool_catalog,
+            tool_names=lambda: tuple(entry.tool.name for entry in self.tools.list()),
+            model_probe=self._model_available,
+        )
+        self._declare_actions()
         self.decision = DecisionEngine(
             capabilities=self.intelligence.capabilities,
             provider=build_decision_provider(
@@ -1674,6 +1784,14 @@ class NovaControlApplication:
         # and the automatic path would be two policies over one machine.
         with self.intelligence.telemetry.stage("model_load"):
             outcome = await asyncio.to_thread(self.model_manager.load, name)
+        await self._announce(
+            EventType.MODEL_LOADED.value,
+            model=outcome.model,
+            loaded=outcome.loaded,
+            verified=outcome.verified,
+            evicted=list(outcome.evicted),
+            reason=outcome.reason,
+        )
         steps = [dict(step) for step in outcome.steps]
         # The response keeps the shape callers already read and adds the
         # manager's record of the six steps, so a refusal can be explained with
@@ -1705,6 +1823,8 @@ class NovaControlApplication:
         # layer below would unload whatever it was handed.
         name = model.strip()
         released = await asyncio.to_thread(self.model_manager.unload, name)
+        for released_model in released or ():
+            await self._announce(EventType.MODEL_UNLOADED.value, model=released_model)
         if name:
             return {"unloaded": bool(released), "models": list(released)}
         return {"unloaded": True, "models": list(released)}
@@ -1776,6 +1896,18 @@ class NovaControlApplication:
         )
         task = self.tasks.create(text, kind="ask")
         self.tasks.update(task.id, TaskRecordStatus.RUNNING, progress=0.1)
+        # Phase 9.1: the request's own id is the correlation id every event it
+        # causes carries, so one thread of work can be followed end to end
+        # ("the intent, the decision about it, the tool it ran") in the history.
+        correlation = task.id
+        # Everything this request goes on to do is correlated as ITS work.
+        _CURRENT_REQUEST.set(correlation)
+        await self._announce(
+            EventType.TASK_STARTED.value,
+            correlation_id=correlation,
+            task_id=task.id,
+            kind="ask",
+        )
         # Phase 7 telemetry: ONE trace per request, opened before understanding
         # and closed after the response is shaped. RAM is sampled at both ends by
         # the caller (this layer owns the monitor), so what a request cost in
@@ -1790,6 +1922,20 @@ class NovaControlApplication:
         # multi-intent). Fallback: the legacy brain classifier.
         with self.intelligence.telemetry.stage("nlu"):
             understood = await self.intelligence.understand_async(text, has_image=bool(attached))
+        await self._announce(
+            EventType.INTENT_DETECTED.value,
+            correlation_id=correlation,
+            intent=understood.intent.intent.value,
+            strategy=understood.strategy,
+            confidence=understood.intent.confidence,
+            has_image=bool(attached),
+        )
+        await self._announce(
+            EventType.CONTEXT_RESOLVED.value,
+            correlation_id=correlation,
+            strategy=understood.strategy,
+            intent=understood.intent.intent.value,
+        )
         # DECISION ENGINE: given what was understood, decide what to DO with it —
         # a deterministic capability, a subsystem handler, the planner, the
         # agentic loop, the vision pipeline, a language model, or one clarifying
@@ -1804,6 +1950,16 @@ class NovaControlApplication:
                 environment=self._decision_environment(),
                 strategy=understood.strategy,
             )
+        await self._announce(
+            EventType.DECISION_CREATED.value,
+            correlation_id=correlation,
+            route=decision_layer.route.value,
+            decision_type=decision_layer.decision_type.value,
+            capability=decision_layer.selected_capability,
+            model=decision_layer.selected_model,
+            requires_planning=decision_layer.requires_planning,
+            requires_confirmation=decision_layer.requires_confirmation,
+        )
         self.intelligence.telemetry.record_decision(
             route=decision_layer.route.value,
             decision_type=decision_layer.decision_type.value,
@@ -1932,6 +2088,13 @@ class NovaControlApplication:
                 understanding=understanding,
                 success=False,
             )
+            await self._announce(
+                EventType.TASK_FAILED.value,
+                correlation_id=correlation,
+                task_id=task.id,
+                error=type(exc).__name__,
+                route=decision.intent.value,
+            )
             raise
         self.intelligence.telemetry.record_outcome(
             request_id=request_id_for(understanding.id), success=True
@@ -1949,6 +2112,12 @@ class NovaControlApplication:
             }
             response = await self.brain.shape_response(request, decision, payload)
         self.tasks.update(task.id, TaskRecordStatus.COMPLETED, progress=1.0, result=response.to_dict())
+        await self._announce(
+            EventType.TASK_COMPLETED.value,
+            correlation_id=correlation,
+            task_id=task.id,
+            route=route or decision.intent.value,
+        )
         # Record the turn in the SHARED transcript so every client renders the
         # same thread (the UI used to keep its own per-browser copy).
         self.chat_transcript.append("user", text)
@@ -2211,21 +2380,39 @@ class NovaControlApplication:
         with self.intelligence.telemetry.stage("planning"):
             plan = self.plan_compiler.compile(goal, decision=decision)
         if plan.steps or plan.needs_clarification:
+            self._announce_plan_created(plan)
             return plan
         legacy = self.planning.create_plan(goal)
-        return Plan(
-            goal=legacy.goal,
-            steps=tuple(
-                PlanStep(
-                    title=step.title,
-                    description=step.description,
-                    depends_on=step.depends_on,
-                    id=step.id,
-                )
-                for step in legacy.steps
-            ),
-            needs_clarification=legacy.needs_clarification,
+        return self._announce_plan_created(
+            Plan(
+                goal=legacy.goal,
+                steps=tuple(
+                    PlanStep(
+                        title=step.title,
+                        description=step.description,
+                        depends_on=step.depends_on,
+                        id=step.id,
+                    )
+                    for step in legacy.steps
+                ),
+                needs_clarification=legacy.needs_clarification,
+            )
         )
+
+    def _announce_plan_created(self, plan: Plan) -> Plan:
+        """Announce a plan the moment it exists, and hand it straight back.
+
+        Returned rather than rebuilt so the announcement cannot become a second
+        place a plan is made: what a watcher hears about IS what will run.
+        """
+        self._announce_soon(
+            EventType.PLAN_CREATED,
+            goal=plan.goal,
+            steps=tuple(step.id for step in plan.steps),
+            titles=tuple(step.title for step in plan.steps),
+            needs_clarification=plan.needs_clarification,
+        )
+        return plan
 
     async def run_plan(self, goal: str, *, approved: Sequence[str] = ()) -> dict[str, Any]:
         """Run a goal through the whole agent loop, and report what happened.
@@ -2374,7 +2561,10 @@ class NovaControlApplication:
         entries = [
             {
                 "capability": capability.capability,
-                "intent": capability.intent.value,
+                # A capability the routing table answers for has an intent; a
+                # projected one (a tool, an action) has none, and "" is that
+                # fact rather than an AttributeError.
+                "intent": capability.intent.value if capability.intent is not None else "",
                 "description": capability.description,
                 "risk": capability.risk.value,
                 "executor": capability.executor,
@@ -2760,8 +2950,17 @@ class NovaControlApplication:
         if not payload.get("captured"):
             payload.setdefault("summary", str(payload.get("message", "")))
             payload.setdefault("question_answered", False)
+            await self._announce(
+                EventType.VISION_COMPLETED.value,
+                image=attached or "screen",
+                answered=False,
+                reason=str(payload.get("message", "")),
+            )
             return "vision", payload
         question = self._vision_question(request)
+        # Announced once the question is known and the capture is real: an event
+        # that says "vision started" before there is anything to look at would
+        # be a statement about an intention rather than about work.
         # Phase 7: the RAM-aware load runs BEFORE the VLM is asked to look. An
         # automatic request used to reach the runtime with the chat model still
         # resident — the conflict this layer exists to resolve — because only the
@@ -2770,6 +2969,12 @@ class NovaControlApplication:
         # rather than a hiccup: the cheap path answers from the screen's text and
         # says the model was not loaded, instead of paging the machine to run a
         # model that does not fit.
+        await self._announce(
+            EventType.VISION_STARTED.value,
+            image=str(payload["screenshot"]),
+            question=question,
+            attached=bool(attached),
+        )
         model = self._vision_pipeline_model()
         outcome = await self._acquire_vision_model(model)
         allow_vlm = not (outcome is not None and outcome.refused)
@@ -2800,7 +3005,279 @@ class NovaControlApplication:
             result,
             refused=outcome.reason if outcome is not None and outcome.refused else "",
         )
+        await self._announce(
+            EventType.VISION_COMPLETED.value,
+            image=str(payload["screenshot"]),
+            answered=bool(result.answered),
+            image_type=str(payload.get("image_type", "")),
+            model=str(getattr(outcome, "model", "") or ""),
+        )
         return "vision", payload
+
+    def reliability_status(self) -> dict[str, Any]:
+        """What Phase 8 can verify, recover, control and refuse — as one readout.
+
+        Reported rather than inferred: a caller (a UI, a doctor command) can see
+        which checks this build has, how many retries it will spend, which
+        tasks a control command would act on, and which risk policy is in
+        force, instead of discovering them by watching something fail.
+        """
+        return {
+            "verification": self.plan_verifier.report(),
+            "recovery": {
+                "max_attempts": self.recovery_engine.retry_policy.max_attempts,
+                "alternatives": list(self.recovery_engine.alternatives()),
+                "confirmation_available": self.recovery_engine.confirmation_available,
+                "escalation_available": self.recovery_engine.escalation_available,
+            },
+            "tasks": [snapshot.to_dict() for snapshot in self.task_control.tasks()],
+            "risk": self.risk.to_dict(),
+        }
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Phase 9: what this installation can do, declared by the layer that does it
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _declare_actions(self) -> None:
+        """Declare the plan steps THIS application carries out, once, next to
+        the code that carries them out.
+
+        ``_run_plan_step`` is the executor for these actions, so the application
+        is the layer that knows them; a registry told about them by anyone else
+        would be second-hand knowledge. Steps that dispatch to a TOOL are
+        deliberately absent — the tool catalogue already declares them, and two
+        tables for one fact is the duplication this registry exists to remove.
+        """
+        declare = self.capabilities.register_action
+        declare(
+            "read_metric",
+            capability_id="system.read_metric",
+            intent=IntentName.SYSTEM_INFO,
+            description="Read a live hardware reading from this machine, never from a model.",
+            inputs=("metric",),
+            outputs=("metrics", "message"),
+            tags=(
+                "read", "metric", "ram", "memory", "cpu", "gpu", "disk",
+                "battery", "temperature", "status",
+            ),
+            examples=(
+                "How much RAM is free?",
+                "What is my CPU usage?",
+                "What's the battery level?",
+            ),
+        )
+        declare(
+            "locate_project",
+            capability_id="developer.locate_project",
+            description="Find a project directory on this machine, in bounded places.",
+            inputs=("project",),
+            outputs=("path",),
+            tags=("find", "locate", "project", "directory", "folder", "repo", "workspace"),
+            examples=("Find my novacontrol project.", "Where is the reports folder?"),
+        )
+        declare(
+            "run_tests",
+            capability_id="developer.run_tests",
+            intent=IntentName.RUN_COMMAND,
+            description="Run a located project's test suite and capture its exit code.",
+            risk=RiskLevel.MEDIUM,
+            permissions=("process.execute",),
+            inputs=("scope",),
+            outputs=("exit_code", "stdout", "stderr"),
+            tags=("test", "tests", "suite", "pytest", "run", "check", "failing"),
+            examples=("Run the test suite.", "Run my project's tests."),
+        )
+        declare(
+            "run_command",
+            capability_id="developer.run_command",
+            intent=IntentName.RUN_COMMAND,
+            description="Run a shell command the caller approved and capture its exit code.",
+            risk=RiskLevel.MEDIUM,
+            permissions=("process.execute",),
+            inputs=("command",),
+            outputs=("exit_code", "stdout", "stderr"),
+            tags=("run", "command", "shell", "terminal", "tests", "build", "install"),
+            examples=("Run the test suite.", "Run pip install -r requirements.txt."),
+        )
+        declare(
+            "collect_output",
+            capability_id="developer.collect_output",
+            description="Capture the output of an upstream step once, and name it.",
+            inputs=("depends_on",),
+            outputs=("captured", "exit_code"),
+            tags=("collect", "capture", "output", "log", "logs", "stdout"),
+            examples=("Collect the output of the test run.",),
+        )
+        declare(
+            "analyze_result",
+            capability_id="developer.analyze_result",
+            description="Read captured output and name what failed, deterministically.",
+            inputs=("depends_on",),
+            outputs=("failures", "summary"),
+            tags=(
+                "analyze", "analyse", "diagnose", "failure", "failures", "error",
+                "errors", "log", "logs", "traceback", "why",
+            ),
+            examples=("Analyse the test output.", "Why did the suite fail?"),
+        )
+        declare(
+            "summarize_result",
+            capability_id="developer.summarize_result",
+            intent=IntentName.SUMMARIZE,
+            description="Summarise what a plan's steps found, in the order they ran.",
+            inputs=("depends_on",),
+            outputs=("summary",),
+            tags=("summarize", "summarise", "report", "explain", "tell", "result"),
+            examples=("Tell me what the run found.", "Summarise the diagnostics."),
+        )
+        # A REAL gap, declared as one: a plan step that asks to reason is refused
+        # by this executor (there is no local reasoning engine), so the registry
+        # says so rather than advertising a capability that would fail.
+        declare(
+            "reason",
+            capability_id="system.reason",
+            description="Reason about a goal with no executor to carry it out.",
+            availability=CapabilityAvailability.UNAVAILABLE,
+            availability_reason=(
+                "no executor carries reasoning locally; a step that asks to reason "
+                "is escalated to a model instead"
+            ),
+            tags=("reason", "think", "infer"),
+        )
+
+    def _model_available(self, role: str) -> bool:
+        """Whether a model that can serve ``role`` is usable right now.
+
+        Answered by the layers that already decide this rather than from a list
+        kept here: "vision" is what the vision pipeline's provider says it can
+        carry, and every other role is a model DECLARING that capability in the
+        registry the selection layer routes on, or a configured cloud provider —
+        the same two ways a request actually gets an answer. A role nobody
+        recognises, or a probe that raises, is not claimed to be available.
+        """
+        wanted = str(role or "").strip().lower()
+        if not wanted:
+            return True
+        if wanted == "vision":
+            try:
+                return bool(self.vision_manager.status()["provider"]["available"])
+            except Exception:  # pragma: no cover - a probe must never block a query
+                return False
+        capability = _MODEL_ROLE_CAPABILITIES.get(wanted)
+        if capability is None:
+            return False
+        try:
+            declared = any(
+                capability in profile.capabilities
+                for profile in self.model_manager.registry.all()
+            )
+        except Exception:  # pragma: no cover - a probe must never block a query
+            declared = False
+        return declared or bool(self.brain.cloud_provider_name)
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Phase 9.1: the lifecycle vocabulary, published from the live path
+    # ──────────────────────────────────────────────────────────────────────
+
+    async def _announce(
+        self,
+        type_: EventType | str,
+        /,
+        *,
+        correlation_id: str = "",
+        **payload: Any,
+    ) -> None:
+        """Announce a lifecycle event, never failing the work it describes.
+
+        ``emit`` already refuses to raise because a SUBSCRIBER failed; a payload
+        that does not match its event's declared fields still raises, because
+        that is a bug in this publisher rather than in a watcher. With no
+        explicit correlation the event inherits the request being served, so
+        depth costs nothing and no publisher has to thread an id around.
+        """
+        await self.event_bus.emit(
+            type_,
+            source="application",
+            correlation_id=correlation_id or _CURRENT_REQUEST.get(),
+            **payload,
+        )
+
+    def _announce_soon(
+        self, type_: EventType | str, /, *, correlation_id: str = "", **payload: Any
+    ) -> None:
+        """Announce from a SYNCHRONOUS seam — a state transition, a planner.
+
+        The payload is validated here, at the publisher, so a missing field
+        raises where the mistake is instead of inside a task nobody is awaiting;
+        the publish itself is scheduled when a loop is running and is a no-op
+        otherwise, exactly like ``_bus_schedule``.
+
+        ``source``, ``correlation_id`` and ``causation_id`` are RESERVED (the bus
+        sets them for every event), so a payload field may not use those names —
+        use a name that says what the value is (``selection_source``,
+        ``image``) rather than passing something that cannot travel.
+        """
+        event = Event.of(
+            type_,
+            source="application",
+            correlation_id=correlation_id or _CURRENT_REQUEST.get(),
+            **payload,
+        )
+        self._bus_schedule(event)
+
+    def _task_transition(self, snapshot: TaskSnapshot, previous: TaskState) -> None:
+        """Publish a task's transition (the state machine's own observer).
+
+        The state table names the event, with one reading the table cannot make:
+        RUNNING entered out of PAUSED is a RESUME, not a start — publishing
+        "started" for a task somebody had paused would be the kind of small lie
+        a status channel must not tell.
+        """
+        state = str(snapshot.current_state)
+        type_ = task_event_name(state)
+        if type_ is None:
+            return
+        if type_ is EventType.TASK_STARTED and str(previous) == TaskState.PAUSED.value:
+            type_ = EventType.TASK_RESUMED
+        self._announce_soon(
+            type_,
+            task_id=snapshot.task_id,
+            state=state,
+            previous=str(previous),
+            step=snapshot.current_step,
+            parent_task_id=snapshot.parent_task_id,
+        )
+
+    async def _tool_event(self, type_: str, payload: Mapping[str, Any]) -> None:
+        """The tool executor's sink: one event per tool call, as it happens."""
+        await self._announce(type_, **dict(payload))
+
+    def _tool_selected(self, selection: Any) -> None:
+        """The selector's observer: which tool this request would reach, and why.
+
+        Synchronous because a selection is: this announces the answer without
+        making the selector wait for anyone to hear it.
+
+        The selection's provenance is published as ``selection_source``, NOT
+        ``source``: every event already carries a ``source`` (the publisher's
+        own name) and a payload field that shadows it cannot be passed to
+        ``Event.of`` at all.
+        """
+        self._announce_soon(
+            EventType.TOOL_SELECTED,
+            tool=str(getattr(selection, "tool", "")),
+            capability=str(getattr(selection, "capability", "")),
+            executor=str(getattr(selection, "executor", "")),
+            selection_source=getattr(getattr(selection, "source", None), "value", ""),
+            confidence=float(getattr(selection, "confidence", 0.0) or 0.0),
+            availability=str(getattr(selection, "availability", "")),
+            degraded=bool(getattr(selection, "degraded", False)),
+            requires_confirmation=bool(getattr(selection, "requires_confirmation", False)),
+        )
+
+    async def _step_announcement(self, type_: str, payload: Mapping[str, Any]) -> None:
+        """The plan executor's announcer: checks and recoveries, as they happen."""
+        await self._announce(type_, **dict(payload))
 
     def _vision_provider_source(self) -> object | None:
         """The completion provider behind the vision pipeline's provider, if any.

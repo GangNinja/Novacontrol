@@ -98,6 +98,15 @@ def sse_frame(event: Event) -> str:
     return f"event: {event.type}\ndata: {json.dumps(payload, default=str)}\n\n"
 
 
+def _csv(value: str) -> tuple[str, ...]:
+    """A comma-separated query parameter as a tuple, with no empty entries.
+
+    Query strings carry lists as text; parsing them in ONE place keeps every
+    endpoint's idea of "a list of names" the same as the next one's.
+    """
+    return tuple(item.strip() for item in str(value or "").split(",") if item.strip())
+
+
 def _routing_preview(nova: NovaControlApplication, text: str, intent: str) -> dict[str, Any]:
     """A small preview of what the user would actually see for a landing rung.
 
@@ -778,6 +787,50 @@ def create_app() -> Any:
             # how it has actually been used (cache hits), so "semantic matching"
             # is a measurable part of the status rather than a claim.
             "semantic": nova.intelligence.semantic.to_dict(),
+        }
+
+    @app.get("/capabilities")
+    async def capability_inventory(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Every capability this installation has, and whether it can run now.
+
+        The whole projection — declared verbs, tools projected from the
+        catalogue, and the plan actions this application carries out — so "what
+        can you do?" is answered from ONE place instead of three.
+        """
+        return nova.capabilities.to_dict(include_projected=True)
+
+    @app.get("/capabilities/discover")
+    async def capability_discovery(
+        query: str = "",
+        intent: str = "",
+        category: str = "",
+        tools: str = "",
+        models: str = "",
+        include_unavailable: bool = False,
+        limit: int = 8,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Phase 9.3: what capabilities are available for this task?
+
+        A RANKING with its evidence, never an execution: discovery says what
+        could carry the work out and why, and an unavailable capability is
+        reported with the reason (a missing model, a missing tool) rather than
+        quietly left out unless the caller asks for it.
+        """
+        matches = nova.capabilities.discover(
+            query,
+            intent=intent or None,
+            tools=_csv(tools),
+            models=_csv(models),
+            categories=_csv(category),
+            include_unavailable=include_unavailable,
+            limit=max(0, limit),
+        )
+        return {
+            "query": query,
+            "count": len(matches),
+            "matches": [match.to_dict() for match in matches],
+            "registry": nova.capabilities.report(),
         }
 
     @app.get("/bugs")

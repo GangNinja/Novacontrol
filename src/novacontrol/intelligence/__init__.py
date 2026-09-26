@@ -22,11 +22,16 @@ from novacontrol.intelligence.entities import EntityExtractorRegistry, default_e
 from novacontrol.intelligence.exemplars import default_exemplars
 from novacontrol.intelligence.intent import (
     INTENT_ALIASES,
+    Capability,
+    CapabilityAvailability,
+    CapabilityMatch,
     CapabilityRegistry,
+    CapabilitySource,
     IntentName,
     IntentRegistry,
     RiskLevel,
     StructuredIntent,
+    capability_from_tool,
     resolve_intent,
 )
 from novacontrol.intelligence.lexical import LexicalMatch, LexicalMatcher
@@ -55,7 +60,12 @@ from novacontrol.intelligence.understanding import UserIntent, parse_llm_output
 
 __all__ = [
     "INTENT_ALIASES",
+    "Capability",
+    "CapabilityAvailability",
+    "CapabilityMatch",
     "CapabilityRegistry",
+    "CapabilitySource",
+    "capability_from_tool",
     "Complexity",
     "ComplexityAssessment",
     "ComplexitySignals",

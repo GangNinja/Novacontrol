@@ -198,6 +198,21 @@ class ApiSurface:
                 ApiRoute("POST", "/vision/describe", "Capture the screen and describe it (vision model or window probe).", authenticated=True),
                 ApiRoute("POST", "/vision/click", "Vision-locate a labeled element on screen, click it, and verify.", authenticated=True),
                 ApiRoute("GET", "/intelligence", "Global Intelligence Layer: telemetry, findings, and capabilities.", authenticated=True),
+                ApiRoute(
+                    "GET",
+                    "/capabilities",
+                    "Every capability this installation has (declared, tool, action), with "
+                    "its availability, risk, permissions, tools, inputs and outputs.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/capabilities/discover",
+                    "What capabilities are available for this task? Query parameters: "
+                    "`query` (required), `intent`, `category`, `tools`, `models`, "
+                    "`include_unavailable`, `limit`. Discovery only - nothing runs.",
+                    authenticated=True,
+                ),
                 ApiRoute("GET", "/bugs", "List recorded bugs (what failed, where, and when).", authenticated=True),
                 ApiRoute("POST", "/bugs/{bug_id}/fix", "Mark a recorded bug as fixed.", authenticated=True),
                 ApiRoute("POST", "/bugs/clear-fixed", "Remove all bugs already marked fixed.", authenticated=True),

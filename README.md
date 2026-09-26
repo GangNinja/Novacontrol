@@ -40,6 +40,8 @@ One brain → many capabilities:
   **Plan The Project** extends the same agent to multi-file work: the model returns a JSON file map (2–5 files + an entry point), the entry runs in the same sandbox, and real errors drive fixes to the affected files (same 3-round budget, whole-project re-runs). Every drafted file renders with a per-file Copy/Save, saved artifacts list in a **Saved Artifacts** strip, and **Run** re-executes any saved file through the same sandbox (`POST /build/artifacts`, `/build/run`, `/build/save`).
 - **Self-improvement telemetry** — resolutions, clarifications, unknown intents, and failed entity resolutions are recorded and exposed as human-readable improvement findings.
 - **Capability registry** — every subsystem declares its intents, required entities, risk level, executor, and *verification strategy*; the orchestrator derives execution and confirmation policy from that table.
+- **Honest states, bounded recovery, and one risk answer** — the reliability layer judges a step by evidence (its own check, then its tool's strategy, then the check the action implies) and reports *unverified* rather than rounding up; it retries only what policy allows, never a destructive or external action and never a refusal; it moves a task through eleven formally checked states with cooperative cancellation honoured at checkpoints; and it derives one risk level from the declared metadata, the tool's own declaration and the action verb — naming which of the three decided.
+- **Typed lifecycle events, and a real answer to "can you do that?"** — every event published from the live request path is one of a 22-name vocabulary validated against its own payload schema *at the publisher*, carries the request's own `correlation_id` from a context variable (so work three layers down names the request that started it), and lands in a bounded history readable by `recent()`. `GET /capabilities` reports what this machine can actually do — availability measured, not assumed, and a missing model or tool reported as UNAVAILABLE with the reason — and `GET /capabilities/discover` ranks the few capabilities that fit a task with the evidence for each score.
 - **Safety-first execution** — device actions require a server-minted, single-use, expiring approval token; auto-approve is opt-in.
 - **One brain everywhere — Chat and Explore follow the same mode** — Explore's research synthesis uses whichever brain Chat uses (scratch templates, the local Ollama model, or the cloud provider), re-synced on every mode switch and boot; its report cache is keyed per synthesis brain, so switching modes never serves the previous brain's cached answer.
 - **Cloud LLM with honest diagnostics** — Settings → Cloud LLM covers every preset with a **Test Connection** button that pings the provider with the pasted key *before* saving it (nothing is persisted on failure; the response names the failing stage — timeout vs rejected key). While a cloud brain is active, the System panel shows lifetime **token usage** (prompt/completion/total per the provider's own usage block) and the **last transport error** verbatim, so a dead key is visible at a glance.
@@ -98,6 +100,11 @@ src/novacontrol/
   planning/       Planner + agent loop: goals into dependency-ordered steps
                   that name a tool, an effect and a way to be verified, then
                   executed with bounded retries behind the approval gate
+  reliability/    Honest verification, bounded recovery, task state and
+                  permissions: the check a step is judged by, what may be
+                  retried (and what never may), eleven formally checked task
+                  states with cooperative cancellation at checkpoints, and one
+                  ordered risk layer that names which source decided
   brain/          Scratch brain (fully local answers) + LLM chat + routing
   desktop/        Desktop controller, parser/planner, vision-guided control
   phone/          adb bridge: connect, apps, texts, calls, screenshots
@@ -111,7 +118,9 @@ src/novacontrol/
   voice/          STT/TTS via OS-native speech services
   tasks/          Task center (create, update, delete, clear)
   core/           Event bus, runtime, config, security (deny-by-default
-                  approvals), bug log, audit trail
+                  approvals), bug log, audit trail, plus the typed lifecycle
+                  event vocabulary (validated payloads, bounded history) that
+                  every subsystem publishes through
   explore/        Research pipeline with live progress events
   memory/         Namespaced memory (SQLite-backed)
   api/            FastAPI surface + single SSE activity channel
@@ -393,6 +402,7 @@ FastAPI app factory with REST + SSE + WebSocket surfaces. The full route catalog
 | `GET`/`POST` | `/vision/describe` · `/vision/click` | Screen understanding and guided clicks |
 | `POST` | `/vision/model` · `/vision/model/clear` | Configure/clear the multimodal vision model (hot swap) |
 | `GET` | `/intelligence` | GIL telemetry, improvement findings, capability registry |
+| `GET` | `/capabilities` · `/capabilities/discover` | What this installation can do — declared, projected from the tool catalogue, or an application action — with **measured** availability and the reason it is unavailable; then ranked discovery for a task, with the evidence behind each score. Nothing runs |
 | `GET` | `/bugs` · `POST /bugs/{id}/fix` · `POST /bugs/clear-fixed` | Bug log review, resolution, and clearing resolved entries |
 | `GET` | `/tasks` · `POST /tasks/delete` · `/tasks/clear` · `/tasks/clear/undo` | Task center (Clear All is undoable) |
 | `POST` | `/brain/mode` · `/brain/cloud` | Switch scratch/LLM brain and configure cloud providers |
@@ -469,7 +479,7 @@ Type checking:
 python -m mypy src
 ```
 
-The suite is hermetic: phone and desktop tests use fake runners (`NoopPhoneRunner`, `NoopDesktopRunner`) — no real device or OS interaction during tests. Trending-topic tests inject fake headline fetchers, so the news feature is tested without network too (one live smoke is run manually, not in CI).
+The suite is hermetic: phone and desktop tests use fake runners (`NoopPhoneRunner`, `NoopDesktopRunner`) — no real device or OS interaction during tests. Trending-topic tests inject fake headline fetchers, so the news feature is tested without network too (one live smoke is run manually, not in CI). Current size on the development machine: **1,796 passed / 12 skipped** (1,686 subtests).
 
 **Cross-platform CI, same command everywhere** — the full suite runs on Linux and Windows (CI: `pytest tests/ -q` on Ubuntu, Python 3.12 + 3.13). Four checks run on every push: the test matrix (Python 3.12 and 3.13), the API-reference sync check (`python scripts/generate_api_reference.py --check`), and mypy in both platform views (`python -m mypy src`, `python -m mypy src --platform win32`). Tests that need OS-specific behavior either isolate it behind a seam or skip honestly:
 
@@ -503,6 +513,7 @@ For a browser-driven smoke of the real page (guided-click result card, reduced m
 - **OpenCV-assisted verification** — click verification diffs frames with OpenCV when available (change-region localization around the click site), falling back to Pillow otherwise
 - **Audit trail** — executed and denied desktop/browser/phone actions share one timestamped audit log
 - **Event bus journal** — durable JSONL event journal plus in-memory journal for diagnostics
+- **Typed lifecycle events** — the live request path publishes `intent.detected`, `context.resolved`, `decision.created`, `plan.created`, `task.*`, `tool.*`, `verification.*`, `recovery.*`, `model.*` and `vision.*` from the bus's typed vocabulary; each event is validated against its own payload schema where it is published, keeps the request's `correlation_id` (carried in a context variable, so nested work inherits it), and stays in a bounded history. `emit()` is the door that cannot raise, so a broken subscriber never breaks the request that published
 - **Live activity** — the web UI's single SSE channel (`/events/stream`) mirrors every subsystem's progress; every frame carries a **`correlation_id`** so two concurrent activities of the same family (a research in Explore while another runs from Chat, or two approved commands) interleave in the UI without mixing rows
 - Log level via `NOVACONTROL_LOG_LEVEL`
 
@@ -529,6 +540,8 @@ For a browser-driven smoke of the real page (guided-click result card, reduced m
 | Cloud LLM | ✅ OpenAI-compatible / Gemini / Groq / **Claude (native `/v1/messages`)** presets; Test Connection (no-save ping), System-panel token usage + last-error surfacing, Explore synthesis follows the active brain; model picker for local Ollama — pinned by `tests/test_integrations_llm.py`, `tests/test_brain_mode_and_tasks.py`, `tests/test_vision_model_config.py` |
 | Self-improvement | ⚠️ Telemetry + sandboxed previews implemented; fully autonomous improvement is *not* enabled |
 | Staged build (Phases 1–7) | ✅ Verified end to end against the running request path — every claim driven through `handle_request`/`run_plan` rather than read off a layer. Two live-path defects found and fixed: context-resolved references now reach the plan (*"open it"* → `open chrome`), and the planner's `run_tests`/`run_command` steps execute behind explicit approval instead of failing with "no executor". Residuals (file operations understood but unwired; real VLM quality unverifiable without a vision model) are recorded in [§25 of the development log](docs/DEVELOPMENT_LOG.md) |
+| Reliability, recovery & task control (Phase 8) | ✅ Working — `reliability/` adds a verification engine (the step's own check → the tool's strategy → the check the action implies, with an injectable probe that reports *cannot tell* instead of a failure), a recovery engine bounded by the plan's retry policy (never repeats a destructive or external action, asks a person for a refusal instead of retrying into it, offers an alternative only for a missing dependency), a task state machine with eleven formally checked states and cooperative cancellation, and one ordered permission layer (declared → tool metadata → action verb → LOW) that reports its source. Verified against the phase's own specification by driving every clause through the application (`tests/test_reliability.py`) — which found and fixed four defects, including risk derived from the letters of "install" in `installed_applications` outranking the tool's own LOW declaration |
+| Internal event bus & capability registry (Phase 9) | ✅ Working — the existing `EventBus` gained the typed vocabulary, payload validation, a bounded history and the non-raising `emit()`, and the live path publishes all 22 lifecycle events behind one injected seam per component (an observer on the task state machine, a sink in the tool executor, an announcer in the plan executor), so nothing has to know the bus exists. `CapabilityRegistry` answers *what can this machine do?* — availability measured against the machine, a real gap declared as one (`system.reason`), discovery ranked with its reasons, and the decision/selection layers reporting a capability's availability without re-routing on it — surfaced through `GET /capabilities` and `GET /capabilities/discover`. Eight defects found by driving the phase end to end are recorded in [§28](docs/DEVELOPMENT_LOG.md) |
 
 See [docs/STATUS.md](docs/STATUS.md) for the phase-by-phase history.
 
@@ -554,6 +567,7 @@ See [docs/STATUS.md](docs/STATUS.md) for the phase-by-phase history.
 - [ ] Trending-chip shuffle (exclude seen topics on demand) and a user-selectable news edition in Settings
 - [ ] LLM-powered chat synthesis: flowing prose answers when a model is configured, template fallback otherwise
 - [ ] Phone companion app (AccessibilityService over WebSocket — see [docs/PHONE_COMPANION_APP.md](docs/PHONE_COMPANION_APP.md)) and wireless-adb pairing for cable-free control
+- [ ] A capability browser and a "why can't you do that?" answer in the web UI (fed by the registry's `report()` and `availability_of()`), plus a request-thread view driven by the lifecycle events instead of polling
 
 ## 🤝 Contributing
 

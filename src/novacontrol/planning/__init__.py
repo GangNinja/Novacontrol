@@ -64,8 +64,13 @@ from novacontrol.planning.recovery import (
 from novacontrol.planning.runtime import PlanningModule
 from novacontrol.planning.verification import (
     DeterministicVerifier,
+    NetworkProbe,
     ProcessProbe,
     VerifyCallable,
+    WindowProbe,
+    default_verification_for,
+    interpret_result,
+    stamp,
 )
 
 __all__ = [
@@ -85,6 +90,7 @@ __all__ = [
     "ConfirmationChannel",
     "DeterministicVerifier",
     "FailureKind",
+    "NetworkProbe",
     "Plan",
     "PlanCompiler",
     "PlanStatus",
@@ -111,7 +117,11 @@ __all__ = [
     "VerificationSpec",
     "VerificationStatus",
     "VerifyCallable",
+    "WindowProbe",
     "WorkflowExecutor",
     "WorkflowResult",
+    "default_verification_for",
+    "interpret_result",
     "repair_parameters",
+    "stamp",
 ]

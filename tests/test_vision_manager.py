@@ -413,10 +413,16 @@ class OcrFirstOrModelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.detected_text, ("Welcome",))
 
     async def test_no_ocr_and_no_model_reports_which_failure_it_was(self) -> None:
-        manager = VisionManager(
-            provider=NullVisionProvider(), ocr=NullOcrEngine()
-        )
-        result = await manager.analyze(VisionRequest("x.png", question="what is this?"))
+        # The source must EXIST for this branch to be the one that answers:
+        # "no OCR engine is available" is a statement about a file that was
+        # there to read, and a missing one is refused as a missing file first.
+        manager = VisionManager(provider=NullVisionProvider(), ocr=NullOcrEngine())
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "screen.png"
+            source.write_bytes(b"\x89PNG\r\n\x1a\n")
+            result = await manager.analyze(
+                VisionRequest(str(source), question="what is this?")
+            )
         self.assertFalse(result.answered)
         self.assertIn("no OCR engine", result.metadata["reason"])
 
@@ -984,6 +990,55 @@ class ApplicationVisionPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.route, "vision")
         self.assertFalse(response.payload["answered"])
         self.assertIn("could not read an image", str(response.payload["metadata"]["reason"]))
+
+    async def test_an_unreadable_attachment_reads_the_same_with_no_vision_model(
+        self,
+    ) -> None:
+        """The refusal is about the FILE, not about what the host installed.
+
+        The CI machine has no vision model wired and a laptop usually has one.
+        Asking which engines were installed FIRST made the same missing
+        attachment come back as "no readable text was found in the image" on the
+        first and "could not read an image" on the second, so the test above
+        passed locally and failed in CI. A source that cannot be read is a fact
+        about the file, and the result must not change with the install.
+        """
+        missing = str(self.app.data_dir / "nope.png")
+        self.app.vision_manager.set_provider(NullVisionProvider())
+        try:
+            response = await self.app.handle_request("what is this error?", image=missing)
+        finally:
+            self.app.vision_manager.set_provider(self.app._vision_pipeline_provider())
+        self.assertEqual(response.route, "vision")
+        self.assertFalse(response.payload["answered"])
+        self.assertIn(
+            f"could not read an image at {missing}",
+            str(response.payload["metadata"]["reason"]),
+        )
+
+    async def test_a_readable_attachment_with_no_text_still_reports_the_text(self) -> None:
+        """The other half of the distinction: a file that WAS read is a text gap.
+
+        An empty picture is not an unreadable one: it was opened, there was no
+        text in it, and "could not read an image" would be a false statement
+        about a file the engine did open.
+        """
+        blank = self.app.data_dir / "blank_attachment.png"
+        blank.parent.mkdir(parents=True, exist_ok=True)
+        blank.write_bytes(b"")
+        self.app.vision_manager.set_provider(NullVisionProvider())
+        try:
+            response = await self.app.handle_request("what is this error?", image=str(blank))
+        finally:
+            self.app.vision_manager.set_provider(self.app._vision_pipeline_provider())
+        self.assertFalse(response.payload["answered"])
+        reason = str(response.payload["metadata"]["reason"])
+        self.assertNotIn("could not read an image", reason)
+        self.assertTrue(
+            "no readable text was found in the image" in reason
+            or "no OCR engine is available" in reason,
+            reason,
+        )
 
     async def test_re_resolving_the_provider_keeps_the_wiring_honest(self) -> None:
         self.app.vision_manager.set_provider(self.app._vision_pipeline_provider())

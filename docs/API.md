@@ -57,6 +57,8 @@ The Phase 12 API subsystem provides REST and WebSocket entrypoints through FastA
 - `POST /vision/describe`: Capture the screen and describe it (vision model or window probe). *(frontend: web panel `renderGeneric`)*
 - `POST /vision/click`: Vision-locate a labeled element on screen, click it, and verify. *(frontend: web panel `renderGeneric`)*
 - `GET /intelligence`: Global Intelligence Layer: telemetry, findings, and capabilities. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /capabilities`: Every capability this installation has (declared, tool, action), with its availability, risk, permissions, tools, inputs and outputs. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /capabilities/discover`: What capabilities are available for this task? Query parameters: `query` (required), `intent`, `category`, `tools`, `models`, `include_unavailable`, `limit`. Discovery only - nothing runs. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /bugs`: List recorded bugs (what failed, where, and when). *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /bugs/{bug_id}/fix`: Mark a recorded bug as fixed. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /bugs/clear-fixed`: Remove all bugs already marked fixed. *(frontend: no web panel - API/CLI or infrastructure)*

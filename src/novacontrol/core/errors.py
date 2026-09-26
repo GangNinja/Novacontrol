@@ -11,6 +11,16 @@ class HandlerFailure:
     handler: str
     error: BaseException
 
+    def to_dict(self) -> dict[str, object]:
+        """A reportable form: which event, which handler, what it raised."""
+        event = self.event
+        type_ = getattr(event, "type", "")
+        return {
+            "event_type": str(type_),
+            "handler": self.handler,
+            "error": f"{type(self.error).__name__}: {self.error}",
+        }
+
 
 class EventDeliveryError(RuntimeError):
     """Raised when an event handler fails and the bus is not in continue mode."""

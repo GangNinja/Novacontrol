@@ -56,6 +56,8 @@ Event types use dotted names:
 - `memory.retrieved`
 - `workflow.completed`
 
+The live request path publishes the typed vocabulary declared in `novacontrol.core.events.EventType` — `intent.detected`, `context.resolved`, `decision.created`, `plan.created`, `task.started`/`paused`/`resumed`/`cancelled`/`completed`/`failed`, `tool.selected`/`started`/`completed`/`failed`, `verification.started`/`completed`, `recovery.started`/`completed`, `model.loaded`/`unloaded`, `vision.started`/`completed`. Every name has a payload schema (`EVENT_PAYLOAD_FIELDS`) that the publisher validates against, so a malformed event fails where it is created instead of at a subscriber; `Event.child`/`Event.of` keep the request's `correlation_id` on nested work, and `EventBus.emit` cannot raise because a subscriber failed. Subscriber kwargs named `source`, `correlation_id` or `causation_id` are the envelope's, not the payload's — a payload key must never shadow one.
+
 ## Security Model
 
 Sensitive actions must be represented as explicit requests that can be approved, denied, audited, and replayed for review. Examples include filesystem mutation, command execution, browser form submission, credential access, and desktop automation.
@@ -89,3 +91,7 @@ See [API.md](API.md) for Phase 12 REST and WebSocket details.
 See [PLUGIN_MARKETPLACE.md](PLUGIN_MARKETPLACE.md) for Phase 13 plugin marketplace details.
 
 See [PERFORMANCE.md](PERFORMANCE.md) for Phase 14 performance details.
+
+## Staged Build (Phases 1–9)
+
+The phase documents above describe the original fifteen-phase baseline. The staged build that followed extends those layers in place instead of adding a second architecture: `reliability/` composes the planner's verifier and recovery advisor with a formally checked task state machine and one ordered permission layer, and every component publishes through the core event bus behind an injected observer or sink rather than importing it. `intelligence.CapabilityRegistry` reports what this installation can do — declared verbs, tools projected live from the catalogue, and application-level actions — with availability **measured** against the machine at read time (a missing model or tool is UNAVAILABLE with the reason; an unprobeable requirement is UNKNOWN, never "available"). See [STATUS.md](STATUS.md) for the phase summaries and [DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md) for the defects each verification pass found.
