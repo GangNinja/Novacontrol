@@ -9,7 +9,8 @@ COMPLETED_PHASES = (
     "phase8", "phase9", "phase10", "phase11", "phase12", "phase13", "phase14",
     "phase15", "phase16", "phase17", "phase18", "phase19", "phase20", "phase21",
     "phase22", "phase23", "phase24", "phase25", "phase26", "phase27", "phase28",
-    "phase29", "phase30", "phase31", "explore",
+    "phase29", "phase30", "phase31", "phase10_sdk", "phase11_rag", "phase12_agents",
+    "explore",
 )
 
 

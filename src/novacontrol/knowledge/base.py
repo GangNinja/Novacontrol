@@ -46,7 +46,7 @@ class KnowledgeBase:
         return {"articles": [article.to_dict() for article in self._articles.values()]}
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "KnowledgeBase":
+    def from_dict(cls, payload: dict[str, Any]) -> KnowledgeBase:
         from novacontrol.knowledge.models import KnowledgeArticle
 
         knowledge = cls()

@@ -24,6 +24,9 @@ This keeps the core stable as future capabilities such as robotics, simulation, 
 - `RetryPolicy`: bounded retry behavior for lifecycle operations
 - `NovaControlConfig`: configuration object loaded from defaults, files, and environment
 - `ApprovalGateway`: security boundary for sensitive actions
+- `KnowledgeManager`: the local pipeline `ingest → chunk → index → retrieve → rerank → context`, plus the versions and hashes that make re-ingesting cheap
+- `ProjectContext` / `ProjectDetector`: the code project the user is standing in, read from the workspace and never written to
+- `SpecialistPipeline` / `SpecialistAgent`: the one stage loop every specialized agent runs (`NLU → Context → Decision → Planner → Tool Selection → Execution → Verification → Recovery`), with the developer and research agents written as stage hooks on it
 
 ## Module Boundaries
 
@@ -37,9 +40,11 @@ flowchart LR
     API --> Core
     Core --> Bus["Event Bus"]
     Bus --> Agents["Agents"]
+    Agents --> Specialists["Specialists (one pipeline)"]
     Bus --> Memory["Memory"]
     Bus --> Tools["Tool Manager"]
     Bus --> Plugins["Plugin Manager"]
+    Bus --> Knowledge["Local Knowledge"]
     Bus --> Automation["Desktop/Browser Automation"]
     Bus --> Observability["Logs and Metrics"]
 ```
@@ -56,7 +61,7 @@ Event types use dotted names:
 - `memory.retrieved`
 - `workflow.completed`
 
-The live request path publishes the typed vocabulary declared in `novacontrol.core.events.EventType` — `intent.detected`, `context.resolved`, `decision.created`, `plan.created`, `task.started`/`paused`/`resumed`/`cancelled`/`completed`/`failed`, `tool.selected`/`started`/`completed`/`failed`, `verification.started`/`completed`, `recovery.started`/`completed`, `model.loaded`/`unloaded`, `vision.started`/`completed`. Every name has a payload schema (`EVENT_PAYLOAD_FIELDS`) that the publisher validates against, so a malformed event fails where it is created instead of at a subscriber; `Event.child`/`Event.of` keep the request's `correlation_id` on nested work, and `EventBus.emit` cannot raise because a subscriber failed. Subscriber kwargs named `source`, `correlation_id` or `causation_id` are the envelope's, not the payload's — a payload key must never shadow one.
+The live request path publishes the typed vocabulary declared in `novacontrol.core.events.EventType` — `intent.detected`, `context.resolved`, `decision.created`, `plan.created`, `task.started`/`paused`/`resumed`/`cancelled`/`completed`/`failed`, `tool.selected`/`started`/`completed`/`failed`, `verification.started`/`completed`, `recovery.started`/`completed`, `model.loaded`/`unloaded`, `vision.started`/`completed`, `plugin.loaded`/`initialized`/`enabled`/`disabled`/`unloaded`/`failed`, `knowledge.indexed`/`retrieved`. Every name has a payload schema (`EVENT_PAYLOAD_FIELDS`) that the publisher validates against, so a malformed event fails where it is created instead of at a subscriber; `Event.child`/`Event.of` keep the request's `correlation_id` on nested work, and `EventBus.emit` cannot raise because a subscriber failed. Subscriber kwargs named `source`, `correlation_id` or `causation_id` are the envelope's, not the payload's — a payload key must never shadow one.
 
 ## Security Model
 
@@ -88,10 +93,14 @@ See [GUI.md](GUI.md) for Phase 11 GUI details.
 
 See [API.md](API.md) for Phase 12 REST and WebSocket details.
 
-See [PLUGIN_MARKETPLACE.md](PLUGIN_MARKETPLACE.md) for Phase 13 plugin marketplace details.
+See [SPECIALIST_AGENTS.md](SPECIALIST_AGENTS.md) for the staged-build specialized agents and the one pipeline they share.
+
+See [PLUGIN_MARKETPLACE.md](PLUGIN_MARKETPLACE.md) for Phase 13 plugin marketplace details and [PLUGIN_GUIDE.md](PLUGIN_GUIDE.md) for the Phase 10 plugin SDK.
 
 See [PERFORMANCE.md](PERFORMANCE.md) for Phase 14 performance details.
 
-## Staged Build (Phases 1–9)
+## Staged Build (Phases 1–11)
 
-The phase documents above describe the original fifteen-phase baseline. The staged build that followed extends those layers in place instead of adding a second architecture: `reliability/` composes the planner's verifier and recovery advisor with a formally checked task state machine and one ordered permission layer, and every component publishes through the core event bus behind an injected observer or sink rather than importing it. `intelligence.CapabilityRegistry` reports what this installation can do — declared verbs, tools projected live from the catalogue, and application-level actions — with availability **measured** against the machine at read time (a missing model or tool is UNAVAILABLE with the reason; an unprobeable requirement is UNKNOWN, never "available"). See [STATUS.md](STATUS.md) for the phase summaries and [DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md) for the defects each verification pass found.
+The phase documents above describe the original fifteen-phase baseline. The staged build that followed extends those layers in place instead of adding a second architecture: `reliability/` composes the planner's verifier and recovery advisor with a formally checked task state machine and one ordered permission layer, and every component publishes through the core event bus behind an injected observer or sink rather than importing it. `intelligence.CapabilityRegistry` reports what this installation can do — declared verbs, tools projected live from the catalogue, and application-level actions — with availability **measured** against the machine at read time (a missing model or tool is UNAVAILABLE with the reason; an unprobeable requirement is UNKNOWN, never "available"). `plugins/` adds the extension boundary: a stable `Plugin` interface, a `PluginManager` that discovers, validates, runs and CONTAINS plugins (a plugin failure is a record with a reason, never a crash), and its tools/capabilities register into the same `ToolRegistry`, `ToolCatalog` and `CapabilityRegistry` the core uses — withdrawn again when the plugin is disabled or unloaded. `knowledge/` adds the memory of the WORKSPACE rather than of the conversation: documents, notes, code and PDFs read off disk, chunked along their own structure, indexed with BM25 over every chunk plus optional vectors over the same, retrieved with the evidence attached and reranked by project, kind and recency, then spent against a token budget that COUNTS what it left out. It is local-first by construction — the default backend is a dependency-free hashing embedder and a real model is supplied per batch and released again, so a machine with no model still answers — and project awareness reads (root, repository, branch, language, framework, recent files, open errors, test status) without ever writing to the tree. See [KNOWLEDGE.md](KNOWLEDGE.md). `agents/` adds the specialized agents the same way, and by the phase's one rule: there is no second agent framework. `SpecialistPipeline` is the only loop a specialist runs — **NLU → Context → Decision → Planner → Tool Selection → Execution → Verification → Recovery** — with each stage being the component that already existed (`TaskInterpreter` for NLU, the knowledge engine's `context_for` for Context, the `PermissionManager`, the approval gateway and the live tool registry for Tool Selection, the `VerificationResult` and `RecoveryStrategy` vocabularies for the last two stages), and a specialist is a set of hooks on it, so the developer agent (inspect, search, plan, write only when authorized, test, debug, git) and the research agent (cited claims, evidence labelled apart from inference) cannot differ in how carefully they verify or how they are authorized. Every run records all eight stages in order, refuses to report COMPLETED unless a step was verified PASS, and gets its authority from the same deny-by-default risk layer as the rest of the build. See [SPECIALIST_AGENTS.md](SPECIALIST_AGENTS.md).
+
+See [STATUS.md](STATUS.md) for the phase summaries and [DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md) for the defects each verification pass found.

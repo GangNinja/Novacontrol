@@ -79,6 +79,16 @@ class EventType(StrEnum):
     MODEL_UNLOADED = "model.unloaded"
     VISION_STARTED = "vision.started"
     VISION_COMPLETED = "vision.completed"
+    # -- plugins (Phase 10) ----------------------------------------------------
+    PLUGIN_LOADED = "plugin.loaded"
+    PLUGIN_INITIALIZED = "plugin.initialized"
+    PLUGIN_ENABLED = "plugin.enabled"
+    PLUGIN_DISABLED = "plugin.disabled"
+    PLUGIN_UNLOADED = "plugin.unloaded"
+    PLUGIN_FAILED = "plugin.failed"
+    # -- local knowledge (Phase 11) -------------------------------------------
+    KNOWLEDGE_INDEXED = "knowledge.indexed"
+    KNOWLEDGE_RETRIEVED = "knowledge.retrieved"
 
 
 #: The payload fields each lifecycle event MUST carry. Checked when an event of
@@ -110,6 +120,20 @@ EVENT_PAYLOAD_FIELDS: Mapping[EventType, tuple[str, ...]] = {
     # shadows it could never be set through ``emit``.
     EventType.VISION_STARTED: ("image",),
     EventType.VISION_COMPLETED: ("image", "answered"),
+    # ``plugin_id`` is the STABLE identity, not the display name: a plugin's
+    # name is a label that may change, and the id is what a watcher keys on.
+    EventType.PLUGIN_LOADED: ("plugin_id",),
+    EventType.PLUGIN_INITIALIZED: ("plugin_id",),
+    EventType.PLUGIN_ENABLED: ("plugin_id",),
+    EventType.PLUGIN_DISABLED: ("plugin_id",),
+    EventType.PLUGIN_UNLOADED: ("plugin_id",),
+    EventType.PLUGIN_FAILED: ("plugin_id", "error"),
+    # ``sources``/``chunks`` are counts of what one ingest did (an ingest may
+    # cover a whole directory); ``source_id`` names the single source it was
+    # about. ``status`` carries the IngestReport outcome, so a watcher sees
+    # added/updated/unchanged/skipped rather than a bare "something happened".
+    EventType.KNOWLEDGE_INDEXED: ("sources", "chunks"),
+    EventType.KNOWLEDGE_RETRIEVED: ("query", "hits", "sources"),
 }
 
 #: Which event a Phase 8 task state publishes when it is entered. Kept here as

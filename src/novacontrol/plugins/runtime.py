@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from novacontrol.core.events import Event, EventBus
+from novacontrol.core.events import Event, EventBus, EventType
 from novacontrol.core.interfaces import Capability
 from novacontrol.plugins.manager import PluginMarketplace
-from novacontrol.plugins.models import PluginManifest
+from novacontrol.plugins.models import PluginInstallRecord, PluginManifest
 
 
 class PluginMarketplaceModule:
@@ -53,13 +53,23 @@ class PluginMarketplaceModule:
 
     async def _handle_enable(self, event: Event) -> None:
         record = await self.marketplace.enable(str(event.payload["plugin_name"]))
-        await self._publish("plugin.enabled", record.to_dict(), event)
+        await self._publish(
+            EventType.PLUGIN_ENABLED,
+            _lifecycle_payload(record),
+            event,
+        )
 
     async def _handle_disable(self, event: Event) -> None:
         record = await self.marketplace.disable(str(event.payload["plugin_name"]))
-        await self._publish("plugin.disabled", record.to_dict(), event)
+        await self._publish(
+            EventType.PLUGIN_DISABLED,
+            _lifecycle_payload(record),
+            event,
+        )
 
-    async def _publish(self, event_type: str, payload: dict[str, object], source_event: Event) -> None:
+    async def _publish(
+        self, event_type: str, payload: dict[str, object], source_event: Event
+    ) -> None:
         if self._event_bus is not None:
             await self._event_bus.publish(
                 Event(
@@ -70,3 +80,21 @@ class PluginMarketplaceModule:
                     causation_id=source_event.correlation_id,
                 )
             )
+
+
+def _lifecycle_payload(record: PluginInstallRecord) -> dict[str, object]:
+    """The shared shape of a plugin lifecycle event, marketplace or SDK.
+
+    ``plugin_id`` is the field the typed vocabulary requires and the one a
+    watcher keys on; the installed record travels alongside it for a subscriber
+    that wants the install-time facts (trust, approval, timestamps). The SDK
+    publishes the same field names for the same events, so one subscriber reads
+    both publishers without a second code path.
+    """
+    return {
+        "plugin_id": record.manifest.plugin_id,
+        "name": record.manifest.name,
+        "version": record.manifest.version,
+        "status": record.status.value,
+        "record": record.to_dict(),
+    }

@@ -8,8 +8,6 @@ import logging
 import os
 import re
 import shlex
-import shutil
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,7 +16,20 @@ from contextvars import ContextVar
 from typing import Any, TypeAlias, cast
 from uuid import uuid4
 
-from novacontrol.agents import AgentModule, AgentRegistry, AgentTask, CoordinatorAgent, build_default_agents
+from novacontrol.agents import (
+    STAGE_ORDER,
+    AgentModule,
+    AgentRegistry,
+    AgentTask,
+    CoordinatorAgent,
+    DeveloperAgent,
+    ResearchAgent,
+    RunnableAgent,
+    SpecialistPipeline,
+    SpecializedAgent,
+    build_default_agents,
+)
+from novacontrol.agents.developer import recognise_test_command
 from novacontrol.application_helpers import (
     ApprovedApprovalGateway,
     build_auto_code_changes,
@@ -88,7 +99,13 @@ from novacontrol.integrations import (
     validate_cloud_key,
 )
 from novacontrol.integrations.llm import _redact_key, provider_supports_vision
-from novacontrol.knowledge import KnowledgeBase
+from novacontrol.knowledge import (
+    KnowledgeBase,
+    KnowledgeManager,
+    KnowledgeModule,
+    ProjectDetector,
+    knowledge_tools,
+)
 from novacontrol.memory import MemoryManager, MemoryModule, MemoryNamespace, SqliteMemoryStore
 from novacontrol.models import (
     KeepAliveSettings,
@@ -127,7 +144,7 @@ from novacontrol.reliability import (
 # under the plan's retry policy and its verification. Importing it under its
 # own name would shadow the agentcore one for the orchestrator wiring.
 from novacontrol.reliability import RecoveryEngine as StepRecoveryEngine
-from novacontrol.plugins import PluginMarketplaceModule
+from novacontrol.plugins import PluginManager, PluginMarketplaceModule
 from novacontrol.projects import ProjectManager
 from novacontrol.scheduler import InMemoryScheduler
 from novacontrol.self_improvement import CodeChange, SelfImprovementEngine
@@ -416,30 +433,18 @@ def _argv_for_command(command: str) -> list[str]:
 def _test_argv(project: str, scope: str) -> tuple[list[str], str] | None:
     """The argv that runs ``project``'s tests, or None when none is recognisable.
 
-    Recognising the runner — rather than guessing one — is the difference
-    between running the project's own suite and running whatever happens to be
-    installed: a Node project gets ``npm test``, a Python project gets pytest
-    from the interpreter that owns this process, and anything else is reported
-    as unrecognised instead of guessed at.
+    The recognition rule itself lives with the developer agent
+    (`novacontrol.agents.developer.recognise_test_command`), so the planning path
+    and the specialist agent cannot disagree about what this project's tests are
+    — a Node project gets ``npm test`` from both, a Python project gets pytest
+    from the interpreter that owns this process, and anything else is reported as
+    unrecognised instead of guessed at. This wrapper keeps the (argv, label) pair
+    the callers here use.
     """
-    root = Path(project)
-    npm = shutil.which("npm")
-    if (root / "package.json").is_file() and npm:
-        return [npm, "test"], "npm test"
-    scope_path = root / scope
-    looks_python = (
-        (root / "pytest.ini").is_file()
-        or (root / "pyproject.toml").is_file()
-        or (root / "setup.cfg").is_file()
-        or (root / "tests").is_dir()
-        or scope_path.exists()
-    )
-    if not looks_python:
+    recognised = recognise_test_command(project, scope=scope)
+    if recognised is None:
         return None
-    argv = [sys.executable, "-m", "pytest", "-q"]
-    if scope_path.exists():
-        argv.append(scope)
-    return argv, "python -m pytest"
+    return [*recognised.argv], recognised.label
 
 
 def _output_tail(text: str) -> str:
@@ -1086,6 +1091,26 @@ class NovaControlApplication:
         # few tools that FIT the request rather than all of them: a list of
         # seventeen names is not a choice, it is a lottery.
         self._register_read_only_tools()
+        # ── Phase 11: local knowledge and project awareness ──────────────────
+        # ONE engine owns everything this installation reads off disk, and the
+        # pipeline the phase names is its shape: ingest → chunk → index →
+        # retrieve → rerank → budget. It is local-first and needs NO embedding
+        # model — the dependency-free hashing embedder is the default and a real
+        # model is supplied per batch and released again — so a machine with no
+        # model at all still answers, lexically. Its tools are registered HERE,
+        # before the catalogue is built, so the retriever can offer them exactly
+        # like a built-in one. Nothing is read at boot.
+        self._last_test_run = ""
+        self.knowledge_engine = KnowledgeManager.from_dict(
+            (self.state_store.read("knowledge_index") if self.state_store is not None else {}) or {},
+            detector=ProjectDetector(
+                bug_log=self.bug_log,
+                # Read, never invented: see _test_status_hint.
+                test_status_provider=self._test_status_hint,
+            ),
+        )
+        for knowledge_tool in knowledge_tools(self.knowledge_engine):
+            self.tools.register(knowledge_tool)
         self.tool_catalog = build_tool_catalog(
             intents=self.intelligence.catalog,
             capabilities=self.intelligence.capabilities,
@@ -1123,6 +1148,19 @@ class NovaControlApplication:
             model_probe=self._model_available,
         )
         self._declare_actions()
+        # Phase 10: the plugin SDK runs third-party functionality against the
+        # SAME registries the core uses — tools, the catalogue, the capability
+        # registry — and the same risk layer, so a plugin's tool is gated and
+        # found exactly like a built-in one, and withdrawn the same way when
+        # its plugin is disabled or unloaded. Nothing is loaded here: what to
+        # run is a decision, not a boot step.
+        self.plugins = PluginManager(
+            tools=self.tools,
+            catalog=self.tool_catalog,
+            capabilities=self.capabilities,
+            permissions=self.risk,
+            event_bus=self.event_bus,
+        )
         self.decision = DecisionEngine(
             capabilities=self.intelligence.capabilities,
             provider=build_decision_provider(
@@ -1176,6 +1214,33 @@ class NovaControlApplication:
             persist_fn=self._agentic_persist,
             event_bus=self.event_bus,
         )
+
+        # ── Specialized agents (Phase 12) ────────────────────────────
+        # Built ON the orchestration above, not beside it: one shared
+        # SpecialistPipeline walks all eight stages (NLU → Context → Decision
+        # → Planner → Tool Selection → Execution → Verification → Recovery)
+        # using the interpreter, the Phase 11 knowledge engine, the Phase 8
+        # risk layer and the live tool registry this build already has. Both
+        # specialists register in the SAME AgentRegistry the coordinator and
+        # the agent event bus dispatch through, and they are registered
+        # `prefer=True` so a coding request reaches the real developer agent
+        # instead of its deterministic placeholder — which stays registered,
+        # because a build with no workspace still needs an answer.
+        self._specialist_pipeline = self._build_specialist_pipeline()
+        self.developer_agent = DeveloperAgent(
+            root=Path.cwd(),
+            engine=self.self_improvement,
+            pipeline=self._specialist_pipeline,
+            change_builder=build_auto_code_changes,
+            bug_log=self.bug_log,
+        )
+        self.research_agent = ResearchAgent(
+            provider=self.explore,
+            pipeline=self._specialist_pipeline,
+        )
+        for specialist in (self.developer_agent, self.research_agent):
+            self._install_specialist(specialist)
+
         # Last boot step: re-apply any persisted vision model so element
         # location uses it immediately (no restart, no UI round-trip).
         self._restore_vision_provider()
@@ -1186,6 +1251,10 @@ class NovaControlApplication:
         self.runtime.register_module(ToolModule(self.tool_executor))
         self.runtime.register_module(ExploreModule(self.explore))
         self.runtime.register_module(PluginMarketplaceModule())
+        # Phase 11: knowledge on the bus — search, ingest, context and project
+        # detection as requests, with a correlated reply, so a module (or a
+        # plugin) can ask what this build knows without importing the engine.
+        self.runtime.register_module(KnowledgeModule(self.knowledge_engine))
         self.runtime.register_module(DesktopAutomationModule(self.desktop))
         self.runtime.register_module(PhoneControlModule(self.phone))
         self.runtime.register_module(BrowserAutomationModule(self.browser))
@@ -1233,6 +1302,74 @@ class NovaControlApplication:
         """Run the full agentic loop for a natural-language goal."""
         state = await self.agentic.run_task(request)
         return state.to_dict()
+
+    # --- Specialized agents (Phase 12) ---
+
+    def _build_specialist_pipeline(self, *, authorize: bool = False) -> SpecialistPipeline:
+        """The shared specialist stage runner, wired to this build's services.
+
+        `authorize=True` is the per-RUN scope for a call the user explicitly
+        approved (the same convention the improvement workflow uses): a fresh
+        pipeline whose approval gateway says yes, rather than a flag flipped on
+        the build's own pipeline, which every other caller shares.
+        """
+        # The interpreter runs heuristically, without the chat model: its
+        # model-assisted mode only refines the subtask list, and neither
+        # specialist reads that list (their decisions and plans come from their
+        # own routing and the query frame). Wiring the model in would buy a
+        # 10–40s round trip per run for a field nobody consumes.
+        return SpecialistPipeline(
+            interpreter=TaskInterpreter(),
+            permissions=self.risk,
+            approvals=ApprovedApprovalGateway() if authorize else DenyByDefaultApprovalGateway(),
+            tools=self.tools,
+            knowledge=self.knowledge_engine,
+            event_bus=self.event_bus,
+        )
+
+    def _install_specialist(self, agent: RunnableAgent) -> None:
+        """Register a specialist in place of the deterministic stub for its role.
+
+        The stub is a placeholder, not a second opinion: leaving both registered
+        would make "which agent answers a coding request?" depend on registration
+        order, and the placeholder would keep winning for anyone enumerating the
+        role. Stubs for roles nobody implements stay exactly where they are.
+        """
+        for existing in self.agent_registry.by_role(agent.role):
+            if type(existing) is SpecializedAgent:
+                self.agent_registry.unregister(existing.name)
+        self.agent_registry.register(agent, prefer=True)
+
+    async def developer_task(self, goal: str, *, authorize: bool = False) -> dict[str, Any]:
+        """Run the Developer Agent: inspect, plan, and — only if authorized — write.
+
+        Without `authorize` the run is read-only in practice: the risk layer
+        refuses the write steps (they declare FILESYSTEM_WRITE at HIGH risk) and
+        the report says which steps were refused. Nothing is written "because
+        the agent asked".
+        """
+        agent = self.developer_agent
+        if authorize:
+            agent = agent.clone(self._build_specialist_pipeline(authorize=True))
+        return (await agent.run_task(goal)).to_dict()
+
+    async def research_task(self, question: str, *, allow_web: bool = True) -> dict[str, Any]:
+        """Run the Research Agent: cited claims, evidence labelled apart."""
+        agent = self.research_agent
+        if not allow_web:
+            agent = ResearchAgent(
+                provider=self.explore,
+                pipeline=self.research_agent.pipeline,
+                allow_web=False,
+            )
+        return (await agent.run_task(question)).to_dict()
+
+    def specialist_agents(self) -> dict[str, Any]:
+        """What this build's specialists are, and which stages they run through."""
+        return {
+            "stages": [stage.value for stage in STAGE_ORDER],
+            "agents": [self.developer_agent.declares(), self.research_agent.declares()],
+        }
 
     def agentic_metrics(self) -> dict[str, Any]:
         return self._agentic_evaluation.to_dict()
@@ -1645,6 +1782,10 @@ class NovaControlApplication:
 
     async def stop(self) -> None:
         self.persist()
+        # Plugins go first, and in the safe order: an enabled one is disabled
+        # (its tools stop being callable) before shutdown runs, so nothing a
+        # plugin holds is released while the system still advertises it.
+        await self.plugins.unload_all()
         await self.browser.close()
         await self.runtime.stop()
 
@@ -1654,6 +1795,10 @@ class NovaControlApplication:
         self.state_store.write("scheduler", self.scheduler.to_dict())
         self.state_store.write("projects", self.projects.to_dict())
         self.state_store.write("knowledge", self.knowledge.to_dict())
+        # Phase 11: the index survives a restart — sources, chunks and the active
+        # project. Vectors are recomputed locally on load (cheap for the default
+        # hashing backend), so no model has to be resident to reopen this.
+        self.state_store.write("knowledge_index", self.knowledge_engine.to_dict())
         self.state_store.write("automation", self.automation.to_dict())
         self.state_store.write("tasks", self.tasks.to_dict())
         self.state_store.write("settings", self.settings.to_dict())
@@ -2741,6 +2886,10 @@ class NovaControlApplication:
             cwd = located if located and Path(located).is_dir() else str(Path.cwd())
             timeout = _COMMAND_TIMEOUT_SECONDS
         exit_code, stdout, stderr = await _run_approved_process(argv, cwd=cwd, timeout=timeout)
+        if step.action == "run_tests":
+            # The project context reports what the tests actually said, and this
+            # is the one place a suite runs under this application's control.
+            self._note_test_run(label, exit_code, stdout)
         return {
             "command": label,
             "argv": list(argv),
@@ -3397,6 +3546,115 @@ class NovaControlApplication:
         results = await self.memory.retrieve(MemoryNamespace.KNOWLEDGE, query, limit=limit)
         facts = [result.record.to_dict() | {"score": result.score} for result in results]
         return {"mode": "knowledge_list", "facts": facts, "count": len(facts)}
+
+    # -- Phase 11: local knowledge and project awareness ----------------------
+
+    async def search_knowledge(self, query: str, *, limit: int = 5) -> dict[str, Any]:
+        """Ranked, cited local knowledge for a question (nothing is modified)."""
+        hits = await self.knowledge_engine.search(query, limit=limit)
+        return {
+            "mode": "knowledge_search",
+            "query": query,
+            "hits": [hit.to_dict() for hit in hits],
+            "count": len(hits),
+            "stats": self.knowledge_engine.stats(),
+        }
+
+    async def ingest_knowledge(
+        self, path: str, *, project: str = "", force: bool = False
+    ) -> dict[str, Any]:
+        """Read a file or directory into the local index (re-reading only changes)."""
+        report = await self.knowledge_engine.ingest_path(
+            path, project=project or None, force=force
+        )
+        self._record_activity("knowledge", "Knowledge indexed", f"{path}: {report.status.value}")
+        return {"mode": "knowledge_ingest", **report.to_dict()}
+
+    def project_context(self, path: str = "") -> dict[str, Any]:
+        """The active code project: root, branch, language, recent files, errors, tests.
+
+        Passing a ``path`` also makes that project the ACTIVE one (the engine's
+        project-scoped retrieval reads it); calling it with no path just reports
+        the active project as it stands.
+        """
+        context = (
+            self.knowledge_engine.set_project(path)
+            if path.strip()
+            else self.knowledge_engine.project_context()
+        )
+        return {"mode": "project_context", **context.to_dict()}
+
+    async def knowledge_context(
+        self, question: str, *, budget_tokens: int | None = None, active_task: str = ""
+    ) -> dict[str, Any]:
+        """Project awareness + the few excerpts that fit a token budget.
+
+        This is the phase's worked example made callable: the caller passes
+        "fix the authentication issue" and gets the project, its branch, what
+        recently changed, what errors are open, what the tests said, and the
+        matching excerpts — with the omitted count, so a short answer is never
+        mistaken for a complete one.
+        """
+        context = await self.knowledge_engine.context_for(
+            question, budget_tokens=budget_tokens, active_task=active_task
+        )
+        return {"mode": "knowledge_context", **context.to_dict()}
+
+    async def answer_with_knowledge(
+        self,
+        question: str,
+        *,
+        budget_tokens: int | None = None,
+        active_task: str = "",
+    ) -> dict[str, Any]:
+        """Answer a question with the local knowledge block in front of the model.
+
+        This is the phase's pipeline end to end as one call — ingest → chunk →
+        index → retrieve → rerank → context → **LLM** — with the context
+        retrieved and budgeted here and handed to the brain as its own system
+        message (`BrainRequest.knowledge`). When no model is configured the
+        scratch brain answers locally and the payload says so through
+        `brain_mode`: "the model used the context" is a claim this method will
+        not make on the model's behalf.
+        """
+        context = await self.knowledge_engine.context_for(
+            question, budget_tokens=budget_tokens, active_task=active_task
+        )
+        response = await self.brain.chat(
+            BrainRequest(text=question, context=self.status(), knowledge=context.text)
+        )
+        payload = dict(response.payload)
+        return {
+            "mode": "knowledge_answer",
+            "question": question,
+            "answer": response.summary,
+            "provider": payload.get("provider", ""),
+            "brain_mode": payload.get("brain_mode", ""),
+            "model_configured": self.brain.model_configured,
+            "citations": [hit.chunk.chunk_id for hit in context.hits],
+            "knowledge": context.to_dict(),
+        }
+
+    def _test_status_hint(self) -> str:
+        """What is known about this project's tests — read, or explicitly not known.
+
+        There is no stored test RESULT in this build, so the honest answer is the
+        runner the project actually has (recognised, never guessed) and the fact
+        that it has not been run from here. Fabricating a pass/fail would be the
+        one thing a context block must never do. When a plan DOES run the suite,
+        ``_note_test_run`` records the real outcome and this reports that.
+        """
+        if self._last_test_run:
+            return self._last_test_run
+        runner = _test_argv(os.getcwd(), "tests")
+        return f"{runner[1]} available; not run from NovaControl this session" if runner else ""
+
+    def _note_test_run(self, label: str, exit_code: int, output: str) -> None:
+        """Remember the outcome of the last suite this application ran."""
+        verdict = "passed" if exit_code == 0 else f"FAILED (exit {exit_code})"
+        tail = _output_tail(output).strip().splitlines()
+        summary = tail[-1].strip() if tail else ""
+        self._last_test_run = f"{label}: {verdict}" + (f" — {summary[:160]}" if summary else "")
 
     async def build_code_plan(self, goal: str, *, language: str = "python") -> dict[str, Any]:
         """Plan a coding task with language awareness and a concrete artifact.

@@ -2,9 +2,10 @@
 
 > **Two numbering schemes share numbers.** The phases on this page are the original
 > fifteen-phase build-out plan — Phase 8 is browser automation, Phase 9 is vision. The
-> *staged-build* phases that followed are also numbered 1–9 with different meanings
+> *staged-build* phases that followed are also numbered 1–11 with different meanings
 > (Phase 7 model/hardware manager, Phase 8 reliability, recovery and safety, Phase 9
-> internal event bus and capability registry); those are recorded in [STATUS.md](STATUS.md)
+> internal event bus and capability registry, Phase 10 plugin SDK, Phase 11 local
+> knowledge and project awareness, Phase 12 specialized agents); those are recorded in [STATUS.md](STATUS.md)
 > and [DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md) and extend these layers in place rather
 > than adding a parallel architecture.
 

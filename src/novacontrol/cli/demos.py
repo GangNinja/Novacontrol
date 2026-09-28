@@ -20,7 +20,13 @@ from novacontrol.gui import DashboardTab, DashboardViewModel
 from novacontrol.memory import InMemoryMemoryStore, MemoryManager, MemoryNamespace
 from novacontrol.performance import LoadTester, MetricsRegistry, Profiler, TtlCache
 from novacontrol.planning import PlanningEngine, WorkflowExecutor
-from novacontrol.plugins import PluginCapability, PluginManifest, PluginMarketplace
+from novacontrol.plugins import (
+    Plugin,
+    PluginCapability,
+    PluginManager,
+    PluginManifest,
+    PluginMarketplace,
+)
 from novacontrol.release import (
     EnvironmentDoctor,
     ReleaseReadinessChecker,
@@ -193,6 +199,255 @@ async def _phase12() -> Mapping[str, Any]:
             "valid": authenticator.authenticate("Bearer demo-token").authenticated,
         },
         "server_command": "python -m uvicorn novacontrol.api.app:create_app --factory --reload",
+    }
+
+
+class _BrokenDemoPlugin(Plugin):
+    """Fails the moment it is switched on — deliberately, to show containment.
+
+    The SDK's promise is not that plugins work; it is that a plugin which does
+    not work is a FAILED record with a reason, while everything else in the
+    process carries on. This is the plugin that proves it.
+    """
+
+    plugin_id = "broken-demo"
+    name = "Broken Demo"
+    version = "1.0.0"
+    description = "Fails on enable, on purpose."
+
+    async def enable(self) -> None:
+        raise RuntimeError("this plugin is broken on purpose")
+
+
+async def _phase10_sdk() -> Mapping[str, Any]:
+    """Phase 10 SDK: load three plugins, enable them, and contain the broken one."""
+    from novacontrol.plugins.examples import DeveloperPlugin, SystemPlugin
+
+    tools = ToolRegistry()
+    manager = PluginManager(tools=tools)
+    manager.register(SystemPlugin())
+    developer = manager.register(DeveloperPlugin())
+    broken = manager.register(_BrokenDemoPlugin())
+
+    loaded = await manager.load_all()
+    enabled = await manager.enable_all()
+    enabled_plugins = list(manager.enabled_ids())
+    listing = await tools.get("developer_workspace_files").tool.run({"limit": 3})
+    unloaded = await manager.unload(developer.plugin_id)
+    return {
+        "status": "ok",
+        "developer": developer.to_dict(),
+        "broken": broken.to_dict(),
+        "after_load": {record.plugin_id: record.status.value for record in loaded},
+        "after_enable": {record.plugin_id: record.status.value for record in enabled},
+        "enabled_plugins": enabled_plugins,
+        "workspace_sample": dict(listing),
+        "unloaded": unloaded.to_dict(),
+        "tool_withdrawn": "developer_workspace_files" not in tools,
+    }
+
+
+async def _phase11_rag() -> Mapping[str, Any]:
+    """Phase 11: local knowledge end to end, on a corpus written for the demo.
+
+    Everything here is local and deterministic: a temp directory is written with
+    a README and a module, ingested, re-ingested (to show that unchanged bytes
+    cost nothing), searched, and budgeted into a context block. The embedding
+    backend prints as ``hashing`` because no model is installed or needed —
+    which is the point of the lexical path.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from novacontrol.knowledge import KnowledgeManager
+
+    root = Path(tempfile.mkdtemp(prefix="novacontrol-knowledge-"))
+    (root / "README.md").write_text(
+        "# Widget service\n\n## Configuration\n\nThe widget timeout is configured "
+        "in widgets.py and defaults to thirty seconds.\n",
+        encoding="utf-8",
+    )
+    (root / "widgets.py").write_text(
+        "DEFAULT_TIMEOUT = 30\n\n\ndef widget_timeout() -> int:\n"
+        "    \"\"\"The timeout a widget request may take.\"\"\"\n    return DEFAULT_TIMEOUT\n",
+        encoding="utf-8",
+    )
+    (root / "pyproject.toml").write_text("[project]\nname = 'widgets'\n", encoding="utf-8")
+
+    manager = KnowledgeManager()
+    first = await manager.ingest_path(root)
+    second = await manager.ingest_path(root)
+    (root / "README.md").write_text(
+        "# Widget service\n\n## Configuration\n\nThe widget timeout is configured in "
+        "settings.py and now defaults to sixty seconds.\n",
+        encoding="utf-8",
+    )
+    third = await manager.ingest_path(root)
+
+    context = await manager.context_for(
+        "Fix the widget timeout issue.", budget_tokens=400, active_task="fix widget timeout"
+    )
+    project = manager.set_project(root)
+    return {
+        "status": "ok",
+        "first_pass": first.to_dict(),
+        "second_pass_unchanged": second.status.value,
+        "after_edit": third.to_dict(),
+        "sources": [source.to_dict() for source in manager.sources()],
+        "stats": manager.stats(),
+        "project": project.to_dict(),
+        "retrieved": context.to_dict(),
+    }
+
+
+async def _phase12_agents() -> Mapping[str, Any]:
+    """Phase 12: both specialists on the shared pipeline, deterministically.
+
+    Nothing here touches the network or a model. A temp workspace is written, a
+    recording command runner stands in for the shell, and the research provider
+    is a stub whose two sources disagree. What the demo shows is the pipeline
+    itself: eight stages per run, the centralized risk layer refusing the write
+    steps nobody approved, the same steps going through when a caller authorizes
+    the run, and an answer whose claims are labelled evidence or inference with
+    citations that resolve.
+    """
+    import tempfile
+    from collections.abc import Sequence
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from novacontrol.agents import DeveloperAgent, ResearchAgent, SpecialistPipeline
+    from novacontrol.agents.developer import CommandResult
+    from novacontrol.application_helpers import ApprovedApprovalGateway
+    from novacontrol.explore.models import ResearchSource
+    from novacontrol.self_improvement import CodeChange, SelfImprovementEngine
+
+    root = Path(tempfile.mkdtemp(prefix="novacontrol-phase12-"))
+    (root / "src" / "widgets").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "pyproject.toml").write_text(
+        "[project]\nname = 'widgets'\n\ndependencies = ['pytest']\n", encoding="utf-8"
+    )
+    (root / "src" / "widgets" / "core.py").write_text(
+        'DEFAULT_TIMEOUT = 30\n\n\ndef widget_timeout() -> int:\n    return DEFAULT_TIMEOUT\n',
+        encoding="utf-8",
+    )
+    (root / "tests" / "test_widgets.py").write_text(
+        "from widgets.core import widget_timeout\n\n\ndef test_timeout() -> None:\n"
+        "    assert widget_timeout() == 30\n",
+        encoding="utf-8",
+    )
+
+    class RecordingRunner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, ...]] = []
+
+        async def run(
+            self,
+            command: Sequence[str],
+            *,
+            cwd: str | Path | None = None,
+            timeout: float = 300.0,
+        ) -> CommandResult:
+            del cwd, timeout
+            argv = tuple(str(part) for part in command)
+            self.calls.append(argv)
+            return CommandResult(command=argv, returncode=0, stdout="2 passed in 0.03s\n")
+
+    runner = RecordingRunner()
+    changes: list[CodeChange] = []
+
+    def build_changes(goal: str) -> tuple[CodeChange, ...]:
+        change = CodeChange(
+            relative_path="notes/phase12.md",
+            content=f"# Change plan\n\n{goal}\n",
+            description="Record the planned change",
+        )
+        changes.append(change)
+        return (change,)
+
+    def build_agent(pipeline: SpecialistPipeline) -> DeveloperAgent:
+        return DeveloperAgent(
+            root=root,
+            engine=SelfImprovementEngine(root),
+            runner=runner,
+            change_builder=build_changes,
+            pipeline=pipeline,
+        )
+
+    read_only = build_agent(SpecialistPipeline())
+    inspected = await read_only.run_task("inspect this repository")
+    proposed = await read_only.run_task("fix the widget timeout")
+    refused = await read_only.run_task("apply the widget timeout fix")
+
+    authorized = build_agent(
+        SpecialistPipeline(approvals=ApprovedApprovalGateway())
+    )
+    applied = await authorized.run_task("apply the widget timeout fix")
+    written = (root / "notes" / "phase12.md")
+
+    sources = (
+        ResearchSource(
+            title="Widget Guide",
+            url="https://example.invalid/widgets",
+            snippet="Widget timeouts.",
+            content=(
+                "The widget timeout increases to sixty seconds under load. "
+                "Latency stays around 30 ms per request."
+            ),
+        ),
+        ResearchSource(
+            title="Widget Benchmarks",
+            url="https://example.invalid/benchmarks",
+            snippet="Widget benchmarks.",
+            content=(
+                "The widget timeout decreases to five seconds under load. "
+                "Latency stays around 80 ms per request. "
+                "Widgets always require a dedicated pool."
+            ),
+        ),
+    )
+
+    class StubProvider:
+        async def research(self, request: ExploreRequest) -> object:
+            return SimpleNamespace(
+                topic=request.topic,
+                overview="Widget timeouts trade headroom against queue depth.",
+                answer="",
+                key_points=("Timeouts are the first thing to tune.",),
+                sources=sources,
+                warnings=(),
+                provider_status="stub",
+            )
+
+    researcher = ResearchAgent(
+        provider=StubProvider(),
+        pipeline=SpecialistPipeline(approvals=ApprovedApprovalGateway()),
+    )
+    research = await researcher.run_task("compare widget timeout behaviour under load")
+
+    return {
+        "status": "ok",
+        "stages": [record.stage.value for record in inspected.stages],
+        "inspected": inspected.report.get("profile", {}),
+        "proposed_action": proposed.decision.get("action"),
+        "proposed_changes": proposed.report.get("plan", {}).get("changes", []),
+        "refused_status": refused.status.value,
+        "refused_tools": [grant.tool for grant in refused.denied],
+        "authorized_status": applied.status.value,
+        "file_written": written.is_file(),
+        "file_content": written.read_text(encoding="utf-8") if written.is_file() else "",
+        "shell_calls": runner.calls,
+        "research_status": research.status.value,
+        "research_summary": research.summary,
+        "citations": research.report.get("sources", []),
+        "evidence_claims": [
+            claim
+            for claim in research.report.get("claims", [])
+            if claim.get("kind") == "evidence"
+        ][:3],
+        "conflicts": research.report.get("conflicts", []),
+        "citations_verified": research.report.get("citations_verified"),
     }
 
 
@@ -524,8 +779,11 @@ _PHASE_HANDLERS: dict[str, Callable[[], Awaitable[Mapping[str, Any]]]] = {
     "phase8": _phase8,
     "phase9": _phase9,
     "phase10": _phase10,
+    "phase10_sdk": _phase10_sdk,
+    "phase11_rag": _phase11_rag,
     "phase11": _phase11,
     "phase12": _phase12,
+    "phase12_agents": _phase12_agents,
     "phase13": _phase13,
     "phase14": _phase14,
     "phase15": _phase15,

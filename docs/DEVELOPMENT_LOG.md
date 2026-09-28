@@ -2003,3 +2003,595 @@ Full suite **1796 passed / 12 skipped** (1686 subtests, 4:14), up from 1703 in �
 routes. mypy clean in both platform views (**223 modules**); `docs/API.md` in sync (68
 routes); ruff at or below the pre-existing baseline on every touched file — 196 E501
 before and after, and one FEWER unused import than `HEAD`.
+## 29. Phase 10: plugins that cannot take the process down
+
+Phase 10 asked for one thing with a sharp edge: let NovaControl gain functionality
+without modifying core code. The edge is that third-party code runs in-process, and "one
+broken plugin must not crash NovaControl" is not a promise you can make by being careful —
+it has to be a property of the design. So the plugin layer is built around containment:
+every hook is wrapped, every failure becomes a record with a reason and an event, and the
+bulk operations are the ones that stop at nothing.
+
+**The extension boundary is one class, and it is data first.** A `Plugin` declares
+`plugin_id`, `name`, `version`, `description`, `author`, `capabilities`, `tools`,
+`permissions`, `risk_level`, `required_capabilities`, `external_services`,
+`filesystem_access`, `network_access`, `configuration_schema`, and then implements
+whichever of `load` / `initialize` / `enable` / `disable` / `shutdown` it actually needs.
+The declarations are not documentation: `manifest()` turns them into the same
+`PluginManifest` a `plugin.json` produces, `validate()` checks them before anything runs,
+and `declaration()` states them to the permission layer. A plugin cannot be enabled on a
+claim it did not make.
+
+**New names went into the existing vocabulary rather than beside it.** Six lifecycle
+events — `plugin.loaded`, `plugin.initialized`, `plugin.enabled`, `plugin.disabled`,
+`plugin.unloaded`, `plugin.failed` — joined `EventType` with validated payloads, and the
+marketplace's enable/disable publisher was brought onto the same payload shape
+(`plugin_id` first), so one subscriber reads both publishers without a second code path.
+`emit()` is the door they publish through, so a broken watcher cannot fail a plugin
+operation.
+
+**Security is the centralized layer, exactly as Phase 8 built it.** `enable()` registers
+the plugin's declaration with the existing `PermissionManager` (one per plugin, one per
+tool), asks THAT layer whether a person must be asked, and only then requests approval
+from the same `ApprovalGateway` the device actions use — no second risk table, no second
+policy. Two consequences the guide states plainly: a permission is not a verdict (a
+read-only plugin declaring `filesystem:read` at low risk runs without a person being
+asked; the same scope at high risk does not), and code may not outgrow the manifest a
+person approved (extra scopes, a lower risk level, undeclared network access, paths or
+services are rejections at discovery). A refusal is `status="denied"` with nothing
+registered — and the plugin stays loaded, so a later approval can enable it.
+
+**What a plugin contributes is registered where the system already looks, and withdrawn
+the same way.** Tools go into `ToolRegistry` and tool metadata into `ToolCatalog` (so the
+selector can find them), capabilities into the Phase 9 `CapabilityRegistry`, declarations
+into the permission layer. All three gained an `unregister`, because "the name is still in
+the registry" is exactly the state that keeps calling into code that is gone.
+
+**The examples were chosen to duplicate nothing**, which is why none of them wraps an
+existing subsystem: `SystemPlugin` reports platform facts and declares no permissions at
+all, `DeveloperPlugin` is a read-only directory listing under `filesystem:read`, and
+`BrowserPlugin` classifies a URL (local / secure / credential-bearing) instead of being a
+second browser controller. `python -m novacontrol demo phase10_sdk` loads all three,
+enables them, calls a plugin tool, and shows the deliberately broken fourth plugin failing
+while everything else keeps running.
+
+### Defects found and fixed
+
+1. **A shared class-level failure list.** The first draft accumulated "pending failure
+   events" in a CLASS attribute, so one manager's failures would have been published by
+   another manager's next event. Found on review before the tests ran; the list was
+   removed and `_fail()` now emits its own event, which is where the information belongs.
+2. **The plugin's id was passed as the ACTION.** Handing the permission layer
+   `assess(plugin_id, action=plugin_id)` meant the layer did what it is designed to do —
+   derive risk from the verb of an action — and "recorder" contains "order", so a plugin
+   named for a recorder was read as an instruction to place an order and was denied by
+   default as CRITICAL. Found by the first run of the new tests. The manager now asks
+   about the PLUGIN, with the declared risk as the whole question; an id is a label, not a
+   verb — the same lesson §27 recorded from the other direction
+   (`installed_applications`).
+3. **A coroutine that was never awaited.** The rejection path in `load()` returned
+   `self._fail(...)` while every other call site awaited it, so a rejected plugin left a
+   coroutine object behind and pytest reported the un-awaited warning. Covered by the
+   "invalid plugin is rejected and never loaded" test, which is exactly the path that was
+   broken.
+4. **A denied plugin could never be enabled.** `enable()` requires INITIALIZED before the
+   security gate, and a DENIED plugin is neither INITIALIZED nor one of the states the
+   walk-forward handles, so it returned the denial forever — even after an approving
+   gateway arrived. Found by writing the "a denied plugin may be enabled once approved"
+   test; the gate now accepts a DENIED record and re-runs the decision.
+
+### Kept
+
+Nothing was removed or duplicated to make this pass. The marketplace keeps its records,
+repository, trust flow and event names; the manifest gained fields and derives a
+`plugin_id` from the name when one is absent, so every existing `plugin.json` still loads.
+`Plugin`, `PluginContext` and `PluginManager` are additive; `reliability.PermissionManager`,
+`core.security.ApprovalGateway`, `tools.registry.ToolRegistry` and
+`intelligence.CapabilityRegistry` are used as they stand (with an `unregister` added to
+each registry, and to `ToolCatalog`) rather than extended into plugin-shaped variants. The
+22 pre-existing lifecycle events are untouched; the six new ones are additive.
+
+### Gates
+
+Full suite **1818 passed / 12 skipped** (1686 subtests, 5:16), up from 1796 in §28:
+`tests/test_plugin_sdk.py` adds 22 tests covering discovery, rejection, lifecycle order,
+enable/disable, containment, permissions, capability and tool registration, and unloading.
+mypy clean in both platform views (**229 modules**); `docs/API.md` in sync (68 routes);
+ruff at or below the pre-existing baseline on every touched file.
+## 30. Phase 10 verified against its own specification
+
+Phase 10 asked for four things — a stable plugin interface, a manager that discovers,
+validates, runs, unloads and CONTAINS plugins, security declarations integrated with the
+centralized permission layer, and minimal examples that duplicate nothing — plus a test
+list of ten behaviours. This pass drove every one of those clauses through the real
+`PluginManager`, the real registries and the real CLI demo (`python -m novacontrol demo
+phase10_sdk`) rather than reading them off the implementation, and it found twelve more
+defects. All are fixed, and each is pinned by the test that would have caught it.
+
+**The headline promise had three holes in it.** "One broken plugin must not crash
+NovaControl" was true of the five lifecycle hooks and false of the declaration path:
+a plugin with `version = ""`, or `capabilities = None`, or a tool object with no
+`ToolSchema` made `register()` raise — once from `PluginManifest` refusing the empty
+version the rejection record was being built with, once from iterating `None`. A plugin's
+mistake is supposed to be DATA. Registration now wraps its own reading of the plugin, and
+the record it writes on rejection uses a placeholder manifest that cannot raise; the same
+guard was added to the enable-time re-validation. The verification suite pins all four
+shapes (empty version, `None` declarations, schema-less tool, type-violating default).
+
+**Two ways one plugin could take another's place.** A rejection was stored under the key
+derived from its directory name, so a directory whose name matched a plugin's id
+(`from-file/` declaring `plugin_id = "zz-broken"`, then a broken `zz-broken/`) REPLACED
+the working record with a FAILED one. And `register()` only checked `_plugins`, not
+`_records`, so a second plugin claiming an id that already had a record (rejected,
+denied, or unloaded) silently overwrote that record's answer. Rejections now take the next
+free key and registration refuses an id that any record already holds; the
+discovery-overwrite case is the test.
+
+**Registration was atomic in the wrong direction.** `self._plugin_tools[pid] =
+self._register_tools(plugin)` recorded the names only on success, so a failure on the
+SECOND tool — or the second capability — left the first registered in a registry with
+nothing left to withdraw it: a FAILED plugin that still owned a live tool. Both
+registrations now record incrementally, and the test forces it by pre-registering the
+capability id a plugin's second capability will claim, then asserting the first is gone
+from the registry and `tool_names()`/`capability_ids()` are empty.
+
+**Unload contradicted load.** `load()` explicitly accepts the UNLOADED state and the
+guide promised a plugin "may be loaded again", but `unload()` popped the instance out of
+`_plugins`, so the next `load()` found no instance and reported "the plugin was rejected
+before loading" — a state the docs said was impossible. Unload now drops the runtime
+context (which is what `shutdown` ends) and keeps the plugin known, so unload → load →
+enable works, hooks and all.
+
+**Two declarations that did nothing.** `configure()` refused only ENABLED plugins, so
+configuring a LOADED or DISABLED plugin stored values that `load()` had already read and
+would never read again — a silent no-op dressed as a setting; it now raises
+`PluginLifecycleError` for anything already loaded. And `required_capabilities` was
+declared, documented, and never consulted anywhere: a plugin needing `browser.search`
+enabled happily in an installation without it. The enable path now checks each requirement
+against the attached capability registry (missing → FAILED with the id; no registry →
+FAILED saying it cannot be confirmed rather than assuming either way), and both outcomes
+are tested with a real `CapabilityRegistry`.
+
+**The manifest was not quite a ceiling.** A `plugin.json` declaring version 9.9.9 whose
+code declared 1.0.0 was accepted — the record then reported one version and the running
+plugin another — and a plugin whose Python declared a configuration field the manifest
+never mentioned could ask a person for settings the approved manifest does not cover. Both
+are now refusals, alongside the scopes, risk level, network, paths and services
+`_manifest_conflicts` already checked.
+
+**Two smaller ones.** A configuration field whose `default` contradicted its own declared
+type was not caught at registration, so it surfaced at load as "configuration field 'x'
+must be a string, got int" — a schema bug reported as a plugin failure; the schema is
+refused at registration now. And `BrowserPlugin` classified a URL by reading
+`urlsplit(...).port`, which RAISES for an out-of-range or non-numeric port, so the example
+tool blew up on `http://x:99999/` instead of answering; it now returns
+`{"valid": False, "reason": "invalid port"}`.
+
+**One lifecycle gap in the application.** `NovaControlApplication.stop()` persisted,
+closed the browser and stopped the runtime while plugins it had enabled were still loaded —
+their tools still registered in the registry the executor uses. It now unloads them first,
+in the safe order (an enabled plugin is disabled before `shutdown` runs).
+
+### Kept
+
+Nothing was relaxed to make the verification pass. The strict rules that already existed
+were extended, not replaced: the permission layer still decides (and the plugin is still
+assessed by its DECLARATION, never by its id), a DENIED plugin can still be enabled later
+once approved, tools and capabilities still register only after `enable()` returns, and
+`ToolRegistry` / `ToolCatalog` / `CapabilityRegistry` keep the `unregister` the withdrawal
+path needs. The new refusals (version, configuration ceiling, requirement check) are
+additions to `validate()` and `_enable_problems` — every plugin that was valid before is
+still valid, which is why the examples and the demo needed no changes beyond the demo
+capturing its enabled set before unloading.
+
+### Gates
+
+Full suite **1847 passed / 12 skipped** (1686 subtests, 7:18), up from 1818 in §29:
+`tests/test_plugin_sdk_verification.py` adds 29 clause-by-clause tests (interface
+declarations and hook defaults, discovery including the manifest cases, validation and
+rejection, lifecycle order and idempotence, reload after unload, status output, every hook
+failing without stopping the others, the permission layer's view of the declarations, the
+approval gate, required capabilities, manifest ceilings, partial-registration rollback,
+withdrawal on unload, the three examples' declarations and tool behaviour, and the demo).
+mypy clean in both platform views (**229 modules**); `docs/API.md` in sync (68 routes);
+ruff at or below the pre-existing baseline on every touched file.
+
+## 31. Phase 11: local knowledge, and a project it can see
+
+Phase 11 asks for two things that sound separate and are not: a knowledge engine
+that can be pointed at a folder of documents, and enough project awareness to
+answer *"fix the authentication issue"* with something better than a guess. They
+are one feature because the second is the first question an engineer asks — *what
+do we know about THIS project?* — and the answer is a retrieval query with a
+project filter plus a header read off the workspace.
+
+The phase named its own architecture, so the code follows it literally:
+`ingest → chunk → index → retrieve → rerank → context`. One module owns each
+arrow (`extract`, `chunking`, `index`, `retrieve`), and `KnowledgeManager` is the
+pipeline that decides what to read and keeps the bookkeeping that makes reading
+it again cheap.
+
+### Local-first is a capability, not a constraint
+
+BM25 needs no model, no download and no network, and for the queries this feature
+exists for — *"where is the retry policy configured?"*, *"which file defines the
+approval token"* — a rare term is exactly what identifies the document. So BM25
+is the signal that is ALWAYS there, and embeddings are the recall a model adds on
+top: any object with `embed` (the same `Embedder` seam the intent matcher and the
+tool retriever already use) can be supplied with `use_embedding_model`, and the
+stored vectors are rebuilt at that moment so a query is never scored against
+vectors from a different backend. `release_embedding_model` gives the model back;
+a provider that raises or has nothing is treated as unavailable rather than as an
+error. The default is the dependency-free hashing embedder, which means a machine
+with no model at all still answers — with no configuration, no flag and no
+degraded mode to explain.
+
+### Incrementality, dedup and the "don't re-read the world" rule
+
+A source is identified by project + path and versioned by its content hash. The
+same bytes are UNCHANGED for the cost of one hash; an edit replaces exactly that
+source's chunks and bumps its version; the same file ingested three times is
+still one source. Chunks are stored per source rather than in one flat table for
+exactly this reason: re-ingesting a file deletes the old chunks first, so nothing
+the file no longer says can be retrieved — and the index never rebuilds because
+one file changed.
+
+### Outputs that admit what they left out
+
+The budget is the part of the phase most easily faked, so it is the part with the
+most reporting. A context carries `tokens`, `budget`, `considered`, `omitted` and
+`truncated`; the ranking fuses the index score with source priority (documentation
+and code ahead of a scan-quality PDF), recency, the active project and
+near-duplicate detection; a per-source cap stops one verbose file from taking
+every slot; and the single hit that does not fit is CUT to fit rather than
+dropped, because "nothing matched" and "there was more and it did not fit" are
+different answers. Cut text is marked `… [truncated]` where it was cut.
+
+### Project awareness reads and writes nothing
+
+`ProjectDetector` walks up to the first directory that looks like a project, reads
+`.git/HEAD` and `.git/config` directly (running git to answer a question about the
+workspace is a command the user did not ask for), derives the language and
+framework from the manifests that are actually present, lists the newest source
+files, reads the shared bug log for open errors, and reports the test runner the
+project really has — or the real outcome of the last suite NovaControl ran, never
+a fabricated pass/fail. A test asserts the strongest version of "do not blindly
+modify files": the whole tree is byte-identical before and after a detection.
+
+### Reachability
+
+Three surfaces, deliberately: the tools (`knowledge_search`, `knowledge_ingest`,
+`project_context`, the two that read the disk declaring `filesystem:read` so the
+central policy gates them like any other), a `KnowledgeModule` on the bus
+(`knowledge.search_requested`, `ingest_requested`, `context_requested`,
+`project.detect_requested`, each with a correlated reply), and the application
+methods (`search_knowledge`, `ingest_knowledge`, `project_context`,
+`knowledge_context`). The index persists with the rest of the state and restores
+on boot — vectors are recomputed locally, so reopening it needs no model. The
+typed vocabulary also gained `knowledge.indexed` and `knowledge.retrieved`, which
+the manager publishes itself, so a watcher sees the same events whichever surface
+drove the work.
+
+### Four defects found by driving it
+
+- **A branch named `feature/timeouts` was reported as `timeouts`.** `read_branch`
+  took the last path segment of `refs/heads/feature/timeouts`. Namespaced branches
+  are the common case, and the segment that was dropped is the one that says what
+  the branch is for. It now strips the ref namespace and reports the rest.
+- **A chunk cut to fit the budget kept its ORIGINAL token count.** `_cut_to_budget`
+  replaced the text and left `tokens` pointing at the full length, so the budget
+  was charged for text that was never sent — the accounting lied in the
+  conservative direction, which is still a lie, and it made a 60-token budget
+  report 127. The count is now recomputed from what is left.
+- **A Markdown chunk repeated its own heading line.** Blocks began with
+  `## Configuration` AND were prefixed with the heading path, doubling the text
+  and its cost in every excerpt. The heading line is now removed when it is the
+  heading the block is filed under, keeping the path (which the line alone never
+  gave) and the heading field.
+- **`render_context` read `path` off the chunk instead of the hit.** Chunks know
+  which source they belong to; the path lives on the source, which the hit
+  carries. It only appears the first time a hit has no source — which is exactly
+  the kind of latent attribute error a test that always populates the source
+  never sees.
+
+### Gates
+
+Full suite **1899 passed / 12 skipped** (1686 subtests, 5:09), up from 1847 in
+§30: `tests/test_knowledge_rag.py` adds 52 tests covering ingestion of a typed
+tree, the PDF and skip paths, source metadata, duplicate prevention, incremental
+re-indexing, project detection and the no-writes guarantee, ranking by project
+and kind, deduplication, the per-source cap, a tight budget, the no-embeddings
+fallback, the tools and their permissions, the module's correlated events,
+persistence and restoration, and the application wiring (engine, tools,
+catalogue, module, restart). mypy clean in both platform views (**237 modules**);
+`docs/API.md` in sync; ruff at or below the pre-existing baseline on every
+touched file. No HTTP routes were added: the phase's surfaces are the tools, the
+bus, the CLI demo (`python -m novacontrol demo phase11_rag`) and the application
+methods, and `docs/KNOWLEDGE.md` documents them.
+
+## 32. Phase 11 verified against its own specification
+
+§31 delivered the local knowledge engine and project awareness. This pass drove
+every clause of the phase through the real code — the manager, the index, the
+detector, the tools, the module, the brain and the application — with the answer
+asserted rather than assumed, in `tests/test_knowledge_rag_verification.py`. It
+found eight defects. All eight are fixed and pinned by the test that caught them.
+
+### The two that mattered most
+
+**Project-scoped retrieval filtered chunk ids against SOURCE ids.** The manager
+hands `KnowledgeIndex.search` the source ids of the active project; the postings
+and the vectors are keyed by CHUNK id, and the two were compared directly, so
+`chunk_id not in allowed` was true for every chunk of every allowed source. Every
+scoped search returned nothing at all — the project-scoped half of the phase,
+silently empty. It survived the first test file because the only scoping test
+exercised the *fallback* path (a project with nothing indexed searches
+everything) and the ranking test used an unscoped search. The translation now
+happens in one place, `KnowledgeIndex._chunk_ids_for`, and the verification file
+asserts both directions: the scoped search returns only its own project, the
+unscoped search returns both, and the wrong project retrieves zero hits.
+
+**Deduplication ran before the priority weighting.** `rank` walked the index's
+candidates in index order, marked near-duplicates against the first copy it saw,
+and only then applied source priority, recency and the active-project boost. So
+of two identical paragraphs — the same text vendored into another project — the
+one that survived was whichever the index happened to list first, and the copy in
+the project you are actually standing in could be the one dropped. Candidates are
+now weighted and sorted FIRST and deduplicated after, so the ranked-best copy
+wins.
+
+### The honest-budget cluster
+
+Three defects were all the same mistake in different places: something real was
+sent to the model that the budget did not count.
+
+- The project header of a `context_for` block was neither budgeted nor measured.
+  A project with forty open errors produced a header of its own length, pushed
+  the block past the caller's budget, and still reported a number inside it. The
+  header now gets a quarter of the budget (cut with a marker when it needs more),
+  and the excerpts get what is left.
+- The per-hit labels (`--- [n] path (kind, lines a-b)`), the request line and the
+  hit count were not charged at all, so a "2000 token" context could arrive as a
+  2200 token one. `assemble` now charges `HEADER_TOKENS` before the first excerpt
+  and `LABEL_TOKENS` (plus `MARKER_TOKENS` when it cuts) per hit, and reports
+  `tokens` as the size of the block that was actually rendered.
+- `context_for` reported a number that was neither the header's size nor the
+  block's size. `tokens` is now `estimate_tokens(text)` in both paths — one
+  number, measured on what is sent.
+
+### The diagnosis defects
+
+- A directory ingest stopped silently at its file cap (5000). "5000 files
+  ingested" and "5000 of 120000 files ingested" are different facts, and only one
+  of them is useful, so the cap is now configurable (`max_files_per_tree`) and
+  REPORTED as a skipped entry plus a warning when it is reached.
+- A path that did not exist was reported as an unsupported FILE TYPE, and a BLANK
+  path was not checked at all — `Path("")` is the current directory, so the naive
+  reading of a blank argument was "ingest this entire working tree". Both are now
+  refused with the reason, and the test asserts the index stays empty.
+- `search`'s docstring promised deduplication it did not do. It does now.
+
+### The one that was a missing half, not a bug
+
+A DELETED file's chunks stayed retrievable forever. An ingest can only report on
+files that exist, so nothing in the pipeline could notice the absence — the index
+answered from a document that was gone, which is worse than a stale index because
+it looks current. `prune_missing(root)` is the other half of an incremental
+update: file-backed sources under the named tree whose file is gone are removed,
+reported as `PRUNED` (deliberately not `SKIPPED`: nothing was read, something was
+forgotten), and announced on the bus. `ingest_path(root, prune=True)` runs it as
+part of the ingest and counts what it removed. It is opt-in and scoped to the tree
+the caller names, because a temporarily unreadable mount must not silently empty
+an index — and a note or a taught article carries a virtual path, so it can never
+be swept up by a prune of a real directory.
+
+### And the last arrow
+
+The phase's pipeline ends `CONTEXT → LLM`, and nothing in §31 put the context in
+front of a model. `BrainRequest` now carries `knowledge`, `_build_chat_messages`
+inserts it as its own system message labelled as local knowledge with the
+instruction to cite the file and not to invent beyond it, and
+`NovaControlApplication.answer_with_knowledge(question)` runs the whole pipeline
+in one call — retrieve, budget, hand to the model, return the answer plus the
+citations and the block that was used. An empty block adds no message, so every
+existing caller is unchanged; the scratch brain answers locally and the payload
+says so through `brain_mode` rather than implying a model read something it never
+saw.
+
+### Smaller fixes found on the way
+
+A tree ingest with an explicit `source_type` ignored it (now honoured per file); a
+directory summary reported SKIPPED when only ONE file in it was skipped (it now
+means "everything was skipped", which is the case a wrong path produces); the
+summary did not state its unchanged count (it does now, so the counts account for
+every file); and `KnowledgeManager.ingest_text`'s article bridge, the tool paths
+and the module's blank-path request all go through the same refusals.
+
+### Gates
+
+Full suite **1944 passed / 12 skipped** (1686 subtests, 7:48), up from 1899 in
+§31: 45 new clause-by-clause tests in
+`tests/test_knowledge_rag_verification.py` covering the pipeline, every source
+kind including a real minimal PDF through the standard-library reader, the
+local-first rules, the tracked fields, duplicate prevention, incremental updates
+including deletion, the eleven project fields, the worked example, the no-writes
+guarantee, project scoping, ranking, deduplication, three budget cases, the
+refusals, the cap and the LLM arrow. mypy clean in both platform views (**237
+modules**); `docs/API.md` in sync (no routes added — the surfaces are the tools,
+the bus, the CLI demo and the application methods); ruff clean apart from the
+repository's pre-existing E501 baseline.
+## 33. Phase 12: specialized agents on one pipeline
+
+Phase 12 asks for specialized agents and forbids a second agent framework, which
+is really one requirement stated twice: **one pipeline, many specialists**. So
+the phase's own architecture is the shape of the code. `agents/pipeline.py` is
+the only loop a specialist runs —
+
+    NLU -> Context -> Decision -> Planner -> Tool Selection
+        -> Execution -> Verification -> Recovery
+
+— and a specialist is a set of stage hooks on it (`decide`, `plan`, `execute`,
+`verify`, `recover`, `report`). Interpretation, context assembly, permission
+checks, the execute/verify/recover loop, event publication and the final verdict
+belong to the pipeline, which is why two specialists cannot drift apart in how
+careful they are. Nothing in the phase was built twice: NLU is
+`TaskInterpreter`, Context is the Phase 11 knowledge engine plus the
+specialist's own cheap local facts, Tool Selection is the Phase 8
+`PermissionManager` plus the approval gateway plus the live tool registry,
+Verification reports the Phase 8 `VerificationResult` vocabulary and Recovery the
+`RecoveryStrategy` one, and a run publishes the Phase 9 typed lifecycle events
+with the request's correlation id.
+
+The two rules the phase states are enforced structurally rather than by habit.
+*Never claim success without verification*: the pipeline refuses to report
+COMPLETED unless a step was verified PASS, judges the run by where each step
+ENDED UP rather than by every attempt, and calls a step that completed with
+nothing observable INCONCLUSIVE. *Do not commit or push destructive changes
+without permission*: every capability is declared with its risk stated rather
+than inferred from a verb, so a write is HIGH and not reversible, running the
+tests is HIGH and executes the project's code, and a repository mutation is HIGH
+and destructive — and a refused step is recorded as denied and never executed.
+Authorization is a per-RUN pipeline, never a flag flipped on shared state.
+
+### The developer agent
+
+Every responsibility has one home: `SelfImprovementEngine.inspect()` for
+inspection, `ProjectDetector` for the project, a local lexical scan for code
+search, the bug log plus the project context for open errors,
+`SelfImprovementEngine.plan()` for a proposal that states
+`writes_require_approval`, `apply_changes()` and a shell-free command runner for
+the write and the tests, failure reproduction plus name-not-guess diagnosis for
+debugging, and a byte comparison of what was written against what was proposed
+for verification. The phase's workflow — Understand, Inspect, Plan, Modify, Test,
+Verify, Recover, Report — is simply the stage order: an `apply_change` run plans
+`inspect_repository -> plan_changes -> apply_changes -> run_tests ->
+verify_changes`, so the proposal always precedes the write and the write is
+always followed by the tests and the byte check.
+
+Two quiet failure modes are worth recording. **A test run with no tally is not a
+pass**: pytest and unittest tallies are both parsed from the run's own output,
+and a collection error or a wrong command exits zero with nothing to count, which
+is exactly the shape that has an agent report success after running nothing. And
+**a failure signature that is not present is not guessed at**: an unrecognised
+failure is reported as unrecognised, because a wrong diagnosis sends the next
+attempt in the wrong direction.
+
+### The research agent
+
+Research is source-aware: the answer is a set of claims, not a paragraph. The
+question is read by the interpreter plus the query frame, the source decision is
+web or the local index (honouring `allow_web` and an offline request), the web
+path calls the **existing** `ExploreService` rather than a second browser, the
+evidence comes from the page text Explore already read, comparison is per source
+with a cross-source agreement figure, and the answer is claims labelled as
+evidence or inference. Conflicts are only reported where two sources demonstrably
+discuss the same thing (vocabulary overlap by Jaccard or containment) and
+disagree in a checkable way — a negation on one side only, figures that do not
+match, or an antonym pair. `verify_citations` fails the step on an evidence claim
+without a citation, a citation index with no matching source, or an inference
+with no basis, so a fabricated reference cannot survive.
+
+### What the clause-by-clause pass found
+
+`tests/test_specialist_agents.py` (62 tests) covers the phase's nine required
+areas. `tests/test_specialist_agents_verification.py` (76 tests) then walked the
+requirements TEXT and asserted the *mechanics* of each stage — that NLU really is
+the interpreter, that Tool Selection really is the risk layer reading the agent's
+own declarations and refusing a tool this build does not have, that every stage
+is recorded even when a run stops early, that the events arrive in the phase's
+order. Eleven defects came out of the two passes.
+
+**Git arguments were silently discarded.** The agent read only the VERB from the
+request: `git diff HEAD~1 -- src` ran a bare `git diff`, `git remote add origin
+<url>` fell through the verb list and ran `git status`, and `git log --oneline -5`
+lost its arguments entirely. Worse, the read-only list contained `branch` and
+`remote`, so `git branch -D feature` was classified as a **read** — the dangerous
+shape, and only harmless because the arguments were being dropped too. The verb
+the user named is now the verb that runs, and its arguments are read back: flags,
+revisions, paths, URLs, the remote and branch names the workspace actually has
+(read from `.git/config`, `.git/HEAD`, `.git/refs/**` and `packed-refs`, no
+subprocess), and quoted values kept whole so `git commit -m 'fix the widget'`
+survives having no shell to quote it. English glue is recorded as unused and
+reported; a word that cannot be shown to be a git argument is unreadable, and a
+**mutation containing one is refused unrun** rather than reshaped — running `git
+commit` for "git commit the widget fix" is a different repository operation from
+the one that was asked for. The read-only classification follows the arguments,
+never the verb alone: `git branch` lists and `git branch -D feature` deletes,
+`git stash list` reads and `git stash pop` writes, and anything unrecognised is a
+mutation, because the safe default for a repository command nobody classified is
+to ask first.
+
+**A step that never ran was reported as a verification FAILURE.** While recovery,
+for that same step, said there was nothing to recover — two stages disagreeing
+about one non-event, and the record implying a failure that never happened. The
+pipeline now answers a skipped step itself, without asking the specialist's
+`verify` hook: INCONCLUSIVE, with the verification stage recorded SKIPPED. No
+specialist can claim to have verified something that did not run.
+
+**A failed `synthesize` was retried.** A synthesis step's inputs are already in
+the run, so a retry spends the run's time to arrive at the same failure.
+Recovery in the research agent now distinguishes a fetch — `search_sources` and
+`retrieve_evidence`, which might actually retrieve something on a second attempt —
+from a computation, which is never retried.
+
+**"is X faster than Y?" was not read as a comparison.** The comparison was
+recognised by keyword, and that question needs a comparison the same way "compare
+X and Y" does; the run skipped the comparison step and then reported an agreement
+figure it had never measured.
+
+**The test command was hard-coded to pytest.** "Run the tests" ran `python -m
+pytest tests -q` whatever the project was, so in a Node tree it ran a command
+that cannot exist and the run failed for a reason that had nothing to do with the
+change. The runner is now recognised from the project the agent is standing in —
+`npm test` where a `package.json` and npm are present, this interpreter's `-m
+pytest -q tests` where the tree is a Python one — and only falls back to the
+pytest default when it recognises nothing. The application's own test-command
+helper delegates to the same function, so a plan and a run cannot disagree about
+which command they mean.
+
+**An agent's own refusal was presented as the diagnosis of a failure.** When a
+debug run was refused (no permission), the step had produced no output, yet the
+report still carried a `diagnosis` and a "high risk" line — the refusal text read
+back as though it were the failure. A diagnosis now only comes from a step that
+actually ran, or from a step recorded FAILED for a reason of its own; a refused
+debug run records its `diagnose` step SKIPPED with "no failing output was recorded
+to diagnose", and the report has no `diagnosis` key to mislead the next reader.
+
+Four more came out of the implementation pass, and three smaller ones from the
+same reading: a run that recovered from a transient failure was still reported
+FAILED (the verdict now comes from where each step ended up); the
+`src/<package>` layout was hard-coded to this repository's own `src/novacontrol`;
+"compare X" needed the query frame to find two nouns before it counted as a
+comparison; a skipped step was retried; the configured test command was
+round-tripped through a display string and re-split, which breaks the moment a
+path contains a space; and the comment on the write path's second approval gate
+claimed a default that refuses when it deliberately mirrors the gate that already
+decided.
+
+### Surfaces
+
+`developer_task(goal, authorize=False)`, `research_task(question,
+allow_web=True)` and `specialist_agents()` on the application; the coordinator and
+the `AgentModule` on the bus; and `python -m novacontrol demo phase12_agents`,
+which runs an inspect, a proposal, a refused write, an authorized run and a cited
+research answer. A specialist registers `prefer=True` in the SAME
+`AgentRegistry` the placeholders use, replacing the deterministic stub for its
+role while the stubs stay for the roles nobody implements. New doc:
+`docs/SPECIALIST_AGENTS.md`.
+
+### Gates
+
+Full suite **2082 passed / 12 skipped** (1773 subtests, 7:15), up from 1944 in
+§32: 62 tests for the phase's nine required areas and 76 clause-by-clause tests.
+mypy clean in both platform views (**240 modules**); `docs/API.md` in sync (no
+routes added — the surfaces are the specialists, the registry, the bus, the CLI
+demo and the application methods); ruff clean on the new files, with the
+repository's pre-existing E501 baseline untouched.
+
+All **four CI checks** were then confirmed locally on the frozen tree, exactly as
+the workflow runs them: `pytest tests/ -q` (2082 passed / 12 skipped, 1773
+subtests), `python scripts/generate_api_reference.py --check` (`docs\API.md: in
+sync`), and mypy in both platform views (`python -m mypy src` and `python -m
+mypy src --platform win32`, 240 source files each). The specialist suites alone
+are 138 tests (62 + 76) in 18s, so the phase's own work can be re-verified
+without the whole suite.

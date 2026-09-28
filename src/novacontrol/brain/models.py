@@ -34,6 +34,11 @@ class BrainRequest:
     text: str
     context: Mapping[str, Any] = field(default_factory=dict)
     id: str = field(default_factory=lambda: uuid4().hex)
+    #: Retrieved local knowledge to put in front of the model — the phase's
+    #: `CONTEXT → LLM` arrow. Empty by default, so every existing caller keeps
+    #: its behaviour; when it is set, the text is inserted as its own system
+    #: message, labelled so the model cites it instead of inventing around it.
+    knowledge: str = ""
 
 
 @dataclass(frozen=True, slots=True)

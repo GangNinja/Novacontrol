@@ -34,10 +34,28 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from novacontrol.core.security import PermissionScope, RiskLevel
-from novacontrol.tools.metadata import ToolMetadata, highest_risk
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from novacontrol.tools.metadata import ToolMetadata
+
+
+def _highest_risk(*levels: RiskLevel) -> RiskLevel:
+    """The most severe of these levels.
+
+    The rule itself lives with the tool metadata that first needed it, so there
+    is one implementation of "highest wins" in the codebase. It is imported
+    here rather than at module scope because the tools package imports THIS
+    module (its executor asks for the manager), and a module-level import in
+    both directions is a cycle that only resolves when the tools package happens
+    to be imported first. The permission vocabulary must be definable without
+    the tool layer existing.
+    """
+    from novacontrol.tools.metadata import highest_risk
+
+    return highest_risk(*levels)
 
 #: Risk at or above which a person is asked before the action runs. The same
 #: set ``tools.selection`` confirms on, so the two layers cannot disagree about
@@ -148,7 +166,7 @@ class PermissionDeclaration:
         ``delete_file`` it was asked to perform a MEDIUM non-destructive call.
         """
         return PermissionDeclaration(
-            risk_level=highest_risk(self.risk_level, other.risk_level),
+            risk_level=_highest_risk(self.risk_level, other.risk_level),
             required_permission=self.required_permission or other.required_permission,
             requires_confirmation=(
                 self.requires_confirmation or other.requires_confirmation
@@ -339,7 +357,7 @@ class PermissionManager:
         # ``max`` is stable, so a tie keeps the higher-priority source: an
         # operator's declaration and the verb saying the same thing reports the
         # declaration, which is the one a person can go and look at.
-        top = highest_risk(*(item.risk_level for _source, item in sources))
+        top = _highest_risk(*(item.risk_level for _source, item in sources))
         level_source = next(source for source, item in sources if item.risk_level is top)
         return combined, level_source
 
@@ -480,6 +498,8 @@ class PermissionManager:
         }
 
     def _metadata_for(self, tool: str) -> ToolMetadata | None:
+        from novacontrol.tools.metadata import ToolMetadata
+
         if self.catalog is None or not tool.strip():
             return None
         getter = getattr(self.catalog, "get", None)

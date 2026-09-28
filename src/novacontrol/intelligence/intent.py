@@ -636,6 +636,28 @@ class CapabilityRegistry:
         if capability.intent is not None and capability.source is CapabilitySource.DECLARED:
             self._by_intent.setdefault(capability.intent, []).append(capability)
 
+    def unregister(self, capability_id: str) -> bool:
+        """Remove a capability by id, and say whether anything was removed.
+
+        A plugin that is disabled or unloaded takes its entries out with it, so
+        "what can this installation do?" stops listing work that can no longer
+        be carried out. Projected tools are not removable here — they follow the
+        catalogue, and they disappear when their tool does.
+        """
+        wanted = str(capability_id or "").strip()
+        existing = self._by_id.pop(wanted, None)
+        if existing is None:
+            return False
+        if existing.intent is not None and existing.source is CapabilitySource.DECLARED:
+            bucket = self._by_intent.get(existing.intent)
+            if bucket is not None:
+                kept = [item for item in bucket if item.id != wanted]
+                if kept:
+                    self._by_intent[existing.intent] = kept
+                else:
+                    del self._by_intent[existing.intent]
+        return True
+
     # -- reading ---------------------------------------------------------------
 
     def for_intent(self, intent: IntentName) -> tuple[Capability, ...]:

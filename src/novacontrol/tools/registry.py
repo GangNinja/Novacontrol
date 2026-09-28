@@ -71,5 +71,21 @@ class ToolRegistry:
         except KeyError as exc:
             raise KeyError(f"Tool is not registered: {name}") from exc
 
+    def unregister(self, name: str) -> RegisteredTool:
+        """Remove a registered tool and return what was removed.
+
+        Needed where a tool's life is shorter than the process: a plugin that is
+        disabled or unloaded must stop being callable, and "the name is still in
+        the registry" is exactly the state that keeps calling into code that is
+        gone.
+        """
+        try:
+            return self._tools.pop(name)
+        except KeyError as exc:
+            raise KeyError(f"Tool is not registered: {name}") from exc
+
+    def __contains__(self, name: object) -> bool:
+        return str(name) in self._tools
+
     def list(self) -> tuple[RegisteredTool, ...]:
         return tuple(self._tools[name] for name in sorted(self._tools))

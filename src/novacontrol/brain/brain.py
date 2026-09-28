@@ -466,13 +466,29 @@ class NovaBrain:
         return {**decision.to_dict(), "trace": trace, "classifiers": classifiers}
 
     def _build_chat_messages(self, request: BrainRequest) -> list[dict[str, str]]:
-        """Build LLM message list with conversation history."""
+        """Build LLM message list with conversation history and local knowledge."""
         messages = self._conversation.to_messages()
         # Ensure system prompt is present
         if not messages or messages[0].get("role") != "system":
             messages.insert(0, {
                 "role": "system",
                 "content": self._conversation.system_prompt,
+            })
+        # Phase 11: local knowledge goes in as its own system message, ahead of
+        # the conversation block and the question. It is labelled with what it is
+        # (excerpts from LOCAL files, already ranked and budgeted by the caller)
+        # because an unlabelled dump reads as part of the conversation and gets
+        # answered as if the user had said it. The caller has already spent the
+        # budget; nothing here truncates or re-ranks.
+        if request.knowledge.strip():
+            messages.append({
+                "role": "system",
+                "content": (
+                    "Relevant local knowledge retrieved from this machine. Cite the "
+                    "file and line when you use it, and do not invent facts beyond "
+                    "it:\n\n"
+                    f"{request.knowledge.strip()}"
+                ),
             })
         # Add context if available
         if request.context:

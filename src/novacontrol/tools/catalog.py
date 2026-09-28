@@ -588,6 +588,17 @@ class ToolCatalog:
         existing = self._tools.get(metadata.name)
         self._tools[metadata.name] = existing.merged(metadata) if existing else metadata
 
+    def unregister(self, name: str) -> bool:
+        """Remove one tool's metadata, and say whether anything was removed.
+
+        Needed where a tool's life is shorter than the process: a plugin that is
+        disabled or unloaded must stop being findable by the selector, not just
+        callable. It removes the entry, not a merge of it, so a caller that
+        replaced pre-existing metadata leaves nothing behind but a hole —
+        plugin tools are validated against name collisions for that reason.
+        """
+        return self._tools.pop(str(name), None) is not None
+
     def get(self, name: str) -> ToolMetadata | None:
         return self._tools.get(name)
 

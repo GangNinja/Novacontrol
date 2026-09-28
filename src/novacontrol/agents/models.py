@@ -44,7 +44,7 @@ class AgentTask:
         if not self.goal.strip():
             raise ValueError("Agent task goal is required.")
 
-    def with_role(self, role: AgentRole) -> "AgentTask":
+    def with_role(self, role: AgentRole) -> AgentTask:
         return replace(self, role=role, status=AgentTaskStatus.RUNNING)
 
 
