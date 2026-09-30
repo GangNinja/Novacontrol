@@ -95,7 +95,7 @@ class IngestionTests(unittest.IsolatedAsyncioTestCase):
             report = await manager.ingest_path(corpus.root)
             self.assertTrue(report.ok)
             self.assertEqual(report.status, IngestStatus.ADDED)
-            kinds = {source.path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]: source.source_type
+            kinds = {Path(source.path).name: source.source_type
                      for source in manager.sources()}
             # A README is DOCUMENTATION, not plain Markdown: its NAME says what
             # it is, and the ranking trusts it a little more for that.

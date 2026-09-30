@@ -145,7 +145,7 @@ class PipelineClauseTests(unittest.IsolatedAsyncioTestCase):
             (root / "CHANGELOG.rst").write_text("Widget service\n==============\n\nNotes.\n", encoding="utf-8")
             manager = KnowledgeManager()
             await manager.ingest_path(root)
-            kinds = {source.path.rsplit("\\", 1)[-1]: source.source_type for source in manager.sources()}
+            kinds = {Path(source.path).name: source.source_type for source in manager.sources()}
             self.assertEqual(kinds["notes.txt"], SourceType.TEXT)
             self.assertEqual(kinds["README.md"], SourceType.DOCUMENTATION)
             self.assertEqual(kinds["CHANGELOG.rst"], SourceType.DOCUMENTATION)
@@ -168,7 +168,7 @@ class PipelineClauseTests(unittest.IsolatedAsyncioTestCase):
             manager = KnowledgeManager()
             # The per-file reports come from ingest_tree; ingest_path summarises.
             reports = await manager.ingest_tree(root)
-            by_name = {report.source.path.rsplit("\\", 1)[-1]: report for report in reports}
+            by_name = {Path(report.source.path).name: report for report in reports}
             self.assertEqual(by_name["bom.md"].status, IngestStatus.ADDED)
             self.assertEqual(by_name["latin.txt"].status, IngestStatus.ADDED)
             self.assertEqual(by_name["binary.md"].status, IngestStatus.SKIPPED)
@@ -675,7 +675,7 @@ class IncrementalUpdateClauseTests(unittest.IsolatedAsyncioTestCase):
             # left and the deleted source is still retrievable.
             before = await manager.ingest_path(root)
             self.assertEqual(before.status, IngestStatus.UNCHANGED)
-            self.assertEqual([s.path.rsplit("\\", 1)[-1] for s in manager.sources()], ["doc.md"])
+            self.assertEqual([Path(s.path).name for s in manager.sources()], ["doc.md"])
             # With pruning, the stale source is gone and the report says so.
             after = await manager.ingest_path(root, prune=True)
             self.assertIn("1 pruned", after.reason)
