@@ -98,6 +98,29 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("GET", "/agent/knowledge"): "no-render",  # application knowledge graph dump
     ("GET", "/plugins"): "no-render",  # plugin marketplace API (CLI only)
     ("GET", "/activity"): "no-render",  # timeline seed fetched by js/activity.js, not run()
+    # Phase 13: automation and audit are API/CLI surfaces for now — the scheduler
+    # has no panel yet, and claiming a renderer here would put a control in the
+    # contract that the frontend does not have.
+    ("GET", "/automation"): "no-render",
+    ("POST", "/automation/schedule"): "no-render",
+    ("POST", "/automation/approve"): "no-render",
+    ("POST", "/automation/cancel"): "no-render",
+    ("POST", "/automation/enable"): "no-render",
+    ("POST", "/automation/disable"): "no-render",
+    ("POST", "/automation/run"): "no-render",
+    ("POST", "/automation/run-due"): "no-render",
+    ("GET", "/audit"): "no-render",
+    ("GET", "/audit/entries"): "no-render",
+    ("POST", "/audit/prune"): "no-render",
+    ("POST", "/audit/delete"): "no-render",
+    ("POST", "/audit/clear"): "no-render",
+    ("GET", "/privacy"): "no-render",
+    ("POST", "/privacy"): "no-render",
+    ("GET", "/resources"): "no-render",
+    ("POST", "/cost/estimate"): "no-render",
+    ("GET", "/diagnostics"): "no-render",
+    ("GET", "/benchmark"): "no-render",
+    ("POST", "/benchmark"): "no-render",
 }
 
 # Markers that are not renderer function names (allowed non-render roles).

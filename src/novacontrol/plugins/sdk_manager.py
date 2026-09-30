@@ -165,6 +165,9 @@ class PluginManager:
         self._contexts: dict[str, PluginContext] = {}
         self._plugin_tools: dict[str, tuple[str, ...]] = {}
         self._plugin_capabilities: dict[str, tuple[str, ...]] = {}
+        #: The permission names each plugin declared, so a withdrawal takes back
+        #: exactly those and nothing another layer stated about itself.
+        self._plugin_declarations: dict[str, tuple[str, ...]] = {}
         self._catalog_created: set[str] = set()
 
     # -- wiring ----------------------------------------------------------------
@@ -495,8 +498,15 @@ class PluginManager:
             record = await self.initialize(record.plugin_id)
         # DENIED is a state a plugin may leave: a refusal is about this attempt,
         # and the same plugin with an approval (or a policy change) may be
-        # enabled afterwards without being loaded a second time.
-        if record.status not in (PluginStatus.INITIALIZED, PluginStatus.DENIED):
+        # enabled afterwards without being loaded a second time. DISABLED is the
+        # other way back: a disabled plugin is still initialized, so switching it
+        # on again needs no second load — the transition the lifecycle guide
+        # draws ("enable again after disable").
+        if record.status not in (
+            PluginStatus.INITIALIZED,
+            PluginStatus.DENIED,
+            PluginStatus.DISABLED,
+        ):
             return record
         plugin = self._plugins.get(record.plugin_id)
         if plugin is None:
@@ -887,8 +897,11 @@ class PluginManager:
         own statement as the source, and the tool's own scopes where it has any.
         """
         self.permissions.declare(plugin.plugin_id, plugin.declaration())
+        declared = [plugin.plugin_id]
         for tool in plugin.tools:
             self.permissions.declare(tool.name, plugin.declaration_for_tool(tool))
+            declared.append(tool.name)
+        self._plugin_declarations[plugin.plugin_id] = tuple(declared)
 
     def _register_tools(self, plugin: Plugin, plugin_id: str) -> tuple[str, ...]:
         self._plugin_tools[plugin_id] = ()
@@ -976,6 +989,14 @@ class PluginManager:
         for capability_id in self._plugin_capabilities.pop(plugin_id, ()):
             if callable(unregister_capability):
                 unregister_capability(capability_id)
+        # The declarations go too: what the layer was told about this plugin is
+        # a contribution like any other, and a withdrawn plugin whose risk
+        # statement is still on file is the same stale state as a withdrawn
+        # tool whose name is still in the registry.
+        for name in self._plugin_declarations.pop(plugin_id, ()):
+            undeclare = getattr(self.permissions, "undeclare", None)
+            if callable(undeclare):
+                undeclare(name)
 
     async def _call_quietly(self, plugin: Plugin, hook: str) -> None:
         method = getattr(plugin, hook, None)

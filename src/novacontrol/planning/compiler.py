@@ -266,6 +266,22 @@ class PlanCompiler:
                 decision=decision_payload,
             )
 
+        # Phase 13: scheduled work is a plan with a step in it, like everything
+        # else. The DECISION already said this request is about an automation
+        # (its selected capability), so the plan is built from that rather than
+        # from clause recognition: "every Monday generate a report" is a
+        # schedule clause, not a report clause, and reading it as one would run
+        # the report now and never again.
+        automation = _automation_template(goal, decision_payload, intent)
+        if automation is not None:
+            return Plan(
+                goal=goal,
+                steps=(self._materialise(automation, decision_payload),),
+                retry_policy=retry_policy,
+                verification_policy=self.verification_policy,
+                decision=decision_payload,
+            )
+
         clauses = self.recognise(goal)
         templates = self._assemble(clauses, decision_payload)
         if not templates:
@@ -848,6 +864,93 @@ def _demands_clarification(decision: Mapping[str, Any], intent: object | None) -
         return True
     # Without a decision, the NLU's own flag is the only evidence there is.
     return bool(getattr(intent, "needs_clarification", None) is True and not decision)
+
+
+#: Capability -> the plan action that carries it out. The decision names the
+#: CAPABILITY (that is what its selection is about); the plan names the ACTION,
+#: which is the application's own vocabulary for what it will do.
+_AUTOMATION_CAPABILITIES: Mapping[str, str] = {
+    "create_automation": "schedule_task",
+    "schedule_task": "schedule_task",
+    "run_automation": "run_automation",
+}
+
+
+def _automation_action(decision: Mapping[str, Any], intent: object | None) -> str:
+    """The automation action a decision asks for, or "" when it asks for none.
+
+    Read from the decision's selected capability first, and only then from the
+    intent, because the capability is what the decision actually chose to act on.
+    """
+    candidates: list[str] = []
+    selected = str(decision.get("selected_capability") or "")
+    if selected:
+        candidates.append(selected)
+    structured = getattr(intent, "intent", None)
+    for value in (getattr(structured, "value", structured), intent):
+        text = str(getattr(value, "value", value) or "")
+        if text:
+            candidates.append(text)
+    for candidate in candidates:
+        action = _AUTOMATION_CAPABILITIES.get(candidate)
+        if action:
+            return action
+    return ""
+
+
+def _automation_template(
+    goal: str, decision: Mapping[str, Any], intent: object | None
+) -> StepTemplate | None:
+    """The step a scheduling or automation request becomes.
+
+    One step, deliberately: storing the request and its schedule IS the work. It
+    is a WRITE (it changes what this machine will do on its own later), so a step
+    the caller has not approved stores the task DISARMED — pending approval —
+    rather than arming work nobody authorized.
+    """
+    action = _automation_action(decision, intent)
+    if not action:
+        return None
+    if action == "run_automation":
+        return StepTemplate(
+            title="Run the automation",
+            action="run_automation",
+            intent="run_automation",
+            description=(
+                f"Find the stored automation that {goal!r} names and run its "
+                "request through the normal request path."
+            ),
+            expected_result="The automation's request ran and was verified.",
+            effect=StepEffect.LOCAL_WRITE,
+            id="run-automation",
+            parameters={"request": goal},
+            verification=VerificationSpec(
+                method=VerificationMethod.CALLABLE,
+                target="automation_run",
+                description="the stored automation's request completed",
+            ),
+        )
+    return StepTemplate(
+        title="Schedule the request",
+        action="schedule_task",
+        intent="schedule_task",
+        description=(
+            f"Store {goal!r} as a scheduled automation, with the schedule the "
+            "request itself states, and record when it will next run."
+        ),
+        expected_result=(
+            "A stored automation with a next execution time, or the reason it "
+            "could not be scheduled."
+        ),
+        effect=StepEffect.LOCAL_WRITE,
+        id="schedule-automation",
+        parameters={"request": goal},
+        verification=VerificationSpec(
+            method=VerificationMethod.CALLABLE,
+            target="automation_scheduled",
+            description="an automation exists with that request and a next run time",
+        ),
+    )
 
 
 def _decision_payload(decision: object | None) -> dict[str, Any]:

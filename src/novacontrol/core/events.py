@@ -90,6 +90,32 @@ class EventType(StrEnum):
     KNOWLEDGE_INDEXED = "knowledge.indexed"
     KNOWLEDGE_RETRIEVED = "knowledge.retrieved"
 
+    # -- scheduled work (Phase 13) --------------------------------------------
+    # ``automation_id`` is the STABLE id of the scheduled request, and ``run_id``
+    # names one execution of it: a watcher that wants the schedule keys on the
+    # first, one that wants a single run's history keys on the second.
+    AUTOMATION_CREATED = "automation.created"
+    AUTOMATION_UPDATED = "automation.updated"
+    AUTOMATION_CANCELLED = "automation.cancelled"
+    AUTOMATION_STARTED = "automation.started"
+    AUTOMATION_COMPLETED = "automation.completed"
+    AUTOMATION_FAILED = "automation.failed"
+    # A refusal and an unmet condition are events OF THEIR OWN rather than
+    # failures with a note, because neither is a failure of the work.
+    AUTOMATION_DENIED = "automation.denied"
+    AUTOMATION_SKIPPED = "automation.skipped"
+
+    # -- the audit trail (Phase 13.3) -----------------------------------------
+    AUDIT_RECORDED = "audit.recorded"
+    AUDIT_PRUNED = "audit.pruned"
+
+    # -- privacy and execution modes (Phase 14.2/14.3) ------------------------
+    # A mode change is a fact about the whole installation; a denial names the
+    # ONE outbound action that was refused (and the control or mode that
+    # refused it), never a person's data.
+    PRIVACY_MODE_CHANGED = "privacy.mode_changed"
+    PRIVACY_DENIED = "privacy.denied"
+
 
 #: The payload fields each lifecycle event MUST carry. Checked when an event of
 #: a known type is published, so "the handler will find it" is a guarantee rather
@@ -134,6 +160,18 @@ EVENT_PAYLOAD_FIELDS: Mapping[EventType, tuple[str, ...]] = {
     # added/updated/unchanged/skipped rather than a bare "something happened".
     EventType.KNOWLEDGE_INDEXED: ("sources", "chunks"),
     EventType.KNOWLEDGE_RETRIEVED: ("query", "hits", "sources"),
+    EventType.AUTOMATION_CREATED: ("automation_id",),
+    EventType.AUTOMATION_UPDATED: ("automation_id", "status"),
+    EventType.AUTOMATION_CANCELLED: ("automation_id",),
+    EventType.AUTOMATION_STARTED: ("automation_id",),
+    EventType.AUTOMATION_COMPLETED: ("automation_id", "run_id", "status"),
+    EventType.AUTOMATION_FAILED: ("automation_id", "run_id", "error"),
+    EventType.AUTOMATION_DENIED: ("automation_id", "reason"),
+    EventType.AUTOMATION_SKIPPED: ("automation_id", "reason"),
+    EventType.AUDIT_RECORDED: ("record_id", "task_id"),
+    EventType.AUDIT_PRUNED: ("removed",),
+    EventType.PRIVACY_MODE_CHANGED: ("mode",),
+    EventType.PRIVACY_DENIED: ("action", "reason"),
 }
 
 #: Which event a Phase 8 task state publishes when it is entered. Kept here as

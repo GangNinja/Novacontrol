@@ -140,6 +140,19 @@ class StepStatus(StrEnum):
     SKIPPED = "skipped"
 
 
+#: What one step's ending says about the stage that ran it. One table rather than
+#: nested conditionals because three different endings must stay tellable
+#: apart: a step that did not apply (SKIPPED) and a step that was refused
+#: (DENIED) are not failures, and a stage table that folds them into FAILED
+#: hides exactly what a reader opens it to find.
+_STAGE_FOR_OUTCOME: dict[StepStatus, StageStatus] = {
+    StepStatus.COMPLETED: StageStatus.OK,
+    StepStatus.SKIPPED: StageStatus.SKIPPED,
+    StepStatus.DENIED: StageStatus.DENIED,
+    StepStatus.FAILED: StageStatus.FAILED,
+}
+
+
 @dataclass(frozen=True, slots=True)
 class StageRecord:
     """One stage's entry in a run: what it did, and whether it worked."""
@@ -899,6 +912,16 @@ class SpecialistPipeline:
                         tool=step.tool,
                     )
                 )
+                # The stage records the refusal rather than being left for the
+                # end-of-run fill: this step was considered and turned down,
+                # which is not the same fact as "the run ended before this
+                # stage" — and the refusal is the fact a reader is after.
+                run.record(
+                    StageName.EXECUTION,
+                    StageStatus.DENIED,
+                    f"{step.action}: {grant.reason}",
+                    **{"outcomes": [entry.to_dict() for entry in run.outcomes]},
+                )
                 continue
             await self._emit(
                 run, EventType.TOOL_STARTED, {"tool": step.tool or step.action, "step_id": step.id}
@@ -933,7 +956,7 @@ class SpecialistPipeline:
             )
             run.record(
                 StageName.EXECUTION,
-                StageStatus.OK if outcome.ok else StageStatus.FAILED,
+                _STAGE_FOR_OUTCOME[outcome.status],
                 f"{step.action}: {outcome.detail or outcome.status.value}",
                 **{"outcomes": [entry.to_dict() for entry in run.outcomes]},
             )

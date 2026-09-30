@@ -47,6 +47,9 @@ class NovaBrain:
         # installed via set_cloud_provider. Kept separate from the boot/local
         # provider so switching local ↔ cloud never loses either configuration.
         self._cloud_provider: object | None = None
+        # Phase 14.2: the execution mode's switch. Closed means NO path may
+        # select the cloud provider, whatever the user's brain mode says.
+        self._cloud_blocked = False
         # User-facing brain mode: "auto" (best local LLM, else scratch), "llm"
         # (force the local/external env model), "scratch" (always local rules),
         # "cloud" (the configured cloud LLM, and ONLY when the user picks it —
@@ -130,6 +133,42 @@ class NovaBrain:
             return ""
         return str(getattr(self._cloud_provider, "name", ""))
 
+    def set_cloud_allowed(self, allowed: bool) -> bool:
+        """Open or close the cloud slot; returns the effective state.
+
+        Phase 14.2's execution mode is enforced HERE, at the one method that
+        selects the cloud provider, rather than at each caller: LOCAL_ONLY must
+        mean no cloud model call, and the surest way to guarantee that is to
+        make the cloud provider unreachable. Closing the slot while "cloud" is
+        the active mode falls back to the local brain immediately.
+        """
+        self._cloud_blocked = not bool(allowed)
+        if self._cloud_blocked and (
+            self.mode == "cloud"
+            or (
+                self._cloud_provider is not None
+                and self.completion_provider is self._cloud_provider
+            )
+        ):
+            # Fall back to the local brain — the boot provider when there is a
+            # real one, Echo otherwise. set_mode("llm") alone is not enough:
+            # with no usable boot provider it leaves the CLOUD provider active
+            # and merely relabels the mode, so the slot that was just closed
+            # would keep answering requests.
+            boot = self._boot_provider
+            if boot is not None and str(getattr(boot, "name", "")) != "echo":
+                self.completion_provider = boot
+                self.mode = "llm"
+            else:
+                self.completion_provider = EchoLLMProvider()
+                self.mode = "scratch"
+        return not self._cloud_blocked
+
+    @property
+    def cloud_allowed(self) -> bool:
+        """Whether the execution mode currently permits the cloud brain."""
+        return not self._cloud_blocked
+
     def set_mode(self, mode: str) -> None:
         """Switch the chat brain: auto | llm | scratch | cloud (no restart).
 
@@ -139,11 +178,19 @@ class NovaBrain:
         - "scratch" swaps Echo in, so every chat answer is local; the boot
           provider is remembered for a later "llm"/"auto".
         - "cloud" activates the configured cloud LLM; with none configured it
-          behaves exactly like "llm" (best local model, else scratch).
+          behaves exactly like "llm" (best local model, else scratch). When the
+          execution mode has closed the cloud slot it behaves like "llm" too —
+          refusing the mode is the point, not an error.
         - "auto" restores the boot provider; the lazy Ollama re-probe resumes
           upgrading it when Ollama appears.
         """
         if mode == "cloud":
+            if self._cloud_blocked:
+                # The execution mode keeps every cloud call closed, so this
+                # request lands on the local brain and the mode stays "llm"
+                # rather than reporting a cloud brain that will never answer.
+                self.set_mode("llm")
+                return
             self.completion_provider = (
                 self._cloud_provider
                 if self._cloud_provider is not None

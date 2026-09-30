@@ -81,13 +81,27 @@ class TrendingTopicsProvider:
         *,
         fetch: Callable[..., tuple[str, ...]] = fetch_trending_headlines,
         edition: str = "in",
+        external_allowed: Callable[[], bool] | None = None,
     ) -> None:
         self._fetch = fetch
         self._edition = edition
+        # Phase 14.3: news headlines come from outside the machine, so this
+        # provider obeys the same allow_external_search control Explore does.
+        # Checked BEFORE the pool is refreshed, so a closed policy performs no
+        # fetch at all — not even a cached-pool refresh.
+        self._external_allowed = external_allowed
         self._lock = threading.Lock()
         self._pool: tuple[str, ...] = ()
         self._fetched_at = 0.0
         self._day = -1
+
+    def _external_closed(self) -> bool:
+        if self._external_allowed is None:
+            return False
+        try:
+            return not bool(self._external_allowed())
+        except Exception:  # pragma: no cover - a broken policy means closed
+            return True
 
     def topics(self, *, count: int = PAGE_SIZE, exclude: tuple[str, ...] = ()) -> dict[str, object]:
         """Return `count` topics, a different window each hour.
@@ -97,6 +111,17 @@ class TrendingTopicsProvider:
         fetch failed and no cached pool exists (topics is then empty — the UI
         falls back to its static help examples).
         """
+        if self._external_closed():
+            return {
+                "topics": [],
+                "source": "unavailable",
+                "reason": (
+                    "external search is closed by this machine's execution mode "
+                    "or privacy policy"
+                ),
+                "updated_at": None,
+                "fetched_at": self._fetched_at or None,
+            }
         now = time.time()
         with self._lock:
             self._ensure_pool(now)

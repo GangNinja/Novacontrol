@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from novacontrol.settings.models import BRAIN_MODES, ApprovalMode, UserSettings
+from novacontrol.optimization.models import ExecutionMode
+from novacontrol.settings.models import (
+    BRAIN_MODES,
+    ApprovalMode,
+    UserSettings,
+    clamp_record_cap,
+    clamp_retention_days,
+)
 
 
 class SettingsManager:
@@ -23,6 +30,16 @@ class SettingsManager:
         include_videos_in_explore: bool | None = None,
         brain_mode: str | None = None,
         auto_approve_run: bool | None = None,
+        automation_enabled: bool | None = None,
+        audit_retention_days: int | None = None,
+        audit_max_records: int | None = None,
+        audit_redact_sensitive: bool | None = None,
+        execution_mode: str | None = None,
+        privacy_allow_cloud: bool | None = None,
+        privacy_allow_external_search: bool | None = None,
+        privacy_allow_external_tools: bool | None = None,
+        privacy_allow_telemetry: bool | None = None,
+        privacy_allow_remote_model: bool | None = None,
     ) -> UserSettings:
         self._settings = replace(
             self._settings,
@@ -36,11 +53,47 @@ class SettingsManager:
             auto_approve_run=self._settings.auto_approve_run
             if auto_approve_run is None
             else auto_approve_run,
+            automation_enabled=self._settings.automation_enabled
+            if automation_enabled is None
+            else automation_enabled,
+            # The retention numbers are validated here too, on the same rule the
+            # persisted copy is read with: an out-of-range period is clamped, not
+            # obeyed, because "keep nothing" is not a retention policy.
+            audit_retention_days=self._settings.audit_retention_days
+            if audit_retention_days is None
+            else clamp_retention_days(audit_retention_days),
+            audit_max_records=self._settings.audit_max_records
+            if audit_max_records is None
+            else clamp_record_cap(audit_max_records),
+            audit_redact_sensitive=self._settings.audit_redact_sensitive
+            if audit_redact_sensitive is None
+            else audit_redact_sensitive,
             # An out-of-vocabulary mode falls back to auto rather than raising: a
             # stale UI value must never wedge the settings store.
             brain_mode=(brain_mode if brain_mode in BRAIN_MODES else "auto")
             if brain_mode is not None
             else self._settings.brain_mode,
+            # Phase 14: the execution mode is validated the same way — an
+            # unknown spelling reads as the middle mode, never as the most
+            # permissive one — and a control left unset keeps its current value.
+            execution_mode=self._settings.execution_mode
+            if execution_mode is None
+            else ExecutionMode.from_text(execution_mode).value,
+            privacy_allow_cloud=self._settings.privacy_allow_cloud
+            if privacy_allow_cloud is None
+            else privacy_allow_cloud,
+            privacy_allow_external_search=self._settings.privacy_allow_external_search
+            if privacy_allow_external_search is None
+            else privacy_allow_external_search,
+            privacy_allow_external_tools=self._settings.privacy_allow_external_tools
+            if privacy_allow_external_tools is None
+            else privacy_allow_external_tools,
+            privacy_allow_telemetry=self._settings.privacy_allow_telemetry
+            if privacy_allow_telemetry is None
+            else privacy_allow_telemetry,
+            privacy_allow_remote_model=self._settings.privacy_allow_remote_model
+            if privacy_allow_remote_model is None
+            else privacy_allow_remote_model,
         )
         return self._settings
 
@@ -48,5 +101,5 @@ class SettingsManager:
         return self._settings.to_dict()
 
     @classmethod
-    def from_dict(cls, payload: dict[str, object] | None) -> "SettingsManager":
+    def from_dict(cls, payload: dict[str, object] | None) -> SettingsManager:
         return cls(UserSettings.from_dict(payload))

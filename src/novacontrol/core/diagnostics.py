@@ -11,9 +11,40 @@ from typing import Any
 
 
 class HealthState(StrEnum):
+    """One health vocabulary, shared by the runtime registry and Phase 14's manager.
+
+    ``SKIPPED`` and ``UNKNOWN`` are additive (Phase 14): a component that is
+    deliberately not enabled is not unhealthy, and one whose telemetry is not
+    available on this platform must not be reported as either working or
+    broken — "could not tell" is its own honest state.
+    """
+
     OK = "ok"
     DEGRADED = "degraded"
     FAILING = "failing"
+    SKIPPED = "skipped"
+    UNKNOWN = "unknown"
+
+    @property
+    def healthy(self) -> bool:
+        """Whether this state needs nobody's attention."""
+        return self in (HealthState.OK, HealthState.SKIPPED)
+
+    @property
+    def severity_rank(self) -> int:
+        """How loudly this state should be aggregated, worst last.
+
+        Deliberately NOT declaration order: a deliberately-off component does
+        not outrank a degraded one, and an unreadable probe outranks a degraded
+        component (it could be hiding a fault) but never a verified failure.
+        """
+        return {
+            HealthState.OK: 0,
+            HealthState.SKIPPED: 0,
+            HealthState.DEGRADED: 1,
+            HealthState.UNKNOWN: 2,
+            HealthState.FAILING: 3,
+        }[self]
 
 
 @dataclass(frozen=True, slots=True)

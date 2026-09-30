@@ -967,3 +967,234 @@ class VisionAndBugsApiTests(_IsolatedApiTestCase):
         # Persisted: a fresh read reflects it too.
         current = self._client.get("/settings").json()
         self.assertTrue(current["auto_approve_run"])
+
+
+class AutomationAuditApiTests(_IsolatedApiTestCase):
+    """Phase 13's HTTP surface: scheduling stores, approval arms, audit reads."""
+
+    def _schedule(self, request: str, **extra: Any) -> dict:
+        response = self._client.post(
+            "/automation/schedule", json={"request": request, **extra}
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    def test_status_reports_the_scheduler_and_its_tasks(self) -> None:
+        response = self._client.get("/automation")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("enabled", payload)
+        self.assertIn("tick_seconds", payload)
+        self.assertEqual(payload["tasks"], [])
+
+    def test_scheduling_stores_a_pending_task_and_runs_nothing(self) -> None:
+        stored = self._schedule("Remind me at 6 PM to push my project.")
+
+        self.assertEqual(stored["request"], "push my project")
+        self.assertEqual(stored["status"], "pending_approval")
+        self.assertFalse(stored["enabled"])
+        self.assertEqual(stored["permissions"], ["automation.run"])
+        self.assertIsNone(stored["last_run_at"])
+        self.assertEqual(self._nova.audit_entries(), [])  # nothing ran
+
+    def test_a_request_that_states_no_time_is_refused(self) -> None:
+        response = self._client.post(
+            "/automation/schedule", json={"request": "push my project"}
+        )
+
+        self.assertEqual(response.status_code, 422)
+
+    def test_approve_enable_disable_and_cancel_round_trip(self) -> None:
+        stored = self._schedule("Every Monday at 9 generate a report")
+        automation_id = stored["automation_id"]
+
+        # Arming an unapproved task is refused: approval is separate.
+        blocked = self._client.post(
+            "/automation/enable", json={"automation_id": automation_id}
+        )
+        self.assertEqual(blocked.status_code, 403)
+
+        approved = self._client.post(
+            "/automation/approve", json={"automation_id": automation_id, "by": "tester"}
+        )
+        self.assertEqual(approved.status_code, 200)
+        self.assertTrue(approved.json()["enabled"])
+        self.assertEqual(approved.json()["approved_by"], "tester")
+
+        disabled = self._client.post(
+            "/automation/disable", json={"automation_id": automation_id}
+        )
+        self.assertEqual(disabled.json()["status"], "disabled")
+
+        cancelled = self._client.post(
+            "/automation/cancel", json={"automation_id": automation_id}
+        )
+        self.assertEqual(cancelled.json()["status"], "cancelled")
+        self.assertFalse(cancelled.json()["enabled"])
+
+    def test_unknown_and_missing_automation_ids_are_rejected(self) -> None:
+        missing = self._client.post("/automation/approve", json={})
+        self.assertEqual(missing.status_code, 422)
+
+        unknown = self._client.post(
+            "/automation/approve", json={"automation_id": "does-not-exist"}
+        )
+        self.assertEqual(unknown.status_code, 404)
+
+    def test_run_due_is_a_no_op_when_nothing_is_due(self) -> None:
+        response = self._client.post("/automation/run-due")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"runs": []})
+
+    def test_audit_status_entries_prune_and_clear(self) -> None:
+        status = self._client.get("/audit").json()
+
+        self.assertIn("records", status)
+        self.assertTrue(status["local_only"])
+        self.assertEqual(status["retention"]["retention_days"], 30)
+        self.assertEqual(self._client.get("/audit/entries").json(), {"entries": []})
+        self.assertEqual(self._client.post("/audit/prune").json()["removed"], 0)
+        self.assertEqual(self._client.post("/audit/clear").json()["removed"], 0)
+
+    def test_audit_delete_requires_a_record_id(self) -> None:
+        response = self._client.post("/audit/delete", json={})
+
+        self.assertEqual(response.status_code, 422)
+
+    def test_automation_and_audit_settings_round_trip_and_apply_live(self) -> None:
+        saved = self._client.post(
+            "/settings",
+            json={
+                "automation_enabled": False,
+                "audit_retention_days": 7,
+                "audit_max_records": 25,
+                "audit_redact_sensitive": False,
+            },
+        )
+
+        self.assertEqual(saved.status_code, 200, saved.text)
+        payload = saved.json()
+        self.assertFalse(payload["automation_enabled"])
+        self.assertEqual(payload["audit_retention_days"], 7)
+        self.assertEqual(payload["audit_max_records"], 25)
+        self.assertFalse(payload["audit_redact_sensitive"])
+        # Both changes take effect on the LIVE surfaces: the scheduler reads its
+        # setting per call, and the audit logger re-reads the retention policy
+        # rather than discovering the change on the next restart.
+        self.assertFalse(self._client.get("/automation").json()["enabled"])
+        retention = self._client.get("/audit").json()["retention"]
+        self.assertEqual(retention["retention_days"], 7)
+        self.assertEqual(retention["max_records"], 25)
+        self.assertFalse(retention["redact_sensitive"])
+
+    def test_audit_retention_settings_reject_non_numbers(self) -> None:
+        response = self._client.post("/settings", json={"audit_retention_days": "soon"})
+
+        self.assertEqual(response.status_code, 422)
+
+
+class Phase14ApiTests(_IsolatedApiTestCase):
+    """Phase 14's HTTP surface: privacy, resources, cost, benchmarks, diagnostics."""
+
+    def test_privacy_reads_the_mode_the_controls_and_every_action(self) -> None:
+        payload = self._client.get("/privacy").json()
+
+        self.assertEqual(payload["mode"], "balanced")
+        self.assertIn("allow_cloud", payload["controls"])
+        self.assertIn("cloud_model", payload["actions"])
+        self.assertEqual(payload["denied"], [])
+        self.assertTrue(payload["cloud_brain_allowed"])
+
+    def test_local_only_closes_the_cloud_brain_over_http(self) -> None:
+        updated = self._client.post("/privacy", json={"execution_mode": "local_only"}).json()
+
+        self.assertEqual(updated["mode"], "local_only")
+        self.assertFalse(updated["cloud_brain_allowed"])
+        self.assertIn("cloud_model", updated["denied"])
+        # The persisted setting agrees with the live policy.
+        self.assertEqual(
+            self._client.get("/settings").json()["execution_mode"], "local_only"
+        )
+
+    def test_the_general_settings_route_forwards_and_applies_the_mode(self) -> None:
+        response = self._client.post("/settings", json={"execution_mode": "performance"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self._client.get("/privacy").json()["mode"], "performance")
+        self.assertEqual(
+            self._client.get("/settings").json()["execution_mode"], "performance"
+        )
+
+    def test_a_single_privacy_control_can_be_switched_without_changing_the_mode(self) -> None:
+        payload = self._client.post("/privacy", json={"allow_external_search": False}).json()
+
+        self.assertEqual(payload["mode"], "balanced")
+        self.assertIn("external_search", payload["denied"])
+        self.assertTrue(payload["cloud_brain_allowed"])
+
+    def test_trending_topics_are_closed_with_the_policy(self) -> None:
+        self._client.post("/privacy", json={"execution_mode": "local_only"})
+
+        payload = self._client.get("/explore/trending").json()
+
+        self.assertEqual(payload["topics"], [])
+        self.assertEqual(payload["source"], "unavailable")
+        self.assertIn("closed", str(payload.get("reason", "")))
+
+    def test_the_resource_report_carries_the_level_and_the_reasons(self) -> None:
+        payload = self._client.get("/resources").json()
+
+        self.assertIn(payload["level"], {"ample", "tight", "critical"})
+        self.assertTrue(payload["reasons"])
+        self.assertIn("thresholds", payload)
+        self.assertIn("hardware", payload)
+
+    def test_cost_estimation_is_an_estimate_and_never_a_gate(self) -> None:
+        payload = self._client.post(
+            "/cost/estimate", json={"request": "Build and test a full application"}
+        ).json()
+
+        self.assertEqual(payload["level"], "very_high")
+        self.assertTrue(payload["route_hint"]["requires_capable_model"])
+        self.assertNotIn("allowed", payload["route_hint"])
+        empty = self._client.post("/cost/estimate", json={"request": "  "})
+        self.assertEqual(empty.status_code, 422)
+
+    def test_the_diagnostics_route_runs_the_whole_roster(self) -> None:
+        payload = self._client.get("/diagnostics").json()
+
+        self.assertEqual(len(payload["components"]), 21)
+        self.assertIn("Core", {row["component"] for row in payload["components"]})
+        self.assertEqual(payload["lines"][0], "NovaControl Health")
+        subset = self._client.get("/diagnostics", params={"only": "Storage,Core"}).json()
+        self.assertEqual(
+            [row["component"] for row in subset["components"]], ["Core", "Storage"]
+        )
+        missing = self._client.get("/diagnostics", params={"only": "Nope"})
+        self.assertEqual(missing.status_code, 404)
+
+    def test_a_benchmark_run_is_measured_through_the_live_provider(self) -> None:
+        before = self._client.get("/benchmark").json()
+        self.assertEqual(before["records"], 0)
+
+        run = self._client.post(
+            "/benchmark",
+            json={"model": "echo", "tasks": ["say hello"], "category": "general"},
+        )
+        self.assertEqual(run.status_code, 200)
+        self.assertEqual(len(run.json()["records"]), 1)
+        after = self._client.get("/benchmark").json()
+        self.assertEqual(after["records"], 1)
+        self.assertEqual(after["categories"], ["general"])
+
+    def test_a_benchmark_needs_a_model_and_at_least_one_task(self) -> None:
+        self.assertEqual(
+            self._client.post("/benchmark", json={"model": "", "tasks": ["x"]}).status_code,
+            422,
+        )
+        self.assertEqual(
+            self._client.post("/benchmark", json={"model": "echo", "tasks": []}).status_code,
+            422,
+        )

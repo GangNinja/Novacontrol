@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
 import json
 import os
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +73,7 @@ class NluSettings:
         }
 
     @classmethod
-    def from_mapping(cls, data: Mapping[str, Any]) -> "NluSettings":
+    def from_mapping(cls, data: Mapping[str, Any]) -> NluSettings:
         defaults = cls()
         return cls(
             fast_confidence=_float_setting(data, "fast_confidence", defaults.fast_confidence),
@@ -328,6 +329,143 @@ class ModelSettings:
         )
 
 
+#: How often the automation tick is allowed to run, in seconds. The floor is
+#: what stops a configured "tick every 0" from becoming a busy loop.
+MIN_AUTOMATION_TICK_SECONDS = 0.5
+MAX_AUTOMATION_TICK_SECONDS = 3600.0
+
+#: Failed runs before a broken automation disables itself. Bounded so a typo
+#: cannot set "keep failing forever".
+MAX_AUTOMATION_FAILURES = 10
+
+
+@dataclass(frozen=True, slots=True)
+class AutomationSettings:
+    """How scheduled work is policed.
+
+    ``tick_seconds`` is the resolution of the whole mechanism, not of any one
+    task: a schedule is stored as an instant and the engine asks "what is due?"
+    on this cadence. ``max_failures`` is the point at which a task that keeps
+    failing disables itself — bounded on purpose, because an automation that
+    fails every hour forever is a task nobody is watching.
+    """
+
+    enabled: bool = True
+    tick_seconds: float = 15.0
+    max_failures: int = 3
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "tick_seconds": self.tick_seconds,
+            "max_failures": self.max_failures,
+        }
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> AutomationSettings:
+        defaults = cls()
+        return cls(
+            enabled=_bool_setting(data, "enabled", defaults.enabled),
+            tick_seconds=_tick_value(data.get("tick_seconds"), defaults.tick_seconds),
+            max_failures=_count_setting(
+                data, "max_failures", defaults.max_failures, maximum=MAX_AUTOMATION_FAILURES
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceSettings:
+    """Phase 14: the lines a load decision is made against, as configuration.
+
+    Defaults describe the machine this phase was written for — 16 GB of RAM,
+    an 8 GB Arc and an NPU that may or may not be visible — so a 4 GB free
+    comfort line and a 1.5 GB critical line. They are read from the config
+    file's ``resources`` section because the second machine this runs on will
+    not be this one. ``max_resident_models`` is the concurrent-resident limit
+    (0 = no policy limit, the memory check still applies) and ``benchmark_cap``
+    bounds the stored measurements.
+    """
+
+    tight_free_ram_mb: int = 4096
+    critical_free_ram_mb: int = 1536
+    max_cpu_percent: float = 90.0
+    max_gpu_utilization: float = 95.0
+    max_temperature_c: float = 85.0
+    min_battery_percent: float = 20.0
+    max_resident_models: int = 2
+    benchmark_cap: int = 500
+    # How long one diagnostic check may take before it is reported as failing.
+    # Short by default: a check that reaches for a runtime or a driver should
+    # answer from what is already wired, not by waiting on one.
+    diagnostics_timeout_seconds: float = 5.0
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "tight_free_ram_mb": self.tight_free_ram_mb,
+            "critical_free_ram_mb": self.critical_free_ram_mb,
+            "max_cpu_percent": self.max_cpu_percent,
+            "max_gpu_utilization": self.max_gpu_utilization,
+            "max_temperature_c": self.max_temperature_c,
+            "min_battery_percent": self.min_battery_percent,
+            "max_resident_models": self.max_resident_models,
+            "benchmark_cap": self.benchmark_cap,
+            "diagnostics_timeout_seconds": self.diagnostics_timeout_seconds,
+        }
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> ResourceSettings:
+        """Read the section; an unusable value keeps its default.
+
+        The critical line is clamped to the comfort line: a critical threshold
+        ABOVE it would make "tight" unreachable, which is a configuration bug
+        the governor would otherwise have to discover at run time.
+        """
+        defaults = cls()
+
+        def count(key: str, current: int, *, low: int = 0, high: int) -> int:
+            value = data.get(key)
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                return current
+            return max(low, min(high, int(value)))
+
+        def number(key: str, current: float, *, low: float, high: float) -> float:
+            value = data.get(key)
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                return current
+            return max(low, min(high, float(value)))
+
+        tight = count("tight_free_ram_mb", defaults.tight_free_ram_mb, low=1, high=1024 * 1024)
+        critical = count(
+            "critical_free_ram_mb", defaults.critical_free_ram_mb, low=0, high=1024 * 1024
+        )
+        return cls(
+            tight_free_ram_mb=tight,
+            critical_free_ram_mb=min(critical, tight),
+            max_cpu_percent=number(
+                "max_cpu_percent", defaults.max_cpu_percent, low=1.0, high=100.0
+            ),
+            max_gpu_utilization=number(
+                "max_gpu_utilization", defaults.max_gpu_utilization, low=1.0, high=100.0
+            ),
+            max_temperature_c=number(
+                "max_temperature_c", defaults.max_temperature_c, low=1.0, high=150.0
+            ),
+            min_battery_percent=number(
+                "min_battery_percent", defaults.min_battery_percent, low=0.0, high=100.0
+            ),
+            max_resident_models=count(
+                "max_resident_models", defaults.max_resident_models, low=0, high=8
+            ),
+            benchmark_cap=count("benchmark_cap", defaults.benchmark_cap, low=0, high=100_000),
+            diagnostics_timeout_seconds=number(
+                "diagnostics_timeout_seconds",
+                defaults.diagnostics_timeout_seconds,
+                low=0.1,
+                high=120.0,
+            ),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class ModuleSettings:
     enabled: bool = True
@@ -343,12 +481,17 @@ class NovaControlConfig:
     nlu: NluSettings = field(default_factory=NluSettings)
     decision: DecisionSettings = field(default_factory=DecisionSettings)
     planning: PlanningSettings = field(default_factory=PlanningSettings)
+    automation: AutomationSettings = field(default_factory=AutomationSettings)
+    # Phase 14: the resource governor's thresholds and the model-layer limits
+    # read from the same section, so one file describes this machine's comfort
+    # lines rather than each service carrying its own constants.
+    resources: ResourceSettings = field(default_factory=ResourceSettings)
     vision: VisionSettings = field(default_factory=VisionSettings)
     models: ModelSettings = field(default_factory=ModelSettings)
     modules: Mapping[str, ModuleSettings] = field(default_factory=dict)
 
     @classmethod
-    def from_mapping(cls, data: Mapping[str, Any]) -> "NovaControlConfig":
+    def from_mapping(cls, data: Mapping[str, Any]) -> NovaControlConfig:
         """Build config from a dictionary-like object."""
         modules = {
             name: ModuleSettings(
@@ -371,13 +514,15 @@ class NovaControlConfig:
             nlu=NluSettings.from_mapping(_mapping(data.get("nlu", {}))),
             decision=DecisionSettings.from_mapping(_mapping(data.get("decision", {}))),
             planning=PlanningSettings.from_mapping(_mapping(data.get("planning", {}))),
+            automation=AutomationSettings.from_mapping(_mapping(data.get("automation", {}))),
+            resources=ResourceSettings.from_mapping(_mapping(data.get("resources", {}))),
             vision=VisionSettings.from_mapping(_mapping(data.get("vision", {}))),
             models=ModelSettings.from_mapping(_mapping(data.get("models", {}))),
             modules=modules,
         )
 
     @classmethod
-    def from_file(cls, path: str | Path) -> "NovaControlConfig":
+    def from_file(cls, path: str | Path) -> NovaControlConfig:
         """Load config from JSON, or YAML when PyYAML is installed."""
         config_path = Path(path)
         raw = config_path.read_text(encoding="utf-8")
@@ -392,7 +537,7 @@ class NovaControlConfig:
         raise ValueError(f"Unsupported config file type: {config_path.suffix}")
 
     @classmethod
-    def from_environment(cls) -> "NovaControlConfig":
+    def from_environment(cls) -> NovaControlConfig:
         """Load config from environment variables."""
         base = cls()
         require_approval = os.getenv("NOVACONTROL_REQUIRE_APPROVAL")
@@ -478,6 +623,25 @@ class NovaControlConfig:
                     os.getenv("NOVACONTROL_PLANNING_MAX_STEP_ATTEMPTS"),
                     base.planning.max_step_attempts,
                     maximum=MAX_PLAN_ATTEMPTS,
+                ),
+            ),
+            automation=replace(
+                base.automation,
+                enabled=_parse_bool(
+                    os.getenv("NOVACONTROL_AUTOMATION_ENABLED"),
+                    default=base.automation.enabled,
+                ),
+                # Clamped, not obeyed: a tick below the floor would busy-loop and
+                # one above the ceiling would make a "15 minute" schedule fire
+                # hours late, so an unusable value keeps the default.
+                tick_seconds=_tick_value(
+                    os.getenv("NOVACONTROL_AUTOMATION_TICK_SECONDS"),
+                    base.automation.tick_seconds,
+                ),
+                max_failures=_count_value(
+                    os.getenv("NOVACONTROL_AUTOMATION_MAX_FAILURES"),
+                    base.automation.max_failures,
+                    maximum=MAX_AUTOMATION_FAILURES,
                 ),
             ),
             models=replace(
@@ -567,6 +731,26 @@ def _count_setting(data: Mapping[str, Any], key: str, default: int, *, maximum: 
     if parsed < 1:
         return default
     return min(parsed, maximum)
+
+
+def _tick_value(value: Any, default: float) -> float:
+    """An automation tick cadence, clamped to the range that still works.
+
+    Below the floor the scheduler is a busy loop; above the ceiling a schedule
+    fires so late that it has stopped being the schedule that was asked for. Both
+    are clamped rather than obeyed, and unusable input keeps the default.
+    """
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed <= 0:
+        return default
+    return min(
+        max(parsed, MIN_AUTOMATION_TICK_SECONDS), MAX_AUTOMATION_TICK_SECONDS
+    )
 
 
 def _vision_provider_setting(value: str | None, default: str) -> str:

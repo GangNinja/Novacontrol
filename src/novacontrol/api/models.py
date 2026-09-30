@@ -7,7 +7,6 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-
 # ── Request bodies ────────────────────────────────────────────────
 #
 # Pydantic models give the API contract real teeth: a missing required key is
@@ -133,7 +132,7 @@ class ApiSurface:
     websocket_paths: tuple[str, ...]
 
     @classmethod
-    def default(cls) -> "ApiSurface":
+    def default(cls) -> ApiSurface:
         return cls(
             routes=(
                 ApiRoute("GET", "/", "Local web platform."),
@@ -228,6 +227,37 @@ class ApiSurface:
                 ApiRoute("GET", "/settings", "Read local user settings.", authenticated=True),
                 ApiRoute("POST", "/settings", "Update local user settings.", authenticated=True),
                 ApiRoute("GET", "/plugins", "List plugin API records.", authenticated=True),
+                # -- Phase 13: scheduled work and the audit trail ------------------
+                # Scheduling stores a request plus its schedule and runs NOTHING:
+                # the stored request still travels intent -> decision -> plan ->
+                # permission -> execution when its time comes (or when run now),
+                # so "run" here is the same gate a due run passes.
+                ApiRoute("GET", "/automation", "Scheduled automations: what is stored, armed, and due next.", authenticated=True),
+                ApiRoute("POST", "/automation/schedule", "Store a request plus the schedule it states as an automation (nothing runs yet).", authenticated=True),
+                ApiRoute("POST", "/automation/approve", "Authorize a pending automation so it may be armed.", authenticated=True),
+                ApiRoute("POST", "/automation/cancel", "Cancel an automation so it never runs again.", authenticated=True),
+                ApiRoute("POST", "/automation/enable", "Arm an approved automation again.", authenticated=True),
+                ApiRoute("POST", "/automation/disable", "Disarm an automation without cancelling it.", authenticated=True),
+                ApiRoute("POST", "/automation/run", "Run a stored automation now, under the same permission gate as a due run.", authenticated=True),
+                ApiRoute("POST", "/automation/run-due", "Run every automation that is due (the scheduler's own tick).", authenticated=True),
+                # The audit trail is local by construction and redacted on the way
+                # in; these routes read and bound it, and nothing here reaches the
+                # model or the network.
+                ApiRoute("GET", "/audit", "Operational audit trail status: records, retention, local-only storage, redactions.", authenticated=True),
+                ApiRoute("GET", "/audit/entries", "Recent audit records (redacted), oldest first.", authenticated=True),
+                ApiRoute("POST", "/audit/prune", "Apply the retention policy and report what was removed.", authenticated=True),
+                ApiRoute("POST", "/audit/delete", "Delete one audit record by id.", authenticated=True),
+                ApiRoute("POST", "/audit/clear", "Delete every audit record (explicit, not retention).", authenticated=True),
+                # Phase 14: the execution mode and privacy controls, the resource
+                # governor's reading, the cost estimate, the measured model
+                # comparison and the component roster.
+                ApiRoute("GET", "/privacy", "Execution mode, privacy controls and every outbound decision.", authenticated=True),
+                ApiRoute("POST", "/privacy", "Change the execution mode and/or a privacy control, live.", authenticated=True),
+                ApiRoute("GET", "/resources", "The resource governor's reading of this machine, with its reasons.", authenticated=True),
+                ApiRoute("POST", "/cost/estimate", "Estimate a request's cost and routing hint (never a gate).", authenticated=True),
+                ApiRoute("GET", "/diagnostics", "Run the component roster, or a comma-separated subset via ?only=.", authenticated=True),
+                ApiRoute("GET", "/benchmark", "Stored model measurements and the measured comparison per category.", authenticated=True),
+                ApiRoute("POST", "/benchmark", "Measure a model on the given tasks through the live provider.", authenticated=True),
             ),
             websocket_paths=("/ws/events",),
         )

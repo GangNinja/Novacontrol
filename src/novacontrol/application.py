@@ -8,8 +8,11 @@ import logging
 import os
 import re
 import shlex
+import shutil
+import socket
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from collections.abc import Callable, Coroutine, Mapping, Sequence
 from contextvars import ContextVar
@@ -50,7 +53,29 @@ from novacontrol.agentcore import (
     UiPerceptionEngine,
     Verifier,
 )
-from novacontrol.automation import AutomationManager
+from novacontrol.audit import (
+    AUDIT_DIRECTORY,
+    AUDIT_FILENAME,
+    AuditLogger,
+    AuditRecord,
+    JsonlAuditSink,
+    RetentionPolicy,
+)
+from novacontrol.automation import (
+    AUTOMATION_RUN_SCOPE,
+    AutomationCondition,
+    AutomationEngine,
+    AutomationManager,
+    AutomationOutcome,
+    AutomationRun,
+    AutomationRunStatus,
+    AutomationStatus,
+    AutomationTask,
+    ConditionKind,
+    Schedule,
+    parse_schedule,
+    strip_schedule,
+)
 from novacontrol.brain import BrainDecision, BrainIntent, BrainRequest, NovaBrain
 from novacontrol.brain.brain import looks_like_research_question
 from novacontrol.brain.scratch import scratchable_intent
@@ -152,6 +177,28 @@ from novacontrol.settings import BRAIN_MODES, SettingsManager
 from novacontrol.skills import SkillRegistry
 from novacontrol.tasks import TaskCenter, TaskRecordStatus
 from novacontrol.telemetry.hardware import HardwareTelemetry
+
+# ── Phase 14: optimization, resource governance and self-diagnostics ─────
+# Imported together because they are wired together: the privacy policy is the
+# one authority on outbound traffic, the governor reads the same monitor the
+# model manager consults, the cost estimator attaches an estimate to a
+# decision, and the diagnostic manager reports on all of them.
+from novacontrol.core.diagnostics import HealthState
+from novacontrol.decision.cost import TaskCostEstimator
+from novacontrol.diagnostics import DiagnosticManager, DiagnosticResult
+from novacontrol.models.hardware import HardwareMonitor, gpu_memory_bytes
+from novacontrol.optimization.benchmark import (
+    BenchmarkCompletion,
+    JsonlBenchmarkStore,
+    ModelBenchmarking,
+)
+from novacontrol.optimization.governor import GovernorThresholds, ResourceGovernor
+from novacontrol.optimization.models import ExecutionMode, PrivacyAction, PrivacyControls
+from novacontrol.optimization.privacy import PrivacyPolicy
+from novacontrol.decision.providers import (
+    DecisionProvider,
+    PrivacyGatedDecisionProvider,
+)
 from novacontrol.tools import (
     FunctionTool,
     OutputNormalizer,
@@ -252,11 +299,198 @@ def _metric_read_check(spec: VerificationSpec, output: Mapping[str, Any]) -> tup
 #: The named checks this installation can perform for a plan. A plan may ask
 #: for one by name; a name that is not here is reported INCONCLUSIVE, never
 #: assumed to have passed.
+def _automation_scheduled_check(
+    spec: VerificationSpec, output: Mapping[str, Any]
+) -> tuple[bool, str]:
+    """Is there an automation, and does it know when it next runs?
+
+    Two facts, both required: an automation id (something was stored) and a next
+    execution time (it will actually fire). A stored task with no next run is a
+    task that was filed rather than scheduled, and reporting that as a pass is
+    how a "reminder at 6 PM" quietly never happens.
+    """
+    del spec
+    automation_id = str(output.get("automation_id") or "")
+    next_run = str(output.get("next_run_at") or "")
+    if not automation_id:
+        return False, "no automation was stored"
+    if not next_run:
+        return False, (
+            f"automation {automation_id} was stored without a next execution time, "
+            "so nothing will run"
+        )
+    return True, f"automation {automation_id} is stored to run next at {next_run}"
+
+
+def _automation_run_check(
+    spec: VerificationSpec, output: Mapping[str, Any]
+) -> tuple[bool, str]:
+    """Did the automation's request actually complete?
+
+    A denial or a skipped condition is reported as a FAILED check with the
+    reason, not as an unverified pass: the step was to run the automation, and
+    saying it ran when it did not is the failure this whole layer exists to
+    prevent.
+    """
+    del spec
+    status = str(output.get("status") or "")
+    detail = str(output.get("detail") or "").strip()
+    if status == AutomationRunStatus.COMPLETED.value:
+        return True, "the automation's request completed"
+    if status in {
+        AutomationRunStatus.FAILED.value,
+        AutomationRunStatus.DENIED.value,
+        AutomationRunStatus.SKIPPED.value,
+    }:
+        return False, f"the run was {status}" + (f": {detail}" if detail else "")
+    return False, "the run reported no status"
+
+
 _PLAN_VERIFICATIONS: dict[
     str, Callable[[VerificationSpec, Mapping[str, Any]], tuple[bool, str]]
 ] = {
     "metric_read": _metric_read_check,
+    # Phase 13: the two checks a scheduled task's steps are verified by. They read
+    # the step's own output, which is the automation the step created or the run
+    # it performed — evidence from the thing that happened, not a restatement of
+    # the step's intent.
+    "automation_scheduled": _automation_scheduled_check,
+    "automation_run": _automation_run_check,
 }
+
+#: The two conditions a request may state in words, and the phrases that state
+#: them. Read literally and removed from the stored request: a condition is part
+#: of the request's MEANING, not part of the work that will run.
+_TESTS_CONDITION = re.compile(r"\bif\s+(?:the\s+)?tests?\s+pass(?:es)?\b[,\s]*", re.I)
+_PATH_CONDITION = re.compile(
+    r"\bif\s+(['\"]?)([^'\"]+?)\1\s+exists\b[,\s]*", re.I
+)
+_LEADING_GLUE = re.compile(
+    r"^(?:,|;|\.|:|-|\bthen\b|\bthat\b|\band\b|\bplease\b)\s*", re.I
+)
+
+
+def _tidy_request(text: str) -> str:
+    """Whitespace and leading punctuation removed after a phrase was taken out."""
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    while True:
+        trimmed = _LEADING_GLUE.sub("", cleaned).strip()
+        if trimmed == cleaned:
+            break
+        cleaned = trimmed
+    return cleaned.strip(" ,;.:-")
+
+
+def _automation_name(request: str) -> str:
+    """A short label for a stored automation, taken from the request itself."""
+    text = " ".join(str(request or "").split())
+    if len(text) <= 48:
+        return text
+    return text[:47].rstrip() + "\u2026"
+
+
+def _audit_plan_steps(data: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
+    """A request's plan as audit rows, joined to what each step ENDED UP as.
+
+    The plan and the outcome are two halves of one fact, and neither is
+    sufficient: the plan says what was intended (action, tool, effect) and the
+    state says what happened (status, whether it verified, why it failed). Rows
+    are joined by step id, which is the same id in both.
+    """
+    plan = data.get("plan")
+    steps = plan.get("steps") if isinstance(plan, Mapping) else None
+    if not isinstance(steps, Sequence) or isinstance(steps, (str, bytes)):
+        return ()
+    state = data.get("state")
+    outcomes = state.get("steps") if isinstance(state, Mapping) else None
+    outcomes = outcomes if isinstance(outcomes, Mapping) else {}
+    rows: list[dict[str, Any]] = []
+    for step in steps:
+        if not isinstance(step, Mapping):
+            continue
+        step_id = str(step.get("step_id") or step.get("id") or "")
+        outcome = outcomes.get(step_id)
+        outcome = outcome if isinstance(outcome, Mapping) else {}
+        error = outcome.get("error")
+        message = ""
+        if isinstance(error, Mapping):
+            message = str(error.get("message") or error.get("kind") or "")
+        rows.append(
+            {
+                "step_id": step_id,
+                "title": str(step.get("title", "")),
+                "action": str(step.get("action", "")),
+                "tool": str(step.get("tool", "")),
+                "effect": str(step.get("effect", "")),
+                "status": str(outcome.get("status", step.get("status", ""))),
+                "verified": bool(outcome.get("verified", False)),
+                "verification": str(outcome.get("verification_result", "")),
+                "attempts": int(outcome.get("attempts", 0) or 0),
+                "error": message,
+                "recovery": [str(item) for item in outcome.get("recovery") or ()],
+            }
+        )
+    return tuple(rows)
+
+
+def _audit_verification(
+    data: Mapping[str, Any], plan_steps: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    """What was checked, and what was NOT — the two halves that matter.
+
+    ``unverified`` is reported rather than omitted: a run whose steps finished
+    without any check passing is exactly the run an operator needs to hear about.
+    """
+    state = data.get("state")
+    state = state if isinstance(state, Mapping) else {}
+    return {
+        "executed": bool(state.get("executed", False)),
+        "verified": bool(state.get("verified", False)),
+        "unverified_steps": [str(item) for item in state.get("unverified_steps") or ()],
+        "steps": {
+            str(row.get("step_id")): str(row.get("verification") or "")
+            for row in plan_steps
+        },
+        "verified_steps": [
+            str(row.get("step_id")) for row in plan_steps if row.get("verified")
+        ],
+    }
+
+
+def _audit_permission_decisions(
+    plan_steps: Sequence[Mapping[str, Any]]
+) -> tuple[dict[str, Any], ...]:
+    """One entry per step the permission layer had a say in.
+
+    Read from where the decisions are OBSERVABLE at this layer: a step that ran
+    was allowed, and a step that was refused says why. Nothing is inferred about
+    the layers nobody recorded — an audit trail that guesses is worse than one
+    that is short.
+    """
+    decisions: list[dict[str, Any]] = []
+    for row in plan_steps:
+        status = str(row.get("status") or "")
+        if status in ("denied", "blocked"):
+            decisions.append(
+                {
+                    "step_id": row.get("step_id", ""),
+                    "action": row.get("action", ""),
+                    "tool": row.get("tool", ""),
+                    "allow": False,
+                    "reason": row.get("error") or "the step was not approved",
+                }
+            )
+        elif status in ("completed", "failed", "unverified"):
+            decisions.append(
+                {
+                    "step_id": row.get("step_id", ""),
+                    "action": row.get("action", ""),
+                    "tool": row.get("tool", ""),
+                    "allow": True,
+                    "reason": "",
+                }
+            )
+    return tuple(decisions)
 
 #: Lines in captured output that name a failure worth reporting back.
 _FAILURE_LINE = re.compile(
@@ -273,6 +507,13 @@ _FAILURE_LINE = re.compile(
 #: correct — that work is the request's), while work started outside any request
 #: sees the empty default.
 _CURRENT_REQUEST: ContextVar[str] = ContextVar("novacontrol_current_request", default="")
+
+#: Which automation caused the request being served, when one did. A context
+#: variable for the same reason ``_CURRENT_REQUEST`` is one: the audit row is
+#: written deep inside the request path, and threading "this run belongs to
+#: automation X" through the planner, the executor and the tool layer to get it
+#: there would make every one of them know about the scheduler.
+_CURRENT_AUTOMATION: ContextVar[str] = ContextVar("novacontrol_current_automation", default="")
 
 #: The model roles a capability may require, mapped to the model capability that
 #: answers them. A role is spelled the way a capability declares it
@@ -857,6 +1098,25 @@ class NovaControlApplication:
             if self.state_store is not None
             else SettingsManager()
         )
+        # ── Phase 14.2/14.3: the ONE privacy policy ──────────────────────────
+        # Built before the brain and Explore exist because both are handed it:
+        # the brain through _apply_execution_mode (the single cloud switch) and
+        # Explore through a predicate, so no research path re-implements a
+        # privacy check of its own.
+        user_settings = self.settings.settings
+        self.privacy = PrivacyPolicy(
+            controls=PrivacyControls(
+                allow_cloud=user_settings.privacy_allow_cloud,
+                allow_external_search=user_settings.privacy_allow_external_search,
+                allow_external_tools=user_settings.privacy_allow_external_tools,
+                allow_telemetry=user_settings.privacy_allow_telemetry,
+                allow_remote_model=user_settings.privacy_allow_remote_model,
+                # One redaction intent, two places it applies: the audit trail
+                # and this policy read the SAME operator switch.
+                sensitive_data_redaction=user_settings.audit_redact_sensitive,
+            ),
+            mode=user_settings.execution_mode,
+        )
         boot_mode = self.settings.settings.brain_mode
         boot_cloud = build_cloud_provider(
             str(stored_cloud.get("provider", "")),
@@ -894,6 +1154,12 @@ class NovaControlApplication:
         self.explore = ExploreService(
             completion_provider=self.brain.completion_provider,
             event_bus=self.event_bus,
+            # Phase 14.3: research asks the policy HERE, once — search, video
+            # search and page reading all sit behind this one predicate, so
+            # there is no second privacy check to drift from it.
+            external_allowed=lambda: self.privacy.allows(
+                PrivacyAction.EXTERNAL_SEARCH
+            ),
         )
         # Scratch mode means the local brain everywhere — Chat AND Explore
         # synthesis — while llm/auto keep whatever boot resolved.
@@ -1026,6 +1292,45 @@ class NovaControlApplication:
         # already performs the eviction the lifecycle would — in the order the
         # specification asks for, with the protection the lifecycle lacks: a
         # model an ACTIVE task is using is refused, never unloaded underneath it.
+        # ── Phase 14: governance, cost estimation, benchmarks, diagnostics ───
+        # (The privacy policy itself is built earlier, above, before the brain
+        # and Explore — both are handed it at construction.)
+        #
+        # The machine is measured once per process: the model manager's monitor
+        # IS the governor's monitor, so a load decision and a resource report
+        # cannot disagree about how much memory was free.
+        self.hardware_monitor = HardwareMonitor()
+        self.governor = ResourceGovernor(
+            self.hardware_monitor,
+            thresholds=GovernorThresholds(
+                tight_free_ram_mb=self.config.resources.tight_free_ram_mb,
+                critical_free_ram_mb=self.config.resources.critical_free_ram_mb,
+                max_cpu_percent=self.config.resources.max_cpu_percent,
+                max_gpu_utilization=self.config.resources.max_gpu_utilization,
+                max_temperature_c=self.config.resources.max_temperature_c,
+                min_battery_percent=self.config.resources.min_battery_percent,
+            ),
+        )
+        # 14.6: an ESTIMATE per request, used by routing as a preference and
+        # never as a gate. It rides on the decision's own metadata, which the
+        # audit trail already stores, so the expected cost of a request is
+        # visible afterwards without a second record of it.
+        self.cost_estimator = TaskCostEstimator()
+        # 14.1: measurements, stored where this build's other runtime state
+        # lives. The reading callback samples the SAME monitor the governor
+        # uses — a benchmark's RAM figure and a load decision's free-memory
+        # figure are readings of one machine, not two.
+        self.benchmark = ModelBenchmarking(
+            store=JsonlBenchmarkStore(self.data_dir / "benchmarks.jsonl"),
+            cap=self.config.resources.benchmark_cap,
+            reading=self._benchmark_reading,
+        )
+        # 14.7: the component roster is registered at the end of __init__,
+        # when every service it reports on actually exists.
+        self.diagnostics = DiagnosticManager(
+            timeout_seconds=self.config.resources.diagnostics_timeout_seconds
+        )
+
         model_config = self.config.models
         self.model_manager = ModelManager(
             OllamaBackend(),
@@ -1038,6 +1343,12 @@ class NovaControlApplication:
             ),
             keep_alive=KeepAliveSettings.from_mapping(model_config.keep_alive_settings()),
             headroom_bytes=model_config.headroom_bytes,
+            # 14.4/14.5: the governor is consulted on every load, and the
+            # concurrent-resident limit is configuration rather than a constant
+            # in the loader.
+            monitor=self.hardware_monitor,
+            advisor=self.governor,
+            max_resident_models=self.config.resources.max_resident_models,
         )
         # ── Phase 6: the vision pipeline ─────────────────────────────────
         # ONE manager owns "what is in this image?": OCR first (cheap and
@@ -1131,6 +1442,46 @@ class NovaControlApplication:
             risk=self.risk,
             events=self._tool_event,
         )
+        # ── Phase 13: scheduled automations and the operational audit trail ──
+        # The engine stores requests plus schedules and executes NOTHING itself:
+        # its runner is this application's request path (see
+        # ``_run_automation_task``), so a scheduled task travels the same intent →
+        # decision → plan → permission → execution path a spoken one does. It is
+        # given the SAME risk layer the tool executor gates on, and
+        # ``automation.run`` is declared HIGH beside the code that carries runs
+        # out — so an unapproved task is refused by the layer that already decides
+        # what may run, rather than by a bespoke check that could drift from it.
+        self.risk.declare(
+            AUTOMATION_RUN_SCOPE,
+            risk_level=RiskLevel.HIGH,
+            requires_confirmation=True,
+            reversible=True,
+            external_side_effect=False,
+        )
+        # The audit trail is local by construction: a JSONL file inside this
+        # application's data directory, redacted on the way in, bounded by the
+        # operator's retention settings.
+        self.audit = AuditLogger(
+            sink=JsonlAuditSink(self.data_dir / AUDIT_DIRECTORY / AUDIT_FILENAME),
+            retention=self._audit_retention(),
+        )
+        self.automation_engine = AutomationEngine.from_dict(
+            (
+                self.state_store.read("automation_tasks")
+                if self.state_store is not None
+                else {}
+            )
+            or {},
+            permissions=self.risk,
+            evaluate_condition=self._evaluate_automation_condition,
+            publish=self._automation_event,
+            max_failures=self.config.automation.max_failures,
+        )
+        # The ticker is started by start() and stopped by stop(); None until then,
+        # so a machine that never started the background loop never runs scheduled
+        # work, and nothing is left running after a stop.
+        self._automation_ticker: asyncio.Task[None] | None = None
+        self._automation_ticks = 0
         # Phase 9.2/9.3: the capability registry is the ONE place that answers
         # what this installation can do. It is the registry the intelligence
         # layer already maintains — attached to the catalogues rather than
@@ -1161,14 +1512,25 @@ class NovaControlApplication:
             permissions=self.risk,
             event_bus=self.event_bus,
         )
+        # Phase 14.3: a configured REMOTE decision provider is the
+        # allow_remote_model control's business. Wrapping it here is what makes
+        # that control real — while the policy keeps remote models closed the
+        # engine sees a switched-off provider and answers locally, and a mode
+        # change takes effect on the next request with no re-wiring.
+        decision_provider: DecisionProvider | None = build_decision_provider(
+            decision_config.provider,
+            endpoint=decision_config.jev_endpoint,
+            timeout_s=decision_config.jev_timeout_s,
+            allow_remote=decision_config.allow_remote,
+        )
+        if decision_provider is not None:
+            decision_provider = PrivacyGatedDecisionProvider(
+                decision_provider,
+                enabled=lambda: self.privacy.allows(PrivacyAction.REMOTE_MODEL),
+            )
         self.decision = DecisionEngine(
             capabilities=self.intelligence.capabilities,
-            provider=build_decision_provider(
-                decision_config.provider,
-                endpoint=decision_config.jev_endpoint,
-                timeout_s=decision_config.jev_timeout_s,
-                allow_remote=decision_config.allow_remote,
-            ),
+            provider=decision_provider,
             requested_provider=decision_config.provider,
             selector=self.tool_selector,
         )
@@ -1260,6 +1622,12 @@ class NovaControlApplication:
         self.runtime.register_module(BrowserAutomationModule(self.browser))
         self.runtime.register_module(VisionModule())
         self.runtime.register_module(VoiceModule())
+
+        # Phase 14, last boot steps: point the ONE cloud switch at the policy,
+        # and give the diagnostic roster the components it reports on (every
+        # service above now exists).
+        self._apply_execution_mode()
+        self._register_diagnostics()
 
     # --- Brain mode (local scratch ↔ local LLM) ---
 
@@ -1354,7 +1722,25 @@ class NovaControlApplication:
         return (await agent.run_task(goal)).to_dict()
 
     async def research_task(self, question: str, *, allow_web: bool = True) -> dict[str, Any]:
-        """Run the Research Agent: cited claims, evidence labelled apart."""
+        """Run the Research Agent: cited claims, evidence labelled apart.
+
+        The privacy policy is asked ONCE, here: with external search closed (or
+        the mode set to LOCAL_ONLY) the run degrades to local knowledge instead
+        of failing, which is the local-first behaviour the mode promises rather
+        than an error a user has to work around.
+        """
+        if allow_web and not self.privacy.allows(PrivacyAction.EXTERNAL_SEARCH):
+            decision = self.privacy.evaluate(PrivacyAction.EXTERNAL_SEARCH)
+            allow_web = False
+            # Observability: a closed path is a recorded decision, not a
+            # silently omitted search step.
+            await self._announce(
+                EventType.PRIVACY_DENIED.value,
+                action=PrivacyAction.EXTERNAL_SEARCH.value,
+                reason=decision.reason,
+                control=decision.control,
+                mode=decision.mode.value,
+            )
         agent = self.research_agent
         if not allow_web:
             agent = ResearchAgent(
@@ -1417,6 +1803,11 @@ class NovaControlApplication:
             "provider": self.brain.provider_name,
             "model": self.brain.model_name,
             "model_configured": self.brain.model_configured,
+            # Phase 14.2: whether the execution mode currently permits the
+            # cloud slot at all — so a UI that offers "cloud" can say why the
+            # switch landed on the local brain instead of pretending it worked.
+            "cloud_allowed": self.brain.cloud_allowed,
+            "execution_mode": self.privacy.mode.value,
             "cloud": self.cloud_llm_status(),
         }
 
@@ -1779,8 +2170,10 @@ class NovaControlApplication:
 
     async def start(self) -> None:
         await self.runtime.start()
+        self._start_automation_ticker()
 
     async def stop(self) -> None:
+        self._stop_automation_ticker()
         self.persist()
         # Plugins go first, and in the safe order: an enabled one is disabled
         # (its tools stop being callable) before shutdown runs, so nothing a
@@ -1800,6 +2193,9 @@ class NovaControlApplication:
         # hashing backend), so no model has to be resident to reopen this.
         self.state_store.write("knowledge_index", self.knowledge_engine.to_dict())
         self.state_store.write("automation", self.automation.to_dict())
+        # Phase 13: a stored schedule outlives the process — a task approved
+        # today still runs tomorrow, with its failure count and its run history.
+        self.state_store.write("automation_tasks", self.automation_engine.to_dict())
         self.state_store.write("tasks", self.tasks.to_dict())
         self.state_store.write("settings", self.settings.to_dict())
 
@@ -2095,6 +2491,17 @@ class NovaControlApplication:
                 environment=self._decision_environment(),
                 strategy=understood.strategy,
             )
+        # Phase 14.6: estimate what this request will cost and attach the
+        # estimate to the decision it was made about — the routing layers may
+        # PREFER a cheaper path, but nothing here can refuse a request, and the
+        # audit trail already stores the decision this rides on.
+        try:
+            estimate = self.cost_estimator.estimate(text)
+            decision_layer = decision_layer.with_(
+                metadata={**decision_layer.metadata, "cost_estimate": estimate.to_dict()}
+            )
+        except Exception:  # an estimate must never break a request
+            pass
         await self._announce(
             EventType.DECISION_CREATED.value,
             correlation_id=correlation,
@@ -2232,6 +2639,9 @@ class NovaControlApplication:
                 decision_layer=decision_layer,
                 understanding=understanding,
                 success=False,
+                task_id=correlation,
+                text=text,
+                route=decision.intent.value,
             )
             await self._announce(
                 EventType.TASK_FAILED.value,
@@ -2277,7 +2687,14 @@ class NovaControlApplication:
             self.intelligence.context.remember_intent(understood.intent.to_dict())
             self.intelligence.context.remember_utterance(understood.intent.normalized_input)
         self._record_request(
-            trace, decision_layer=decision_layer, understanding=understanding, success=True
+            trace,
+            decision_layer=decision_layer,
+            understanding=understanding,
+            success=True,
+            task_id=correlation,
+            text=text,
+            route=route or decision.intent.value,
+            payload=payload,
         )
         return ApplicationResponse(route, decision.intent.value, response.summary, payload)
 
@@ -2288,6 +2705,10 @@ class NovaControlApplication:
         decision_layer: Decision,
         understanding: Any,
         success: bool,
+        task_id: str = "",
+        text: str = "",
+        route: str = "",
+        payload: Mapping[str, Any] | None = None,
     ) -> None:
         """Close a request trace and file the row.
 
@@ -2308,7 +2729,7 @@ class NovaControlApplication:
             DecisionRoute.LOCAL_CAPABILITY,
         } and not bool(getattr(understanding, "used_model", False))
         try:
-            self.intelligence.telemetry.end_request(
+            row = self.intelligence.telemetry.end_request(
                 trace,
                 ram_after=self.model_manager.monitor.available_ram_bytes(),
                 model=decision_layer.selected_model,
@@ -2317,7 +2738,27 @@ class NovaControlApplication:
                 success=success,
             )
         except Exception:  # pragma: no cover - telemetry must never break a request
-            self.intelligence.telemetry.end_request(trace)
+            row = self.intelligence.telemetry.end_request(trace)
+        # Phase 13.3: the same row the telemetry keeps also answers the audit
+        # trail's questions about latency and memory, so the audit row is built
+        # from it rather than measured a second time.
+        self._record_audit(
+            task_id=task_id,
+            text=text,
+            decision_layer=decision_layer,
+            understanding=understanding,
+            success=success,
+            route=route,
+            payload=payload,
+            latency_ms=float((row or {}).get("total_ms") or 0.0),
+            resources={
+                "ram_before_bytes": (row or {}).get("ram_before_bytes"),
+                "ram_after_bytes": (row or {}).get("ram_after_bytes"),
+                "ram_delta_bytes": (row or {}).get("ram_delta_bytes"),
+                "stages_ms": (row or {}).get("stages_ms", {}),
+                "fast_path": bool((row or {}).get("fast_path", fast_path)),
+            },
+        )
 
     # ── Intent handlers ──────────────────────────────────
 
@@ -2807,6 +3248,15 @@ class NovaControlApplication:
         because a plan that quietly reports success for a step nobody ran is the
         exact failure this layer exists to prevent.
         """
+        # Phase 14.3: the ONE place allow_external_tools applies — a step whose
+        # tool declares an external side effect. Asked here, in the single step
+        # runner every plan goes through, rather than beside each tool.
+        # PrivacyDenied is a PermissionError, so the executor records a DENIED
+        # step (not a failed one) and recovery does not retry it.
+        tool_name = str(getattr(step, "tool", "") or "")
+        declaration = self.risk.declared_for(tool_name) if tool_name else None
+        if declaration is not None and declaration.external_side_effect:
+            self.privacy.require(PrivacyAction.EXTERNAL_TOOL)
         action = step.action
         if action.startswith("read_"):
             return self._read_metric_step(step)
@@ -2820,6 +3270,12 @@ class NovaControlApplication:
             return await self._run_command_step(step, context)
         if action == "locate_project":
             return await self._locate_project_step(step)
+        # Phase 13: scheduling IS a plan action. The step stores the request and
+        # its schedule; the engine runs it later through this same path.
+        if action in ("schedule_task", "create_automation"):
+            return await self._schedule_automation_step(step)
+        if action == "run_automation":
+            return await self._run_automation_step(step)
         if action == "reason":
             raise RuntimeError(
                 f"No executor carries reasoning locally, so step {step.id!r} "
@@ -2925,6 +3381,1001 @@ class NovaControlApplication:
         if result.status is ToolStatus.FAILED:
             raise RuntimeError(result.error or f"Tool {step.tool!r} failed.")
         return dict(result.output)
+
+    # ── Phase 13: scheduled automations and the audit trail ─────────────────
+
+    def _automation_event(self, type_: EventType | str, **payload: Any) -> None:
+        """Publish a scheduling event from the engine's synchronous seams.
+
+        Wired to ``_announce_soon`` because the engine's state changes (a task was
+        created, approved, cancelled) are synchronous: the payload is validated
+        here, where a mistake would be, and the publish is scheduled on the
+        running loop when there is one.
+        """
+        self._announce_soon(type_, **payload)
+
+    def _audit_retention(self) -> RetentionPolicy:
+        """The operator's retention choice, as the logger's policy."""
+        stored = self.settings.settings
+        return RetentionPolicy(
+            retention_days=int(stored.audit_retention_days),
+            max_records=int(stored.audit_max_records),
+            redact_sensitive=bool(stored.audit_redact_sensitive),
+            local_only=True,
+        )
+
+    def apply_audit_settings(self) -> dict[str, Any]:
+        """Re-read the retention policy after the operator changed it."""
+        self.audit.retention = self._audit_retention()
+        self.audit.redactor.enabled = bool(self.audit.retention.redact_sensitive)
+        return self.audit.report()
+
+    def _condition_from_request(self, request: str) -> tuple[AutomationCondition, str]:
+        """A condition the request states in words, and the request without it.
+
+        Read from the STORED request rather than during routing, because the
+        condition belongs to the automation and not to the sentence that created
+        it. Only two conditions are recognised, and only when stated literally —
+        anything cleverer would be a second parser to keep in step with the first.
+        """
+        text = str(request or "")
+        if _TESTS_CONDITION.search(text):
+            remaining = _tidy_request(_TESTS_CONDITION.sub(" ", text))
+            return (
+                AutomationCondition(ConditionKind.TESTS_PASS),
+                remaining or text,
+            )
+        path = _PATH_CONDITION.search(text)
+        if path is not None:
+            target = path.group(2).strip()
+            remaining = _tidy_request(_PATH_CONDITION.sub(" ", text))
+            return (
+                AutomationCondition(ConditionKind.PATH_EXISTS, target),
+                remaining or text,
+            )
+        return AutomationCondition(), text
+
+    def _evaluate_automation_condition(
+        self, condition: AutomationCondition
+    ) -> tuple[bool, str]:
+        """Whether a conditional automation's condition is met RIGHT NOW.
+
+        Both checks read something that already exists rather than inventing a
+        fact: a path on disk, and the outcome of the last test suite this
+        application actually ran. ``TESTS_PASS`` is deliberately strict — with no
+        recorded run there is no pass, so a conditional task waits for evidence
+        instead of firing on an assumption.
+        """
+        if condition.kind is ConditionKind.PATH_EXISTS:
+            target = condition.argument.strip()
+            if not target:
+                return False, "the condition names no path, so there is nothing to check"
+            path = Path(target).expanduser()
+            if path.exists():
+                return True, f"{path} exists"
+            return False, f"{path} does not exist"
+        if condition.kind is ConditionKind.TESTS_PASS:
+            recorded = self._last_test_run
+            if not recorded:
+                return False, (
+                    "no test run is recorded on this machine, so there is no pass to "
+                    "condition on"
+                )
+            if "FAILED" in recorded:
+                return False, f"the last test run did not pass ({recorded})"
+            return True, f"the last test run passed ({recorded})"
+        return True, "no condition"
+
+    async def _schedule_automation_step(self, step: PlanStep) -> dict[str, Any]:
+        """Store a scheduling request as an automation — or refuse with the reason.
+
+        Nothing is executed here except the STORING of the request. Running it is
+        the engine's job later, through this same request path and behind the
+        same permission layer. The step carries the sentence the person said, so
+        the schedule is read from their words rather than from parameters a caller
+        assembled.
+        """
+        request = str(step.parameters.get("request") or "").strip()
+        if not request:
+            raise RuntimeError("No request was given, so there is nothing to schedule.")
+        schedule = parse_schedule(request)
+        if schedule is None:
+            raise RuntimeError(
+                "That request states no time I can read, so nothing was scheduled: "
+                'say when it should run ("at 6 PM", "every Monday at 9", "in 10 minutes").'
+            )
+        condition, inner = self._condition_from_request(strip_schedule(request) or request)
+        approved = self._confirm_plan_step(step)
+        task = self.automation_engine.create(
+            inner,
+            schedule=schedule,
+            name=_automation_name(inner),
+            condition=condition,
+            permissions=(AUTOMATION_RUN_SCOPE,),
+            requires_approval=True,
+            approved=approved,
+            approved_by="plan-step" if approved else "",
+            metadata={"requested_as": request, "plan_step": step.id},
+        )
+        self.persist()
+        next_run = task.next_run_at.isoformat() if task.next_run_at else "never"
+        return {
+            **task.to_dict(),
+            "summary": (
+                f"Automation {task.id} stored ({schedule.describe()}), next run {next_run}."
+                + ("" if approved else " It waits for approval before it runs.")
+            ),
+        }
+
+    async def _run_automation_step(self, step: PlanStep) -> dict[str, Any]:
+        """Run a STORED automation by name, under the same permission gate.
+
+        A manual run is not an approval: the engine checks the same
+        ``automation.run`` scope a due run is checked with, so "run my backup"
+        cannot do what the schedule itself would refuse to do.
+        """
+        request = str(step.parameters.get("request") or "").strip()
+        matches = self.automation_engine.find(request)
+        if not matches:
+            raise RuntimeError(f"No stored automation matches {request!r}.")
+        if len(matches) > 1:
+            listed = "; ".join(
+                f"{match.name or match.request} ({match.id})" for match in matches[:5]
+            )
+            raise RuntimeError(
+                f"{len(matches)} automations match {request!r}: {listed}. Name one."
+            )
+        task = matches[0]
+        run = await self.automation_engine.run_now(task.id, self._run_automation_task)
+        self.persist()
+        return {
+            **run.to_dict(),
+            "automation_id": task.id,
+            "summary": f"Automation {task.id} ran: {run.status.value}"
+            + (f" \u2014 {run.detail}" if run.detail else ""),
+        }
+
+    async def _run_automation_task(self, task: AutomationTask) -> AutomationOutcome:
+        """Run ONE scheduled request by handing it to the ordinary request path.
+
+        This is the phase's central promise made mechanical: a scheduled task is
+        not carried out by the scheduler, it is carried out by ``handle_request``
+        — the same intent detection, decision, planning, tool selection,
+        permission gate, execution and verification a typed sentence goes
+        through. Two things are added here, and nothing else: a loop guard, and
+        the automation id the audit row is filed under.
+        """
+        if parse_schedule(task.request) is not None:
+            return AutomationOutcome(
+                status=AutomationRunStatus.SKIPPED,
+                detail=(
+                    f"the stored request still states a schedule ({task.request!r}), so "
+                    "running it would create another automation"
+                ),
+            )
+        token = _CURRENT_AUTOMATION.set(task.id)
+        try:
+            response = await self.handle_request(task.request)
+        except Exception as exc:
+            return AutomationOutcome(
+                status=AutomationRunStatus.FAILED,
+                detail=f"{type(exc).__name__}: {exc}",
+                failure_kind=type(exc).__name__,
+            )
+        finally:
+            _CURRENT_AUTOMATION.reset(token)
+        data = response.payload if isinstance(response.payload, Mapping) else {}
+        state = data.get("state")
+        state = state if isinstance(state, Mapping) else {}
+        outcomes = state.get("steps")
+        failures = [
+            str(row.get("error", {}).get("message") or row.get("status"))
+            for row in (outcomes or {}).values()
+            if isinstance(row, Mapping) and str(row.get("status")) == "failed"
+        ]
+        verified = bool(state.get("verified", False))
+        if failures:
+            return AutomationOutcome(
+                status=AutomationRunStatus.FAILED,
+                detail="; ".join(failures)[:300],
+                verified=verified,
+                failure_kind="step_failed",
+            )
+        return AutomationOutcome(
+            status=AutomationRunStatus.COMPLETED,
+            detail=str(response.summary)[:300],
+            verified=verified,
+        )
+
+    # -- automation surfaces ---------------------------------------------------
+
+    def automation_enabled(self) -> bool:
+        """Whether scheduled work is policed at all in this installation."""
+        return bool(self.settings.settings.automation_enabled and self.config.automation.enabled)
+
+    def automation_status(self) -> dict[str, Any]:
+        ticker = self._automation_ticker
+        return {
+            "enabled": self.automation_enabled(),
+            "tick_seconds": float(self.config.automation.tick_seconds),
+            "ticks": self._automation_ticks,
+            "running": bool(ticker is not None and not ticker.done()),
+            "engine": self.automation_engine.report(),
+            "tasks": [task.to_dict() for task in self.automation_engine.tasks()],
+        }
+
+    def automation_tasks(self) -> list[dict[str, Any]]:
+        return [task.to_dict() for task in self.automation_engine.tasks()]
+
+    def schedule_automation(
+        self,
+        request: str,
+        *,
+        name: str = "",
+        condition: AutomationCondition | None = None,
+        schedule: Schedule | None = None,
+        authorize: bool = False,
+    ) -> dict[str, Any]:
+        """Store a scheduled request without waiting for a plan to be built.
+
+        The headless twin of the plan step, for callers that already have the
+        request and the schedule (the CLI, the API, a test). Approval still has
+        to be explicit: ``authorize=True`` is a caller stating it has one, and
+        without it the task is stored pending and armed by ``approve_automation``.
+        """
+        text = str(request or "").strip()
+        if not text:
+            raise ValueError("Describe what should run before scheduling it.")
+        stated = schedule or parse_schedule(text)
+        if stated is None:
+            raise ValueError(
+                'No schedule was given or stated, so nothing was scheduled: say when it '
+                'should run ("at 6 PM", "every Monday at 9", "in 10 minutes").'
+            )
+        read_condition, inner = self._condition_from_request(strip_schedule(text) or text)
+        task = self.automation_engine.create(
+            inner,
+            schedule=stated,
+            name=name or _automation_name(inner),
+            condition=condition or read_condition,
+            permissions=(AUTOMATION_RUN_SCOPE,),
+            requires_approval=not authorize,
+            approved=authorize,
+            approved_by="caller" if authorize else "",
+            metadata={"requested_as": text},
+        )
+        self.persist()
+        return task.to_dict()
+
+    def approve_automation(self, automation_id: str, *, by: str = "operator") -> dict[str, Any]:
+        task = self.automation_engine.approve(automation_id, by=by)
+        self.persist()
+        return task.to_dict()
+
+    def cancel_automation(self, automation_id: str) -> dict[str, Any]:
+        task = self.automation_engine.cancel(automation_id)
+        self.persist()
+        return task.to_dict()
+
+    def enable_automation(self, automation_id: str) -> dict[str, Any]:
+        task = self.automation_engine.enable(automation_id)
+        self.persist()
+        return task.to_dict()
+
+    def disable_automation(self, automation_id: str) -> dict[str, Any]:
+        task = self.automation_engine.disable(automation_id)
+        self.persist()
+        return task.to_dict()
+
+    async def run_automation(self, automation_id: str) -> dict[str, Any]:
+        """Run one stored automation NOW, under the same gate a due run gets."""
+        run = await self.automation_engine.run_now(automation_id, self._run_automation_task)
+        self.persist()
+        return {"automation_id": automation_id, **run.to_dict()}
+
+    async def run_due_automations(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
+        """Run everything that is due. The ticker's body, and a public seam."""
+        if not self.automation_enabled():
+            return []
+        runs = await self.automation_engine.run_due(self._run_automation_task, now=now)
+        if runs:
+            self.persist()
+        return [run.to_dict() for run in runs]
+
+    def _start_automation_ticker(self) -> None:
+        """Start the background tick when the runtime starts. Idempotent."""
+        if self._automation_ticker is not None and not self._automation_ticker.done():
+            return
+        if not self.automation_enabled():
+            return
+        self._automation_ticker = asyncio.get_running_loop().create_task(
+            self._automation_loop()
+        )
+
+    def _stop_automation_ticker(self) -> None:
+        ticker = self._automation_ticker
+        self._automation_ticker = None
+        if ticker is not None and not ticker.done():
+            ticker.cancel()
+
+    async def _automation_loop(self) -> None:
+        """Sleep, then tick — never tick at boot, so a restart is not a burst."""
+        interval = float(self.config.automation.tick_seconds)
+        while True:
+            await asyncio.sleep(interval)
+            await self._automation_tick()
+
+    async def _automation_tick(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
+        """One tick: run what is due, and never let a failure stop the loop."""
+        self._automation_ticks += 1
+        try:
+            return await self.run_due_automations(now=now)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # one broken automation must not kill the scheduler
+            return []
+
+    # -- audit surfaces --------------------------------------------------------
+
+    def audit_status(self) -> dict[str, Any]:
+        return {
+            "records": self.audit.count(),
+            "redactions_total": self.audit.report()["redactions_total"],
+            **self.audit.report(),
+        }
+
+    def audit_entries(self, limit: int = 20) -> list[dict[str, Any]]:
+        return [record.to_dict() for record in self.audit.tail(limit)]
+
+    def audit_prune(self) -> dict[str, Any]:
+        removed = self.audit.prune()
+        self._announce_soon(EventType.AUDIT_PRUNED, removed=removed)
+        return {"removed": removed, **self.audit.report()}
+
+    def audit_delete(self, record_id: str) -> dict[str, Any]:
+        return {"deleted": self.audit.delete(record_id), **self.audit.report()}
+
+    def audit_clear(self) -> dict[str, Any]:
+        removed = self.audit.clear()
+        self._announce_soon(EventType.AUDIT_PRUNED, removed=removed)
+        return {"removed": removed, **self.audit.report()}
+
+    # ── Phase 14: execution mode, privacy, resources, cost and diagnostics ──
+
+    @property
+    def execution_mode(self) -> ExecutionMode:
+        """The operator's current execution mode."""
+        return self.privacy.mode
+
+    def _apply_execution_mode(self) -> dict[str, Any]:
+        """Point the ONE cloud switch at the policy, and say what it decided.
+
+        Called at boot and again whenever the operator changes the mode or a
+        control: the brain learns whether its cloud slot may be used, and the
+        answer comes from the policy rather than from a second reading of the
+        settings that could disagree with it.
+        """
+        allowed = self.brain.set_cloud_allowed(
+            self.privacy.allows(PrivacyAction.CLOUD_MODEL)
+        )
+        # Explore holds its own synthesis provider, so closing the cloud slot
+        # must re-sync it too: without this, a research report would still be
+        # synthesized by the cloud provider the execution mode just closed
+        # (Chat would be local while Explore kept reaching out).
+        self._sync_explore_provider()
+        return {
+            "mode": self.privacy.mode.value,
+            "cloud_allowed": allowed,
+            "brain_mode": self.brain.mode,
+            "effective_mode": self.brain.effective_mode,
+        }
+
+    def privacy_status(self) -> dict[str, Any]:
+        """The policy as it stands, and what each outbound action would be told."""
+        return {
+            "mode": self.privacy.mode.value,
+            "controls": self.privacy.controls.to_dict(),
+            "cloud_brain_allowed": self.brain.cloud_allowed,
+            "brain_mode": self.brain.mode,
+            "effective_brain": self.brain.effective_mode,
+            "actions": {
+                action.value: self.privacy.evaluate(action).to_dict()
+                for action in PrivacyAction
+            },
+            "denied": [
+                action.value for action in PrivacyAction if not self.privacy.allows(action)
+            ],
+        }
+
+    async def apply_privacy_settings(
+        self,
+        *,
+        execution_mode: str | None = None,
+        allow_cloud: bool | None = None,
+        allow_external_search: bool | None = None,
+        allow_external_tools: bool | None = None,
+        allow_telemetry: bool | None = None,
+        allow_remote_model: bool | None = None,
+    ) -> dict[str, Any]:
+        """Apply and persist a privacy change, then re-point the cloud switch.
+
+        Settings, the live policy and the brain are updated in that order, so
+        the persisted intent and the running policy end up saying the same
+        thing — the same order the audit settings follow. Awaitable because a
+        mode change is announced on the one event bus.
+        """
+        settings = self.settings.update(
+            execution_mode=execution_mode,
+            privacy_allow_cloud=allow_cloud,
+            privacy_allow_external_search=allow_external_search,
+            privacy_allow_external_tools=allow_external_tools,
+            privacy_allow_telemetry=allow_telemetry,
+            privacy_allow_remote_model=allow_remote_model,
+        )
+        self.privacy.update(
+            controls=PrivacyControls(
+                allow_cloud=settings.privacy_allow_cloud,
+                allow_external_search=settings.privacy_allow_external_search,
+                allow_external_tools=settings.privacy_allow_external_tools,
+                allow_telemetry=settings.privacy_allow_telemetry,
+                allow_remote_model=settings.privacy_allow_remote_model,
+                sensitive_data_redaction=settings.audit_redact_sensitive,
+            ),
+            mode=settings.execution_mode,
+        )
+        applied = self._apply_execution_mode()
+        self._persist_settings()
+        await self._announce(
+            EventType.PRIVACY_MODE_CHANGED.value,
+            mode=self.privacy.mode.value,
+            controls=self.privacy.controls.to_dict(),
+            cloud_allowed=applied.get("cloud_allowed"),
+            brain_mode=self.brain.mode,
+        )
+        return self.privacy_status()
+
+    def _persist_settings(self) -> None:
+        """Mirror the user settings into the state store; never breaks a caller."""
+        if self.state_store is None:
+            return
+        try:
+            self.state_store.write("settings", self.settings.to_dict())
+        except Exception:  # a persistence failure must not fail the request
+            pass
+
+    def resource_status(self) -> dict[str, Any]:
+        """The governor's reading of this machine right now, with its reasons."""
+        report = self.governor.report()
+        assessment = report.get("assessment", {})
+        # The specification's list includes "model memory estimates": the
+        # resident models with the size the model layer knows for each one
+        # (measured when the runtime reports it, the loader's estimate
+        # otherwise) — `None` stays `None` rather than becoming a zero.
+        loaded = assessment.get("loaded_models", ()) or ()
+        sizes = [
+            {
+                "model": str(name),
+                "size_bytes": self.model_manager.model_size_bytes(str(name)),
+            }
+            for name in loaded
+        ]
+        return {
+            "level": assessment.get("level"),
+            "reasons": list(assessment.get("reasons", ())),
+            **report,
+            "loaded_model_sizes": sizes,
+            "execution_mode": self.privacy.mode.value,
+        }
+
+    def estimate_cost(self, request: str) -> dict[str, Any]:
+        """Phase 14.6: the cost estimate for a request and its routing hint."""
+        estimate = self.cost_estimator.estimate(request)
+        return {**estimate.to_dict(), "route_hint": self.cost_estimator.route_hint(estimate)}
+
+    def _benchmark_reading(self) -> dict[str, Any]:
+        """The machine, sampled for one benchmark row: measured, or omitted."""
+        monitor = self.hardware_monitor
+        reading: dict[str, Any] = {}
+        total = monitor.total_ram_bytes()
+        available = monitor.available_ram_bytes()
+        if total is not None and available is not None:
+            reading["ram_bytes"] = max(0, total - available)
+        gpu = monitor.gpu()
+        if gpu.get("available"):
+            percent = gpu.get("percent")
+            if isinstance(percent, (int, float)):
+                reading["gpu_utilization"] = float(percent)
+            memory = gpu_memory_bytes(gpu)
+            if memory is not None:
+                reading["gpu_memory_bytes"] = memory[0]
+        if bool(monitor.npu().get("available")):
+            reading["npu_available"] = True
+        return reading
+
+    async def benchmark_model(
+        self, model: str, tasks: Sequence[str], *, category: str
+    ) -> dict[str, Any]:
+        """Measure a model on tasks through the provider this build already uses.
+
+        The runner is the brain's own completion provider, so what is measured
+        is what a real request would get rather than a second code path built
+        for the benchmark. A provider that cannot answer still produces
+        records: the failure is one of the specification's figures.
+        """
+        provider = self.brain.completion_provider
+        complete = getattr(provider, "complete", None)
+
+        async def runner(prompt: str, _category: str) -> BenchmarkCompletion:
+            if complete is None:
+                raise RuntimeError("the configured provider cannot run a benchmark")
+            answer = await complete([{"role": "user", "content": prompt}], max_tokens=256)
+            return BenchmarkCompletion(text=str(answer))
+
+        records = await self.benchmark.run(
+            model,
+            list(tasks),
+            category=category,
+            runner=runner,
+            provider=str(getattr(provider, "name", "") or ""),
+        )
+        return {
+            "model": model,
+            "category": category,
+            "records": [record.to_dict() for record in records],
+            "report": self.benchmark.report(),
+        }
+
+    def benchmark_status(self) -> dict[str, Any]:
+        """Stored measurements and the measured comparison, per category."""
+        return self.benchmark.report()
+
+    async def diagnostics_report(self, *, only: Sequence[str] | None = None) -> dict[str, Any]:
+        """Run the Phase 14.7 roster and return the structured report."""
+        rows = await self.diagnostics.run(only=only)
+        report = self.diagnostics.to_dict(rows)
+        report["execution_mode"] = self.privacy.mode.value
+        return report
+
+    def diagnostics_lines(self) -> tuple[str, ...]:
+        """The last roster run as the checklist a person reads."""
+        return self.diagnostics.report_lines()
+
+    def _register_diagnostics(self) -> None:
+        """Register the Phase 14.7 roster against the services above.
+
+        Registration order is report order — core, the machine, then the
+        systems that may legitimately be absent — and every check reads what is
+        ALREADY wired: no probe starts a runtime, a browser or a model just to
+        answer the roster. A component that cannot be seen is reported UNKNOWN
+        or SKIPPED rather than guessed at in either direction.
+        """
+
+        def row(
+            name: str,
+            status: HealthState,
+            message: str,
+            *,
+            remediation: str = "",
+            **metadata: Any,
+        ) -> DiagnosticResult:
+            return DiagnosticResult(
+                component=name,
+                status=status,
+                message=message,
+                remediation=remediation,
+                metadata=dict(metadata),
+            )
+
+        def core() -> DiagnosticResult:
+            return row(
+                "Core",
+                HealthState.OK,
+                "the event bus and the runtime are up",
+                activity_limit=getattr(self.activity, "limit", None),
+            )
+
+        def nlu() -> DiagnosticResult:
+            catalog = self.intelligence.catalog
+            size = len(catalog) if hasattr(catalog, "__len__") else None
+            return row(
+                "Fast NLU",
+                HealthState.OK,
+                "the deterministic NLU catalogue is loaded",
+                intents=size,
+            )
+
+        def context() -> DiagnosticResult:
+            return row(
+                "Context",
+                HealthState.OK,
+                "memory and the shared chat transcript are wired",
+                memory_store=type(self.memory).__name__,
+            )
+
+        def decision_engine() -> DiagnosticResult:
+            provider = str(getattr(self.decision, "requested_provider", "") or "")
+            return row(
+                "Decision engine",
+                HealthState.OK,
+                f"route selection is answering ({provider or 'local'})",
+                provider=provider,
+            )
+
+        def planner() -> DiagnosticResult:
+            return row(
+                "Planner",
+                HealthState.OK,
+                "the plan compiler, executor and verifier are wired",
+                max_cycles=self.config.planning.max_cycles,
+                max_step_attempts=self.config.planning.max_step_attempts,
+            )
+
+        def tools() -> DiagnosticResult:
+            registered = len(self.tools.list())
+            if registered == 0:
+                return row(
+                    "Tools",
+                    HealthState.DEGRADED,
+                    "no tools are registered",
+                    remediation="install or enable the plugins that provide them",
+                )
+            return row(
+                "Tools",
+                HealthState.OK,
+                f"{registered} tool(s) registered",
+                registered=registered,
+            )
+
+        def vision() -> DiagnosticResult:
+            provider = getattr(self.vision_manager, "provider", None)
+            if provider is None:
+                return row(
+                    "Vision",
+                    HealthState.OK,
+                    "OCR and landmarks only; no vision model is configured",
+                )
+            return row(
+                "Vision",
+                HealthState.OK,
+                "a vision provider is configured",
+                provider=type(provider).__name__,
+            )
+
+        def ollama() -> DiagnosticResult:
+            status = self.model_manager.runtime_status()
+            name = status.provider or "the local runtime"
+            if not status.reachable:
+                return row(
+                    "Ollama",
+                    HealthState.DEGRADED,
+                    f"{name} is not reachable",
+                    remediation="start the local runtime and run this report again",
+                    provider=status.provider,
+                )
+            return row(
+                "Ollama",
+                HealthState.OK,
+                f"{name} answered; {len(status.loaded_models)} model(s) resident",
+                provider=status.provider,
+                resident=list(status.loaded_models),
+            )
+
+        def models() -> DiagnosticResult:
+            report = self.model_manager.registry_report()
+            known = int(report.get("known", 0))
+            if known == 0:
+                return row(
+                    "Models",
+                    HealthState.DEGRADED,
+                    "no models are declared or discovered",
+                    remediation="pull a model into the local runtime, or declare it",
+                )
+            return row(
+                "Models",
+                HealthState.OK,
+                f"{known} model(s) known",
+                known=known,
+                declared=int(report.get("declared", 0)),
+            )
+
+        def model_manager() -> DiagnosticResult:
+            status = self.model_manager.runtime_status()
+            return row(
+                "Model manager",
+                HealthState.OK,
+                "capability selection, keep-alive and resident limits are active",
+                active_model=status.active_model,
+                resident=list(status.loaded_models),
+                available_ram_bytes=status.available_memory_bytes,
+            )
+
+        def gpu() -> DiagnosticResult:
+            reading = self.hardware_monitor.gpu()
+            if not reading.get("available"):
+                reason = str(reading.get("reason", "") or "no probe reported one")
+                return row("GPU", HealthState.UNKNOWN, f"no GPU reading is available ({reason})")
+            memory = gpu_memory_bytes(reading)
+            return row(
+                "GPU",
+                HealthState.OK,
+                "a GPU is detected and reporting",
+                utilization=reading.get("percent"),
+                memory_used_bytes=memory[0] if memory else None,
+                memory_total_bytes=memory[1] if memory else None,
+            )
+
+        def npu() -> DiagnosticResult:
+            reading = self.hardware_monitor.npu()
+            if not reading.get("available"):
+                reason = str(reading.get("reason", "") or "no probe reported one")
+                return row(
+                    "NPU",
+                    HealthState.UNKNOWN,
+                    f"no NPU is visible to this build ({reason})",
+                    remediation=(
+                        "supply an NPU probe for this platform if the machine has one"
+                    ),
+                )
+            return row(
+                "NPU",
+                HealthState.OK,
+                "an NPU is present and detected",
+                **{key: value for key, value in reading.items() if key != "available"},
+            )
+
+        def database() -> DiagnosticResult:
+            if self.state_store is None:
+                return row("Database", HealthState.SKIPPED, "no state store is configured")
+            try:
+                self.state_store.read("settings")
+            except Exception as exc:
+                return row(
+                    "Database",
+                    HealthState.FAILING,
+                    f"the state store could not be read: {type(exc).__name__}",
+                    remediation="check permissions on the data directory",
+                )
+            return row(
+                "Database",
+                HealthState.OK,
+                "the state store reads and writes",
+                kind=type(self.state_store).__name__,
+            )
+
+        def redis() -> DiagnosticResult:
+            return row(
+                "Redis",
+                HealthState.SKIPPED,
+                "not enabled in this build; nothing is asked of it",
+            )
+
+        def plugins() -> DiagnosticResult:
+            installed = len(self.plugins.plugins())
+            enabled = len(self.plugins.enabled_ids())
+            rejected = len(self.plugins.rejected())
+            if rejected:
+                return row(
+                    "Plugin system",
+                    HealthState.DEGRADED,
+                    f"{installed} plugin(s), {enabled} enabled, {rejected} rejected",
+                    remediation="read the validation problems the plugin surface reports",
+                    installed=installed,
+                    enabled=enabled,
+                    rejected=rejected,
+                )
+            return row(
+                "Plugin system",
+                HealthState.OK,
+                f"{installed} plugin(s) installed, {enabled} enabled",
+                installed=installed,
+                enabled=enabled,
+            )
+
+        def knowledge() -> DiagnosticResult:
+            sources = self.knowledge_engine.sources()
+            stats = self.knowledge_engine.stats()
+            return row(
+                "Knowledge system",
+                HealthState.OK,
+                f"{len(sources)} source(s) indexed",
+                sources=len(sources),
+                chunks=stats.get("chunks") if isinstance(stats, Mapping) else None,
+            )
+
+        def scheduler() -> DiagnosticResult:
+            if not self.config.automation.enabled:
+                return row(
+                    "Scheduler",
+                    HealthState.SKIPPED,
+                    "scheduled work is disabled in configuration",
+                )
+            ticker = self._automation_ticker
+            running = ticker is not None and not ticker.done()
+            report = self.automation_engine.to_dict()
+            tasks = report.get("tasks", []) if isinstance(report, Mapping) else []
+            count = len(tasks) if isinstance(tasks, list) else 0
+            if not running:
+                return row(
+                    "Scheduler",
+                    HealthState.DEGRADED,
+                    f"{count} scheduled task(s); the background loop is not running",
+                    remediation="start the application's background loop so due tasks run",
+                    tasks=count,
+                )
+            return row(
+                "Scheduler",
+                HealthState.OK,
+                f"{count} scheduled task(s); the loop is running",
+                tasks=count,
+                ticks=self._automation_ticks,
+            )
+
+        def permissions() -> DiagnosticResult:
+            if self.risk.declared_for(AUTOMATION_RUN_SCOPE) is None:
+                return row(
+                    "Permissions",
+                    HealthState.DEGRADED,
+                    "the automation run scope is not declared",
+                    remediation="declare automation.run in the risk layer",
+                )
+            return row(
+                "Permissions",
+                HealthState.OK,
+                "the permission layer is answering and the run scope is declared",
+            )
+
+        def storage() -> DiagnosticResult:
+            data_dir = self.data_dir
+            if not data_dir.exists():
+                return row(
+                    "Storage",
+                    HealthState.FAILING,
+                    "the data directory does not exist",
+                    remediation=f"create {data_dir}",
+                )
+            probe = data_dir / ".diagnostic-probe"
+            try:
+                probe.write_text("ok", encoding="utf-8")
+                probe.unlink()
+            except OSError as exc:
+                return row(
+                    "Storage",
+                    HealthState.FAILING,
+                    f"the data directory is not writable: {type(exc).__name__}",
+                    remediation="fix permissions on the data directory",
+                )
+            free = shutil.disk_usage(data_dir).free
+            gigabytes = free / (1024 ** 3)
+            if free < 512 * 1024 * 1024:
+                return row(
+                    "Storage",
+                    HealthState.DEGRADED,
+                    f"only {gigabytes:.1f} GB free on the data volume",
+                    remediation="free space before large ingests or model pulls",
+                    free_bytes=free,
+                )
+            return row(
+                "Storage",
+                HealthState.OK,
+                f"{gigabytes:.1f} GB free on the data volume",
+                free_bytes=free,
+            )
+
+        def network() -> DiagnosticResult:
+            try:
+                with socket.socket() as probe:
+                    probe.bind(("127.0.0.1", 0))
+            except OSError as exc:
+                return row(
+                    "Network",
+                    HealthState.DEGRADED,
+                    f"no local loopback socket could be opened: {type(exc).__name__}",
+                    remediation="check the machine's networking stack",
+                )
+            cloud = self.privacy.evaluate(PrivacyAction.CLOUD_MODEL)
+            suffix = "" if cloud.allowed else "; external calls are closed by policy"
+            return row(
+                "Network",
+                HealthState.OK,
+                "local networking works" + suffix,
+                external_allowed=self.privacy.mode.external_allowed,
+                cloud_allowed=cloud.allowed,
+            )
+
+        def configuration() -> DiagnosticResult:
+            settings = self.settings.settings
+            return row(
+                "Configuration",
+                HealthState.OK,
+                "the configuration loaded and validated",
+                execution_mode=settings.execution_mode,
+                brain_mode=settings.brain_mode,
+                automation_tick_seconds=self.config.automation.tick_seconds,
+                resources=self.config.resources.to_mapping(),
+            )
+
+        self.diagnostics.register("Core", core, category="core")
+        self.diagnostics.register("Fast NLU", nlu, category="core")
+        self.diagnostics.register("Context", context, category="core")
+        self.diagnostics.register("Decision engine", decision_engine, category="core")
+        self.diagnostics.register("Planner", planner, category="core")
+        self.diagnostics.register("Tools", tools, category="systems")
+        self.diagnostics.register("Vision", vision, category="systems")
+        self.diagnostics.register("Ollama", ollama, category="runtime")
+        self.diagnostics.register("Models", models, category="runtime")
+        self.diagnostics.register("Model manager", model_manager, category="runtime")
+        self.diagnostics.register("GPU", gpu, category="hardware")
+        self.diagnostics.register("NPU", npu, category="hardware")
+        self.diagnostics.register("Database", database, category="data")
+        self.diagnostics.register("Redis", redis, category="data")
+        self.diagnostics.register("Plugin system", plugins, category="systems")
+        self.diagnostics.register("Knowledge system", knowledge, category="data")
+        self.diagnostics.register("Scheduler", scheduler, category="systems")
+        self.diagnostics.register("Permissions", permissions, category="core")
+        self.diagnostics.register("Storage", storage, category="platform")
+        self.diagnostics.register("Network", network, category="platform")
+        self.diagnostics.register("Configuration", configuration, category="platform")
+
+    def _record_audit(
+        self,
+        *,
+        task_id: str,
+        text: str,
+        decision_layer: Decision,
+        understanding: Any,
+        success: bool,
+        route: str = "",
+        payload: Mapping[str, Any] | None = None,
+        latency_ms: float = 0.0,
+        resources: Mapping[str, Any] | None = None,
+    ) -> AuditRecord | None:
+        """File one request in the audit trail.
+
+        Everything here is read from what the request already produced — the
+        decision that was made, the plan that was built, the state the executor
+        published, the telemetry row that was just closed. Nothing is inferred
+        and nothing is invented, and a failure to write the row is swallowed: an
+        audit trail that can fail a request is a new way for the request to fail.
+        """
+        try:
+            data = dict(payload or {})
+            plan_steps = _audit_plan_steps(data)
+            automation_id = _CURRENT_AUTOMATION.get()
+            intent = ""
+            understanding_intent = getattr(understanding, "intent", None)
+            if understanding_intent is not None:
+                intent = str(getattr(understanding_intent, "intent", ""))
+            record = self.audit.record(
+                task_id=task_id,
+                user_request=text,
+                outcome="completed" if success else "failed",
+                automation_id=automation_id,
+                source="automation" if automation_id else "request",
+                route=route,
+                intent=intent,
+                decision=decision_layer.to_dict(),
+                plan=plan_steps,
+                tools=tuple(sorted({str(row.get("tool")) for row in plan_steps if row.get("tool")})),
+                actions=tuple(str(row.get("action")) for row in plan_steps if row.get("action")),
+                verification=_audit_verification(data, plan_steps),
+                failures=tuple(
+                    f"{row.get('step_id')}: {row.get('error')}" for row in plan_steps if row.get("error")
+                ),
+                recovery=tuple(
+                    {"step_id": row.get("step_id"), "recovery": list(row.get("recovery") or ())}
+                    for row in plan_steps
+                    if row.get("recovery")
+                ),
+                model=str(getattr(decision_layer, "selected_model", "")),
+                provider=str(getattr(decision_layer, "provider", "")),
+                latency_ms=latency_ms,
+                resources=dict(resources or {}),
+                permission_decisions=_audit_permission_decisions(plan_steps),
+            )
+        except Exception:  # pragma: no cover - auditing never fails a request
+            return None
+        self._announce_soon(EventType.AUDIT_RECORDED, record_id=record.id, task_id=task_id)
+        return record
 
     def _selection_for(
         self, request: BrainRequest, understanding: dict[str, Any]
@@ -3278,6 +4729,42 @@ class NovaControlApplication:
             outputs=("summary",),
             tags=("summarize", "summarise", "report", "explain", "tell", "result"),
             examples=("Tell me what the run found.", "Summarise the diagnostics."),
+        )
+        # Phase 13: scheduling and running a stored automation are plan actions
+        # this application carries out, so the registry is told about them here —
+        # beside ``_run_plan_step``, the code that actually performs them.
+        declare(
+            "schedule_task",
+            capability_id="automation.schedule",
+            intent=IntentName.SCHEDULE_TASK,
+            description=(
+                "Store a request plus the schedule it states, to be run later "
+                "through the normal request path."
+            ),
+            risk=RiskLevel.HIGH,
+            permissions=(AUTOMATION_RUN_SCOPE,),
+            inputs=("request",),
+            outputs=("automation_id", "next_run_at", "status"),
+            tags=(
+                "schedule", "scheduled", "automation", "remind", "reminder", "later",
+                "every", "daily", "weekly", "recurring", "recurringly",
+            ),
+            examples=(
+                "Remind me at 6 PM to push my project.",
+                "Every Monday generate a project report.",
+            ),
+        )
+        declare(
+            "run_automation",
+            capability_id="automation.run_now",
+            intent=IntentName.RUN_AUTOMATION,
+            description="Run a stored automation's request through the normal request path.",
+            risk=RiskLevel.HIGH,
+            permissions=(AUTOMATION_RUN_SCOPE,),
+            inputs=("request",),
+            outputs=("automation_id", "status"),
+            tags=("automation", "run", "trigger", "workflow", "saved"),
+            examples=("Run my backup automation.",),
         )
         # A REAL gap, declared as one: a plan step that asks to reason is refused
         # by this executor (there is no local reasoning engine), so the registry

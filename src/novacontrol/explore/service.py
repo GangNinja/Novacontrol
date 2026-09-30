@@ -3,19 +3,13 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 from urllib.parse import urlparse
 
+from novacontrol.core.events import Event, EventBus
 from novacontrol.explore.explainer import ResearchExplainer
-from novacontrol.explore.query import (
-    build_search_queries,
-    extract_search_topic,
-    is_relevant,
-    is_wiki_film_result,
-    relevance_score,
-    wiki_search_variations,
-)
 from novacontrol.explore.models import ExploreReport, ExploreRequest, ResearchSource, VideoResult
 from novacontrol.explore.page_reader import PageReader
 from novacontrol.explore.planner import ResearchPlan, plan_research
@@ -25,7 +19,13 @@ from novacontrol.explore.providers import (
     VideoProvider,
     YouTubeSearchVideoProvider,
 )
-from novacontrol.core.events import Event, EventBus
+from novacontrol.explore.query import (
+    build_search_queries,
+    is_relevant,
+    is_wiki_film_result,
+    relevance_score,
+    wiki_search_variations,
+)
 from novacontrol.explore.web_search import WikipediaSearchProvider
 from novacontrol.performance import TtlCache
 
@@ -46,7 +46,14 @@ class ExploreService:
         cache: TtlCache[ExploreReport] | None = None,
         cache_ttl_seconds: float = 900,
         event_bus: EventBus | None = None,
+        external_allowed: Callable[[], bool] | None = None,
     ) -> None:
+        # Phase 14.3: the ONE predicate that says whether this machine's
+        # execution mode and privacy controls permit reaching outside it. It is
+        # a callable rather than a flag so a mode change takes effect on the
+        # next research run with no re-wiring; None means "no policy attached"
+        # (the CLI and tests), which keeps the historical behaviour.
+        self._external_allowed = external_allowed
         self.search_provider = search_provider or ResilientSearchProvider()
         self._wiki_provider = wiki_provider or WikipediaSearchProvider()
         self.video_provider = video_provider or YouTubeSearchVideoProvider()
@@ -192,9 +199,35 @@ class ExploreService:
         await self._emit("retrying", "Search came back empty — retrying once...", correlation_id=request.id)
         return await self._safe_search(request, plan)
 
+    def _external_search_closed(self) -> bool:
+        """Whether the policy keeps external search closed for this run.
+
+        A predicate that raises is read as CLOSED: a broken policy must never
+        be the reason a request quietly reaches the network.
+        """
+        if self._external_allowed is None:
+            return False
+        try:
+            return not bool(self._external_allowed())
+        except Exception:  # pragma: no cover - defensive
+            return True
+
     async def _safe_search(
         self, request: ExploreRequest, plan: ResearchPlan | None = None
     ) -> tuple[tuple[ResearchSource, ...], tuple[str, ...]]:
+        if self._external_search_closed():
+            await self._emit(
+                "search_closed",
+                "External search is closed by this machine's execution mode or privacy policy.",
+                correlation_id=request.id,
+            )
+            return (
+                (),
+                (
+                    "External search is closed by this machine's execution mode or "
+                    "privacy policy, so this answer uses the local workflow only.",
+                ),
+            )
         try:
             sources = await self._multi_platform_search(request, plan)
         except Exception:
@@ -335,6 +368,14 @@ class ExploreService:
         return read
 
     async def _safe_video_search(self, request: ExploreRequest) -> tuple[tuple[VideoResult, ...], tuple[str, ...]]:
+        if self._external_search_closed():
+            return (
+                (),
+                (
+                    "Video search is closed by this machine's execution mode or "
+                    "privacy policy.",
+                ),
+            )
         try:
             return (await self.video_provider.search_videos(request.topic, limit=request.max_videos), ())
         except Exception:

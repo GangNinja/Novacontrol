@@ -20,6 +20,7 @@ from novacontrol.application import NovaControlApplication
 from novacontrol.core.events import Event
 from novacontrol.explore import ExploreRequest
 from novacontrol.explore.trending import TrendingTopicsProvider
+from novacontrol.optimization.models import PrivacyAction
 from novacontrol.planning import PlanningEngine
 from novacontrol.release import ReleaseHardeningChecker, RuntimePackageBuilder, SystemHealthMonitor
 from novacontrol.settings import ApprovalMode
@@ -155,7 +156,12 @@ def create_app() -> Any:
     """Create the NovaControl API app."""
     # Daily-updates provider for the Explore panel's topic suggestions: one
     # per app (cached + rotating), edition defaults to India.
-    trending = TrendingTopicsProvider()
+    # Phase 14.3: headline topics come from outside the machine, so the pool
+    # obeys the same allow_external_search control Explore does — behind the
+    # policy's ONE decision rather than a second check of its own.
+    trending = TrendingTopicsProvider(
+        external_allowed=lambda: nova.privacy.allows(PrivacyAction.EXTERNAL_SEARCH)
+    )
     try:
         from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
         from fastapi.middleware.gzip import GZipMiddleware
@@ -278,6 +284,11 @@ def create_app() -> Any:
 
     @app.post("/settings")
     async def update_settings(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        try:
+            retention_days = int(payload["audit_retention_days"]) if "audit_retention_days" in payload else None
+            max_records = int(payload["audit_max_records"]) if "audit_max_records" in payload else None
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="Audit retention must be a whole number.") from exc
         settings = nova.settings.update(
             approval_mode=ApprovalMode(str(payload["approval_mode"])) if "approval_mode" in payload else None,
             detailed_explanations=bool(payload["detailed_explanations"])
@@ -289,7 +300,37 @@ def create_app() -> Any:
             auto_approve_run=bool(payload["auto_approve_run"])
             if "auto_approve_run" in payload
             else None,
+            automation_enabled=bool(payload["automation_enabled"])
+            if "automation_enabled" in payload
+            else None,
+            audit_retention_days=retention_days,
+            audit_max_records=max_records,
+            audit_redact_sensitive=bool(payload["audit_redact_sensitive"])
+            if "audit_redact_sensitive" in payload
+            else None,
+            execution_mode=str(payload["execution_mode"]) if "execution_mode" in payload else None,
+            privacy_allow_cloud=bool(payload["privacy_allow_cloud"])
+            if "privacy_allow_cloud" in payload
+            else None,
+            privacy_allow_external_search=bool(payload["privacy_allow_external_search"])
+            if "privacy_allow_external_search" in payload
+            else None,
+            privacy_allow_external_tools=bool(payload["privacy_allow_external_tools"])
+            if "privacy_allow_external_tools" in payload
+            else None,
+            privacy_allow_telemetry=bool(payload["privacy_allow_telemetry"])
+            if "privacy_allow_telemetry" in payload
+            else None,
+            privacy_allow_remote_model=bool(payload["privacy_allow_remote_model"])
+            if "privacy_allow_remote_model" in payload
+            else None,
         )
+        # The audit logger holds its own copy of the retention policy, so a changed
+        # setting is re-applied here rather than waiting for the next restart.
+        nova.apply_audit_settings()
+        # Phase 14: the same round-trip re-derives the privacy policy from the
+        # settings and re-points the ONE cloud switch, so a mode change is live.
+        await nova.apply_privacy_settings()
         nova.persist()
         return settings.to_dict()
 
@@ -883,6 +924,185 @@ def create_app() -> Any:
     @app.get("/agent/knowledge")
     async def agent_knowledge(_principal: str = Depends(require_auth)) -> dict[str, Any]:
         return nova.agentic_knowledge()
+
+    # ── Phase 13: scheduled automations and the audit trail ─────────────────
+    #
+    # Scheduling stores a request and its schedule; it runs nothing. Execution
+    # still travels intent → decision → plan → permission → execution, whether a
+    # run is due or asked for now, so these endpoints cannot become a second way
+    # to make the machine act. The audit routes only read and bound the local
+    # trail — they never reach a model or the network.
+
+    def _automation_id(payload: dict[str, Any]) -> str:
+        automation_id = str(payload.get("automation_id", "")).strip()
+        if not automation_id:
+            raise HTTPException(status_code=422, detail="automation_id is required.")
+        return automation_id
+
+    @app.get("/automation")
+    async def automation_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """What is scheduled, what is armed, and when the next run happens."""
+        return nova.automation_status()
+
+    @app.post("/automation/schedule")
+    async def automation_schedule(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Store a request plus the schedule its wording states.
+
+        ``authorize`` is the caller saying it has approved the task; without it
+        the automation is stored pending and stays disarmed until
+        ``/automation/approve``, which is the only way it becomes runnable.
+        """
+        try:
+            return nova.schedule_automation(
+                str(payload["request"]),
+                name=str(payload.get("name", "")),
+                authorize=bool(payload.get("authorize", False)),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/automation/approve")
+    async def automation_approve(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        try:
+            return nova.approve_automation(
+                _automation_id(payload), by=str(payload.get("by", "operator"))
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/automation/cancel")
+    async def automation_cancel(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        try:
+            return nova.cancel_automation(_automation_id(payload))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/automation/enable")
+    async def automation_enable(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        try:
+            return nova.enable_automation(_automation_id(payload))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/automation/disable")
+    async def automation_disable(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        try:
+            return nova.disable_automation(_automation_id(payload))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/automation/run")
+    async def automation_run(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Run one stored automation now — the same gate a due run passes."""
+        try:
+            return await nova.run_automation(_automation_id(payload))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/automation/run-due")
+    async def automation_run_due(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Run everything that is due, exactly as the scheduler's own tick would."""
+        return {"runs": await nova.run_due_automations()}
+
+    @app.get("/audit")
+    async def audit_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return nova.audit_status()
+
+    @app.get("/audit/entries")
+    async def audit_entries(limit: int = 20, _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return {"entries": nova.audit_entries(limit)}
+
+    @app.post("/audit/prune")
+    async def audit_prune(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return nova.audit_prune()
+
+    @app.post("/audit/delete")
+    async def audit_delete(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        record_id = str(payload.get("record_id", "")).strip()
+        if not record_id:
+            raise HTTPException(status_code=422, detail="record_id is required.")
+        return nova.audit_delete(record_id)
+
+    @app.post("/audit/clear")
+    async def audit_clear(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return nova.audit_clear()
+
+    @app.get("/privacy")
+    async def privacy_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """The execution mode, the controls, and every outbound decision."""
+        return nova.privacy_status()
+
+    @app.post("/privacy")
+    async def privacy_update(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Change the execution mode and/or a control, and apply it live."""
+        return await nova.apply_privacy_settings(
+            execution_mode=str(payload["execution_mode"])
+            if "execution_mode" in payload
+            else None,
+            allow_cloud=bool(payload["allow_cloud"]) if "allow_cloud" in payload else None,
+            allow_external_search=bool(payload["allow_external_search"])
+            if "allow_external_search" in payload
+            else None,
+            allow_external_tools=bool(payload["allow_external_tools"])
+            if "allow_external_tools" in payload
+            else None,
+            allow_telemetry=bool(payload["allow_telemetry"])
+            if "allow_telemetry" in payload
+            else None,
+            allow_remote_model=bool(payload["allow_remote_model"])
+            if "allow_remote_model" in payload
+            else None,
+        )
+
+    @app.get("/resources")
+    async def resources_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """The governor's reading of this machine, with the reasons behind it."""
+        return nova.resource_status()
+
+    @app.post("/cost/estimate")
+    async def cost_estimate(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Estimate a request's cost — a hint for routing, never a gate."""
+        request = str(payload.get("request", "")).strip()
+        if not request:
+            raise HTTPException(status_code=422, detail="request is required.")
+        return nova.estimate_cost(request)
+
+    @app.get("/diagnostics")
+    async def diagnostics(
+        only: str = "", _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Run the component roster (or a comma-separated subset)."""
+        names = [part.strip() for part in only.split(",") if part.strip()]
+        try:
+            return await nova.diagnostics_report(only=names or None)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/benchmark")
+    async def benchmark_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Stored measurements and the measured comparison, per category."""
+        return nova.benchmark_status()
+
+    @app.post("/benchmark")
+    async def benchmark_run(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Measure a model on the given tasks through the live provider."""
+        model = str(payload.get("model", "")).strip()
+        tasks = payload.get("tasks")
+        category = str(payload.get("category", "")).strip() or "general"
+        if not model:
+            raise HTTPException(status_code=422, detail="model is required.")
+        if not isinstance(tasks, list) or not tasks:
+            raise HTTPException(status_code=422, detail="tasks must be a non-empty list.")
+        try:
+            return await nova.benchmark_model(
+                model, [str(task) for task in tasks], category=category
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post("/brain/decide")
     async def brain_decide(payload: BrainDecideRequest, _principal: str = Depends(require_auth)) -> dict[str, Any]:

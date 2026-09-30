@@ -2595,3 +2595,340 @@ sync`), and mypy in both platform views (`python -m mypy src` and `python -m
 mypy src --platform win32`, 240 source files each). The specialist suites alone
 are 138 tests (62 + 76) in 18s, so the phase's own work can be re-verified
 without the whole suite.
+
+## 34. Phase 13: running later, and saying what happened
+
+Phase 13 asks for two things that sound unrelated and are the same question
+asked twice: a system that can run an approved task **later or repeatedly**, and
+a permanent, verifiable record of what it did. The first half is a timing
+problem, the second is a trust problem, and the temptation in both is to build
+a second machine — a scheduler with its own executor, an audit log written from
+whatever the writer happened to have to hand. Both temptations are the failure.
+
+So the phase is two narrow packages that each refuse to do more than one thing.
+`automation/` owns **WHEN** and performs nothing: `AutomationEngine` stores a
+request plus a `Schedule` and, when the time comes, calls an injected
+`AutomationRunner` — which in this application is `handle_request`. A scheduled
+task therefore travels the same path a spoken one does, and the scheduler
+cannot act on its own because it has no capability to act with. `audit/` owns
+**WHAT HAPPENED** and writes only what the request already produced: the
+decision that was made, the plan that was built, the state the executor
+published, the telemetry row that was just closed. It reaches for nothing and
+infers nothing, and writing a row can never fail a request.
+
+### A schedule is computed, never guessed
+
+The phase's sensitivity requirement — natural-language mentions of a schedule
+must not auto-execute — is answered by the parser being deliberately narrow
+rather than by a gate later on. `parse_schedule` returns `None` when the
+wording states no concrete time, so *"when should I run my backup?"* schedules
+nothing and creation still travels intent → decision → plan → permission →
+execution. A parser that invented a default time would be deciding for the user
+at the wrong layer, and one that guessed from a mention would be scheduling on
+one. The other half of the same rule lives in `strip_schedule`: the request
+that is STORED is the request that will be RUN, so the scheduling phrase is
+removed before storage — a stored copy that still said "at 6 PM" would be read
+as a request to schedule something on every run, and the loop guard that
+reports that case SKIPPED is the backstop rather than the mechanism.
+
+`Schedule.next_after(now)` always returns a strictly future occurrence, and
+this is where the phase's subtler promise lives: a machine that was off over a
+daily job's hour does not get a burst of catch-up runs when it wakes. One run
+happens per due task per tick however long the machine slept, intervals
+compress their missed occurrences into one ("a backlog of stale runs is a
+stampede wearing a schedule's clothes"), and a finished one-time task returns
+`None` — the only thing `None` ever means, which is why "no next occurrence"
+cannot be confused with "cancelled" or "disabled".
+
+### Authorization is checked where the work happens
+
+Three rules, and the third is the one that is easy to get wrong. Only approved
+tasks are armed: creation stores `pending_approval` and disarmed, `approve` is
+the only way in, and `enable` — a way to re-arm — refuses a task that was never
+approved, because arming is not a way to approve. The permission layer is then
+asked at the **moment of the run**, under the declared HIGH `automation.run`
+scope, so a stored state file somebody edited is still gated; checking only at
+arming time would make the stored record the authority. And with no permission
+layer wired the engine **refuses** — "no gate" is not permission — because the
+one thing a scheduler must never do is run work it cannot show was allowed.
+
+A denial and an unmet condition are separate run outcomes and are **not**
+counted as failures: neither is the work's fault, and counting either would
+disable a healthy automation for something it did not cause. A denial also
+disarms the task rather than re-asking every tick — a refusal of an *unapproved*
+task leaves it `pending_approval` (a state a person can act on), a refusal of an
+*approved* one leaves it DISABLED (a policy to look at). Failures are counted,
+and bounded: at the limit the task disables itself, so a broken automation stops
+announcing itself instead of failing every hour forever, and a runner that
+raises is a recorded failure rather than a crashed loop.
+
+### The audit trail records facts, not thoughts
+
+The record carries every field the phase names — task id, timestamp, request,
+automation id and source, route, intent, decision, plan joined to outcomes,
+tools, actions, verification (what was checked *and*, explicitly, what was not),
+failures, recovery, model, provider, latency, resources, permission decisions —
+and **no chain-of-thought**. That is a decision rather than an omission. An
+audit trail is kept for a long time and read by more people than a debug log, so
+a free-text field of a model's reasoning would be the largest privacy surface in
+the system and the least useful thing in the file; the named fields are what
+"what did this system do, under whose authority, and how did it end" is actually
+answered from, and a test pins that the reasoning-shaped keys do not exist.
+
+Privacy is a property of the code path rather than of the operator's
+discipline. Redaction happens **on the way in** — before the record is built, so
+there is no field in which a secret briefly exists and no reader that has to
+remember to filter — covering private-key blocks, `Authorization` headers,
+bearer tokens, JWTs, `sk-`/`ghp_`/`xox`/`AKIA` credentials, credentials embedded
+in a URL and `key = value` assignments, plus secret-named mapping keys whose
+values are hidden whatever they look like. Prose is deliberately left alone
+("the token expired" stays), because a redactor that eats prose is one people
+turn off. The sink is local-only and `attach_sink` **refuses** a sink that
+declares itself remote. Retention is bounded by a period *and* a hard cap, both
+clamped when read back from a hand-editable file, with explicit `delete`/`clear`
+for a record that is wrong and should not wait for an expiry — and a record
+whose timestamp this build cannot read is **kept**, because an unreadable date
+is not evidence that a record is old.
+
+### The defect the live path found
+
+One real defect, and it was exactly the shape the phase exists to prevent. The
+scheduled run inspected its own outcome by reading `response.data` — an
+attribute `ApplicationResponse` does not have (its payload is `response.payload`,
+and only `to_dict()` names it `data`). The engine caught the `AttributeError`
+from its runner and dutifully recorded a FAILED run, so **every scheduled run
+failed**, with a detail that named the bug rather than the work; the audit row
+the request had already written said `completed`, because the request itself had
+succeeded. It surfaced only by driving a scheduled task through `run_automation`
+on a real application instance and reading the run's status, which is why the
+phase's tests now include exactly that: a scheduled request that goes through
+`handle_request` and whose audit row is asserted to be filed under the
+automation rather than as a standalone request. A second, smaller one came out
+of the same probe: the audit row's `resources` block read the telemetry row's
+stage timings, which is the right source, but the run's own `verified` flag had
+to come from the request's state — so `AutomationOutcome.verified` is now filled
+from `state.verified` and a run that finished without proving anything reports
+that honestly.
+
+### Surfaces
+
+`schedule_automation`, `approve_automation`, `cancel_automation`,
+`enable_automation`, `disable_automation`, `run_automation`,
+`run_due_automations`, `automation_status`, `automation_tasks`,
+`automation_enabled`, `audit_status`, `audit_entries`, `audit_prune`,
+`audit_delete`, `audit_clear` and `apply_audit_settings` on the application; the
+`schedule_task` plan action (which stores a task disarmed unless the step is
+approved) and `run_automation` (which re-checks the run permission);
+ten new typed lifecycle events plus `audit.recorded`/`audit.pruned`; a background
+ticker started by `start()` and stopped by `stop()`; and thirteen new HTTP
+routes — `GET /automation`, `POST /automation/{schedule,approve,cancel,enable,disable,run,run-due}`,
+`GET /audit`, `GET /audit/entries`, `POST /audit/{prune,delete,clear}` — with
+`docs/API.md` regenerated (81 routes). New doc: `docs/AUTOMATION.md`.
+
+### Gates
+
+Full suite **2167 passed / 12 skipped** (1813 subtests), up from 2082 in §33: 50
+tests for the automation clauses, 25 for the audit trail's, and 10 HTTP tests for
+the new routes. Four of those tests came from the post-phase verification pass,
+which also closed a wiring gap it found: `POST /settings` did not forward
+`automation_enabled` or the audit retention settings, so `apply_audit_settings`
+had no caller and a changed retention policy was not picked up until a restart.
+mypy is clean in both platform views (**246 modules**, up from 240 —
+`automation/engine.py`, `automation/schedule.py` and the four `audit/` modules);
+`docs/API.md` in sync; ruff clean on the new files, with the repository's
+pre-existing E501 baseline untouched. The full suite is run in three file
+groups here because a single `pytest tests/ -q` exceeds the ten-minute command
+budget on this machine (the three groups total 1:42 + 1:46 + 2:13); one
+order-dependent flake was observed once and did not reproduce
+(`test_browser_fill_form_plans_navigate_and_fill`, which passes alone and in its
+own file and in the group on a re-run), and it is unrelated to this phase's
+changes.
+
+## 35. CI: the last Windows-only path assumption (run #18)
+
+Both `Test` legs of CI run #18 (`401264f`, py3.12 and py3.13 on ubuntu-latest)
+failed in `Run tests`; `Type check` and `API reference in sync` were green. The
+cause was environment-only, which is why every local run was green:
+`tests/test_knowledge_rag_verification.py` extracted file names from paths with
+`path.rsplit("\\", 1)[-1]`. On this machine that is correct — paths look like
+`C:\Users\...\doc.md` — but on ubuntu `source.path` is
+`/tmp/tmpXXXXXXXX/doc.md` and the split returns the whole path unchanged, so the
+tests that identify a source by name looked up a key that was never inserted
+(`KeyError: 'notes.txt'`, `KeyError: 'bom.md'`, and one assertion comparing the
+absolute path against `["doc.md"]`).
+
+Fixed by extracting names with `pathlib.Path(path).name` in all three places,
+and the one remaining double-split in `test_knowledge_rag.py` was normalised to
+the same idiom (it worked, but it was the pattern the next copy would have
+copied). `Path.name` is correct for `/` and `\` on both platforms, so the
+assertions are about the file rather than the OS. The rule is recorded in
+AGENTS.md: never split a filesystem path on a literal separator in a test.
+
+## 36. Phase 14: the machine it is actually running on
+
+Phase 14 makes the build adaptive to the actual hardware and runtime state — the
+reference machine is 16 GB of RAM, an 8 GB Intel Arc, an NPU and Ollama — and
+the phase's opening instruction ("use actual runtime telemetry", "do NOT assume
+the NPU has independent dedicated VRAM") is what shaped every module.
+
+The reconnaissance found that Phases 8–13 had already built most of the
+vocabulary this phase needs: `models/hardware.py` measures the machine and
+reports anything it cannot read as `None`; `models/manager.py` already had
+loading, keep-alive and eviction; `intelligence/complexity.py` already counted
+the signals a cost estimate needs; `core/diagnostics.py` already had a health
+registry. None of those was duplicated. `HardwareMonitor` gained temperature and
+battery, an injected `advisor` was added to the load path, and the rest of the
+phase went into four new modules (`optimization/benchmark.py`,
+`optimization/privacy.py`, `optimization/governor.py`, `decision/cost.py`) plus
+one (`diagnostics/manager.py`) that EXTENDS the existing health vocabulary with
+`skipped` and `unknown` rather than forking it.
+
+Three design decisions are worth recording, because they are the phase's
+substance:
+
+* **The privacy policy is asked at the ONE place each path leaves.** Cloud
+  calls go through `NovaBrain.set_cloud_allowed`: closing the slot makes
+  `set_mode("cloud")` behave like `"llm"` instead of opening what the operator
+  closed, and there is no second check to drift from it. Web research asks once
+  at `research_task` and DEGRADES to local knowledge rather than failing,
+  because that is what LOCAL_ONLY promises. A test drives the flips through
+  both the application and HTTP.
+* **The governor and the model manager read one monitor.** The application
+  builds the `HardwareMonitor` once and hands the same object to both, so a
+  load decision and a resource report cannot disagree about how much memory was
+  free. `advise_load` answers three-valued (`None` = could not measure) for the
+  same reason every other fit check in this build does.
+* **Cost is a hint that rides on the decision.** `TaskCostEstimator`'s estimate
+  is attached to the decision's metadata, which the audit trail already stores —
+  so the expected cost of a request is auditable without a second record, and
+  nothing in the estimator can refuse a request (the specification asks for
+  routing information, "not as a rigid blocker"). A test reads the estimate
+  back out of the audited row.
+
+Two defects were caught during the build. The diagnostic manager's first
+aggregation used the enum's declaration order as its severity rank, which let
+`unknown` outrank `failing` in the overall state; the live probe showed it
+immediately and the aggregation now uses an explicit `severity_rank` (a
+skipped component is neutral, an unreadable probe outranks a degraded one, a
+verified failure outranks both). And a `ruff --fix` pass rewrote
+`getattr(self.completion_provider, "complete")` into attribute access in
+`brain._complete` — the provider is typed `object`, so mypy caught it before any
+test ran and the line was restored. Both are the same lesson as §34 and §35:
+drive the real path, and let the gates disagree with you.
+
+Gates on the finished phase: pytest in three file groups — **2252 passed / 12
+skipped** (1832 subtests, up from 2167 when the phase began);
+`docs/API.md` in sync (**88 routes**, seven of them new); mypy clean in both
+platform views (**253 source files**, up from 246); ruff clean on the new files
+with the repository's pre-existing E501 baseline untouched. Details in
+docs/OPTIMIZATION.md.
+
+### The verification pass, and what it found
+
+Driving every clause through the real code (not reading it off) found six gaps,
+all now fixed and each pinned by a test. The two that mattered were leaks:
+
+* **Explore kept a cloud synthesis provider after the execution mode closed
+  the slot.** Chat went local, because the brain's provider was swapped — but
+  Explore holds its OWN provider (`explore.explainer`), synced only by
+  `_sync_explore_provider`, which the mode change never called. Research
+  reports would still have been synthesized by the cloud the operator had just
+  closed. `_apply_execution_mode` now re-syncs it, and `set_cloud_allowed`
+  itself was tightened: with no usable boot provider, `set_mode("llm")` left
+  the CLOUD provider active and merely relabelled the mode; it now falls back
+  to the boot provider or Echo, so a closed slot has no path to an answer.
+* **Explore and the trending pool searched externally regardless of
+  `allow_external_search`.** The control existed and was evaluated, but no
+  external path consulted it except `research_task`. `ExploreService` now takes
+  one predicate and performs no search, video search or page read when it is
+  closed (returning its existing offline path with a warning), and the
+  `TrendingTopicsProvider` behind `/explore/trending` obeys the same predicate
+  rather than fetching headlines.
+
+The other four: `allow_external_tools` had no enforcement point (now enforced in
+`_run_plan_step`, the single step runner, against the step tool's declared
+external side effect — a `PrivacyDenied` is a `PermissionError`, so the executor
+records a DENIED step and recovery does not retry it); `allow_remote_model` had
+none either (a configured remote decision provider is now wrapped in
+`PrivacyGatedDecisionProvider`, so the engine sees a switched-off provider and
+answers locally); privacy decisions emitted no events (`privacy.mode_changed`
+and `privacy.denied` are now on the one bus — observability, per the phase's own
+architectural requirements); and the resource report lacked the model memory
+estimates the specification lists, while the diagnostic timeout was a constant
+(`resources.diagnostics_timeout_seconds` now configures it). A first-token
+latency caveat is documented rather than papered over: the providers this build
+talks to are non-streaming, so the application's own benchmark runs record
+`None` there and only an injected streaming runner can measure it.
+
+The lesson is the same one §34 and §35 recorded: the fastest way to find a
+control that does not work is to try to use it. `apply_privacy_settings`
+returning the right dictionary proved nothing; closing the slot and asking
+Explore to synthesize WAS the proof.
+
+## 37. Phases 8–14 verified end to end, across the phase boundaries
+
+Each phase was verified against its own specification as it landed (§27, §30,
+§32, §34, §36). This pass asked the other question: do the seven phases still
+hold when they run through ONE application — with Phase 14's privacy policy,
+resource governor, cost estimator and diagnostics roster reading the same
+registries Phases 8–13 built — and does anything a later phase wired change
+what an earlier phase promised? Every acceptance path was driven through
+`NovaControlApplication` on a real data directory rather than through its
+parts: approval → execution → verification → recovery; a failing event watcher
+beside a healthy one, plus the capability registry's own counts and its
+declared-unavailable row; a plugin installed, enabled, made visible to the risk
+layer, gated, disabled, and withdrawn; ingest → search with resolvable
+citations and a project-aware context block; the specialists' eight stages,
+including the LOCAL_ONLY research path; a scheduled automation run through
+`handle_request` and the audit row it files; and the whole Phase 14 surface —
+modes, the five controls, governor, benchmark (records and their JSONL sink),
+cost estimator, the 21-component diagnostics roster, and the same policy
+surviving a restart.
+
+**Three defects came out of it, all fixed and each pinned by a test.**
+
+* **A skipped step was reported as a FAILED execution stage.**
+  `_stage_execution` asked only `outcome.ok`, so a step that legitimately did
+  not apply — `detect_conflicts` with nothing to conflict with,
+  `search_sources` with the web closed, `apply_changes` with nothing to write
+  — made the stage table read `execution: failed` while the run completed and
+  `_finish` documented the opposite ("a step that was never applicable
+  (SKIPPED) is not a failure either"). The verification stage had already been
+  fixed for that same non-event in §32; the stage that RAN the step had not.
+  Statuses now come from one table (`_STAGE_FOR_OUTCOME`), so SKIPPED and
+  DENIED stay tellable apart from FAILED. Every LOCAL_ONLY research run was
+  the live example.
+* **A refused step's stage claimed the run never reached it.** With every step
+  denied (a plan naming an unregistered tool), the execution stage fell
+  through to the end-of-run fill and reported "the run ended before this
+  stage" — a different fact from "this step was turned down". The refusal is
+  now recorded where it happened, as DENIED.
+* **A disabled plugin could never be enabled again, and kept its
+  declarations.** `docs/PLUGIN_GUIDE.md` draws `enable again after disable`;
+  `enable()` did not accept DISABLED and returned the record unchanged, so the
+  transition the guide documents was a silent no-op. And `_withdraw` took back
+  tools, catalogue entries and capabilities but not the permission
+  declarations the plugin had made — the stale state the phase's own rationale
+  rejects ("the name is still in the registry is exactly the state that keeps
+  calling into code that is gone"). `enable()` now accepts DISABLED (a
+  disabled plugin is still initialized, so no second load is needed), and
+  withdrawal undeclares exactly the names that plugin contributed, through the
+  new `PermissionManager.undeclare`.
+
+The cross-phase checks that found nothing are worth as much as the ones that
+did: a plugin's network tool is refused by `allow_external_tools` through the
+same `_run_plan_step` gate a core tool passes (Phase 10 × 14); the `LOCAL_ONLY`
+research run completes with the reason it needed no web access, announces
+`privacy.denied`, and cites the local index; a scheduled request runs through
+the ordinary request path and lands in the audit trail under its automation id,
+with an unapproved one refused before it runs; the privacy policy and all five
+controls survive a restart because boot reads them from the same settings the
+write path persisted; and the diagnostics roster reports every component
+without starting a runtime, a browser or a model.
+
+Gates on the verified tree: pytest in three file groups — **2254 passed / 12
+skipped** (1832 subtests); `docs/API.md` in sync (88 routes); mypy clean in both
+platform views (253 source files). The cross-phase probe was a throwaway script,
+deleted once the pass was done; what it proved lives in the tests above.
+
+

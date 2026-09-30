@@ -74,6 +74,26 @@ The Phase 12 API subsystem provides REST and WebSocket entrypoints through FastA
 - `GET /settings`: Read local user settings. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /settings`: Update local user settings. *(frontend: web panel `renderSettingsResult`)*
 - `GET /plugins`: List plugin API records. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /automation`: Scheduled automations: what is stored, armed, and due next. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /automation/schedule`: Store a request plus the schedule it states as an automation (nothing runs yet). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /automation/approve`: Authorize a pending automation so it may be armed. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /automation/cancel`: Cancel an automation so it never runs again. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /automation/enable`: Arm an approved automation again. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /automation/disable`: Disarm an automation without cancelling it. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /automation/run`: Run a stored automation now, under the same permission gate as a due run. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /automation/run-due`: Run every automation that is due (the scheduler's own tick). *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /audit`: Operational audit trail status: records, retention, local-only storage, redactions. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /audit/entries`: Recent audit records (redacted), oldest first. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /audit/prune`: Apply the retention policy and report what was removed. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /audit/delete`: Delete one audit record by id. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /audit/clear`: Delete every audit record (explicit, not retention). *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /privacy`: Execution mode, privacy controls and every outbound decision. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /privacy`: Change the execution mode and/or a privacy control, live. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /resources`: The resource governor's reading of this machine, with its reasons. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /cost/estimate`: Estimate a request's cost and routing hint (never a gate). *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /diagnostics`: Run the component roster, or a comma-separated subset via ?only=. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /benchmark`: Stored model measurements and the measured comparison per category. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /benchmark`: Measure a model on the given tasks through the live provider. *(frontend: no web panel - API/CLI or infrastructure)*
 
 <!-- END GENERATED: api-reference -->
 

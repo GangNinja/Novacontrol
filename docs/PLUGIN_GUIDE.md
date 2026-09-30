@@ -103,8 +103,10 @@ discover → load → initialize → enable → disable → shutdown
   calls it.
 - **enable** — switch on. *After* this returns, the manager registers the
   plugin's tools and capabilities; a plugin never registers its own.
-- **disable** — stop serving. The manager withdraws the tools and capabilities
-  whether or not `disable` succeeded.
+- **disable** — stop serving. The manager withdraws the tools, catalogue
+  entries, capabilities and the plugin's own permission declarations whether or
+  not `disable` succeeded; a disabled plugin is not just uncallable, it is
+  unknown to the registries and the risk layer again.
 - **shutdown** — release everything. Unloading an enabled plugin disables it
   first, so nothing is ever shut down while it is still callable.
 
@@ -112,7 +114,7 @@ The manager walks a plugin to where it needs to be: `enable()` on a fresh plugin
 runs `load` → `initialize` → `enable`, in that order, exactly once. Calling a
 hook twice is a no-op, not a second run.
 
-Two consequences worth knowing before you write a plugin:
+Three consequences worth knowing before you write a plugin:
 
 - **Settings are read by `load`.** `configure()` is therefore refused once a
   plugin has been loaded (`PluginLifecycleError`) — otherwise the new values
@@ -121,6 +123,12 @@ Two consequences worth knowing before you write a plugin:
   context) and calls `shutdown`, and the plugin can be loaded again afterwards;
   the record stays so status still answers. Hooks run once per transition, so a
   reload runs `load` → `initialize` → `enable` a second time, in order.
+- **Enable after disable works**, as the diagram shows: a disabled plugin is
+  still initialized, so `enable()` switches it back on without a second `load`,
+  re-declaring it to the permission layer and re-registering its tools and
+  capabilities on the way. (Both halves of that — the transition and the
+  exhaustive withdrawal — are pinned by
+  `tests/test_plugin_sdk_verification.py`.)
 
 ## The manager
 

@@ -343,7 +343,7 @@ python -m novacontrol
   DENIED plugin could never be enabled later because the walk back to the security gate
   did not include that state
 - Verified against the phase's own specification by driving each clause through the real
-  manager and the demo (`tests/test_plugin_sdk_verification.py`, 29 tests), which found
+  manager and the demo (`tests/test_plugin_sdk_verification.py`, 30 tests), which found
   twelve more defects — all fixed and pinned by the test that caught each one, recorded in
   `DEVELOPMENT_LOG.md` §30: a plugin whose declarations could not be read (empty version,
   `capabilities = None`, a tool with no schema) RAISED out of `register()` instead of
@@ -359,6 +359,11 @@ python -m novacontrol
   mismatch and a code-declared configuration field the manifest never declared were both
   accepted; `BrowserPlugin` raised out of a tool on an out-of-range port; and
   `NovaControlApplication.stop()` left plugins running after the app stopped
+- Two more defects were found later, in the cross-phase pass of §37: `enable()` did
+  not accept the DISABLED state, so the `enable again after disable` transition the
+  lifecycle guide draws was a silent no-op, and `_withdraw` took back a disabled
+  plugin's tools, catalogue entries and capabilities but left its permission
+  declarations on file — the same stale state the phase's own rationale rejects
 - Gates: **1847 passed / 12 skipped** (1686 subtests), mypy clean in both platform views
   (229 modules), `docs/API.md` in sync, ruff at or below the pre-existing baseline on
   every touched file
@@ -528,7 +533,7 @@ python -m novacontrol
 - Surfaces: `developer_task` / `research_task` / `specialist_agents` on the
   application, the coordinator and `AgentModule`, and
   `python -m novacontrol demo phase12_agents`. New doc: `docs/SPECIALIST_AGENTS.md`
-- 62 tests in `tests/test_specialist_agents.py` cover the phase's nine required areas
+- 63 tests in `tests/test_specialist_agents.py` cover the phase's nine required areas
   (routing, project context, repository inspection, test execution, failure recovery,
   research routing, source handling, citation preservation, permission enforcement)
 
@@ -542,8 +547,10 @@ python -m novacontrol
   this build does not have, Verification really is the Phase 8 vocabulary, Recovery
   really is the strategy vocabulary, every stage is recorded even when a run stops
   early, and the events arrive in the phase's order with the request's id
-- Eleven defects found across the implementation pass and this one, each pinned by the
-  test that caught it. **Git arguments were silently discarded**: `git diff HEAD~1 --
+- Eleven defects found across the implementation pass and this one (a twelfth — a
+  skipped step making the execution stage read FAILED while the run completed — came
+  from the cross-phase pass of §37), each pinned by the test that caught it.
+  **Git arguments were silently discarded**: `git diff HEAD~1 --
   src` ran a bare `git diff`, `git remote add …` ran `git status`, and
   `git branch -D feature/x` — whose verb was on a read-only list — was classified as a
   **read**, which is the dangerous shape: a deletion the classifier called a read. A
@@ -571,6 +578,176 @@ python -m novacontrol
   sync; `python -m mypy src` and `python -m mypy src --platform win32` — clean in
   both platform views (240 modules). Ruff (not a CI gate) is clean on the new
   files, with the pre-existing E501 baseline elsewhere untouched
+
+## Completed Scheduler, Automation and Audit Trail (Phase 13)
+
+- `automation/` owns **WHEN** a stored request runs and performs nothing itself. An
+  `AutomationEngine` stores one request plus a `Schedule` and hands the text to an
+  injected runner — in this application `handle_request` — so a scheduled task
+  travels the same intent → decision → plan → tool selection → permission →
+  execution → verification path a spoken request does. There is no second execution
+  path and no way for the scheduler to act on its own
+- `Schedule` is a frozen value with a `ScheduleKind` (`once`, `interval`, `daily`,
+  `weekly`) whose constructor refuses ambiguous combinations, and `next_after`
+  always returns a strictly **future** occurrence: a machine asleep over a daily
+  job's hour gets ONE next run rather than a burst of catch-up runs, and intervals
+  compress missed occurrences the same way. `parse_schedule` returns `None` when the
+  wording states no time — a request that merely *mentions* a schedule is never
+  auto-executed, and creation still travels the whole pipeline — and `strip_schedule`
+  removes the scheduling phrase from the request that will later be RUN, so a run
+  cannot re-schedule itself
+- Only approved tasks are armed: creation stores `pending_approval` and disarmed,
+  `approve` is the only way in, and `enable` refuses a task that was never approved.
+  The permission layer is asked at the moment of the run (under the declared HIGH
+  `automation.run` scope), not only when the task was armed, and with no permission
+  layer wired the run is **refused** — "no gate" is not permission
+- A `denied` run or an unmet **named** condition is not a failure and does not
+  increment the failure count; a denial disarms the task instead of retrying into
+  the same refusal. Failures are counted and bounded: at the configured limit the
+  task disables itself, and a runner that raises is a recorded failure rather than a
+  crashed loop. Conditions are named checks (`always`, `path_exists`, `tests_pass`),
+  never stored code
+- The tracked state is exactly what the phase asks for — `automation_id`, request,
+  schedule, status, next and previous execution, failure count, enabled,
+  permissions, created timestamp — plus a bounded run history, and it survives a
+  restart
+- `audit/` records one request or one scheduled run end to end: task id, timestamp,
+  request, automation id and source, route, intent, the decision, the plan joined to
+  what each step ended up as, tools, actions, verification (what was checked *and*
+  what was not), failures, recovery, model, provider, latency, resources and the
+  permission decisions — and **no chain-of-thought**, because a free-text reasoning
+  field would be the largest privacy surface in a long-kept, widely-read file. A
+  test pins that absence
+- Privacy is a property of the code path: redaction happens **on the way in**
+  (private-key blocks, `Authorization` headers, bearer tokens, JWTs,
+  `sk-`/`ghp_`/`xox`/`AKIA` credentials, URL-embedded credentials, `key=value`
+  assignments, and secret-named mapping keys whose values are hidden whatever they
+  look like), prose is deliberately left alone, the sink is local-only and the
+  logger **refuses** a remotely-declared one, and retention is bounded by a period
+  *and* a hard cap with explicit `delete`/`clear`. An unreadable timestamp is kept
+  rather than deleted. Writing a row is best-effort: it can never fail a request
+- Surfaces: application methods (`schedule_automation`, `approve_automation`,
+  `cancel_automation`, `enable_automation`, `disable_automation`, `run_automation`,
+  `run_due_automations`, `automation_status`, `audit_status`, `audit_entries`,
+  `audit_prune`, `audit_delete`, `audit_clear`, …), plan actions (`schedule_task`,
+  which stores a task disarmed unless the step is approved, and `run_automation`,
+  which re-checks the run permission), ten new typed lifecycle events, a
+  background ticker started by `start()`/stopped by `stop()` that ticks only after
+  its sleep, and thirteen new HTTP routes (81 total, `docs/API.md` regenerated)
+- Verified by driving every clause through the engine, the application, the HTTP
+  surface and the request path (`tests/test_automation.py` 50 tests,
+  `tests/test_audit.py` 25 tests, plus `AutomationAuditApiTests` in
+  `tests/test_web_api.py`). The live probe found and fixed two real defects: the
+  scheduled run read its own state from `response.data`, an attribute
+  `ApplicationResponse` does not have, so every run failed with an
+  `AttributeError` ("the call returned" never became a verified outcome) — the run
+  now reads `response.payload`; and `POST /settings` never forwarded
+  `automation_enabled` or the audit retention settings, leaving
+  `apply_audit_settings` with no caller, so the two settings the phase adds were
+  unreachable over HTTP and a changed retention policy was not picked up until a
+  restart. Both settings now round-trip through `POST /settings` and take effect
+  live. A test drives a spoken schedule *mention* through `handle_request` and
+  pins that it is planned and stored pending, never executed, with the audit row
+  filed as a request
+- All **four CI checks** confirmed locally: `pytest tests/ -q` — **2167 passed / 12
+  skipped** (1813 subtests); `python scripts/generate_api_reference.py --check` —
+  `docs/API.md` in sync (81 routes); `python -m mypy src` and
+  `python -m mypy src --platform win32` — clean in both platform views (246
+  modules). Ruff (not a CI gate) is clean on the new files, with the pre-existing
+  E501 baseline elsewhere untouched
+
+## Completed Optimization, Resource Governance and Self-Diagnostics (Phase 14)
+
+Phase 14 makes the build adaptive to the machine it actually runs on (the
+reference machine: 16 GB RAM, an 8 GB Intel Arc, an Intel NPU, Ollama), using
+runtime telemetry rather than assumptions. What was built, clause by clause:
+
+- **14.1 Model benchmarking** (`optimization/benchmark.py`): `ModelBenchmarking`
+  records one `BenchmarkRecord` per task — first-token latency, tokens/sec, total
+  latency, RAM used, GPU utilization, GPU memory, NPU use where available,
+  structured-output success, task success, tool-selection accuracy and failure —
+  and a runner that raises produces a FAILED record rather than a missing one,
+  because the failure rate is one of the figures. `compare(category)`/`best_for`
+  read the measurements; **no model is hard-coded as best**, and an unmeasured
+  rate is `None`, never `0.0`. Storage is JSONL with a configured cap.
+- **14.2 Execution modes** (`optimization/models.py`): `LOCAL_ONLY`, `BALANCED`,
+  `PERFORMANCE` as policy values, with the middle one as the fallback for an
+  unrecognised spelling.
+- **14.3 Privacy policy** (`optimization/privacy.py`): ONE `PrivacyPolicy` with
+  `allow_cloud`, `allow_external_search`, `allow_external_tools`,
+  `allow_telemetry`, `allow_remote_model` and `sensitive_data_redaction`, each
+  decision carrying the single control that decided it. Enforced at the ONE
+  place the cloud provider is selected (`NovaBrain.set_cloud_allowed`, so
+  `set_mode("cloud")` lands on the local brain when the slot is closed) and at
+  the research entry (web search closed → the run degrades to local knowledge).
+- **14.4 Resource governor** (`optimization/governor.py`): AMPLE/TIGHT/CRITICAL
+  from free RAM, CPU, GPU utilization, GPU-memory pressure, temperature, battery
+  and the resident models, with the figure behind every escalation.
+  `advise_load` answers yes/no/unknown and lists what to unload; thresholds are
+  configuration (`resources:` in the config file), not constants. The two
+  specification examples hold: 2.5 GB free → TIGHT, prefer lightweight, release
+  inactive models; high GPU-memory pressure → a vision model's load is refused
+  by the fit check.
+- **14.5 Model loading policy** (`models/manager.py`): the governor is injected
+  as the manager's load advisor; lazy loading, keep-alive with idle eviction,
+  priority-ordered eviction, a `max_resident_models` limit, and a model an
+  active task is using is never evicted underneath it.
+- **14.6 Task cost estimation** (`decision/cost.py`): `TaskCostEstimator`
+  returns a five-band estimate with reasons, model/cloud/GPU requirements,
+  estimated RAM, expected latency and tool calls. The specification's examples
+  are the acceptance test — RAM usage → trivial, a large PDF → medium, build and
+  test a full application → very high — and `route_hint` is a preference, never
+  a gate. The estimate is attached to the decision's metadata, which the audit
+  trail already stores, and a test reads it back from the audited row.
+- **14.7 Self-diagnostics** (`diagnostics/manager.py`): `DiagnosticManager`
+  returns one structured result per component (component, status, severity,
+  message, remediation, metadata) for the whole roster the specification names,
+  with `skipped` for a deliberately-off component and `unknown` for a probe this
+  platform cannot answer — the NPU reports `unknown` with its reason rather than
+  claiming an accelerator it cannot see. A check that throws, times out or
+  returns the wrong type becomes a FAILING row; overall state is the worst that
+  matters; src checks run off the event loop.
+- **API**: seven new routes (`GET`/`POST /privacy`, `GET /resources`,
+  `POST /cost/estimate`, `GET /diagnostics` with `?only=`, `GET`/`POST
+  /benchmark`), and `POST /settings` now forwards the execution mode and the
+  five controls and re-applies the policy live.
+- **Tests**: `tests/test_optimization.py` (75 tests / 5 subtests) plus
+  `Phase14ApiTests` in `tests/test_web_api.py` (10 tests).
+- **Verified clause by clause through the real code after the build**, which
+  found and fixed six gaps: Explore kept a cloud synthesis provider after the
+  mode closed it (Chat went local, Explore did not) — `_apply_execution_mode`
+  now re-syncs it and `set_cloud_allowed` falls back to the boot provider or
+  Echo rather than leaving the cloud provider active under a relabelled mode;
+  Explore and the trending pool searched externally regardless of
+  `allow_external_search` — both now sit behind the policy's one predicate and
+  perform no call at all when it is closed; `allow_external_tools` had no
+  enforcement point — it is now enforced in `_run_plan_step` against the step
+  tool's own declaration; `allow_remote_model` had no enforcement point — a
+  configured remote decision provider is now wrapped in
+  `PrivacyGatedDecisionProvider`; privacy decisions emitted no events —
+  `privacy.mode_changed` and `privacy.denied` are now published on the one
+  bus; and the resource report lacked model memory estimates while the
+  diagnostic timeout was a constant — both are now present and
+  configuration-driven.
+- All **four CI checks** confirmed locally: `pytest` in three file groups —
+  **2254 passed / 12 skipped** (1832 subtests); `python
+  scripts/generate_api_reference.py --check` — `docs/API.md` in sync (88 routes);
+  `python -m mypy src` and `python -m mypy src --platform win32` — clean in both
+  platform views (253 source files). Ruff (not a CI gate) is clean on the new
+  files, with the pre-existing E501 baseline elsewhere untouched. Details in
+  [docs/OPTIMIZATION.md](OPTIMIZATION.md).
+- **Phases 8–14 verified end to end across their boundaries** against one live
+  application (approval → execution → verification → recovery; event isolation
+  and the capability registry; a plugin enabled, gated by the risk layer and
+  withdrawn; ingest → cited retrieval and project awareness; the specialists'
+  eight stages including the LOCAL_ONLY research path; a scheduled automation
+  through the ordinary request path and its audit row; and the whole Phase 14
+  surface plus a restart). Three defects found and fixed, each pinned by a test:
+  a skipped step made the execution stage read FAILED, a fully denied plan's
+  execution stage claimed the run never reached it, and a disabled plugin could
+  neither be enabled again (the lifecycle the plugin guide draws) nor give back
+  its permission declarations. See §37 of
+  [docs/DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md).
 
 ## Next Work
 

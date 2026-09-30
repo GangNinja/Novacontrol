@@ -644,13 +644,40 @@ class Phase10SecurityTests(unittest.IsolatedAsyncioTestCase):
         await manager.enable("good")
         self.assertIsNotNone(registry.get("plugin.good.good.greet"))
         self.assertIsNotNone(catalog.get("good_greet"))
+        self.assertIsNotNone(manager.permissions.declared_for("good"))
+        self.assertIsNotNone(manager.permissions.declared_for("good_greet"))
 
         await manager.unload("good")
         self.assertNotIn("good_greet", tools)
         self.assertIsNone(catalog.get("good_greet"))
         self.assertIsNone(registry.get("plugin.good.good.greet"))
+        # The declarations are a contribution too: a withdrawn plugin whose risk
+        # statement is still on file is the same stale state as a withdrawn
+        # tool whose name is still in the registry.
+        self.assertIsNone(manager.permissions.declared_for("good"))
+        self.assertIsNone(manager.permissions.declared_for("good_greet"))
+        self.assertNotIn("good", manager.permissions.declared())
+        self.assertNotIn("good_greet", manager.permissions.declared())
         self.assertEqual(manager.tool_names(), ())
         self.assertEqual(manager.capability_ids(), ())
+
+    async def test_disable_withdraws_the_declarations_and_reenable_declares_again(
+        self,
+    ) -> None:
+        manager = PluginManager(tools=ToolRegistry())
+        manager.register(Good())
+        await manager.enable("good")
+        self.assertIsNotNone(manager.permissions.declared_for("good_greet"))
+
+        await manager.disable("good")
+        self.assertIsNone(manager.permissions.declared_for("good_greet"))
+
+        # The retry the docs promise: enabling again states its declaration
+        # again before the security gate asks about it, so withdrawal cannot
+        # make a later enable ask about an undeclared plugin.
+        await manager.enable("good")
+        self.assertIsNotNone(manager.permissions.declared_for("good"))
+        self.assertIsNotNone(manager.permissions.declared_for("good_greet"))
 
 
 class Phase10ExampleTests(unittest.IsolatedAsyncioTestCase):

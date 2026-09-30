@@ -168,6 +168,21 @@ class HardwareMonitor:
         except Exception:  # pragma: no cover - a probe must never throw
             return ()
 
+    def temperature_celsius(self) -> float | None:
+        """A thermal reading, or ``None`` when no sensor is exposed.
+
+        Phase 14's governor needs a temperature where one is accessible. This is
+        the model layer's view of the same sampled probe the telemetry panel
+        reads, so there is one measurement rather than two that can disagree.
+        """
+        reading = self._telemetry.temperature()
+        value = reading.get("celsius")
+        return float(value) if isinstance(value, (int, float)) else None
+
+    def battery(self) -> Mapping[str, Any]:
+        """Battery state as the platform reports it (``available`` is honest)."""
+        return dict(self._telemetry.battery())
+
     def snapshot(self) -> HardwareSnapshot:
         return HardwareSnapshot(
             total_ram_bytes=self.total_ram_bytes(),

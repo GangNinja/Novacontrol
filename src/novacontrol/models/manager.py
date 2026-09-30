@@ -70,6 +70,30 @@ class ModelLifecycle(Protocol):
 
 
 @runtime_checkable
+class ResourceAdvisor(Protocol):
+    """The resource governor, as this layer needs it — duck-typed on purpose.
+
+    Two calls: what a load should do, and a block for the status surface.
+    Naming the concrete ``ResourceGovernor`` would point this low layer at the
+    optimization package that imports its hardware view, so the protocol keeps
+    the dependency pointing one way.
+    """
+
+    def advise_load(
+        self,
+        needed_bytes: int | None,
+        *,
+        model: str = "",
+        loaded: Sequence[str] | None = None,
+        active: Sequence[str] = (),
+    ) -> Any:
+        """Whether the machine has room for this load, and what to release."""
+
+    def report(self) -> Mapping[str, Any]:
+        """The governor's figures, for a health/status surface."""
+
+
+@runtime_checkable
 class ModelProvider(Protocol):
     """A runtime that can hold models — the replaceable half of this layer.
 
@@ -356,6 +380,9 @@ class ModelManager:
         lifecycle: ModelLifecycle | None = None,
         keep_alive: KeepAliveSettings | None = None,
         headroom_bytes: int = DEFAULT_HEADROOM_BYTES,
+        advisor: ResourceAdvisor | None = None,
+        max_resident_models: int = 0,
+        priorities: Mapping[str, int] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._provider = provider
@@ -368,6 +395,15 @@ class ModelManager:
         # "load/unload/status", and requiring the concrete type would make the
         # runtime impossible to fake in a test.
         self._lifecycle = lifecycle
+        #: The resource governor (Phase 14.4), consulted on the load path. Also
+        #: duck-typed: the application supplies ``optimization.governor``'s
+        #: concrete class, and a test supplies a fake machine.
+        self._advisor = advisor
+        #: Concurrent-resident limit. 0 = no policy limit; the memory check is
+        #: still the hard one, because it is the only one that pages.
+        self.max_resident_models = max(0, int(max_resident_models))
+        self._priority: dict[str, int] = {}
+        self.set_priorities(priorities)
         self.monitor = monitor if monitor is not None else HardwareMonitor(
             resident_models=self._resident_names,
             headroom_bytes=self.headroom_bytes,
@@ -382,6 +418,56 @@ class ModelManager:
         #: per process rather than once per selection.
         self._reported: dict[str, frozenset[str]] = {}
         self._probed: set[str] = set()
+
+    def set_priorities(self, priorities: Mapping[str, int] | None) -> None:
+        """Replace the eviction priority table (higher = kept longer).
+
+        Priority is ordering, not capability: it says which model to release
+        FIRST when room must be made, and defaults to 0 for everything. A
+        value the table cannot read is ignored rather than guessed at.
+        """
+        table: dict[str, int] = {}
+        for name, value in (priorities or {}).items():
+            try:
+                table[_key(name)] = int(value)
+            except (TypeError, ValueError):
+                continue
+        self._priority = table
+
+    def _priority_of(self, model: str) -> int:
+        return self._priority.get(_key(model), 0)
+
+    def _advice(
+        self, needed: int | None, *, model: str, loaded: Sequence[str]
+    ) -> dict[str, Any] | None:
+        """Ask the governor, and read whatever shape it answers with.
+
+        ``None`` means the advisor could not answer; the load then proceeds on
+        the arithmetic this layer already did, which is the pre-Phase-14
+        behaviour and remains correct without a governor.
+        """
+        if self._advisor is None:
+            return None
+        try:
+            advice = self._advisor.advise_load(
+                needed, model=model, loaded=loaded, active=tuple(sorted(self._active))
+            )
+        except Exception:  # pragma: no cover - an advisor must never break a load
+            return None
+        to_dict = getattr(advice, "to_dict", None)
+        if callable(to_dict):
+            rendered = to_dict()
+            return dict(rendered) if isinstance(rendered, Mapping) else None
+        return dict(advice) if isinstance(advice, Mapping) else None
+
+    def _governor_report(self) -> dict[str, Any]:
+        if self._advisor is None:
+            return {"configured": False}
+        try:
+            report = self._advisor.report()
+        except Exception:  # pragma: no cover - a status read must not fail
+            return {"configured": True, "error": "the governor could not report"}
+        return {"configured": True, **dict(report)}
 
     # ── discovery and health ────────────────────────────────────────────
     def provider_name(self) -> str:
@@ -471,6 +557,23 @@ class ModelManager:
         self.discover()
         return dict(self._reported)
 
+    def model_size_bytes(self, model: str) -> int | None:
+        """A model's footprint — resident when loaded, else its on-disk size.
+
+        Public because a status surface needs the same answer the loader does:
+        asking the provider here, once, is what keeps the resource report and
+        the load decision measuring the same thing. ``None`` means the runtime
+        did not say — never zero.
+        """
+        name = str(model or "").strip()
+        if not name or self._provider is None:
+            return None
+        try:
+            size = self._provider.model_size_bytes(name)
+        except Exception:  # a probe must never break a report
+            return None
+        return int(size) if isinstance(size, (int, float)) and size else None
+
     def runtime_status(self) -> ModelRuntimeStatus:
         """The provider's state right now, with the active model's profile."""
         resident = self._resident()
@@ -507,6 +610,7 @@ class ModelManager:
             "telemetry": self.telemetry.to_dict(),
             "registry": self.registry_report(),
             "active_tasks": dict(self._active),
+            "governor": self._governor_report(),
         }
 
     def registry_report(self) -> dict[str, Any]:
@@ -722,11 +826,17 @@ class ModelManager:
         # counted as room either: a refusal has to be a refusal even in the
         # arithmetic.
         protected = set(self._active)
-        candidates = [
-            other
-            for other in loaded_now
-            if _key(other) != _key(name) and _key(other) not in protected
-        ]
+        # Ordered by model priority (lowest first), because the eviction below
+        # reads this list as "what may go, and in what order". The sort is
+        # stable, so the runtime's own order decides among equals.
+        candidates = sorted(
+            (
+                other
+                for other in loaded_now
+                if _key(other) != _key(name) and _key(other) not in protected
+            ),
+            key=self._priority_of,
+        )
         blocked = [
             other
             for other in loaded_now
@@ -755,6 +865,55 @@ class ModelManager:
                 "source": "measured" if measured else "parameters",
             }
         )
+
+        # 3b. The concurrent-model limit and the resource governor (Phase 14.4).
+        # Both can refuse a load the arithmetic alone would allow, and both say
+        # why: the limit states what policy it is enforcing, the governor names
+        # the reading that produced the pressure.
+        limit = self.max_resident_models
+        if (
+            limit
+            and _key(name) not in {_key(other) for other in loaded_now}
+            and len(loaded_now) - len(candidates) >= limit
+        ):
+            # Even releasing every model that MAY be released leaves the limit
+            # reached, so this load cannot proceed without breaking the policy.
+            self.telemetry.refusals += 1
+            steps.append(
+                {
+                    "step": "refuse",
+                    "reason": "concurrent model limit reached",
+                    "max_resident_models": limit,
+                    "resident": list(loaded_now),
+                }
+            )
+            return ModelLoadOutcome(
+                model=name,
+                loaded=False,
+                refused=True,
+                steps=tuple(steps),
+                reason=(
+                    f"the concurrent model limit ({limit}) is reached and no "
+                    "resident model may be released"
+                ),
+                available_memory_bytes=available,
+            )
+        advice = self._advice(needed, model=name, loaded=loaded_now)
+        if advice is not None:
+            steps.append({"step": "governor", **advice})
+            if advice.get("allow") is False and not force:
+                self.telemetry.refusals += 1
+                steps.append(
+                    {"step": "refuse", "reason": "the resource governor refused the load"}
+                )
+                return ModelLoadOutcome(
+                    model=name,
+                    loaded=False,
+                    refused=True,
+                    steps=tuple(steps),
+                    reason=str(advice.get("reason") or "the resource governor refused it"),
+                    available_memory_bytes=available,
+                )
 
         if any(_key(n) == _key(name) for n in loaded_now):
             # Already resident: the cheapest possible answer, and the reason the
@@ -826,6 +985,17 @@ class ModelManager:
             for other in candidates:
                 if self._release(other):
                     evicted.append(other)
+        elif limit and len(loaded_now) >= limit:
+            # The load fits, but policy says too many models are resident. Only
+            # as many are released as the limit requires — the rule from step 4
+            # applies here too: evicting is not a condition of loading.
+            remaining = len(loaded_now)
+            for other in candidates:
+                if remaining < limit:
+                    break
+                if self._release(other):
+                    evicted.append(other)
+                    remaining -= 1
         steps.append({"step": "evict", "models": list(evicted)})
 
         # 5. Load.

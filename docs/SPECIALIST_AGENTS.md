@@ -47,6 +47,15 @@ never omitted. A run that ends early still has eight entries, and the last four
 say `the run ended before this stage` — which is how a reader can tell a stage
 that failed from a stage that never happened.
 
+The Execution and Verification stages tell the same endings apart, because a
+step's ending is not always pass/fail: a step that did not apply is `SKIPPED`, a
+step that was refused is `DENIED`, and only a step that actually failed is
+`FAILED`. A refused step's stage is recorded where the refusal happened rather
+than left for the end-of-run fill to report as `the run ended before this stage`
+— a different fact, and one that used to be stated instead of the refusal
+(§37). The verification rule in the next section is the reason the distinction
+matters: a `SKIPPED` step is INCONCLUSIVE and never a failure.
+
 The pipeline contains failure by design. A stage hook that raises is recorded as
 FAILED and the run ends with a report, so a broken specialist cannot take its
 caller down; a stage whose failure is survivable (a knowledge index that is still
@@ -95,7 +104,8 @@ risk stated rather than inferred from a verb:
 The pipeline's Tool Selection stage is the gate: a step whose tool is not
 registered with the build is refused outright, a step whose risk nobody approved
 is refused with the reason, and a refused step is **recorded as DENIED and never
-executed**. With no approval flow wired (the default) that is the end of a write
+executed** — its Execution stage says `DENIED` (never `FAILED`), and the run
+cannot report COMPLETED while any step was refused. With no approval flow wired (the default) that is the end of a write
 attempt — the run reports the refusals instead of performing them. Authorization
 is a **per-run pipeline** (`agent.clone(pipeline)`, `developer_task(goal,
 authorize=True)`), never a flag flipped on shared state, so a caller who

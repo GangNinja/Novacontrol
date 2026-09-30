@@ -333,6 +333,66 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run.stage(StageName.PLANNER).status, StageStatus.SKIPPED)
         self.assertEqual(run.status.value, "failed")
 
+    async def test_a_step_that_does_not_apply_is_not_a_failed_execution_stage(self) -> None:
+        """A legitimate skip is a SKIPPED stage, never a FAILED one.
+
+        ``_finish`` already documents the reading — a step that was never
+        applicable is not a failure either — and the verification stage records
+        SKIPPED for it; the stage that ran it must agree, or the run's own table
+        contradicts the run's own summary.
+        """
+
+        class Skipper(SpecialistAgent):
+            def __init__(self) -> None:
+                super().__init__(
+                    "skipping-agent", AgentRole.CODING, "Skips what does not apply."
+                )
+
+            def clone(self, pipeline: SpecialistPipeline) -> SpecialistAgent:
+                return Skipper()
+
+            def declarations(self) -> Mapping[str, PermissionDeclaration]:
+                return {
+                    "probe.skip": PermissionDeclaration(),
+                    "probe.work": PermissionDeclaration(),
+                }
+
+            def decide(self, *args: Any, **kwargs: Any) -> SpecialistDecision:
+                return SpecialistDecision(action="probe")
+
+            def plan(self, *args: Any, **kwargs: Any) -> tuple[PipelineStep, ...]:
+                return (
+                    PipelineStep(action="probe.skip", expected="nothing applies"),
+                    PipelineStep(action="probe.work", expected="the work is done"),
+                )
+
+            async def execute(self, step: PipelineStep, run: AgentRun) -> StepOutcome:
+                if step.action == "probe.skip":
+                    return StepOutcome(
+                        step_id=step.id,
+                        action=step.action,
+                        status=StepStatus.SKIPPED,
+                        detail="there is nothing here this step applies to",
+                    )
+                return StepOutcome(
+                    step_id=step.id,
+                    action=step.action,
+                    status=StepStatus.COMPLETED,
+                    detail="the work was done",
+                    output={"done": True},
+                )
+
+        run = await SpecialistPipeline().run(Skipper(), AgentTask("do the probe"))
+
+        execution = run.stage(StageName.EXECUTION)
+        assert execution is not None
+        self.assertEqual(execution.status, StageStatus.SKIPPED)
+        self.assertNotEqual(execution.status, StageStatus.FAILED)
+        self.assertIn("nothing here this step applies to", execution.detail)
+        self.assertIn("the work was done", execution.detail)
+        # And the skip does not block the run: the work that did run was verified.
+        self.assertEqual(run.status.value, "completed")
+
     async def test_steps_naming_an_undeclared_tool_are_refused(self) -> None:
         class Sneaky(SpecialistAgent):
             def __init__(self) -> None:
@@ -357,6 +417,13 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         # Recorded as a refusal, never attempted: the stub's execute() would have
         # raised AssertionError if the step had been dispatched at all.
         self.assertEqual([outcome.status for outcome in run.outcomes], [StepStatus.DENIED])
+        # The stage that considered the refusal says so. Falling through to the
+        # end-of-run fill would report "the run ended before this stage", which
+        # is a different fact from "this step was turned down".
+        execution = run.stage(StageName.EXECUTION)
+        assert execution is not None
+        self.assertEqual(execution.status, StageStatus.DENIED)
+        self.assertIn("not registered", execution.detail)
         self.assertEqual(run.status.value, "failed")
 
     async def test_declared_permissions_are_what_the_risk_layer_reads(self) -> None:

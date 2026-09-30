@@ -312,6 +312,17 @@ class PermissionManager:
     def declared(self) -> tuple[str, ...]:
         return tuple(sorted(self._declarations))
 
+    def undeclare(self, tool_or_action: str) -> bool:
+        """Take back ONE declaration, and say whether there was one.
+
+        The counterpart of :meth:`declare` for layers that contribute
+        declarations at runtime and must remove exactly what they contributed:
+        withdrawing a plugin's names must not forget what the rest of the build
+        stated about itself, so this removes one name rather than clearing the
+        table. An action that was never declared is reported, not an error.
+        """
+        return self._declarations.pop(tool_or_action.strip(), None) is not None
+
     # -- resolution ------------------------------------------------------------
 
     def resolve(

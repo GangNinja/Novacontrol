@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
-
 from typing import Any
 
-from novacontrol.automation.models import AutomationStep, AutomationWorkflow, AutomationWorkflowStatus
+from novacontrol.automation.models import (
+    AutomationStep,
+    AutomationWorkflow,
+    AutomationWorkflowStatus,
+)
 
 
 class AutomationManager:
@@ -43,7 +46,7 @@ class AutomationManager:
         return {"workflows": [workflow.to_dict() for workflow in self._workflows.values()]}
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "AutomationManager":
+    def from_dict(cls, payload: dict[str, Any]) -> AutomationManager:
         manager = cls()
         for item in payload.get("workflows", []):
             if isinstance(item, dict):

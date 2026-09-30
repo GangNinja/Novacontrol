@@ -34,7 +34,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from novacontrol.decision.models import (
@@ -548,6 +548,42 @@ class LocalDecisionProvider:
 #: A provider is an advisor, not a channel: bound what it can send back.
 _MAX_ACTIONS = 12
 _MAX_FIELD = 120
+
+
+class PrivacyGatedDecisionProvider:
+    """Wraps a provider so an execution mode can close it.
+
+    Phase 14.3: a configured REMOTE provider is the allow_remote_model
+    control's business. ``enabled`` is asked on every read, so a mode change
+    takes effect on the next request with no re-wiring; when the predicate says
+    no, the engine sees a DISABLED provider ("the local answer is simply the
+    answer", no fallback noise) and ``decide`` declines outright — a policy
+    that closed the remote path must not be re-opened by a caller that read
+    ``enabled`` a moment before the operator changed the mode.
+
+    A predicate that raises is read as CLOSED: a broken policy must never be
+    the reason a request quietly reaches the network.
+    """
+
+    def __init__(self, inner: DecisionProvider, *, enabled: Callable[[], bool]) -> None:
+        self._inner = inner
+        self._enabled = enabled
+        # A plain attribute (the protocol declares ``name`` writable, and a
+        # provider's name never changes): the wrapper keeps the inner name so a
+        # status surface reports the same provider the operator configured.
+        self.name = str(getattr(inner, "name", "") or "remote")
+
+    @property
+    def enabled(self) -> bool:
+        try:
+            return bool(self._enabled())
+        except Exception:  # pragma: no cover - defensive; a broken policy closes
+            return False
+
+    def decide(self, request: DecisionRequest) -> Decision | None:
+        if not self.enabled:
+            return None  # decline, exactly like a provider that is switched off
+        return self._inner.decide(request)
 
 
 class JevDecisionProvider:
