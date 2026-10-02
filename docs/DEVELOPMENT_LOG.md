@@ -2931,4 +2931,373 @@ skipped** (1832 subtests); `docs/API.md` in sync (88 routes); mypy clean in both
 platform views (253 source files). The cross-phase probe was a throwaway script,
 deleted once the pass was done; what it proved lives in the tests above.
 
+## 38. Phase 15: recording what happened, without training on it yet
 
+The phase asks for a data/evaluation/reward FOUNDATION and says, repeatedly,
+what it is not: not SFT, not DPO/ORPO, not RLHF/RLAIF, not RLVR, not agentic RL.
+The design that follows from that is an OBSERVER. `evaluation/` never decides,
+plans, calls a tool or answers a request; it subscribes to the lifecycle the
+application already publishes on the **same** `EventBus`, groups it by the
+correlation id a request already threads, and writes one versioned row per piece
+of work. A second execution path would have been the easy way to get rich data
+and the wrong way to get honest data: what a trajectory records has to be what
+the system actually did, not what a parallel recorder believed it did.
+
+**Nothing stores hidden reasoning.** The schema has no field for it, the
+recorder copies only structured payloads, and the evaluation's `evidence` list
+is made of references (`tool:desktop.launch#0=completed`), not narration. That
+is a product decision and a privacy one: an operator can read this store.
+
+**Every optional field is genuinely optional, and a missing figure stays
+missing.** `success` is `bool | None` — `None` means "the run ended and nothing
+decided whether it worked", which the quality filter HOLDS for review rather
+than rejecting or accepting. A latency nobody measured is `None`, so the reward's
+latency component is scored neutrally (0.5) with a reason saying so instead of
+being handed a zero that reads as "instant".
+
+**Failure isolation is structural, not inherited.** The recorder's handler, its
+sink call, the service's processing and every publish it makes run inside their
+own catch-all with a counter. The bus already isolates subscribers from each
+other, but that is a property of the bus; "recording can never fail a request"
+is a promise of THIS layer, so it is enforced here — and pinned by a test that
+breaks the recorder and the sink and asserts the request still completes.
+
+**One weight table, one severity table, one vocabulary.** `RewardConfig` is the
+only place a number that shapes the reward is written down, and it is readable
+from the config file. `DEFAULT_SEVERITIES` is the only place a quality finding's
+weight is declared (ERROR rejects, WARN holds, INFO is a note on an accepted
+row). The nine dimensions extend `EvaluationDimension` rather than being strings
+scattered across the evaluator.
+
+**A refusal is not a penalty, and this is where the phase could most easily have
+gone wrong.** `unsafe_action_penalty` is for an action that BYPASSED a gate — it
+completed although its confirmation was refused, or with no recorded answer.
+An action the permission layer correctly stopped is the safety layer WORKING, so
+it raises `safety` and is held by the quality filter as safety evidence. A
+reward that punished refusals would teach a future phase to avoid asking for
+permission.
+
+**The golden set is small, deterministic and grounded.** Six examples, each
+naming something this build really has — an `IntentName`, a `DecisionRoute`,
+a tool the application registers — and every timestamp fixed, because a fixture
+that changes on every load cannot be diffed or trusted as a fixture.
+
+**Storage extends what exists.** JSONL beside the audit trail, written through
+a temporary file and an atomic replace, with upsert-by-id so a late annotation
+(measured latency, memory delta) updates its rows instead of leaving two that
+disagree. No new database, no server, and the store is a three-method protocol
+with an in-memory implementation, so the layer is testable with no disk at all.
+
+The test suite (`tests/test_evaluation.py`, 106 tests) runs entirely on
+deterministic fixtures — no model, no network, no GPU — and drives the live
+application through `handle_request` while asserting that no model was loaded,
+which is what the phase's resource clause asks a 16 GB Windows desktop to be
+able to prove.
+
+**Defects found while building, each fixed and pinned by a test.**
+
+* **Versioned datasets overwrote each other.** `DatasetRepository` keyed rows by
+  `dataset_id`, so saving 1.1.0 to an upserting repository *replaced* 1.0.0 and
+  "versions accumulate" was false. Rows are now keyed `dataset_id@version`:
+  re-saving a version replaces that version, and a new version is a new row.
+* **The safety dimension penalised correct refusals.** An action that required
+  confirmation, was refused, and did not run scored 0.0 on the confirmation
+  component — the layer working exactly as designed, marked down. A refusal is
+  now an ANSWER for that component (only an unanswered gate counts against it),
+  which is the same rule the reward engine already followed for its penalty.
+* **An `INFO` finding held a row for review.** The verdict resolver treated any
+  finding as review-worthy, so "filtering is disabled" and "the run failed with
+  no reason recorded" — both notes meant to travel WITH an accepted row —
+  quietly moved rows into the review pile. Severity now decides the verdict.
+* **Execution scored 1.0 with no evidence.** The retry component was added
+  unconditionally, so a trajectory with no outcome, no tools and no steps scored
+  a perfect execution instead of `unknown`. A dimension with nothing to judge now
+  says so.
+* **Retries were counted per call, not per tool.** Five calls to one tool
+  reported fifteen retries, which inflated the retry rate metric and the
+  excessive-retry penalty. It is counted per distinct tool now.
+* **A partial capture read as an empty row.** A trajectory that named a task but
+  captured nothing else yet was rejected as `empty_trajectory`, so a flushed
+  in-flight draft was thrown away in the review sense. A row that names a task
+  is a PARTIAL CAPTURE and is held; only a row that names nothing is empty.
+
+The one compatibility change to an existing test: `test_lifecycle_events.py`
+counted exactly one healthy subscriber on `intent.detected` (that suite's own
+wildcard recorder). The Phase 15 recorder is a second one, so the count is now
+two, with a comment naming both — the test's point (a broken handler is reported
+while every healthy one still hears the event) is unchanged.
+
+Gates on the Phase 15 tree: pytest in three file groups — **2360 passed / 12
+skipped** (1846 subtests); `docs/API.md` in sync (92 routes); mypy clean in both
+platform views (264 source files); ruff clean on the new package and its tests.
+No model was loaded at any point, and none of the phase's work reached the
+network.
+
+## 39. Phase 15 re-verified against its requirements, four defects repaired
+
+Every numbered requirement was re-derived from the source and the gates were
+re-run on the frozen tree: pytest in three file groups — **2362 passed / 12
+skipped** (1846 subtests); mypy clean in both platform views (264 source files);
+`docs/API.md` in sync (92 routes); ruff clean on the new package and its tests.
+Four defects escaped the phase's own tests; each is now pinned by one.
+
+* **Fast-path and LLM-escalation percentages counted ROUTE NAMES, not runs.**
+  The distinct-route set was intersected with the fast-path/model sets, so ten
+  runs through `local_llm` beside one through `direct_tool` reported 50% / 50%
+  instead of 10% / 90%. The existing routing test used three distinct routes, so
+  both readings agreed there and the error was invisible. Both figures are now
+  counted per run, which is what their documented definitions always said.
+* **A zero-sized recent ring kept everything.** `rows[-0:]` is the whole list,
+  not an empty one, so `max_recent=0` left every finished row held. The zero case
+  now empties the ring explicitly.
+* **A late annotation's redactions were applied but not counted.** A request
+  annotated after its trajectory had been written was redacted correctly, yet the
+  re-delivered row kept its old redaction count — the one place where arriving
+  late could make a row look less sanitised than it was. The count and the kinds
+  now travel with the update.
+* **The status surface reported the dataset's schema as the trajectory schema.**
+  `summary()["versions"]["trajectory_schema"]` read the golden dataset's version
+  rather than the trajectory schema's; both are 1 today, so nothing visible
+  changed, but the wrong field was read. The summary now reports the trajectory
+  schema and the golden-dataset schema separately.
+
+No behaviour changed for any other case: the three-distinct-route routing test
+reads the same before and after, and the one compatibility change recorded in §38
+is unchanged.
+
+
+## 40. Phase 16: supervised fine-tuning, on top of what was recorded
+
+Phase 16 adds `src/novacontrol/training/` (13 modules) and
+`tests/test_training.py`: it turns the Phase 15 record of what NovaControl DID
+into supervised fine-tuning datasets, runs a trainer against them, checkpoints as
+it goes, evaluates the result against the base model, and registers the candidate
+as an EXPERIMENTAL model that only an explicit, evidence-backed approval can
+promote. Nothing about the earlier phases changed: the subsystem is one optional
+package behind one switch, and no existing call path consumes it.
+
+The decisions worth writing down, because they are the phase:
+
+* **Dry run is the default.** `TrainingConfig.dry_run` is `True`,
+  `create_run` has no side effects at all (no process, no checkpoint, no model),
+  and *starting* a real run needs the deployment to permit it **and** an explicit
+  `confirm=True`. There is no path from "a run exists" to "something trained".
+* **No training dependency is required, and no CUDA device is assumed.** Nothing
+  in the package imports `torch`, `transformers` or `peft` at module level; the
+  one runtime probe asks `torch` lazily and treats its absence as a note. The
+  default backend walks a real step schedule and writes real checkpoint files, so
+  a 16 GB machine with an Intel iGPU and an NPU can validate the whole path.
+* **The concrete PEFT loop is deliberately absent.** `PeftLoraBackend` is the
+  boundary — it probes for the extras without importing them, validates the LoRA
+  configuration, and runs an injected `PeftRunner`. Shipping an untestable
+  training loop would be untested code in the one place that moves weights.
+* **An unsafe estimate is a refusal.** The estimator returns SAFE / WARNING /
+  UNSAFE with its reasons, `start` returns `ok=false, refused=true` for UNSAFE
+  and does not move the run, and only an explicit override on a deployment that
+  permits one proceeds.
+* **A model is never approved on a loss curve.** `approve` requires a recorded
+  passing evaluation; with no predictors the run is recorded as `skipped` and
+  approval stays impossible; a regression auto-rejects the candidate.
+* **No hidden chain-of-thought, and no silent trimming.** A row carrying a
+  reasoning key is refused and counted, not copied-and-cleaned.
+* **Nothing big is unbounded.** Loss points per run, model history, checkpoints
+  kept, dataset rows and stored records all have ceilings.
+
+The public surface follows the existing conventions rather than inventing new
+ones: 25 `/training/*` routes (117 in the surface), a 24-action
+`novacontrol training` CLI that dispatches to the application's own methods, a
+`training:` config section plus five user settings and `NOVACONTROL_TRAINING_*`
+overrides, eight `training.*` events on the existing bus, and a `Training`
+diagnostics row that is SKIPPED when the subsystem is off. `start`, `resume` and
+`evaluate` run in a worker thread, so the API keeps answering while a real run
+trains.
+
+It implements **no** preference optimisation and **no** reinforcement learning —
+no DPO/ORPO, RLHF/RLAIF, RLVR or agentic RL. §16.12 of
+[docs/TRAINING.md](TRAINING.md) is the seam a later phase would use.
+
+## 41. Phase 16 re-verified against its requirements, three defects repaired
+
+Every numbered requirement was re-derived from the source and driven end to end
+on the frozen tree — build a dataset of each of the seven types, split it, create,
+start, cancel, resume and evaluate a run, register, approve and promote a model,
+read the HTTP surface and the CLI — rather than read off the layer that makes the
+claim. The gates were then re-run on the frozen tree: pytest in three file groups
+— **2621 passed / 12 skipped** (1896 subtests, of which `tests/test_training.py`
+is 259); mypy clean in both platform views (277 source files); `docs/API.md` in
+sync (117 routes, 25 of them `/training/*`); ruff clean on `training/`, the
+configuration it reads and the tests added here.
+
+One compatibility note: Phase 16 registers a `Training` row in the Phase 14
+diagnostic roster, so the two tests that pinned the roster's size (21) now name
+the new component and expect 22. That is the roster test doing its job — a new
+subsystem is a new row — and it is the only pre-existing test either phase
+changed.
+
+Three defects escaped the phase's own tests; each is now pinned by one.
+
+* **The split walk starved the test split.** Group assignment compared each
+  split's *absolute* room against its target, so `train` — whose target is simply
+  the largest number — took the first groups: four groups of ten became 30/10/0
+  and the split the evaluator reads by default was empty. The comparison is now
+  relative to each split's own target, so the same four groups become 20/10/10
+  and no split with a non-zero ratio is empty while another is over-filled.
+
+* **A source row carrying reasoning in its metadata trained silently.** The
+  example builder copies a fixed set of provenance fields, so a
+  `chain_of_thought` sitting in a trajectory's `metadata` never reached the
+  example-level guard: the row produced an example with its reasoning quietly
+  dropped instead of being refused and counted. The refusal is now made on the
+  SOURCE row, before an example exists, and `hidden_reasoning` counts it — the
+  reason the vocabulary already had and never used on that path.
+
+* **A backend had nowhere to say where its adapter went.** The registry inferred
+  the adapter block from the configuration, so a real backend that wrote an
+  adapter produced a record whose `adapter.path` was always empty — an entry that
+  looked complete and could not be loaded. `SFTTrainer.model_metadata()` is now
+  what a backend reports it produced, and the manager passes it to
+  `registry.register`; a dry run says plainly that it wrote no adapter file.
+
+Two further findings from the same pass were repaired where they belong:
+
+* **An unrecognised boolean environment value read as "off".** `_parse_bool` kept
+  the call site's default only for an absent variable; any other unreadable
+  spelling became `False`. For a switch whose default is the cautious answer that
+  is backwards — `NOVACONTROL_TRAINING_DRY_RUN=ture` would have turned a dry run
+  into a real one, and the same held for `NOVACONTROL_EVALUATION_REDACT`. Only an
+  explicitly written `1/true/yes/on` or `0/false/no/off` is obeyed now; anything
+  else keeps the current value, which is the rule `_count_value` and
+  `_days_value` already applied to numbers and the one the settings sections
+  documented.
+
+* **The probe found its own bugs, not the code's.** Three "failures" in the first
+  run of the audit were the audit: a hardware policy string was passed where a
+  configuration was expected, `HardwareCapabilities.total_ram_bytes` was called
+  as a method, and `local_cpu` was asserted to be unavailable on a machine that
+  has a CPU. Recorded here because a verification pass that cannot tell its own
+  mistakes from the code's is not one.
+
+No behaviour changed for any other case: the ratio test (40 single-example
+groups) reads the same before and after, and the reasoning test now asserts the
+refusal it was already describing.
+
+## 42. Phase 17: preference optimization on top of what was verified
+
+Phase 17 adds `src/novacontrol/preference/` (12 modules) and
+`tests/test_preference.py`: it turns the pairs the system has already observed
+into versioned preference datasets, runs DPO or ORPO against them (a dry run by
+default), and lets a model improve only where a measured behaviour comparison
+says it improved. It consumes the seams Phase 16 left open rather than opening
+new ones — the splitter, the run lifecycle and checkpoints, the evaluator and the
+one model registry are all Phase 16's.
+
+The decisions worth writing down, because they are the phase:
+
+* **A pair is never invented.** Both sides must be observable behaviour (or a
+  golden fixture that outranks it), the orientation must be supported by the
+  record, and the same two candidates the other way round is a contradiction
+  that neither orientation trains on. A correction is accepted only as a
+  STRUCTURED mapping — prose is never parsed into a pair — and a row carrying
+  hidden chain-of-thought is refused before a pair exists.
+* **Six families, one pair schema, one strength table.** `nlu`, `decision`,
+  `tool_selection`, `planning`, `recovery`, `response`; every pair carries its
+  source, its provenance ids, a three-axis `PreferenceStrength` and its
+  evidence, and a content `fingerprint()` that makes an identical rebuild
+  recognisable and a different version refusable.
+* **Quality is structural.** One severity table: `ERROR` rejects, `WARN` holds
+  for review unless a person settled the pair. A held pair is stored and
+  counted, and only ACCEPTED pairs train.
+* **Splits are Phase 16's.** Pairs are projected to the supervised shape for the
+  walk and the ids are translated back, so "group-safe and deterministic" has
+  exactly one implementation and a re-tuning in one phase changes both.
+* **DPO and ORPO are one pipeline.** Only the objective — and therefore whether
+  a reference model is counted — differs; a dry run labels every figure
+  `simulated` rather than letting a schedule read as a measurement.
+* **A preference loss is not an evaluation.** The evaluator compares base vs SFT
+  vs candidate on held-out pairs with preference accuracy plus Phase 16's
+  metrics, deltas, noise floors and blocking regression areas; `loss_consulted`
+  is False on every comparison, and without two predictors the run is recorded
+  as `skipped` and approval stays impossible.
+* **Nothing trains by itself.** `dry_run` defaults to true, `create_run` and
+  `submit` have no model side effects, and a real run needs the deployment to
+  permit it AND an explicit confirmation.
+* **The review queue only moves forward.** `choose_b` swaps the pair's sides
+  rather than forking it; `tie` and `reject` need a reason; a decision is stored
+  as human-review evidence; and only settled pairs are pulled into a later
+  build.
+
+The public surface follows the existing conventions: 29 `/preference/*` routes,
+a 26-action `novacontrol preference` CLI that dispatches to the application's
+own methods, a `preference:` config section plus five user settings and
+`NOVACONTROL_PREFERENCE_*` overrides, five `preference.*` events on the existing
+bus, and a `Preference optimization` diagnostics row that is SKIPPED when the
+subsystem is off. It implements **no** reinforcement learning — no RLHF/RLAIF,
+RLVR, critique learning or agentic RL, no distributed training, and no concrete
+Transformers/PEFT loop.
+
+## 43. Phase 17 re-verified against its requirements, three defects repaired
+
+Every numbered requirement was re-derived from the source and driven end to end
+on the frozen tree — build a pair dataset of each family, validate it, split it,
+create, start, evaluate and read back a run, submit and settle a review, compare
+three models, approve and promote a model, read the HTTP surface and the CLI —
+rather than read off the layer that makes the claim. The gates were then re-run
+on the frozen tree: pytest in three file groups — **2788 passed / 12 skipped**
+(1960 subtests, of which `tests/test_preference.py` is 167); mypy clean in both
+platform views (289 source files); `docs/API.md` in sync (145 routes, 29 of them
+`/preference/*`); ruff clean on `preference/` and `tests/test_preference.py`
+apart from the E501 baseline this repository has always had.
+
+One compatibility note: Phase 17 registers a `Preference optimization` row in
+the Phase 14 diagnostic roster, so the two tests that pinned the roster's size
+(22) now name the new component and expect 23. That is the roster test doing its
+job — a new subsystem is a new row — and those are the only pre-existing tests
+this phase changed.
+
+Three source defects escaped the phase's own tests; each is now pinned by one.
+
+* **A benchmark fixture that was MET still produced a pair.** Agreement was
+  judged by comparing the run's candidate mapping with the fixture's expectation
+  for equality, but a golden example is a PARTIAL statement — it declares a tool
+  and its arguments and says nothing about the call's status or capability —
+  while the candidate is the full observed behaviour. The two could never be
+  equal, so a run that did exactly what was expected was recorded as a
+  disagreement and manufactured a pair from it. Agreement is now judged field by
+  field on the fields the fixture actually asserts, and a fixture that declares
+  no arguments has no opinion about them rather than asserting an empty mapping.
+
+* **An undecided review could be pulled into a build.** `resolved_pairs()`
+  filtered by decision only when a decision was named, so its default returned
+  every stored row — including pairs still waiting in the queue. A later dataset
+  build takes settled reviews as its strongest source, and would have claimed a
+  person had decided a pair nobody had answered. It now returns only `reviewed`
+  rows, which is what its name and the manager both promise.
+
+* **A payload that is not a predictor crashed the comparison.** The HTTP routes
+  accept `base`/`candidate` from a JSON body, and a JSON body is a mapping with
+  no `predict`; Phase 16's evaluator reads `predictor.name`, so
+  `/preference/compare` and `/preference/runs/evaluate` answered a 500 instead of
+  the honest "nothing was measured". The evaluator now normalises anything
+  without a callable `predict` into a silent predictor, and the comparison is
+  reported as `inconclusive` — the same verdict two silent models already got.
+
+Two further findings from the same pass were bugs in the AUDIT, not the code,
+and are recorded so the verification stays auditable:
+
+* **The immutability test built an empty dataset.** Both fixture trajectories
+  carried the same default intent, so the pair builder correctly produced zero
+  pairs (identical candidates) and "rewriting" one empty version as another
+  changed nothing. Giving the second trajectory a different intent makes the
+  dataset non-empty and the store refuses the rewrite, which is what it already
+  did for real content — pinned by a probe before the fixture was touched.
+
+* **The determinism test compared ids, not content.** Splits are keyed by the
+  `preference_id`s a build mints (and the same test asserts those differ between
+  builds — deliberately), so the two maps can never be equal even when the same
+  pair landed in the same place. The test now compares the split CONTENT
+  (preference fingerprint per split), which is stable across builds; the
+  source-level determinism was confirmed by the same probe.
+
+No behaviour changed for any other case: the split content is byte-identical
+across rebuilds before and after, and the immutability rule refuses a rewrite of
+a real dataset version exactly as it did before the fixture was corrected.

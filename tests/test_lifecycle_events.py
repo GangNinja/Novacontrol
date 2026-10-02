@@ -220,7 +220,9 @@ class LifecycleEventTests(unittest.IsolatedAsyncioTestCase):
             Event.of(EventType.INTENT_DETECTED.value, intent="demo")
         )
 
-        self.assertEqual(result.delivered, 1)  # the recorder
+        # Both healthy observers heard it: this suite's wildcard recorder and the
+        # Phase 15 trajectory recorder, which watches the same lifecycle.
+        self.assertEqual(result.delivered, 2)
         self.assertTrue(result.failures)
         self.assertIn("this watcher is broken", str(result.failures[0].error))
 

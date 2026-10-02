@@ -7,7 +7,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 
 @dataclass(frozen=True, slots=True)
@@ -466,6 +466,222 @@ class ResourceSettings:
         )
 
 
+#: The longest a trajectory may be kept, in days. Ten years: past that the
+#: setting is not a retention policy, it is a decision not to have one.
+MAX_EVALUATION_RETENTION_DAYS = 3650
+
+#: The largest number of rows one evaluation store may hold.
+MAX_EVALUATION_RECORDS = 1_000_000
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationSettings:
+    """Phase 15: what is recorded, how it is scored, and how long it is kept.
+
+    ``enabled`` is the master switch: off means no trajectory is built at all.
+    ``record_trajectories`` is the operator's finer switch — evaluation and
+    reward can still be computed for a trajectory handed over directly (a
+    specialist run, an imported row) while live capture stays off.
+
+    The scoring lines (``latency_budget_ms``, ``max_tool_calls``, ``max_retries``)
+    are here rather than in code because "slow" and "too many steps" are facts
+    about a machine and a workload, not about this project. The reward weights
+    are read here too: an operator changing what "good" means does it in the
+    config file, and the defaults live in ``evaluation/reward.py`` so there is
+    exactly one copy of them.
+    """
+
+    enabled: bool = True
+    record_trajectories: bool = True
+    evaluate: bool = True
+    compute_rewards: bool = True
+    quality_filter: bool = True
+    redact_sensitive: bool = True
+    retention_days: int = 30
+    max_records: int = 2000
+    latency_budget_ms: float = 8000.0
+    max_tool_calls: int = 12
+    max_retries: int = 2
+    reward_component_weights: Mapping[str, float] = field(default_factory=dict)
+    reward_penalty_weights: Mapping[str, float] = field(default_factory=dict)
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "record_trajectories": self.record_trajectories,
+            "evaluate": self.evaluate,
+            "compute_rewards": self.compute_rewards,
+            "quality_filter": self.quality_filter,
+            "redact_sensitive": self.redact_sensitive,
+            "retention_days": self.retention_days,
+            "max_records": self.max_records,
+            "latency_budget_ms": self.latency_budget_ms,
+            "max_tool_calls": self.max_tool_calls,
+            "max_retries": self.max_retries,
+            "reward_component_weights": dict(self.reward_component_weights),
+            "reward_penalty_weights": dict(self.reward_penalty_weights),
+        }
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> EvaluationSettings:
+        """Read the section; an unusable value keeps its default."""
+        defaults = cls()
+        days = data.get("retention_days")
+        if isinstance(days, bool) or not isinstance(days, (int, float)) or days < 0:
+            retention = defaults.retention_days
+        else:
+            retention = min(int(days), MAX_EVALUATION_RETENTION_DAYS)
+        return cls(
+            enabled=_bool_setting(data, "enabled", defaults.enabled),
+            record_trajectories=_bool_setting(
+                data, "record_trajectories", defaults.record_trajectories
+            ),
+            evaluate=_bool_setting(data, "evaluate", defaults.evaluate),
+            compute_rewards=_bool_setting(data, "compute_rewards", defaults.compute_rewards),
+            quality_filter=_bool_setting(data, "quality_filter", defaults.quality_filter),
+            redact_sensitive=_bool_setting(data, "redact_sensitive", defaults.redact_sensitive),
+            retention_days=retention,
+            max_records=_count_setting(
+                data, "max_records", defaults.max_records, maximum=MAX_EVALUATION_RECORDS
+            ),
+            latency_budget_ms=_float_value(
+                data.get("latency_budget_ms"), defaults.latency_budget_ms
+            ),
+            max_tool_calls=_count_setting(
+                data, "max_tool_calls", defaults.max_tool_calls, maximum=10_000
+            ),
+            max_retries=_count_setting(data, "max_retries", defaults.max_retries, maximum=100),
+            reward_component_weights=_weight_setting(
+                data.get("reward_component_weights"), defaults.reward_component_weights
+            ),
+            reward_penalty_weights=_weight_setting(
+                data.get("reward_penalty_weights"), defaults.reward_penalty_weights
+            ),
+        )
+
+
+#: The largest number of rows one training store may hold.
+MAX_TRAINING_RECORDS = 1_000_000
+
+#: The ceiling on a checkpoint retention policy. Kept here (rather than
+#: imported from the training package) so the settings layer never imports the
+#: subsystem it configures; ``tests/test_training.py`` pins the two together.
+MAX_TRAINING_CHECKPOINTS = 100
+
+
+@dataclass(frozen=True, slots=True)
+class TrainingSettings:
+    """Phase 16: whether supervised fine-tuning is available, and how cautious.
+
+    Training is the one subsystem that can occupy this machine for hours and
+    fill a disk with checkpoints, so its defaults are the cautious ones:
+    ``enabled`` is True (the surface exists) while ``dry_run`` is True (nothing
+    is actually trained until an operator asks) and ``allow_unsafe`` is False
+    (an estimate that says UNSAFE is a refusal, not a warning to click past).
+
+    ``defaults`` is a partial ``TrainingConfig`` mapping: the machine's usual
+    epochs, LoRA rank or sequence length are written down once here and every
+    new run inherits them. The mapping is not validated here — an unusable
+    value is reported by the run itself, so there is one validator, not two.
+    """
+
+    enabled: bool = True
+    dry_run: bool = True
+    allow_unsafe: bool = False
+    hardware_policy: str = "auto"
+    max_checkpoints: int = 3
+    max_records: int = 2000
+    retention_days: int = 30
+    defaults: Mapping[str, Any] = field(default_factory=dict)
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "dry_run": self.dry_run,
+            "allow_unsafe": self.allow_unsafe,
+            "hardware_policy": self.hardware_policy,
+            "max_checkpoints": self.max_checkpoints,
+            "max_records": self.max_records,
+            "retention_days": self.retention_days,
+            "defaults": dict(self.defaults),
+        }
+
+    def base_config(self) -> dict[str, Any]:
+        """What a new run starts from: this section's policy, plus overrides.
+
+        The section's own fields are the policy (they say how this deployment
+        behaves); ``defaults`` is the operator's opinion about the trainer.
+        A key in both is the operator's, deliberately.
+        """
+        settings: dict[str, Any] = {
+            "hardware_policy": self.hardware_policy,
+            "max_checkpoints": self.max_checkpoints,
+            "dry_run": self.dry_run,
+        }
+        settings.update(self.defaults)
+        return settings
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> Self:
+        """Read the section; an unusable value keeps its default.
+
+        ``Self`` rather than the class name because the parser builds ``cls``:
+        Phase 17's preference section is the same shape and inherits this reader,
+        and an annotation naming the base would make that inherit-then-narrow
+        pattern untypeable for the caller.
+        """
+        defaults = cls()
+        days = data.get("retention_days")
+        if isinstance(days, bool) or not isinstance(days, (int, float)) or days < 0:
+            retention = defaults.retention_days
+        else:
+            retention = min(int(days), MAX_EVALUATION_RETENTION_DAYS)
+        raw_defaults = data.get("defaults")
+        overrides = (
+            {str(key): value for key, value in raw_defaults.items()}
+            if isinstance(raw_defaults, Mapping)
+            else {}
+        )
+        policy = str(data.get("hardware_policy", defaults.hardware_policy)).strip().lower()
+        return cls(
+            enabled=_bool_setting(data, "enabled", defaults.enabled),
+            dry_run=_bool_setting(data, "dry_run", defaults.dry_run),
+            allow_unsafe=_bool_setting(data, "allow_unsafe", defaults.allow_unsafe),
+            hardware_policy=policy or defaults.hardware_policy,
+            max_checkpoints=_count_setting(
+                data,
+                "max_checkpoints",
+                defaults.max_checkpoints,
+                maximum=MAX_TRAINING_CHECKPOINTS,
+            ),
+            max_records=_count_setting(
+                data, "max_records", defaults.max_records, maximum=MAX_TRAINING_RECORDS
+            ),
+            retention_days=retention,
+            defaults=overrides,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PreferenceSettings(TrainingSettings):
+    """Phase 17: whether preference optimization is offered, and how cautious.
+
+    Deliberately the SAME fields as the training section: DPO/ORPO is the same
+    kind of subsystem with the same hazards — a run can occupy this machine for
+    hours and fill a disk with checkpoints — so these are the same switches, and
+    an operator who understands one section understands both. The section is
+    separate because the answer may differ: an installation may fine-tune a model
+    on its own verified data and still refuse preference optimization, or the
+    other way round, and one switch for both would decide that for them.
+
+    ``defaults`` is a partial ``PreferenceTrainingConfig`` mapping, so this is
+    where a deployment writes down its usual ``algorithm``, ``beta`` or LoRA rank
+    once and every new run inherits it. The mapping is not validated here — an
+    unusable value is reported by the run itself, so there is one validator, not
+    two.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class ModuleSettings:
     enabled: bool = True
@@ -486,6 +702,19 @@ class NovaControlConfig:
     # read from the same section, so one file describes this machine's comfort
     # lines rather than each service carrying its own constants.
     resources: ResourceSettings = field(default_factory=ResourceSettings)
+    # Phase 15: what is recorded, what it is scored against, and how long the
+    # evidence is kept — one section, because these are one decision.
+    evaluation: EvaluationSettings = field(default_factory=EvaluationSettings)
+    # Phase 16: whether supervised fine-tuning is offered, how cautious it is,
+    # and the defaults a new training run inherits. Separate from evaluation
+    # because an installation may record and score without ever training.
+    training: TrainingSettings = field(default_factory=TrainingSettings)
+    # Phase 17: whether DPO/ORPO is offered at all, how cautious it is, and the
+    # defaults a new preference run inherits. Its own section for the same reason
+    # the training section is its own: the two subsystems can be answered
+    # differently, and a deployment that wants one and not the other should not
+    # have to accept both.
+    preference: PreferenceSettings = field(default_factory=PreferenceSettings)
     vision: VisionSettings = field(default_factory=VisionSettings)
     models: ModelSettings = field(default_factory=ModelSettings)
     modules: Mapping[str, ModuleSettings] = field(default_factory=dict)
@@ -516,6 +745,11 @@ class NovaControlConfig:
             planning=PlanningSettings.from_mapping(_mapping(data.get("planning", {}))),
             automation=AutomationSettings.from_mapping(_mapping(data.get("automation", {}))),
             resources=ResourceSettings.from_mapping(_mapping(data.get("resources", {}))),
+            evaluation=EvaluationSettings.from_mapping(_mapping(data.get("evaluation", {}))),
+            training=TrainingSettings.from_mapping(_mapping(data.get("training", {}))),
+            preference=PreferenceSettings.from_mapping(
+                _mapping(data.get("preference", {}))
+            ),
             vision=VisionSettings.from_mapping(_mapping(data.get("vision", {}))),
             models=ModelSettings.from_mapping(_mapping(data.get("models", {}))),
             modules=modules,
@@ -667,6 +901,111 @@ class NovaControlConfig:
                     maximum=MAX_MODEL_HEADROOM_MB,
                 ),
             ),
+            evaluation=replace(
+                base.evaluation,
+                enabled=_parse_bool(
+                    os.getenv("NOVACONTROL_EVALUATION_ENABLED"),
+                    default=base.evaluation.enabled,
+                ),
+                record_trajectories=_parse_bool(
+                    os.getenv("NOVACONTROL_EVALUATION_RECORDING"),
+                    default=base.evaluation.record_trajectories,
+                ),
+                redact_sensitive=_parse_bool(
+                    os.getenv("NOVACONTROL_EVALUATION_REDACT"),
+                    default=base.evaluation.redact_sensitive,
+                ),
+                retention_days=_days_value(
+                    os.getenv("NOVACONTROL_EVALUATION_RETENTION_DAYS"),
+                    base.evaluation.retention_days,
+                ),
+                max_records=_count_value(
+                    os.getenv("NOVACONTROL_EVALUATION_MAX_RECORDS"),
+                    base.evaluation.max_records,
+                    maximum=MAX_EVALUATION_RECORDS,
+                ),
+                latency_budget_ms=_seconds_value(
+                    os.getenv("NOVACONTROL_EVALUATION_LATENCY_BUDGET_MS"),
+                    base.evaluation.latency_budget_ms,
+                ),
+            ),
+            training=replace(
+                base.training,
+                enabled=_parse_bool(
+                    os.getenv("NOVACONTROL_TRAINING_ENABLED"),
+                    default=base.training.enabled,
+                ),
+                dry_run=_parse_bool(
+                    os.getenv("NOVACONTROL_TRAINING_DRY_RUN"),
+                    default=base.training.dry_run,
+                ),
+                allow_unsafe=_parse_bool(
+                    os.getenv("NOVACONTROL_TRAINING_ALLOW_UNSAFE"),
+                    default=base.training.allow_unsafe,
+                ),
+                hardware_policy=(
+                    os.getenv(
+                        "NOVACONTROL_TRAINING_HARDWARE_POLICY", base.training.hardware_policy
+                    ).strip().lower()
+                    or base.training.hardware_policy
+                ),
+                max_checkpoints=_count_value(
+                    os.getenv("NOVACONTROL_TRAINING_MAX_CHECKPOINTS"),
+                    base.training.max_checkpoints,
+                    maximum=MAX_TRAINING_CHECKPOINTS,
+                ),
+                max_records=_count_value(
+                    os.getenv("NOVACONTROL_TRAINING_MAX_RECORDS"),
+                    base.training.max_records,
+                    maximum=MAX_TRAINING_RECORDS,
+                ),
+                retention_days=_days_value(
+                    os.getenv("NOVACONTROL_TRAINING_RETENTION_DAYS"),
+                    base.training.retention_days,
+                ),
+            ),
+            # Phase 17: the preference switches, read on exactly the same rules.
+            # The ceilings are the training section's, because they are about the
+            # same two things — how many checkpoints a run may keep and how many
+            # rows the store may hold.
+            preference=replace(
+                base.preference,
+                enabled=_parse_bool(
+                    os.getenv("NOVACONTROL_PREFERENCE_ENABLED"),
+                    default=base.preference.enabled,
+                ),
+                dry_run=_parse_bool(
+                    os.getenv("NOVACONTROL_PREFERENCE_DRY_RUN"),
+                    default=base.preference.dry_run,
+                ),
+                allow_unsafe=_parse_bool(
+                    os.getenv("NOVACONTROL_PREFERENCE_ALLOW_UNSAFE"),
+                    default=base.preference.allow_unsafe,
+                ),
+                hardware_policy=(
+                    os.getenv(
+                        "NOVACONTROL_PREFERENCE_HARDWARE_POLICY",
+                        base.preference.hardware_policy,
+                    )
+                    .strip()
+                    .lower()
+                    or base.preference.hardware_policy
+                ),
+                max_checkpoints=_count_value(
+                    os.getenv("NOVACONTROL_PREFERENCE_MAX_CHECKPOINTS"),
+                    base.preference.max_checkpoints,
+                    maximum=MAX_TRAINING_CHECKPOINTS,
+                ),
+                max_records=_count_value(
+                    os.getenv("NOVACONTROL_PREFERENCE_MAX_RECORDS"),
+                    base.preference.max_records,
+                    maximum=MAX_TRAINING_RECORDS,
+                ),
+                retention_days=_days_value(
+                    os.getenv("NOVACONTROL_PREFERENCE_RETENTION_DAYS"),
+                    base.preference.retention_days,
+                ),
+            ),
             vision=replace(
                 base.vision,
                 # "none" is a real answer here, so an unknown value must not
@@ -695,10 +1034,32 @@ def _mapping(value: Any) -> dict[str, Any]:
     return dict(value)
 
 
+#: The spellings an operator may use for a boolean environment variable. Both
+#: directions are listed so an explicitly written "off" is obeyed while a typo
+#: is not mistaken for one.
+_TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
+_FALSE_WORDS = frozenset({"0", "false", "no", "off"})
+
+
 def _parse_bool(value: str | None, *, default: bool) -> bool:
+    """Read a boolean switch, keeping the current value on unusable input.
+
+    An explicitly written value — 1/true/yes/on, or 0/false/no/off — is obeyed.
+    Anything else (a typo, a stray quote, an empty string) keeps the default
+    rather than reading as "off": for a switch like ``training_dry_run`` or
+    ``evaluation_redact_sensitive`` the default is the cautious answer, and a
+    misspelling must not be the thing that turns it into the permissive one.
+    This is the same rule ``_count_value`` and ``_days_value`` already apply to
+    numbers, and the one the settings sections document.
+    """
     if value is None:
         return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+    text = value.strip().lower()
+    if text in _TRUE_WORDS:
+        return True
+    if text in _FALSE_WORDS:
+        return False
+    return default
 
 
 def _count_value(value: str | None, default: int, *, maximum: int) -> int:
@@ -803,6 +1164,40 @@ def _float_setting(data: Mapping[str, Any], key: str, default: float) -> float:
     except (TypeError, ValueError):
         return default
     return parsed if 0.0 <= parsed <= 1.0 else default
+
+
+def _days_value(value: str | None, default: int) -> int:
+    """A retention period in days, where 0 legitimately means "no age limit"."""
+    if value is None or not str(value).strip():
+        return default
+    try:
+        parsed = int(str(value).strip())
+    except ValueError:
+        return default
+    if parsed < 0:
+        return default
+    return min(parsed, MAX_EVALUATION_RETENTION_DAYS)
+
+
+def _weight_setting(value: Any, default: Mapping[str, float]) -> Mapping[str, float]:
+    """Reward weights from configuration: finite numbers only, others ignored.
+
+    A weight may be zero ("this factor does not count here") and may be large;
+    what it may not be is ``nan`` or an infinity, because a reward nobody can
+    compare is worse than a reward with the wrong weight. An unusable entry is
+    dropped rather than defaulted, so the engine's own default applies to it.
+    """
+    if not isinstance(value, Mapping):
+        return {}
+    cleaned: dict[str, float] = {}
+    for key, item in value.items():
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            continue
+        number = float(item)
+        if number != number or number in {float("inf"), float("-inf")}:
+            continue
+        cleaned[str(key)] = number
+    return cleaned or dict(default)
 
 
 def _bool_setting(data: Mapping[str, Any], key: str, default: bool) -> bool:

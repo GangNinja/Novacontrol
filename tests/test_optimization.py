@@ -946,9 +946,15 @@ class Phase14ApplicationTests(unittest.IsolatedAsyncioTestCase):
             "Vision", "Ollama", "Models", "Model manager", "GPU", "NPU",
             "Database", "Redis", "Plugin system", "Knowledge system", "Scheduler",
             "Permissions", "Storage", "Network", "Configuration",
+            # Phase 16 adds the SFT subsystem: DEGRADED without the training
+            # libraries (dry-run still works) and SKIPPED when it is switched off.
+            "Training",
+            # Phase 17 adds preference optimization: the same treatment, with the
+            # DPO/ORPO objectives and the pair store behind it.
+            "Preference optimization",
         ):
             self.assertIn(name, components)
-        self.assertEqual(len(report["components"]), 21)
+        self.assertEqual(len(report["components"]), 23)
         for row in report["components"]:
             self.assertIn(row["status"], {state.value for state in HealthState})
             self.assertTrue(row["message"])

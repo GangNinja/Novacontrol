@@ -94,6 +94,63 @@ The Phase 12 API subsystem provides REST and WebSocket entrypoints through FastA
 - `GET /diagnostics`: Run the component roster, or a comma-separated subset via ?only=. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /benchmark`: Stored model measurements and the measured comparison per category. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /benchmark`: Measure a model on the given tasks through the live provider. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /evaluation/summary`: Recorded trajectories, quality verdicts, scores and retention, at a glance. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /evaluation/trajectory/{trajectory_id}`: One stored trajectory with its evaluation and reward breakdown. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /evaluation/metrics`: Aggregate metrics over stored trajectories (success, latency p50/p95, reward, routing). *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /evaluation/rewards`: Stored rewards, newest first, with their component and penalty breakdowns. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /training/status`: Training subsystem state: enabled, dry-run, backend, capabilities. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /training/summary`: Datasets, runs, checkpoints and models, at a glance. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /training/estimate`: Estimate a training config's resources without starting anything. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /training/datasets`: Stored fine-tuning dataset versions, newest first. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /training/datasets`: Build a dataset version from stored trajectories, deterministically split. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /training/datasets/validate`: Validate a dataset version: leakage, duplicates, empty splits. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /training/datasets/{dataset_version_id}`: One dataset version with its split counts and provenance. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /training/runs`: Training runs, newest first, with their status and resource verdict. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /training/runs`: Create a training run from a config (never starts it). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /training/runs/start`: Start a run: refused when the estimate is unsafe, real training needs confirmation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /training/runs/pause`: Pause a running training run at the next checkpoint boundary. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /training/runs/cancel`: Cancel a run; its checkpoints are kept for inspection. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /training/runs/resume`: Resume an interrupted run from its newest valid checkpoint. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /training/runs/re-estimate`: Re-estimate a run's resources against the current machine reading. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /training/runs/evaluate`: Compare a run's candidate against its base model and record the verdict. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /training/runs/{run_id}/checkpoints`: A run's checkpoints with their validity (complete, partial, corrupt). *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /training/runs/{run_id}`: One training run: config, metrics, progress and checkpoint list. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /training/evaluations`: Recorded before/after evaluations with their regression checks. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /training/models`: Fine-tuned candidates and registered models, with their lifecycle status. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /training/models/{model_id}`: One registered model: adapter metadata, lineage and evaluation history. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /training/models/approve`: Approve a candidate that has a recorded passing evaluation (explicit only). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /training/models/promote`: Promote an approved model to production, demoting the previous one. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /training/models/reject`: Reject a candidate with a recorded reason. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /training/models/deprecate`: Deprecate a registered model so it is no longer selected. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /training/models/rollback`: Roll a deployment back to the model a promotion replaced. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /preference/status`: Preference subsystem state: datasets, runs, reviews, readiness. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /preference/summary`: Datasets, runs, reviews and objectives, at a glance. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /preference/algorithms`: The DPO and ORPO objectives, what each costs, and readiness here. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /preference/estimate`: Estimate a preference config's resources without starting anything. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /preference/dry-run`: Validate a dataset, config and output directory, and price the run — starting nothing. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /preference/datasets`: Stored preference dataset versions, newest first. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /preference/datasets`: Build a preference dataset version from observed behaviour, deterministically split. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /preference/datasets/validate`: Validate a preference dataset: leakage, contradictions, provenance, quality. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /preference/datasets/{dataset_version_id}`: One preference dataset version with its splits and statistics. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /preference/datasets/{dataset_version_id}/pairs/{preference_id}`: One preference pair: both candidates, evidence, outcomes and split. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /preference/reviews`: Pairs waiting on a human reviewer, with both candidates side by side. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /preference/reviews/{preference_id}`: One queued pair as a reviewer sees it. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /preference/reviews/submit`: Submit a preference a person is asserting (choose A/B, or record a pair). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /preference/reviews/decide`: Settle a queued pair: choose A, choose B, mark a tie, or reject it. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /preference/runs`: Preference runs, newest first, filtered by objective. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /preference/runs`: Create a DPO/ORPO run from a config (never starts it). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /preference/runs/start`: Start a preference run: unsafe estimates and unconfirmed real runs are refused. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /preference/runs/pause`: Pause a running preference run at the next step boundary. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /preference/runs/cancel`: Cancel a preference run; its checkpoints are kept. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /preference/runs/resume`: Resume an interrupted preference run from its newest valid checkpoint. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /preference/runs/re-estimate`: Re-estimate a run's resources against the current machine reading. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /preference/runs/evaluate`: Compare base, SFT and candidate on the held-out pairs and record the verdict. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /preference/compare`: Compare three models on a pair dataset without needing a run. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /preference/runs/{run_id}/checkpoints`: A preference run's checkpoints with their validity. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /preference/runs/{run_id}`: One preference run: algorithm, config, metrics and checkpoints. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /preference/evaluations`: Recorded preference comparisons with their regression checks. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /preference/models`: Registered preference models, filtered by objective (same registry as training). *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /preference/models/{model_id}`: One registered preference model, with the objective that produced it. *(frontend: no web panel - API/CLI or infrastructure)*
 
 <!-- END GENERATED: api-reference -->
 

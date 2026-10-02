@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -150,6 +150,390 @@ async def run_train(goal: str, *, iterations: int, feedback: str) -> None:
         print_json({"status": "ok", "training": result})
     finally:
         await app.stop()
+
+
+def _training_overrides(pairs: Sequence[str]) -> dict[str, Any]:
+    """Turn repeated --set KEY=VALUE into the mapping a config is built from.
+
+    Values stay strings unless they are plainly a number or a boolean, which is
+    the same rule `TrainingConfig.from_mapping` applies on the other side: an
+    unusable value keeps its default instead of silently becoming 0.
+    """
+    overrides: dict[str, Any] = {}
+    for pair in pairs:
+        key, separator, value = str(pair).partition("=")
+        key = key.strip()
+        if not separator or not key:
+            raise ValueError(f"--set needs KEY=VALUE, got {pair!r}")
+        text = value.strip()
+        lowered = text.lower()
+        if lowered in ("true", "false"):
+            overrides[key] = lowered == "true"
+            continue
+        for caster in (int, float):
+            try:
+                overrides[key] = caster(text)
+                break
+            except ValueError:
+                continue
+        else:
+            overrides[key] = text
+    return overrides
+
+
+async def run_training(
+    action: str,
+    *,
+    identifier: str = "",
+    dataset_type: str = "nlu",
+    name: str = "",
+    model: str = "",
+    dataset_version: str = "",
+    epochs: int | None = None,
+    limit: int = 50,
+    overrides: Sequence[str] = (),
+    confirm: bool = False,
+    override: bool = False,
+    reason: str = "",
+    note: str = "",
+    approved_by: str = "",
+) -> None:
+    """Supervised fine-tuning: datasets, runs, checkpoints and trained models.
+
+    Read-only actions (status, datasets, runs, models…) answer with what is
+    stored. Actions that change something go through the application's own
+    methods, so the CLI cannot start, approve or promote anything the API could
+    not — and a refusal reports the manager's reason and exits non-zero instead
+    of printing a cheerful payload.
+    """
+    app = NovaControlApplication(data_dir=Path("data"))
+    await app.start()
+    try:
+        result = await _training_action(
+            app,
+            action,
+            identifier=identifier,
+            dataset_type=dataset_type,
+            name=name,
+            model=model,
+            dataset_version=dataset_version,
+            epochs=epochs,
+            limit=limit,
+            overrides=overrides,
+            confirm=confirm,
+            override=override,
+            reason=reason,
+            note=note,
+            approved_by=approved_by,
+        )
+    except (KeyError, ValueError, TypeError) as exc:
+        print_json({"status": "error", "reason": f"{type(exc).__name__}: {exc}"})
+        raise SystemExit(1) from exc
+    finally:
+        await app.stop()
+    refused = not result.get("ok", True)
+    print_json({"status": "refused" if refused else "ok", "training": result})
+    if refused:
+        raise SystemExit(1)
+
+
+async def _training_action(app: NovaControlApplication, action: str, **args: Any) -> dict[str, Any]:
+    """Dispatch one training action to the application method that owns it."""
+    identifier = str(args["identifier"])
+    limit = int(args["limit"])
+    if action == "status":
+        return app.training_status()
+    if action == "summary":
+        return app.training_summary()
+    if action == "datasets":
+        return app.training_datasets(dataset_type=str(args["dataset_type"]), limit=limit)
+    if action == "dataset":
+        return app.training_dataset(identifier)
+    if action == "build":
+        rules: dict[str, Any] = {}
+        if args["overrides"]:
+            rules = _training_overrides(args["overrides"])
+        return app.create_training_dataset(
+            str(args["name"]) or str(args["dataset_type"]),
+            str(args["dataset_type"]),
+            rules=rules or None,
+        )
+    if action == "validate":
+        return app.validate_training_dataset(identifier)
+    if action == "estimate":
+        config: dict[str, Any] = _training_overrides(args["overrides"])
+        if args["model"]:
+            config["base_model"] = str(args["model"])
+        if args["dataset_version"]:
+            config["dataset_version"] = str(args["dataset_version"])
+        if args["epochs"] is not None:
+            config["epochs"] = int(args["epochs"])
+        return app.estimate_training(config)
+    if action == "create":
+        return app.create_training_run(
+            str(args["model"]),
+            str(args["dataset_version"]),
+            config=_training_overrides(args["overrides"]) or None,
+            name=str(args["name"]),
+        )
+    if action == "runs":
+        return app.training_runs(limit=limit)
+    if action == "run":
+        return app.training_run(identifier)
+    if action == "checkpoints":
+        return app.training_checkpoints(identifier)
+    if action == "evaluate":
+        return await app.evaluate_training_run(identifier)
+    if action == "evaluations":
+        return app.training_evaluations(limit=limit)
+    if action == "models":
+        return app.training_models(limit=limit)
+    if action == "model":
+        return app.training_model(identifier)
+    if action == "start":
+        return await app.start_training_run(
+            identifier, confirm=bool(args["confirm"]), override=bool(args["override"])
+        )
+    if action == "pause":
+        return app.pause_training_run(identifier)
+    if action == "resume":
+        return await app.resume_training_run(identifier)
+    if action == "cancel":
+        return app.cancel_training_run(identifier)
+    if action == "approve":
+        return app.approve_training_model(
+            identifier, approved_by=str(args["approved_by"]), note=str(args["note"])
+        )
+    if action == "promote":
+        return app.promote_training_model(identifier, note=str(args["note"]))
+    if action == "reject":
+        return app.reject_training_model(identifier, reason=str(args["reason"]))
+    if action == "deprecate":
+        return app.deprecate_training_model(identifier, reason=str(args["reason"]))
+    if action == "rollback":
+        return app.rollback_training_model(identifier, reason=str(args["reason"]))
+    raise ValueError(f"unsupported training action {action!r}")
+
+
+async def run_preference(
+    action: str,
+    *,
+    identifier: str = "",
+    dataset_type: str = "nlu",
+    algorithm: str = "",
+    name: str = "",
+    model: str = "",
+    dataset_version: str = "",
+    epochs: int | None = None,
+    beta: float | None = None,
+    limit: int = 50,
+    pairs: str = "",
+    decision: str = "",
+    reviewer: str = "",
+    overrides: Sequence[str] = (),
+    confirm: bool = False,
+    override: bool = False,
+    reason: str = "",
+    note: str = "",
+) -> None:
+    """Preference optimization (DPO/ORPO): pair datasets, runs and reviews.
+
+    Same contract as the `training` command beside it: read-only actions answer
+    with what is stored, changing actions go through the application's own
+    methods (so the CLI can do nothing the API could not), a refusal exits
+    non-zero, and nothing here starts a real run without --confirm.
+    """
+    app = NovaControlApplication(data_dir=Path("data"))
+    await app.start()
+    try:
+        result = await _preference_action(
+            app,
+            action,
+            identifier=identifier,
+            dataset_type=dataset_type,
+            algorithm=algorithm,
+            name=name,
+            model=model,
+            dataset_version=dataset_version,
+            epochs=epochs,
+            beta=beta,
+            limit=limit,
+            pairs=pairs,
+            decision=decision,
+            reviewer=reviewer,
+            overrides=overrides,
+            confirm=confirm,
+            override=override,
+            reason=reason,
+            note=note,
+        )
+    except (KeyError, ValueError, TypeError, OSError) as exc:
+        print_json({"status": "error", "reason": f"{type(exc).__name__}: {exc}"})
+        raise SystemExit(1) from exc
+    finally:
+        await app.stop()
+    refused = not result.get("ok", True)
+    print_json({"status": "refused" if refused else "ok", "preference": result})
+    if refused:
+        raise SystemExit(1)
+
+
+async def _preference_action(
+    app: NovaControlApplication, action: str, **args: Any
+) -> dict[str, Any]:
+    """Dispatch one preference action to the application method that owns it."""
+    identifier = str(args["identifier"])
+    limit = int(args["limit"])
+    algorithm = str(args["algorithm"])
+    if action == "status":
+        return app.preference_status()
+    if action == "summary":
+        return app.preference_summary()
+    if action == "algorithms":
+        return app.preference_algorithms()
+    if action == "datasets":
+        return app.preference_datasets(dataset_type=str(args["dataset_type"]), limit=limit)
+    if action == "dataset":
+        return app.preference_dataset(identifier)
+    if action == "pair":
+        dataset_version, _, preference_id = identifier.partition(":")
+        if not preference_id:
+            raise ValueError("--id needs DATASET_VERSION:PREFERENCE_ID for a pair")
+        return app.preference_pair(dataset_version, preference_id)
+    if action == "build":
+        rules = _training_overrides(args["overrides"]) if args["overrides"] else {}
+        return app.create_preference_dataset(
+            str(args["name"]) or str(args["dataset_type"]),
+            str(args["dataset_type"]),
+            rules=rules or None,
+        )
+    if action == "validate":
+        return app.validate_preference_dataset(identifier)
+    if action == "estimate":
+        return app.estimate_preference(_preference_config_args(args))
+    if action == "dry-run":
+        return app.dry_run_preference(
+            str(args["model"]),
+            str(args["dataset_version"]),
+            config=_preference_config_args(args) or None,
+            algorithm=algorithm,
+        )
+    if action == "create":
+        return app.create_preference_run(
+            str(args["model"]),
+            str(args["dataset_version"]),
+            config=_preference_config_args(args) or None,
+            name=str(args["name"]),
+        )
+    if action == "runs":
+        return app.preference_runs(algorithm=algorithm, limit=limit)
+    if action == "run":
+        return app.preference_run(identifier)
+    if action == "checkpoints":
+        return app.preference_checkpoints(identifier)
+    if action == "evaluate":
+        return await app.evaluate_preference_run(identifier)
+    if action == "evaluations":
+        return app.preference_evaluations(limit=limit)
+    if action == "reviews":
+        return app.preference_reviews(limit=limit)
+    if action == "review":
+        return app.preference_review(identifier)
+    if action == "submit":
+        return app.submit_preference_pair(**_submitted_pair(args))
+    if action == "decide":
+        if not str(args["decision"]):
+            raise ValueError("decide needs --decision choose_a|choose_b|tie|reject")
+        return app.decide_preference_review(
+            identifier,
+            str(args["decision"]),
+            reviewer=str(args["reviewer"]),
+            reason=str(args["reason"]),
+        )
+    if action == "models":
+        return app.preference_models(algorithm=algorithm, limit=limit)
+    if action == "model":
+        return app.preference_model(identifier)
+    if action == "start":
+        return await app.start_preference_run(
+            identifier, confirm=bool(args["confirm"]), override=bool(args["override"])
+        )
+    if action == "pause":
+        return app.pause_preference_run(identifier)
+    if action == "resume":
+        return await app.resume_preference_run(identifier)
+    if action == "cancel":
+        return app.cancel_preference_run(identifier)
+    raise ValueError(f"unsupported preference action {action!r}")
+
+
+def _preference_config_args(args: Mapping[str, Any]) -> dict[str, Any]:
+    """The configuration flags shared by `estimate`, `dry-run` and `create`."""
+    config: dict[str, Any] = _training_overrides(args["overrides"])
+    if args["algorithm"]:
+        config["algorithm"] = str(args["algorithm"])
+    if args["model"]:
+        config["base_model"] = str(args["model"])
+    if args["dataset_version"]:
+        config["preference_dataset_version"] = str(args["dataset_version"])
+    if args["epochs"] is not None:
+        config["epochs"] = int(args["epochs"])
+    if args["beta"] is not None:
+        config["beta"] = float(args["beta"])
+    return config
+
+
+def _submitted_pair(args: Mapping[str, Any]) -> dict[str, Any]:
+    """Read a submitted pair from a JSON file: one pair, or a list of them.
+
+    A file rather than a dozen flags because a pair is two structured outputs —
+    an intent, a decision, a tool call with its arguments — and inventing flag
+    syntax for every one of them would be a worse interface than the structure it
+    is describing.
+    """
+    raw = _read_json_file(str(args["pairs"]))
+    payload = raw[0] if isinstance(raw, list) and raw else raw
+    if not isinstance(payload, Mapping):
+        raise ValueError("--pairs needs a JSON object or a list of JSON objects")
+    pair = dict(payload)
+    dataset_type = str(args["dataset_type"])
+    return {
+        "dataset_type": str(pair.get("dataset_type", dataset_type)),
+        "prompt": _required_mapping(pair, "prompt"),
+        "chosen": _required_mapping(pair, "chosen"),
+        "rejected": _required_mapping(pair, "rejected"),
+        "context": _optional_mapping(pair, "context"),
+        "chosen_outcome": _optional_mapping(pair, "chosen_outcome"),
+        "rejected_outcome": _optional_mapping(pair, "rejected_outcome"),
+        "reviewer": str(args["reviewer"] or pair.get("reviewer", "")),
+        "reason": str(args["reason"] or pair.get("reason", "")),
+        "confidence": float(pair.get("confidence", 1.0) or 1.0),
+        "group_key": str(pair.get("group_key", "")),
+        "tags": tuple(str(tag) for tag in pair.get("tags", ()) or ()),
+        "enqueue": bool(pair.get("enqueue", False)),
+    }
+
+
+def _read_json_file(path: str) -> Any:
+    """Read a JSON document from disk (a pair, or a list of pairs)."""
+    import json
+
+    if not path:
+        raise ValueError("--pairs needs a path to a JSON file")
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _required_mapping(pair: Mapping[str, Any], key: str) -> dict[str, Any]:
+    value = pair.get(key)
+    if not isinstance(value, Mapping):
+        raise ValueError(f"a submitted pair needs a {key} object")
+    return dict(value)
+
+
+def _optional_mapping(pair: Mapping[str, Any], key: str) -> dict[str, Any] | None:
+    value = pair.get(key)
+    return dict(value) if isinstance(value, Mapping) else None
 
 
 async def run_ask(request: str) -> None:

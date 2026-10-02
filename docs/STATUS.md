@@ -1,13 +1,13 @@
 # Project Status
 
-Current phase: **Phase 15 - Complete Local Baseline**
+Current phase: **Phase 17 — Preference Optimization (DPO/ORPO)**
 
 Status: **Complete**
 
-> The phase label above is the original fifteen-phase baseline. The staged build that
-> followed it — what it verified, what it changed, and what remains — is recorded below
-> under "Completed Staged-Build Verification (Phases 1–7)" and the Phase 8 / Phase 9 /
-> Phase 10 sections that continue it.
+> The original baseline ended at Phase 15; the staged build that followed it — what
+> it verified, what it changed, and what remains — is recorded below under
+> "Completed Staged-Build Verification (Phases 1–7)" and the Phase 8 … Phase 17
+> sections that continue it.
 
 Verified with:
 
@@ -748,6 +748,226 @@ runtime telemetry rather than assumptions. What was built, clause by clause:
   neither be enabled again (the lifecycle the plugin guide draws) nor give back
   its permission declarations. See §37 of
   [docs/DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md).
+
+## Completed Data Collection, Evaluation and Reward Foundation (Phase 15)
+
+**What it delivers.** `evaluation/` records what the system did, scores it, and
+puts a weighted price on it — without becoming a second execution path and
+without training anything.
+
+* **`models.py`** — a versioned `AgentTrajectory`: identity, request, structured
+  intent, decision, plan, execution steps, tool calls, observations,
+  verification, recovery, final result, outcome, model information, latency,
+  resources, feedback, reward and quality. Structured only: there is no field for
+  hidden reasoning, every field is optional with a usable default, and an
+  unmeasured figure is `None` rather than `0.0`.
+* **`recorder.py`** — `TrajectoryRecorder` observes the EXISTING `EventBus`
+  lifecycle and groups it by correlation id: bounded in-flight drafts, a small
+  ring of finished rows so a late annotation finds one, redaction on the way in,
+  a switch, and failure isolation for both the observer and the sink.
+* **`quality.py`** — `DataQualityFilter` returns ACCEPTED / REJECTED /
+  NEEDS_REVIEW with structured reasons (presence, outcome, serialisability,
+  schema, empty result, contradictions, failed verification, malformed calls,
+  refusals kept as safety evidence, residual sensitive text, noise, duplicates)
+  and never deletes a row. Every line it draws is `QualityConfig`.
+* **`evaluator.py`** — nine dimensions scored separately (NLU, decision, tool
+  selection, planning, execution, verification, recovery, safety, efficiency),
+  each with findings and figures, `unknown` where evidence is missing, plus
+  false-success / false-failure detection and golden expectations.
+* **`reward.py`** — `RewardEngine` + `RewardConfig` + `RewardResult`: weighted
+  observable components minus penalties, with per-factor reasons, a version, a
+  normalised total and an explanation. A refusal is never penalised.
+* **`datasets.py`** — versioned `GoldenDataset`/`GoldenExample` and the small
+  deterministic built-in set (`novacontrol-core` 1.0.0, six examples).
+* **`storage.py`** — JSONL repositories (the audit trail's own pattern) with
+  upsert-by-id, caps, retention, and filtering by task, model, date and status;
+  replaceable stores, in-memory included.
+* **`metrics.py`** — the aggregate figures from stored rows: success, failure,
+  verification, tool selection, planning, recovery, safety interventions,
+  retries, average reward, latency with p50/p95, fast path %, LLM escalation %,
+  quality distribution and the nine dimension means.
+* **`service.py` / `runtime.py`** — the order the pieces run in, and the bus seam
+  that attaches the recorder (`EvaluationModule`) with correlated replies to
+  `evaluation.*_requested`.
+* **Read-only API** — `GET /evaluation/summary`, `/evaluation/trajectory/{id}`,
+  `/evaluation/metrics`, `/evaluation/rewards` (four routes; 92 in the surface).
+* **Settings** — `evaluation:` config section (switch, thresholds, retention,
+  reward weights) and the user-facing `evaluation_enabled` /
+  `evaluation_retention_days` / `evaluation_max_records`, applied live from
+  `POST /settings`.
+
+**Not implemented, on purpose:** preference optimisation and reinforcement
+learning — DPO/ORPO, RLHF/RLAIF, RLVR and agentic RL. Phase 15 is the data, the
+evaluation and the reward foundation those phases would consume; it changes no
+weights, no prompts and no behaviour. (Phase 16 adds supervised fine-tuning
+*infrastructure* on top of it; see below.)
+
+The pass is documented in [docs/EVALUATION.md](EVALUATION.md) and §38–§39 of
+[DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md), and pinned by `tests/test_evaluation.py`
+(108 tests / 6 subtests).
+
+## Completed Supervised Fine-Tuning (Phase 16)
+
+Phase 16 in one line: it turns the Phase 15 record of what NovaControl DID into
+supervised fine-tuning datasets, runs a trainer against them (a dry run by
+default), checkpoints as it goes, evaluates the result against the base model,
+and registers the candidate as an EXPERIMENTAL model that only an explicit,
+evidence-backed approval can promote. It is documented in
+[docs/TRAINING.md](TRAINING.md) and §40–§41 of
+[DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md), and pinned by `tests/test_training.py`
+(259 tests).
+
+**Datasets** — `SFTDatasetBuilder` builds seven dataset types (`nlu`, `decision`,
+`tool_selection`, `planning`, `recovery`, `developer`, `research`), one target
+schema each, from accepted trajectories. Eligibility is one `SelectionRules`
+table (quality verdict, success, verification must exist and pass, minimum reward
+or dimension score, model, task category, source, tags, date window, row cap,
+developer/research scope). Every refusal has a name — `quality_not_accepted`,
+`not_successful`, `verification_failed`, `below_min_reward`, `duplicate`,
+`residual_sensitive_data`, `hidden_reasoning`, `missing_structured_data`, … — and
+the counts stay on the version. `SFTTrainingExample` is a structured input and a
+structured target, with `metadata` free-form and round-tripping exactly, so an
+importer can extend it without a schema change.
+
+**Splits and versioning** — `SplitConfig` defaults to 80/10/10 with `seed=42` and
+`group_by="task"`: whole groups go to one split, so a model is never tested on a
+task whose other half it trained on. The walk measures each split's shortfall
+RELATIVE to its own target, so a handful of large groups cannot starve validation
+or test (four groups of ten become 20/10/10, not 30/10/0). Versions are monotonic
+and immutable (`nlu@1.0.0 → 1.0.1`), and `validate()` returns every reason a
+dataset must not be trained on rather than an `ok` nobody can act on.
+
+**Configuration and resources** — `TrainingConfig` is the one validated place
+every trainer parameter lives: an out-of-range value is an error rather than a
+silent clamp, and a typo that cannot be read keeps the default (parsing is not
+validation). `ResourceEstimator` measures the component breakdown (weights,
+adapter or gradients + optimizer, activations, the dataset, checkpoints) against
+this machine's real memory reading and returns SAFE / WARNING / UNSAFE with its
+reasons — and an UNSAFE estimate is a refusal: `start` returns `ok=false,
+refused=true` and does not move the run unless the deployment allows an override
+AND one was asked for. An explicit hardware policy that names a device this
+machine does not have says so instead of quietly becoming a CPU run.
+
+**Backends** — `SFTTrainer` is a small library-free interface the orchestrator
+drives (so a backend cannot smuggle in a second scheduler, store or lifecycle),
+with `TrainingCallbacks` as the way back. `DryRunTrainer` needs nothing installed
+and writes real checkpoints; `PeftLoraBackend` is the isolated PEFT/LoRA boundary
+that probes for `torch`/`transformers`/`peft` without importing them and explains
+what is missing. The concrete Transformers/PEFT loop is deliberately not shipped
+— it would be untestable on a 16 GB machine with no CUDA device, and untested
+code in a training path is worse than a clear boundary. `model_metadata()` is what
+a backend says it produced, so a real adapter's path reaches the registry instead
+of the registry guessing from the configuration.
+
+**Runs and checkpoints** — nine run statuses (`created`, `validating`,
+`preparing`, `running`, `paused`, `evaluating`, `completed`, `failed`,
+`cancelled`), with `create_run` having no side effects at all and a real
+(non-dry-run) start requiring confirmation. `CheckpointManager` writes atomically,
+validates by re-reading the file, reports `complete`/`incomplete`/`corrupt`,
+finds the best and the resume point, and applies retention.
+
+**Evaluation and the registry** — `TrainingEvaluator` compares base against
+candidate on the held-out split with per-metric deltas, `LOWER_IS_BETTER`
+latency/memory, a noise floor so jitter cannot fail a candidate, and a verdict of
+`pass` / `regress` / `inconclusive` — never `pass` when nothing usable was
+measured. `SFTModelRegistry` enforces the six statuses and the explicit
+transition table, requires a recorded passing evaluation before approval, demotes
+the previous production model on promotion (with a rollback point), auto-rejects
+a regression, and keeps a bounded `{from, to, reason, at}` history. The base model
+and the adapter are separate fields.
+
+**Surfaces** — 25 `/training/*` routes, a 24-action `novacontrol training` CLI, a
+`training:` config section plus five user settings and
+`NOVACONTROL_TRAINING_*` environment overrides, eight `training.*` events, and a
+`Training` diagnostics row. `start`, `resume` and `evaluate` run in a worker
+thread, so the API keeps answering while a real run trains.
+
+**Not implemented, on purpose:** the concrete Transformers/PEFT training loop,
+DPO/ORPO, RLHF/RLAIF, RLVR, agentic RL, distributed training, and any evaluation
+that approves a model on its loss curve.
+
+## Completed Preference Optimization (Phase 17)
+
+Phase 17 in one line: it turns the pairs the system has already **observed** into
+versioned preference datasets, runs DPO or ORPO against them (a dry run by
+default), and lets a model improve only where a measured behaviour comparison
+says it improved. It is documented in [docs/PREFERENCE.md](PREFERENCE.md) and
+§42–§43 of [DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md), and pinned by
+`tests/test_preference.py` (167 tests). It adds no second store, no second
+registry, no second trainer interface and no reinforcement learning.
+
+**Pairs from observation, never invention** — `PreferenceDatasetBuilder` builds
+six families (`nlu`, `decision`, `tool_selection`, `planning`, `recovery`,
+`response`) from verified outcomes (one run verified, the other not), structured
+corrections, evaluation margins beyond a minimum, golden-fixture disagreements
+(judged only on the fields the fixture asserts — a run that did what was
+expected has no pair), human review, and marked teacher/synthetic sources. Both
+sides are observable behaviour; the same two candidates the other way round are
+a contradiction that neither orientation trains on; duplicates are counted and
+dropped; and a row carrying hidden chain-of-thought is refused **before a pair
+exists**, never trimmed.
+
+**Quality and provenance** — `PreferenceQualityFilter` classifies ACCEPTED /
+REJECTED / NEEDS_REVIEW from one severity table (an `ERROR` rejects, a `WARN`
+holds for review unless a person settled the pair), redacts both candidates and
+their outcomes on the way in, and rejects residual secrets under the default
+policy. Every pair carries its source, its confidence, a three-axis
+`PreferenceStrength` (`confidence` / `evidence_quality` / `verification_strength`)
+with its `PreferenceEvidence` list, provenance ids and a content
+`fingerprint()` that makes a rebuild recognisable and a different version
+refusable.
+
+**Versions and splits** — `name@version`, monotonic and immutable, with the
+rules, statistics and a `phase17.1` preprocessing stamp on the version.
+`validate()` returns every reason a version must not be trained on (unknown
+family, a pair in two splits or none, duplicates, identical candidates, hidden
+reasoning, missing evidence or provenance, group leakage). Splits are Phase
+16's group-safe, deterministic splitter applied to pairs, so "leak-free" has one
+implementation in the codebase; `split(name)` returns only ACCEPTED pairs by
+default.
+
+**Configuration and resources** — `PreferenceTrainingConfig` validates
+`algorithm` (`dpo`/`orpo` only), `beta` in `[0.01, 1.0]` (default 0.1), the
+reference model, LoRA/QLoRA and the shared Phase 16 fields, and `dry_run` is
+`True` by default. `PreferenceResourceEstimator` reuses the Phase 16 walk and
+adds `preference_pairs` (both sides, at twice a supervised example's bytes per
+token) and, for DPO only, the **reference model** as a second copy of the
+weights — or says plainly that the size is unknown and the figure is a lower
+bound. AUTO/CPU/GPU/NPU, no CUDA assumption, and an UNSAFE verdict is still a
+refusal.
+
+**Backends and runs** — `DPOTrainer` and `ORPOTrainer` share every step but the
+objective; `DryRunPreferenceTrainer` walks a real schedule and labels every
+figure `simulated`, a missing dependency or a missing runner is named, and a
+supervised dataset handed to a preference backend is refused by name. A run is a
+Phase 16 `TrainingRun` with `algorithm` and `preference_metrics`, the same
+checkpoints, pause/resume/cancel and worker-thread start.
+
+**Evaluation and the one registry** — `PreferenceEvaluator` compares base vs SFT
+vs preference-optimized on held-out pairs with `preference_accuracy`,
+`chosen_match_rate`, `rejected_match_rate` and Phase 16's metrics, deltas, noise
+floors and blocking regression areas; a loss is never consulted
+(`loss_consulted: false`), and without two predictors the run is `skipped` and
+approval stays impossible. A payload that is not a predictor is reported as
+`inconclusive` rather than crashing the route. Approval, promotion and rollback
+are the Phase 16 registry's own explicit transitions.
+
+**Human review** — a queue the API serves: a person can submit a pair, or decide
+`choose_a` / `choose_b` (B swaps the sides) / `tie` / `reject`; both refusals
+need a reason, hidden reasoning is never queued, and only **settled** pairs are
+pulled into a later build.
+
+**Surfaces** — 29 `/preference/*` routes, a 26-action `novacontrol preference`
+CLI that dispatches to the application's own methods, a `preference:` config
+section plus five user settings and `NOVACONTROL_PREFERENCE_*` overrides, five
+`preference.*` events on the existing bus, a runtime module that answers
+questions and starts nothing, and a 23rd diagnostics row (`Preference
+optimization`).
+
+**Not implemented, on purpose:** RLHF/RLAIF, RLVR, critique learning, agentic
+RL, distributed training, and the concrete Transformers/PEFT loop (the adapter
+boundary is where it lands). Tests use mocks, synthetic rows and dry runs — no
+model is downloaded and no GPU is required.
 
 ## Next Work
 

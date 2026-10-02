@@ -59,6 +59,7 @@ from novacontrol.audit import (
     AuditLogger,
     AuditRecord,
     JsonlAuditSink,
+    Redactor,
     RetentionPolicy,
 )
 from novacontrol.automation import (
@@ -89,7 +90,39 @@ from novacontrol.core.runtime import EventDrivenRuntime
 from novacontrol.core.security import ApprovalDecision, ApprovalRequest, DenyByDefaultApprovalGateway
 from novacontrol.desktop import DesktopAutomationController, DesktopAutomationModule, LocalDesktopRunner
 from novacontrol.desktop.vision import VisionController
+from novacontrol.evaluation import (
+    DataQualityFilter,
+    EvaluationConfig,
+    EvaluationEngine,
+    EvaluationModule,
+    EvaluationService,
+    MetricsCalculator,
+    QualityConfig,
+    RewardConfig,
+    RewardEngine,
+    TrajectoryRecorder,
+    build_repositories,
+)
 from novacontrol.explore import ExploreModule, ExploreRequest, ExploreService, set_explore_cache_provider
+from novacontrol.preference import (
+    ALGORITHMS,
+    PreferenceManager,
+    PreferenceModule,
+    PreferenceQualityConfig,
+    PreferenceRules,
+    PreferenceTrainingConfig,
+    build_preference_repositories,
+)
+from novacontrol.training import (
+    ResourceEstimator,
+    SFTModelRegistry,
+    SelectionRules,
+    SplitConfig,
+    TrainingConfig,
+    TrainingManager,
+    TrainingModule,
+    build_training_repositories,
+)
 from novacontrol.decision import (
     Decision,
     DecisionEngine,
@@ -1482,6 +1515,30 @@ class NovaControlApplication:
         # work, and nothing is left running after a stop.
         self._automation_ticker: asyncio.Task[None] | None = None
         self._automation_ticks = 0
+        # ── Phase 15: trajectories, evaluation and reward ──────────────────
+        # An OBSERVER of the lifecycle this file already publishes, not another
+        # execution path: the recorder subscribes to the SAME event bus a few
+        # lines up (attached by EvaluationModule's start), groups what it hears
+        # by the correlation id the request path already threads, and hands the
+        # finished row to the service, which filters, scores, rewards and stores
+        # it. Nothing here can fail a request: the recorder's handler and the
+        # service's sink both swallow their own errors.
+        self.evaluation = self._build_evaluation_service()
+        # ── Phase 16: supervised fine-tuning ───────────────────────────────
+        # Built from the SAME Phase 15 service above (a dataset is built from
+        # what really happened, not from a second capture) and from the SAME
+        # model and resource layers the request path uses (an estimate is
+        # about THIS machine). Nothing here trains: the default configuration
+        # is dry_run, the training libraries are optional, and a real run has
+        # to be asked for explicitly.
+        self.training = self._build_training_manager()
+        # ── Phase 17: preference optimization (DPO / ORPO) ──────────────────
+        # Built on the SAME stores, the SAME model registry and the SAME Phase
+        # 15 service the training manager above uses: a preference run is a run,
+        # a preference model is a registered model, and a second registry or
+        # run store would be a second thing to keep honest. Only the pair
+        # datasets and the review queue are new files.
+        self.preference = self._build_preference_manager()
         # Phase 9.2/9.3: the capability registry is the ONE place that answers
         # what this installation can do. It is the registry the intelligence
         # layer already maintains — attached to the catalogues rather than
@@ -1622,12 +1679,36 @@ class NovaControlApplication:
         self.runtime.register_module(BrowserAutomationModule(self.browser))
         self.runtime.register_module(VisionModule())
         self.runtime.register_module(VoiceModule())
+        # Phase 15: the evaluation module attaches the trajectory recorder to
+        # the bus at start (and detaches it at stop, writing out any partial
+        # capture instead of losing it), and answers the evaluation.* requests.
+        self.runtime.register_module(EvaluationModule(self.evaluation))
+        # Phase 16: the training surface answers status/dataset/run/model
+        # questions on the bus. It deliberately exposes no start or cancel
+        # path: a run is started by an operator through the CLI or the API,
+        # never by another module that decided to "improve" something.
+        self.runtime.register_module(TrainingModule(self.training))
+        # Phase 17: the preference surface answers status/dataset/review/algorithm
+        # questions on the bus. Review DECISIONS stay off it deliberately: a
+        # reviewer's choice changes what a future dataset may train on and must
+        # carry a name, which a bus message too easily does not.
+        self.runtime.register_module(PreferenceModule(self.preference))
 
         # Phase 14, last boot steps: point the ONE cloud switch at the policy,
         # and give the diagnostic roster the components it reports on (every
         # service above now exists).
         self._apply_execution_mode()
         self._register_diagnostics()
+        # Phase 15: point the recorder at the operator's current choice and
+        # apply the configured retention once, at boot.
+        self.apply_evaluation_settings()
+        # Phase 16: and the same for the training defaults — the dry-run
+        # switch, the checkpoint cap and this machine's usual parameters.
+        self.apply_training_settings()
+        # Phase 17: and for the preference defaults (objective, beta, dry-run,
+        # checkpoint cap), so a deployment's opinion is in place before anyone
+        # asks what a DPO run would cost.
+        self.apply_preference_settings()
 
     # --- Brain mode (local scratch ↔ local LLM) ---
 
@@ -2759,6 +2840,66 @@ class NovaControlApplication:
                 "fast_path": bool((row or {}).get("fast_path", fast_path)),
             },
         )
+        # Phase 15: the same measured row enriches the trajectory the recorder
+        # is holding for this request. The lifecycle events cannot carry a
+        # request's END-TO-END latency (they happen inside it), so the layer
+        # that measures it hands it over rather than having the recorder guess;
+        # an annotation never raises and never blocks, and a request whose
+        # trajectory has already been written is updated in place.
+        self._annotate_trajectory(
+            task_id=task_id,
+            text=text,
+            route=route,
+            decision_layer=decision_layer,
+            row=row if isinstance(row, Mapping) else {},
+            fast_path=fast_path,
+        )
+
+    def _annotate_trajectory(
+        self,
+        *,
+        task_id: str,
+        text: str,
+        route: str,
+        decision_layer: Decision,
+        row: Mapping[str, Any],
+        fast_path: bool,
+    ) -> None:
+        """Hand the measured figures to the recorder. Failure is a no-op.
+
+        Only MEASURED values travel: a key whose reading is ``None`` is left
+        out rather than written as a zero, because "not measured" and "measured
+        at nothing" are different facts (the rule the whole evaluation layer
+        follows).
+        """
+        try:
+            latency: dict[str, Any] = {"stages_ms": dict(row.get("stages_ms") or {})}
+            if row.get("total_ms") is not None:
+                latency["total_ms"] = row.get("total_ms")
+            resources = {
+                key: row.get(key)
+                for key in ("ram_before_bytes", "ram_after_bytes", "ram_delta_bytes")
+                if row.get(key) is not None
+            }
+            model = {
+                key: value
+                for key, value in (
+                    ("model", decision_layer.selected_model),
+                    ("provider", decision_layer.provider),
+                )
+                if value
+            }
+            self.evaluation.recorder.annotate(
+                task_id or _CURRENT_REQUEST.get(),
+                user_request=text,
+                latency_metrics=latency,
+                resource_usage=resources,
+                model_information=model,
+                metadata={"fast_path": bool(fast_path), "route": route},
+            )
+        except Exception:  # pragma: no cover - recording never fails a request
+            return
+
 
     # ── Intent handlers ──────────────────────────────────
 
@@ -3740,6 +3881,852 @@ class NovaControlApplication:
         self._announce_soon(EventType.AUDIT_PRUNED, removed=removed)
         return {"removed": removed, **self.audit.report()}
 
+    # ── Phase 15: trajectories, evaluation and reward ───────────────────────
+
+    def _build_evaluation_service(self) -> EvaluationService:
+        """Build the trajectory/evaluation/reward layer from configuration.
+
+        Every line this layer draws comes from configuration: the recorder's
+        switch, the redactor's, the quality filter's thresholds, the evaluator's
+        budgets and the reward engine's weights. Nothing here hard-codes a
+        weight, so "what counts as good" is an operator decision rather than a
+        constant buried in a request path.
+
+        Storage follows the audit trail: JSONL files inside this application's
+        data directory, one folder, three files, no second database and no
+        server to run. A build with no data directory gets the in-memory stores
+        instead, so the layer is usable from a test with no disk at all.
+        """
+        settings = self.config.evaluation
+        preferences = self.settings.settings
+        redactor = Redactor(enabled=settings.redact_sensitive)
+        evaluation_config = EvaluationConfig.from_mapping(
+            {
+                "latency_budget_ms": settings.latency_budget_ms,
+                "max_tool_calls": settings.max_tool_calls,
+                "max_retries": settings.max_retries,
+            }
+        )
+        reward_config = RewardConfig.from_mapping(
+            {
+                "component_weights": dict(settings.reward_component_weights),
+                "penalty_weights": dict(settings.reward_penalty_weights),
+                "latency_budget_ms": settings.latency_budget_ms,
+                "max_retries": settings.max_retries,
+            }
+        )
+        trajectories, evaluations, rewards, datasets = build_repositories(
+            self.data_dir, cap=preferences.evaluation_max_records
+        )
+        return EvaluationService(
+            recorder=TrajectoryRecorder(
+                enabled=self._evaluation_recording_enabled(),
+                redactor=redactor,
+            ),
+            trajectories=trajectories,
+            evaluations=evaluations,
+            rewards=rewards,
+            datasets=datasets,
+            evaluator=EvaluationEngine(evaluation_config),
+            reward_engine=RewardEngine(reward_config),
+            quality=DataQualityFilter(
+                QualityConfig(enabled=settings.quality_filter), redactor=redactor
+            ),
+            metrics=MetricsCalculator(ok_threshold=evaluation_config.ok_threshold),
+            retention_days=preferences.evaluation_retention_days,
+            max_records=preferences.evaluation_max_records,
+            evaluate=settings.evaluate,
+            compute_rewards=settings.compute_rewards,
+        )
+
+    def _evaluation_recording_enabled(self) -> bool:
+        """Whether trajectories are captured: the install switch AND the choice."""
+        settings = self.config.evaluation
+        return bool(
+            settings.enabled
+            and settings.record_trajectories
+            and self.settings.settings.evaluation_enabled
+        )
+
+    def apply_evaluation_settings(self) -> dict[str, Any]:
+        """Re-apply the recording switch and retention, live.
+
+        Called at boot and whenever the operator changes a setting: turning
+        recording OFF writes out whatever is in flight first (the recorder
+        flushes rather than dropping it), and retention changes take effect on
+        the next prune.
+        """
+        recording = self.evaluation.set_recording(self._evaluation_recording_enabled())
+        preferences = self.settings.settings
+        retention = self.evaluation.set_retention(
+            days=preferences.evaluation_retention_days,
+            max_records=preferences.evaluation_max_records,
+        )
+        return {"recording": recording, **retention}
+
+    def evaluation_status(self) -> dict[str, Any]:
+        """What is recorded, how it is scored, and what could not be."""
+        return self.evaluation.status()
+
+    def evaluation_summary(self) -> dict[str, Any]:
+        """The evaluation layer's headline figures, with their definitions."""
+        return self.evaluation.summary()
+
+    def evaluation_metrics(self) -> dict[str, Any]:
+        """Aggregate metrics over everything stored. Read-only, no sampling."""
+        return self.evaluation.metrics_snapshot()
+
+    def evaluation_trajectory(self, trajectory_id: str) -> dict[str, Any]:
+        """One stored run: its trajectory, its evaluation and its reward."""
+        found = self.evaluation.trajectory(trajectory_id)
+        if found is None:
+            raise KeyError(f"no trajectory {trajectory_id!r}")
+        return found
+
+    def evaluation_rewards(
+        self,
+        limit: int = 20,
+        *,
+        min_total: float | None = None,
+        max_total: float | None = None,
+    ) -> dict[str, Any]:
+        """Stored rewards, newest first, with their full breakdowns."""
+        results = self.evaluation.list_rewards(
+            limit=limit, min_total=min_total, max_total=max_total
+        )
+        return {"rewards": [result.to_dict() for result in results], "count": len(results)}
+
+    # ── Phase 16: supervised fine-tuning (SFT) ─────────────────────────────
+
+    def _build_training_manager(self) -> TrainingManager:
+        """Build the SFT subsystem from configuration and the live services.
+
+        Three attachments matter, and none of them is a new architecture: the
+        Phase 15 service (what a dataset is BUILT FROM), the live model manager
+        (what a base model's size is) and the resource governor (how much
+        memory is really free). Storage follows the audit trail and the
+        evaluation layer: JSONL files in one folder inside the data directory —
+        no second database, no server, and an in-memory store when this build
+        has no data directory at all.
+        """
+        preferences = self.settings.settings
+        datasets, runs, checkpoints, models, evaluations = build_training_repositories(
+            self.data_dir, cap=preferences.training_max_records
+        )
+        return TrainingManager(
+            datasets=datasets,
+            runs=runs,
+            checkpoints=checkpoints,
+            models=models,
+            evaluations=evaluations,
+            source=self.evaluation,
+            output_root=self.data_dir / "training_output",
+            default_config=self._training_default_config(),
+            estimator=ResourceEstimator(
+                governor=self.governor,
+                monitor=getattr(self, "hardware_monitor", None),
+                model_size_lookup=getattr(self.model_manager, "model_size_bytes", None),
+            ),
+            registry=SFTModelRegistry(models, model_manager=self.model_manager),
+            max_checkpoints=preferences.training_max_checkpoints,
+            publish=self._training_event,
+        )
+
+    def _training_default_config(self) -> TrainingConfig:
+        """What a new run inherits, from the config section and the settings.
+
+        The section's policy is read first and the operator's ``defaults``
+        mapping over it, then the whole thing goes through the training
+        package's OWN validator — there is one validator, not two. ``dry_run``
+        is the OR of the two switches, which is the direction a safety switch
+        should fail in: turning dry-run on anywhere keeps this machine from
+        training, and a real run needs BOTH to say so.
+        """
+        settings = self.config.training
+        preferences = self.settings.settings
+        mapping = dict(settings.base_config())
+        mapping["dry_run"] = bool(settings.dry_run or preferences.training_dry_run)
+        mapping["max_checkpoints"] = preferences.training_max_checkpoints
+        return TrainingConfig.from_mapping(mapping)
+
+    def _training_event(self, type_: str, payload: Mapping[str, Any]) -> None:
+        """Publish a training event from the manager's synchronous seams."""
+        self._announce_soon(type_, **dict(payload))
+
+    def _training_enabled(self) -> bool:
+        """Whether this installation offers SFT at all (install AND operator)."""
+        return bool(self.config.training.enabled and self.settings.settings.training_enabled)
+
+    def _training_disabled(self) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "refused": True,
+            "reason": (
+                "supervised fine-tuning is switched off in this installation "
+                "(NOVACONTROL_TRAINING_ENABLED / training_enabled)"
+            ),
+        }
+
+    def apply_training_settings(self) -> dict[str, Any]:
+        """Re-derive the training defaults and retention, live.
+
+        Called at boot and whenever the operator changes a training setting:
+        the manager's default configuration and checkpoint cap are re-pointed
+        here rather than at the next restart, exactly as Phase 15 re-points the
+        trajectory recorder.
+        """
+        config = self._training_default_config()
+        self.training.default_config = config
+        self.training.checkpoint_manager.max_checkpoints = max(
+            1, int(self.settings.settings.training_max_checkpoints)
+        )
+        return {
+            "enabled": self._training_enabled(),
+            "dry_run": config.dry_run,
+            "hardware_policy": config.hardware_policy,
+            "max_checkpoints": self.training.checkpoint_manager.max_checkpoints,
+            "output_root": str(self.training.output_root),
+        }
+
+    def training_status(self) -> dict[str, Any]:
+        """The subsystem's headline state: datasets, runs, models, machine."""
+        return {**self.training.status(), "enabled": self._training_enabled()}
+
+    def training_summary(self) -> dict[str, Any]:
+        """The same, plus the newest datasets, runs and models by name."""
+        return {**self.training.summary(), "enabled": self._training_enabled()}
+
+    # -- datasets --------------------------------------------------------------
+
+    def training_datasets(
+        self, *, dataset_type: str = "", name: str = "", limit: int = 50
+    ) -> dict[str, Any]:
+        found = self.training.datasets_list(dataset_type=dataset_type, name=name, limit=limit)
+        return {"datasets": [item.to_dict() for item in found], "count": len(found)}
+
+    def training_dataset(self, dataset_version_id: str) -> dict[str, Any]:
+        dataset = self.training.dataset(dataset_version_id)
+        if dataset is None:
+            raise KeyError(f"no training dataset {dataset_version_id!r}")
+        return dataset.to_dict()
+
+    def create_training_dataset(
+        self,
+        name: str,
+        dataset_type: str,
+        *,
+        rules: Mapping[str, Any] | None = None,
+        split: Mapping[str, Any] | None = None,
+        version: str = "",
+        description: str = "",
+        tags: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        """Build one immutable dataset version from the recorded trajectories."""
+        if not self._training_enabled():
+            return self._training_disabled()
+        try:
+            dataset = self.training.create_dataset(
+                name,
+                dataset_type,
+                rules=SelectionRules.from_mapping(rules) if rules else None,
+                split=SplitConfig.from_mapping(split) if split else None,
+                version=version,
+                description=description,
+                tags=tuple(str(tag) for tag in tags),
+            )
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+        return {"ok": True, "dataset": dataset.to_dict()}
+
+    def validate_training_dataset(self, dataset_version_id: str) -> dict[str, Any]:
+        """Check a stored dataset: ids, splits, leakage and statistics."""
+        return self.training.validate_dataset(dataset_version_id)
+
+    # -- runs ------------------------------------------------------------------
+
+    def training_runs(
+        self,
+        *,
+        status: str = "",
+        model: str = "",
+        dataset_version: str = "",
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        found = self.training.runs_list(
+            status=status, model=model, dataset_version=dataset_version, limit=limit
+        )
+        return {"runs": [item.to_dict() for item in found], "count": len(found)}
+
+    def training_run(self, run_id: str) -> dict[str, Any]:
+        run = self.training.run(run_id)
+        if run is None:
+            raise KeyError(f"no training run {run_id!r}")
+        return run.to_dict()
+
+    def create_training_run(
+        self,
+        model: str,
+        dataset_version: str,
+        *,
+        config: Mapping[str, Any] | None = None,
+        name: str = "",
+    ) -> dict[str, Any]:
+        """Validate a configuration, estimate it, and store a CREATED run."""
+        if not self._training_enabled():
+            return self._training_disabled()
+        try:
+            run = self.training.create_run(
+                model, dataset_version, config=config, name=name
+            )
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+        return {"ok": True, "run": run.to_dict()}
+
+    def estimate_training(self, config: Mapping[str, Any]) -> dict[str, Any]:
+        """Validate an ad-hoc configuration and estimate it — no run created."""
+        return self.training.estimate_config(config)
+
+    def estimate_training_run(self, run_id: str) -> dict[str, Any]:
+        """Re-estimate a stored run against the machine as it is NOW."""
+        return self.training.estimate_run(run_id)
+
+    async def start_training_run(
+        self, run_id: str, *, override: bool = False, confirm: bool = False
+    ) -> dict[str, Any]:
+        """Validate, estimate and run — off the event loop, never blocking it.
+
+        A dry run is quick, but a real one is minutes to hours: it runs in a
+        worker thread (`asyncio.to_thread`) so the API keeps answering while it
+        trains, and pause/cancel stay reachable. An UNSAFE estimate is refused
+        unless the DEPLOYMENT allows an override AND the caller asked for one;
+        a real (non-dry-run) configuration additionally needs confirmation.
+        """
+        if not self._training_enabled():
+            return self._training_disabled()
+        if override and not self.config.training.allow_unsafe:
+            return {
+                "ok": False,
+                "refused": True,
+                "run_id": run_id,
+                "reason": (
+                    "overriding an unsafe resource estimate is not allowed in this "
+                    "installation (NOVACONTROL_TRAINING_ALLOW_UNSAFE)"
+                ),
+            }
+        return await asyncio.to_thread(
+            self.training.start, run_id, override=override, confirm=confirm
+        )
+
+    async def resume_training_run(
+        self, run_id: str, *, checkpoint_id: str = ""
+    ) -> dict[str, Any]:
+        """Continue a paused/failed/cancelled run from a loadable checkpoint."""
+        if not self._training_enabled():
+            return self._training_disabled()
+        return await asyncio.to_thread(
+            self.training.resume, run_id, checkpoint_id=checkpoint_id
+        )
+
+    def pause_training_run(self, run_id: str) -> dict[str, Any]:
+        """Ask a running run to stop at its next step (it stays resumable)."""
+        return self.training.pause(run_id)
+
+    def cancel_training_run(self, run_id: str) -> dict[str, Any]:
+        """End a run: a live one at its next step, a stored one immediately."""
+        return self.training.cancel(run_id)
+
+    def training_checkpoints(self, run_id: str) -> dict[str, Any]:
+        """Every checkpoint row of one run, with loadability and size."""
+        found = self.training.checkpoints(run_id)
+        return {"checkpoints": list(found), "count": len(found)}
+
+    async def evaluate_training_run(
+        self,
+        run_id: str,
+        *,
+        base: Any = None,
+        candidate: Any = None,
+        split: str = "test",
+        tolerance: float | None = None,
+    ) -> dict[str, Any]:
+        """Compare the base model against the candidate on the held-out split.
+
+        Without two predictors there is nothing honest to measure: the run is
+        recorded as unevaluated instead of being approved on its loss curve.
+        Measuring means running models, so it happens off the event loop.
+        """
+        if not self._training_enabled():
+            return self._training_disabled()
+        return await asyncio.to_thread(
+            self.training.evaluate_run,
+            run_id,
+            base=base,
+            candidate=candidate,
+            split=split,
+            tolerance=tolerance,
+        )
+
+    def training_evaluations(self, *, limit: int = 50) -> dict[str, Any]:
+        found = self.training.evaluations_list(limit=limit)
+        return {"evaluations": [item.to_dict() for item in found], "count": len(found)}
+
+    # -- the model registry ----------------------------------------------------
+
+    def training_models(
+        self, *, status: str = "", base_model: str = "", limit: int = 50
+    ) -> dict[str, Any]:
+        found = self.training.models_list(status=status, base_model=base_model, limit=limit)
+        return {"models": [item.to_dict() for item in found], "count": len(found)}
+
+    def training_model(self, model_id: str) -> dict[str, Any]:
+        model = self.training.model(model_id)
+        if model is None:
+            raise KeyError(f"no trained model {model_id!r}")
+        return model.to_dict()
+
+    def training_model_report(self) -> dict[str, Any]:
+        """What the registry holds, by status, and which model is in production."""
+        return self.training.registry.summary()
+
+    def approve_training_model(
+        self, model_id: str, *, approved_by: str = "", note: str = ""
+    ) -> dict[str, Any]:
+        """Approve from recorded evidence only — never from training loss."""
+        return self.training.approve_model(model_id, approved_by=approved_by, note=note)
+
+    def promote_training_model(self, model_id: str, *, note: str = "") -> dict[str, Any]:
+        """Make an APPROVED model the production one; explicit, never automatic."""
+        return self.training.promote_model(model_id, note=note)
+
+    def reject_training_model(self, model_id: str, *, reason: str = "") -> dict[str, Any]:
+        return self.training.reject_model(model_id, reason=reason)
+
+    def deprecate_training_model(self, model_id: str, *, reason: str = "") -> dict[str, Any]:
+        return self.training.deprecate_model(model_id, reason=reason)
+
+    def rollback_training_model(self, model_id: str, *, reason: str = "") -> dict[str, Any]:
+        """Return production to the model this one replaced."""
+        return self.training.rollback_model(model_id, reason=reason)
+
+    # ── Phase 17: preference optimization (DPO / ORPO) ─────────────────────
+
+    def _build_preference_manager(self) -> PreferenceManager:
+        """Build the DPO/ORPO subsystem ON the Phase 16 stores and registry.
+
+        The run store, the checkpoint records, the model registry and the
+        evaluation records are the training manager's — one registry, one run
+        history, one place a model can be promoted from. What is new is a pair
+        dataset store and a review queue, both JSONL files in the same folder,
+        plus the Phase 15 service every pair is built from.
+        """
+        preferences = self.settings.settings
+        datasets, reviews = build_preference_repositories(
+            self.data_dir, cap=preferences.preference_max_records
+        )
+        return PreferenceManager(
+            datasets=datasets,
+            reviews=reviews,
+            runs=self.training.runs,
+            checkpoints=self.training.checkpoints_repo,
+            models=self.training.models,
+            evaluations=self.training.evaluations,
+            supervised_datasets=self.training.datasets,
+            source=self.evaluation,
+            output_root=self.data_dir / "preference_output",
+            default_config=self._preference_default_config(),
+            estimator=ResourceEstimator(
+                governor=self.governor,
+                monitor=getattr(self, "hardware_monitor", None),
+                model_size_lookup=getattr(self.model_manager, "model_size_bytes", None),
+            ),
+            registry=self.training.registry,
+            max_checkpoints=preferences.preference_max_checkpoints,
+            publish=self._preference_event,
+        )
+
+    def _preference_default_config(self) -> PreferenceTrainingConfig:
+        """What a new preference run inherits, from the section and the settings.
+
+        ``dry_run`` is the OR of the two switches, the direction a safety switch
+        fails in: turning dry-run on anywhere keeps this machine from training,
+        and a real run needs BOTH to say otherwise.
+        """
+        settings = self.config.preference
+        preferences = self.settings.settings
+        mapping = dict(settings.base_config())
+        mapping["dry_run"] = bool(settings.dry_run or preferences.preference_dry_run)
+        mapping["max_checkpoints"] = preferences.preference_max_checkpoints
+        return PreferenceTrainingConfig.from_mapping(mapping)
+
+    def _preference_event(self, type_: str, payload: Mapping[str, Any]) -> None:
+        """Publish a preference event from the manager's synchronous seams."""
+        self._announce_soon(type_, **dict(payload))
+
+    def _preference_enabled(self) -> bool:
+        """Whether this installation offers DPO/ORPO at all (install AND operator)."""
+        return bool(
+            self.config.preference.enabled and self.settings.settings.preference_enabled
+        )
+
+    def _preference_disabled(self) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "refused": True,
+            "reason": (
+                "preference optimization is switched off in this installation "
+                "(NOVACONTROL_PREFERENCE_ENABLED / preference_enabled)"
+            ),
+        }
+
+    def apply_preference_settings(self) -> dict[str, Any]:
+        """Re-derive the preference defaults and retention, live."""
+        config = self._preference_default_config()
+        self.preference.preference_defaults = config
+        self.preference.default_config = config.as_training_config()
+        self.preference.checkpoint_manager.max_checkpoints = max(
+            1, int(self.settings.settings.preference_max_checkpoints)
+        )
+        return {
+            "enabled": self._preference_enabled(),
+            "dry_run": config.dry_run,
+            "algorithm": config.algorithm,
+            "beta": config.beta,
+            "hardware_policy": config.hardware_policy,
+            "max_checkpoints": self.preference.checkpoint_manager.max_checkpoints,
+            "output_root": str(self.preference.output_root),
+        }
+
+    def preference_status(self) -> dict[str, Any]:
+        """The subsystem's headline state: datasets, runs, reviews, algorithms."""
+        return {**self.preference.status(), "enabled": self._preference_enabled()}
+
+    def preference_summary(self) -> dict[str, Any]:
+        """The same, plus the newest datasets and runs by name."""
+        return {**self.preference.summary(), "enabled": self._preference_enabled()}
+
+    def preference_algorithms(self) -> dict[str, Any]:
+        """The two objectives, what each costs, and what this machine can do."""
+        return self.preference.algorithms()
+
+    # -- preference datasets ---------------------------------------------------
+
+    def preference_datasets(
+        self, *, dataset_type: str = "", name: str = "", limit: int = 50
+    ) -> dict[str, Any]:
+        found = self.preference.preference_datasets(
+            dataset_type=dataset_type, name=name, limit=limit
+        )
+        return {"datasets": [item.to_dict() for item in found], "count": len(found)}
+
+    def preference_dataset(self, dataset_version_id: str) -> dict[str, Any]:
+        dataset = self.preference.pair_dataset(dataset_version_id)
+        if dataset is None:
+            raise KeyError(f"no preference dataset {dataset_version_id!r}")
+        return dataset.to_dict()
+
+    def create_preference_dataset(
+        self,
+        name: str,
+        dataset_type: str,
+        *,
+        rules: Mapping[str, Any] | None = None,
+        quality: Mapping[str, Any] | None = None,
+        split: Mapping[str, Any] | None = None,
+        version: str = "",
+        description: str = "",
+        tags: Sequence[str] = (),
+        queue_for_review: bool = True,
+    ) -> dict[str, Any]:
+        """Build one immutable preference dataset version from what was recorded."""
+        if not self._preference_enabled():
+            return self._preference_disabled()
+        try:
+            dataset = self.preference.build_dataset(
+                name,
+                dataset_type,
+                rules=PreferenceRules.from_mapping(rules) if rules else None,
+                quality=PreferenceQualityConfig.from_mapping(quality) if quality else None,
+                split=SplitConfig.from_mapping(split) if split else None,
+                version=version,
+                description=description,
+                tags=tuple(str(tag) for tag in tags),
+                queue_for_review=queue_for_review,
+            )
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+        return {"ok": True, "dataset": dataset.to_dict()}
+
+    def validate_preference_dataset(self, dataset_version_id: str) -> dict[str, Any]:
+        """Check a stored pair dataset: pairs, splits, leakage and provenance."""
+        return self.preference.validate_dataset(dataset_version_id)
+
+    def preference_pair(self, dataset_version_id: str, preference_id: str) -> dict[str, Any]:
+        """One pair inside a version: its candidates, evidence and provenance."""
+        return self.preference.inspect_pair(dataset_version_id, preference_id)
+
+    # -- human review ----------------------------------------------------------
+
+    def preference_reviews(
+        self, *, pending_only: bool = True, limit: int = 50, dataset_version: str = ""
+    ) -> dict[str, Any]:
+        """The queue a person works through, with both candidates side by side."""
+        found = self.preference.reviews_list(
+            pending_only=pending_only, limit=limit, dataset_version=dataset_version
+        )
+        return {
+            "reviews": list(found),
+            "count": len(found),
+            "stats": self.preference.review_stats(),
+        }
+
+    def preference_review(self, preference_id: str) -> dict[str, Any]:
+        item = self.preference.review(preference_id)
+        if item is None:
+            raise KeyError(f"no queued preference pair {preference_id!r}")
+        return item
+
+    def submit_preference_pair(
+        self,
+        *,
+        dataset_type: str,
+        prompt: Mapping[str, Any],
+        chosen: Mapping[str, Any],
+        rejected: Mapping[str, Any],
+        context: Mapping[str, Any] | None = None,
+        chosen_outcome: Mapping[str, Any] | None = None,
+        rejected_outcome: Mapping[str, Any] | None = None,
+        reviewer: str = "",
+        reason: str = "",
+        confidence: float = 1.0,
+        group_key: str = "",
+        tags: Sequence[str] = (),
+        enqueue: bool = False,
+    ) -> dict[str, Any]:
+        """Record a preference a person is asserting (the strongest source there is)."""
+        if not self._preference_enabled():
+            return self._preference_disabled()
+        return self.preference.submit_pair(
+            dataset_type=dataset_type,
+            prompt=prompt,
+            chosen=chosen,
+            rejected=rejected,
+            context=context,
+            chosen_outcome=chosen_outcome,
+            rejected_outcome=rejected_outcome,
+            reviewer=reviewer,
+            reason=reason,
+            confidence=confidence,
+            group_key=group_key,
+            tags=tuple(str(tag) for tag in tags),
+            enqueue=enqueue,
+        )
+
+    def decide_preference_review(
+        self,
+        preference_id: str,
+        decision: str,
+        *,
+        reviewer: str = "",
+        reason: str = "",
+    ) -> dict[str, Any]:
+        """Settle a queued pair: choose A, choose B, mark a tie, or reject it."""
+        if not self._preference_enabled():
+            return self._preference_disabled()
+        return self.preference.decide_review(
+            preference_id, decision, reviewer=reviewer, reason=reason
+        )
+
+    # -- preference runs -------------------------------------------------------
+
+    def preference_runs(
+        self, *, algorithm: str = "", status: str = "", limit: int = 50
+    ) -> dict[str, Any]:
+        """The preference runs, filtered by objective when asked."""
+        found = self.preference.preference_runs(
+            algorithm=algorithm, status=status, limit=limit
+        )
+        return {"runs": [item.to_dict() for item in found], "count": len(found)}
+
+    def preference_run(self, run_id: str) -> dict[str, Any]:
+        run = self.preference.run(run_id)
+        if run is None:
+            raise KeyError(f"no preference run {run_id!r}")
+        return run.to_dict()
+
+    def create_preference_run(
+        self,
+        model: str,
+        dataset_version: str,
+        *,
+        config: Mapping[str, Any] | None = None,
+        name: str = "",
+    ) -> dict[str, Any]:
+        """Validate a preference configuration, price it, and store a CREATED run."""
+        if not self._preference_enabled():
+            return self._preference_disabled()
+        try:
+            run = self.preference.create_run(
+                model, dataset_version, config=config, name=name
+            )
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+        return {"ok": True, "run": run.to_dict()}
+
+    def estimate_preference(self, config: Mapping[str, Any]) -> dict[str, Any]:
+        """Validate an ad-hoc preference configuration and price it — no run."""
+        return self.preference.estimate_config(config)
+
+    def estimate_preference_run(self, run_id: str) -> dict[str, Any]:
+        """Re-price a stored preference run against the machine as it is NOW."""
+        return self.preference.estimate_run(run_id)
+
+    def dry_run_preference(
+        self,
+        model: str = "",
+        dataset_version: str = "",
+        *,
+        config: Mapping[str, Any] | None = None,
+        algorithm: str = "",
+    ) -> dict[str, Any]:
+        """Validate and price a DPO or ORPO run — and start nothing."""
+        if not self._preference_enabled():
+            return self._preference_disabled()
+        return self.preference.dry_run(
+            model, dataset_version, config=config, algorithm=algorithm
+        )
+
+    async def start_preference_run(
+        self, run_id: str, *, override: bool = False, confirm: bool = False
+    ) -> dict[str, Any]:
+        """Validate, estimate and run — off the event loop, never blocking it.
+
+        The rails are Phase 16's, inherited rather than restated: an UNSAFE
+        estimate is refused unless this deployment allows an override AND the
+        caller asked for one, and a real (non-dry-run) configuration needs an
+        explicit confirmation as well.
+        """
+        if not self._preference_enabled():
+            return self._preference_disabled()
+        if override and not self.config.preference.allow_unsafe:
+            return {
+                "ok": False,
+                "refused": True,
+                "run_id": run_id,
+                "reason": (
+                    "overriding an unsafe resource estimate is not allowed in this "
+                    "installation (NOVACONTROL_PREFERENCE_ALLOW_UNSAFE)"
+                ),
+            }
+        return await asyncio.to_thread(
+            self.preference.start, run_id, override=override, confirm=confirm
+        )
+
+    async def resume_preference_run(
+        self, run_id: str, *, checkpoint_id: str = ""
+    ) -> dict[str, Any]:
+        """Continue a paused/failed/cancelled preference run from a checkpoint."""
+        if not self._preference_enabled():
+            return self._preference_disabled()
+        return await asyncio.to_thread(
+            self.preference.resume, run_id, checkpoint_id=checkpoint_id
+        )
+
+    def pause_preference_run(self, run_id: str) -> dict[str, Any]:
+        """Ask a running preference run to stop at its next step."""
+        return self.preference.pause(run_id)
+
+    def cancel_preference_run(self, run_id: str) -> dict[str, Any]:
+        """End a preference run: a live one at its next step, a stored one now."""
+        return self.preference.cancel(run_id)
+
+    def preference_checkpoints(self, run_id: str) -> dict[str, Any]:
+        """Every checkpoint row of one preference run, with loadability and size."""
+        found = self.preference.checkpoints(run_id)
+        return {"checkpoints": list(found), "count": len(found)}
+
+    # -- evaluation and the registry -------------------------------------------
+
+    async def evaluate_preference_run(
+        self,
+        run_id: str,
+        *,
+        base: Any = None,
+        candidate: Any = None,
+        sft: Any = None,
+        split: str = "test",
+        tolerance: float | None = None,
+    ) -> dict[str, Any]:
+        """Base vs SFT vs preference-optimized on the same held-out pairs.
+
+        The preference loss is not consulted anywhere in here: a model that got
+        better at preferring is not thereby a better model, so approval waits
+        for measured behaviour on the pairs it has never seen.
+        """
+        if not self._preference_enabled():
+            return self._preference_disabled()
+        return await asyncio.to_thread(
+            self.preference.evaluate_run,
+            run_id,
+            base=base,
+            candidate=candidate,
+            sft=sft,
+            split=split,
+            tolerance=tolerance,
+        )
+
+    def compare_preference_models(
+        self,
+        dataset_version: str,
+        *,
+        base: Any,
+        candidate: Any,
+        sft: Any = None,
+        split: str = "test",
+        tolerance: float | None = None,
+        algorithm: str = "",
+    ) -> dict[str, Any]:
+        """Compare three models without a run: the same evaluator, on demand."""
+        if not self._preference_enabled():
+            return self._preference_disabled()
+        return self.preference.compare_models(
+            dataset_version,
+            base=base,
+            candidate=candidate,
+            sft=sft,
+            split=split,
+            tolerance=tolerance,
+            algorithm=algorithm,
+        )
+
+    def preference_evaluations(self, *, limit: int = 50) -> dict[str, Any]:
+        """Every stored comparison, newest first, with its regressions."""
+        found = self.preference.evaluations_list(limit=limit)
+        return {"evaluations": [item.to_dict() for item in found], "count": len(found)}
+
+    def preference_models(
+        self, *, status: str = "", algorithm: str = "", limit: int = 50
+    ) -> dict[str, Any]:
+        """Registered models, filtered to the preference objectives.
+
+        The registry is Phase 16's — the same records, the same statuses, the
+        same explicit approval path — so this is a VIEW, not a second registry.
+        """
+        wanted = algorithm.strip().lower()
+        found = [
+            item
+            for item in self.training.models_list(status=status, limit=0)
+            if item.algorithm in ("dpo", "orpo") and (not wanted or item.algorithm == wanted)
+        ]
+        if limit and limit > 0:
+            found = found[:limit]
+        return {"models": [item.to_dict() for item in found], "count": len(found)}
+
+    def preference_model(self, model_id: str) -> dict[str, Any]:
+        model = self.training.model(model_id)
+        if model is None:
+            raise KeyError(f"no trained model {model_id!r}")
+        return model.to_dict()
+
     # ── Phase 14: execution mode, privacy, resources, cost and diagnostics ──
 
     @property
@@ -4294,6 +5281,97 @@ class NovaControlApplication:
                 resources=self.config.resources.to_mapping(),
             )
 
+        def training() -> DiagnosticResult:
+            """The SFT subsystem: wired, and honest about what it cannot do.
+
+            Missing training libraries are reported rather than installed, and
+            the check reads the EXISTING capability reading — it never probes
+            the runtime, so asking for diagnostics cannot load a torch.
+            """
+            if not self._training_enabled():
+                return row(
+                    "Training",
+                    HealthState.SKIPPED,
+                    "supervised fine-tuning is switched off in this installation",
+                    enabled=False,
+                    dry_run=self.training.default_config.dry_run,
+                )
+            capabilities = self.training.estimator.capabilities()
+            missing = capabilities.missing_dependencies()
+            if missing:
+                return row(
+                    "Training",
+                    HealthState.DEGRADED,
+                    "the SFT subsystem is wired; dry-run works, real training needs: "
+                    + ", ".join(missing),
+                    remediation=(
+                        "pip install " + " ".join(missing)
+                        + " to enable a real PEFT/LoRA run"
+                    ),
+                    enabled=True,
+                    dry_run=self.training.default_config.dry_run,
+                    backends=list(capabilities.backends),
+                    training_dependencies_ready=capabilities.training_dependencies_ready,
+                )
+            return row(
+                "Training",
+                HealthState.OK,
+                "the SFT subsystem is wired and its training dependencies are installed",
+                enabled=True,
+                dry_run=self.training.default_config.dry_run,
+                backends=list(capabilities.backends),
+            )
+
+        def preference() -> DiagnosticResult:
+            """The DPO/ORPO subsystem: wired, and honest about what it cannot do.
+
+            Nothing here probes the runtime — the capability reading is the one
+            the training row already took, so asking for diagnostics can never
+            load a torch. A machine without the optional dependencies is
+            DEGRADED (dry run, dataset validation and estimation all work), and
+            an installation that switched preference optimization off is
+            SKIPPED rather than broken.
+            """
+            defaults = self.preference.preference_defaults
+            if not self._preference_enabled():
+                return row(
+                    "Preference optimization",
+                    HealthState.SKIPPED,
+                    "preference optimization is switched off in this installation",
+                    enabled=False,
+                    dry_run=defaults.dry_run,
+                    algorithms=list(ALGORITHMS),
+                )
+            capabilities = self.preference.preference_estimator.capabilities()
+            missing = capabilities.missing_dependencies()
+            if missing:
+                return row(
+                    "Preference optimization",
+                    HealthState.DEGRADED,
+                    "the DPO/ORPO subsystem is wired; dry-run works, a real run "
+                    "needs: " + ", ".join(missing),
+                    remediation=(
+                        "pip install " + " ".join(missing)
+                        + " to enable a real PEFT/LoRA preference run"
+                    ),
+                    enabled=True,
+                    dry_run=defaults.dry_run,
+                    algorithm=defaults.algorithm,
+                    algorithms=list(ALGORITHMS),
+                    reviews_pending=self.preference.review_stats().get("pending", 0),
+                )
+            return row(
+                "Preference optimization",
+                HealthState.OK,
+                "the DPO/ORPO subsystem is wired and its training dependencies are "
+                "installed",
+                enabled=True,
+                dry_run=defaults.dry_run,
+                algorithm=defaults.algorithm,
+                algorithms=list(ALGORITHMS),
+                reviews_pending=self.preference.review_stats().get("pending", 0),
+            )
+
         self.diagnostics.register("Core", core, category="core")
         self.diagnostics.register("Fast NLU", nlu, category="core")
         self.diagnostics.register("Context", context, category="core")
@@ -4315,6 +5393,16 @@ class NovaControlApplication:
         self.diagnostics.register("Storage", storage, category="platform")
         self.diagnostics.register("Network", network, category="platform")
         self.diagnostics.register("Configuration", configuration, category="platform")
+        # Phase 16: the SFT subsystem reports presence, not eagerness: a machine
+        # without the training libraries is DEGRADED (dry-run still works), and
+        # an installation that switched training off is SKIPPED, not broken.
+        self.diagnostics.register("Training", training, category="systems")
+        # Phase 17: preference optimization reports presence on the same terms.
+        # Its dependency story is DPO's reference model, so the row names the
+        # objective and whether this run would keep a second copy of the weights.
+        self.diagnostics.register(
+            "Preference optimization", preference, category="systems"
+        )
 
     def _record_audit(
         self,

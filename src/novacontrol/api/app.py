@@ -170,6 +170,35 @@ def create_app() -> Any:
     except ModuleNotFoundError as exc:  # pragma: no cover - depends on optional install
         raise RuntimeError("FastAPI is not installed. Run `pip install -e .` first.") from exc
 
+    def _training_id(payload: dict[str, Any], key: str = "run_id") -> str:
+        """The identifier a training action needs, or a 422 that names the field."""
+        value = str(payload.get(key, "")).strip()
+        if not value:
+            raise HTTPException(status_code=422, detail=f"{key} is required.")
+        return value
+
+    def _is_missing(result: dict[str, Any]) -> bool:
+        """Whether a refusal is really a 404 (that thing does not exist)."""
+        reason = str(result.get("reason", ""))
+        return reason.startswith("no run ") or reason.startswith("no dataset version")
+
+    def _training_refused(
+        result: dict[str, Any], what: str, *, status_code: int = 409
+    ) -> dict[str, Any]:
+        """A refused training action is its own HTTP status, never a silent 200.
+
+        The body the manager returns already names the reason ("a completed run
+        cannot be cancelled", "approval requires a recorded passing evaluation"),
+        and that reason is what the caller needs to read — so it is passed through
+        as the detail rather than replaced with a generic message.
+        """
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=status_code,
+                detail=str(result.get("reason", f"the {what} was refused")),
+            )
+        return result
+
     class NoCacheStaticFiles(StaticFiles):
         """Static files that are never cached, so UI edits appear on the next load."""
 
@@ -287,8 +316,50 @@ def create_app() -> Any:
         try:
             retention_days = int(payload["audit_retention_days"]) if "audit_retention_days" in payload else None
             max_records = int(payload["audit_max_records"]) if "audit_max_records" in payload else None
+            evaluation_retention_days = (
+                int(payload["evaluation_retention_days"])
+                if "evaluation_retention_days" in payload
+                else None
+            )
+            evaluation_max_records = (
+                int(payload["evaluation_max_records"])
+                if "evaluation_max_records" in payload
+                else None
+            )
+            training_max_checkpoints = (
+                int(payload["training_max_checkpoints"])
+                if "training_max_checkpoints" in payload
+                else None
+            )
+            training_retention_days = (
+                int(payload["training_retention_days"])
+                if "training_retention_days" in payload
+                else None
+            )
+            training_max_records = (
+                int(payload["training_max_records"])
+                if "training_max_records" in payload
+                else None
+            )
+            preference_max_checkpoints = (
+                int(payload["preference_max_checkpoints"])
+                if "preference_max_checkpoints" in payload
+                else None
+            )
+            preference_retention_days = (
+                int(payload["preference_retention_days"])
+                if "preference_retention_days" in payload
+                else None
+            )
+            preference_max_records = (
+                int(payload["preference_max_records"])
+                if "preference_max_records" in payload
+                else None
+            )
         except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=422, detail="Audit retention must be a whole number.") from exc
+            raise HTTPException(
+                status_code=422, detail="Retention must be a whole number."
+            ) from exc
         settings = nova.settings.update(
             approval_mode=ApprovalMode(str(payload["approval_mode"])) if "approval_mode" in payload else None,
             detailed_explanations=bool(payload["detailed_explanations"])
@@ -324,6 +395,29 @@ def create_app() -> Any:
             privacy_allow_remote_model=bool(payload["privacy_allow_remote_model"])
             if "privacy_allow_remote_model" in payload
             else None,
+            evaluation_enabled=bool(payload["evaluation_enabled"])
+            if "evaluation_enabled" in payload
+            else None,
+            evaluation_retention_days=evaluation_retention_days,
+            evaluation_max_records=evaluation_max_records,
+            training_enabled=bool(payload["training_enabled"])
+            if "training_enabled" in payload
+            else None,
+            training_dry_run=bool(payload["training_dry_run"])
+            if "training_dry_run" in payload
+            else None,
+            training_max_checkpoints=training_max_checkpoints,
+            training_retention_days=training_retention_days,
+            training_max_records=training_max_records,
+            preference_enabled=bool(payload["preference_enabled"])
+            if "preference_enabled" in payload
+            else None,
+            preference_dry_run=bool(payload["preference_dry_run"])
+            if "preference_dry_run" in payload
+            else None,
+            preference_max_checkpoints=preference_max_checkpoints,
+            preference_retention_days=preference_retention_days,
+            preference_max_records=preference_max_records,
         )
         # The audit logger holds its own copy of the retention policy, so a changed
         # setting is re-applied here rather than waiting for the next restart.
@@ -331,6 +425,16 @@ def create_app() -> Any:
         # Phase 14: the same round-trip re-derives the privacy policy from the
         # settings and re-points the ONE cloud switch, so a mode change is live.
         await nova.apply_privacy_settings()
+        # Phase 15: and re-points the trajectory recorder at the operator's
+        # switch, so "stop recording" takes effect on this request rather than
+        # on the next restart.
+        nova.apply_evaluation_settings()
+        # Phase 16: and the training defaults (the dry-run switch, the
+        # checkpoint cap), so "do not train on this machine" is live too.
+        nova.apply_training_settings()
+        # Phase 17: and the preference defaults — the same two switches, for the
+        # DPO/ORPO subsystem, applied without waiting for a restart.
+        nova.apply_preference_settings()
         nova.persist()
         return settings.to_dict()
 
@@ -1103,6 +1207,736 @@ def create_app() -> Any:
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # Phase 15: the evaluation layer's inspection surface. Read-only by
+    # construction — nothing here runs a model, quotes a prompt, or writes a
+    # row: it reports what was recorded, how it was scored, and what the
+    # weighted reward made of it (with every factor that produced it).
+    @app.get("/evaluation/summary")
+    async def evaluation_summary(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """What has been recorded, how it was scored, and what is held."""
+        return nova.evaluation_summary()
+
+    @app.get("/evaluation/trajectory/{trajectory_id}")
+    async def evaluation_trajectory(
+        trajectory_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """One run: its trajectory, its nine-dimension evaluation and its reward."""
+        try:
+            return nova.evaluation_trajectory(trajectory_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/evaluation/metrics")
+    async def evaluation_metrics(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Aggregate figures over everything stored (success, latency, reward…)."""
+        return nova.evaluation_metrics()
+
+    @app.get("/evaluation/rewards")
+    async def evaluation_rewards(
+        limit: int = 20,
+        min_total: float | None = None,
+        max_total: float | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Stored rewards, newest first, optionally filtered by total."""
+        return nova.evaluation_rewards(limit=limit, min_total=min_total, max_total=max_total)
+
+    # Phase 16: supervised fine-tuning. Building a dataset or a run is data
+    # work — it writes one row and estimates a cost — while starting a run is
+    # the one operation on this surface that can occupy the machine: it is
+    # refusal-first (an UNSAFE estimate is refused unless the DEPLOYMENT allows
+    # an override), a real (non-dry-run) configuration additionally needs
+    # confirmation, and the work happens in a worker thread so the API keeps
+    # answering (and pause/cancel stay reachable) while it trains.
+    @app.get("/training/status")
+    async def training_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Datasets, runs, models, and what this machine can train with."""
+        return nova.training_status()
+
+    @app.get("/training/summary")
+    async def training_summary(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """The same, plus the newest datasets, runs and models by name."""
+        return nova.training_summary()
+
+    @app.post("/training/estimate")
+    async def estimate_training(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Validate a training configuration and estimate it; trains nothing."""
+        return nova.estimate_training(payload)
+
+    @app.get("/training/datasets")
+    async def training_datasets(
+        dataset_type: str = "",
+        name: str = "",
+        limit: int = 50,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Stored dataset versions, newest first, optionally filtered."""
+        return nova.training_datasets(dataset_type=dataset_type, name=name, limit=limit)
+
+    @app.post("/training/datasets")
+    async def create_training_dataset(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Build one immutable dataset version from the recorded trajectories."""
+        name = str(payload.get("name", "")).strip()
+        dataset_type = str(payload.get("dataset_type", "")).strip()
+        if not name or not dataset_type:
+            raise HTTPException(status_code=422, detail="name and dataset_type are required.")
+        rules = payload.get("rules")
+        split = payload.get("split")
+        tags = payload.get("tags")
+        result = nova.create_training_dataset(
+            name,
+            dataset_type,
+            rules=rules if isinstance(rules, dict) else None,
+            split=split if isinstance(split, dict) else None,
+            version=str(payload.get("version", "")),
+            description=str(payload.get("description", "")),
+            tags=[str(tag) for tag in tags] if isinstance(tags, (list, tuple)) else (),
+        )
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=422, detail=str(result.get("reason", "the dataset could not be built"))
+            )
+        return result
+
+    @app.post("/training/datasets/validate")
+    async def validate_training_dataset(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Check a stored dataset: ids, split references, leakage, statistics."""
+        # Both spellings are accepted on purpose: the path parameter is named
+        # `dataset_version_id` while the config field is `dataset_version`, and
+        # a caller should not have to guess which one a body wants.
+        dataset_version = str(
+            payload.get("dataset_version_id") or payload.get("dataset_version") or ""
+        ).strip()
+        if not dataset_version:
+            raise HTTPException(
+                status_code=422, detail="dataset_version_id is required (name@version)."
+            )
+        return nova.validate_training_dataset(dataset_version)
+
+    @app.get("/training/datasets/{dataset_version_id}")
+    async def training_dataset(
+        dataset_version_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """One dataset version: its examples, splits, rules and statistics."""
+        try:
+            return nova.training_dataset(dataset_version_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/training/runs")
+    async def training_runs(
+        status: str = "",
+        model: str = "",
+        dataset_version: str = "",
+        limit: int = 50,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Stored training runs, newest first, optionally filtered."""
+        return nova.training_runs(
+            status=status, model=model, dataset_version=dataset_version, limit=limit
+        )
+
+    @app.post("/training/runs")
+    async def create_training_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Validate a configuration, estimate it, and store a CREATED run."""
+        model = str(payload.get("model", "")).strip()
+        dataset_version = str(payload.get("dataset_version", "")).strip()
+        if not model or not dataset_version:
+            raise HTTPException(status_code=422, detail="model and dataset_version are required.")
+        config = payload.get("config")
+        result = nova.create_training_run(
+            model,
+            dataset_version,
+            config=config if isinstance(config, dict) else None,
+            name=str(payload.get("name", "")),
+        )
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=422, detail=str(result.get("reason", "the run could not be created"))
+            )
+        return result
+
+    @app.post("/training/runs/start")
+    async def start_training_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Start a run (dry-run by default) in a worker thread."""
+        run_id = str(payload.get("run_id", "")).strip()
+        if not run_id:
+            raise HTTPException(status_code=422, detail="run_id is required.")
+        result = await nova.start_training_run(
+            run_id,
+            override=bool(payload.get("override", False)),
+            confirm=bool(payload.get("confirm", False)),
+        )
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=409,
+                detail=str(result.get("reason", "the run could not be started")),
+            )
+        return result
+
+    @app.post("/training/runs/pause")
+    async def pause_training_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Ask a live run to stop at its next step; it stays resumable."""
+        return _training_refused(nova.pause_training_run(_training_id(payload)), "pause")
+
+    @app.post("/training/runs/cancel")
+    async def cancel_training_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """End a run: a live one at its next step, a stored one immediately."""
+        return _training_refused(
+            nova.cancel_training_run(_training_id(payload)), "cancellation"
+        )
+
+    @app.post("/training/runs/resume")
+    async def resume_training_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Continue a paused/failed/cancelled run from a loadable checkpoint."""
+        run_id = str(payload.get("run_id", "")).strip()
+        if not run_id:
+            raise HTTPException(status_code=422, detail="run_id is required.")
+        result = await nova.resume_training_run(
+            run_id, checkpoint_id=str(payload.get("checkpoint_id", ""))
+        )
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=409,
+                detail=str(result.get("reason", "the run could not be resumed")),
+            )
+        return result
+
+    @app.post("/training/runs/re-estimate")
+    async def estimate_training_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Re-estimate a stored run against the machine as it is NOW."""
+        return _training_refused(
+            nova.estimate_training_run(_training_id(payload)), "estimate", status_code=404
+        )
+
+    @app.post("/training/runs/evaluate")
+    async def evaluate_training_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Compare the base model against the candidate on the held-out split.
+
+        Without two predictors there is nothing to measure, and the run is
+        recorded as unevaluated — a model is never approved on its loss curve.
+        """
+        run_id = str(payload.get("run_id", "")).strip()
+        if not run_id:
+            raise HTTPException(status_code=422, detail="run_id is required.")
+        split = str(payload.get("split", "test")).strip() or "test"
+        tolerance = payload.get("tolerance")
+        result = await nova.evaluate_training_run(
+            run_id,
+            split=split,
+            tolerance=float(tolerance) if isinstance(tolerance, (int, float)) else None,
+        )
+        # A comparison that measured NOTHING is a refusal, not a pass: the run is
+        # recorded as unevaluated and the caller gets a non-2xx, exactly as the
+        # CLI exits non-zero. A comparison that ran (pass, regress, even
+        # inconclusive) is a 200 with its verdict in the body.
+        return _training_refused(result, "evaluation", status_code=404 if _is_missing(result) else 409)
+
+    @app.get("/training/runs/{run_id}/checkpoints")
+    async def training_checkpoints(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Every checkpoint of one run, with its kind, size and loadability."""
+        return nova.training_checkpoints(run_id)
+
+    @app.get("/training/runs/{run_id}")
+    async def training_run(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """One run: its configuration, status, losses, checkpoints and estimate."""
+        try:
+            return nova.training_run(run_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/training/evaluations")
+    async def training_evaluations(
+        limit: int = 50, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Stored base-versus-candidate comparisons, newest first."""
+        return nova.training_evaluations(limit=limit)
+
+    @app.get("/training/models")
+    async def training_models(
+        status: str = "",
+        base_model: str = "",
+        limit: int = 50,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Trained adapters/models by status; EXPERIMENTAL until approved."""
+        return nova.training_models(status=status, base_model=base_model, limit=limit)
+
+    @app.get("/training/models/{model_id}")
+    async def training_model(
+        model_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """One trained model: its adapter metadata and evaluation history."""
+        try:
+            return nova.training_model(model_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/training/models/approve")
+    async def approve_training_model(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Approve from recorded evidence only — never from training loss."""
+        result = nova.approve_training_model(
+            _training_id(payload, "model_id"),
+            approved_by=str(payload.get("approved_by", "")),
+            note=str(payload.get("note", "")),
+        )
+        return _training_refused(result, "approval")
+
+    @app.post("/training/models/promote")
+    async def promote_training_model(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Make an APPROVED model the production one; explicit, never automatic."""
+        result = nova.promote_training_model(
+            _training_id(payload, "model_id"), note=str(payload.get("note", ""))
+        )
+        return _training_refused(result, "promotion")
+
+    @app.post("/training/models/reject")
+    async def reject_training_model(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Reject a candidate; a rejected model is never promoted by accident."""
+        result = nova.reject_training_model(
+            _training_id(payload, "model_id"), reason=str(payload.get("reason", ""))
+        )
+        return _training_refused(result, "rejection")
+
+    @app.post("/training/models/deprecate")
+    async def deprecate_training_model(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Retire a production or approved model without deleting its record."""
+        result = nova.deprecate_training_model(
+            _training_id(payload, "model_id"), reason=str(payload.get("reason", ""))
+        )
+        return _training_refused(result, "deprecation")
+
+    @app.post("/training/models/rollback")
+    async def rollback_training_model(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Return production to the model this one replaced."""
+        result = nova.rollback_training_model(
+            _training_id(payload, "model_id"), reason=str(payload.get("reason", ""))
+        )
+        return _training_refused(result, "rollback")
+
+    # ── Phase 17: preference optimization (DPO / ORPO) ─────────────────────────
+    #
+    # The same conventions as the training surface above: a refusal is its own
+    # HTTP status rather than a 200 with ok=false, a missing thing is a 404, and
+    # a real run is never started by a read. The registry operations are NOT
+    # restated here — a preference model is registered in the SAME registry, so
+    # approving, promoting and rolling one back are the /training/models routes.
+
+    @app.get("/preference/status")
+    async def preference_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Pair datasets, runs, the review queue and what this machine can do."""
+        return nova.preference_status()
+
+    @app.get("/preference/summary")
+    async def preference_summary(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """The same, plus the newest datasets and runs by name."""
+        return nova.preference_summary()
+
+    @app.get("/preference/algorithms")
+    async def preference_algorithms(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """The DPO and ORPO objectives, what each costs, and readiness here."""
+        return nova.preference_algorithms()
+
+    @app.post("/preference/estimate")
+    async def estimate_preference(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Validate a preference configuration and price it; trains nothing."""
+        return nova.estimate_preference(payload)
+
+    @app.post("/preference/dry-run")
+    async def dry_run_preference(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Validate the dataset, config, backend and output directory; start nothing."""
+        config = payload.get("config")
+        return nova.dry_run_preference(
+            str(payload.get("model", "")),
+            str(payload.get("dataset_version", payload.get("dataset_version_id", ""))),
+            config=config if isinstance(config, dict) else None,
+            algorithm=str(payload.get("algorithm", "")),
+        )
+
+    @app.get("/preference/datasets")
+    async def preference_datasets(
+        dataset_type: str = "",
+        name: str = "",
+        limit: int = 50,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Stored preference dataset versions, newest first."""
+        return nova.preference_datasets(dataset_type=dataset_type, name=name, limit=limit)
+
+    @app.post("/preference/datasets")
+    async def create_preference_dataset(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Build one immutable pair dataset version from what was recorded."""
+        name = str(payload.get("name", "")).strip()
+        dataset_type = str(payload.get("dataset_type", "")).strip()
+        if not name or not dataset_type:
+            raise HTTPException(status_code=422, detail="name and dataset_type are required.")
+        rules = payload.get("rules")
+        quality = payload.get("quality")
+        split = payload.get("split")
+        tags = payload.get("tags")
+        queue = payload.get("queue_for_review")
+        result = nova.create_preference_dataset(
+            name,
+            dataset_type,
+            rules=rules if isinstance(rules, dict) else None,
+            quality=quality if isinstance(quality, dict) else None,
+            split=split if isinstance(split, dict) else None,
+            version=str(payload.get("version", "")),
+            description=str(payload.get("description", "")),
+            tags=[str(tag) for tag in tags] if isinstance(tags, (list, tuple)) else (),
+            queue_for_review=True if queue is None else bool(queue),
+        )
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=422,
+                detail=str(result.get("reason", "the dataset could not be built")),
+            )
+        return result
+
+    @app.post("/preference/datasets/validate")
+    async def validate_preference_dataset(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Check a stored pair dataset: splits, leakage, provenance, quality."""
+        dataset_version = str(
+            payload.get("dataset_version_id", payload.get("dataset_version", ""))
+        ).strip()
+        if not dataset_version:
+            raise HTTPException(
+                status_code=422,
+                detail="dataset_version_id is required (name@version).",
+            )
+        return nova.validate_preference_dataset(dataset_version)
+
+    @app.get("/preference/datasets/{dataset_version_id}")
+    async def preference_dataset(
+        dataset_version_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """One preference dataset version with its splits and statistics."""
+        try:
+            return nova.preference_dataset(dataset_version_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/preference/datasets/{dataset_version_id}/pairs/{preference_id}")
+    async def preference_pair(
+        dataset_version_id: str,
+        preference_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """One pair: both candidates, the evidence, the outcomes, the split."""
+        result = nova.preference_pair(dataset_version_id, preference_id)
+        if not result.get("ok"):
+            raise HTTPException(status_code=404, detail=str(result.get("reason", "no pair")))
+        return result
+
+    @app.get("/preference/reviews")
+    async def preference_reviews(
+        pending_only: bool = True,
+        dataset_version: str = "",
+        limit: int = 50,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """The review queue, with both candidates and the evidence side by side."""
+        return nova.preference_reviews(
+            pending_only=pending_only, limit=limit, dataset_version=dataset_version
+        )
+
+    @app.get("/preference/reviews/{preference_id}")
+    async def preference_review(
+        preference_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """One queued pair as a reviewer sees it."""
+        try:
+            return nova.preference_review(preference_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/preference/reviews/submit")
+    async def submit_preference_pair(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Record a preference a person is asserting, as a reviewed pair."""
+        dataset_type = str(payload.get("dataset_type", "")).strip()
+        prompt = payload.get("prompt")
+        chosen = payload.get("chosen")
+        rejected = payload.get("rejected")
+        if not dataset_type or not isinstance(prompt, dict):
+            raise HTTPException(
+                status_code=422, detail="dataset_type and prompt are required."
+            )
+        if not isinstance(chosen, dict) or not isinstance(rejected, dict):
+            raise HTTPException(
+                status_code=422, detail="chosen and rejected must both be objects."
+            )
+        context = payload.get("context")
+        chosen_outcome = payload.get("chosen_outcome")
+        rejected_outcome = payload.get("rejected_outcome")
+        tags = payload.get("tags")
+        result = nova.submit_preference_pair(
+            dataset_type=dataset_type,
+            prompt=prompt,
+            chosen=chosen,
+            rejected=rejected,
+            context=context if isinstance(context, dict) else None,
+            chosen_outcome=chosen_outcome if isinstance(chosen_outcome, dict) else None,
+            rejected_outcome=(
+                rejected_outcome if isinstance(rejected_outcome, dict) else None
+            ),
+            reviewer=str(payload.get("reviewer", "")),
+            reason=str(payload.get("reason", "")),
+            confidence=float(payload.get("confidence", 1.0) or 1.0),
+            group_key=str(payload.get("group_key", "")),
+            tags=[str(tag) for tag in tags] if isinstance(tags, (list, tuple)) else (),
+            enqueue=bool(payload.get("enqueue", False)),
+        )
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=422, detail=str(result.get("reason", "the pair was refused"))
+            )
+        return result
+
+    @app.post("/preference/reviews/decide")
+    async def decide_preference_review(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Settle a queued pair: choose A, choose B, mark a tie, or reject it."""
+        result = nova.decide_preference_review(
+            _training_id(payload, "preference_id"),
+            str(payload.get("decision", "")),
+            reviewer=str(payload.get("reviewer", "")),
+            reason=str(payload.get("reason", "")),
+        )
+        if not result.get("ok"):
+            reason = str(result.get("reason", "the decision was refused"))
+            raise HTTPException(
+                status_code=404 if reason.startswith("no queued pair") else 422,
+                detail=reason,
+            )
+        return result
+
+    @app.get("/preference/runs")
+    async def preference_runs(
+        algorithm: str = "",
+        status: str = "",
+        limit: int = 50,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Preference runs, newest first, optionally filtered by objective."""
+        return nova.preference_runs(algorithm=algorithm, status=status, limit=limit)
+
+    @app.post("/preference/runs")
+    async def create_preference_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Create a DPO/ORPO run from a config; never starts it."""
+        model = str(payload.get("model", "")).strip()
+        dataset_version = str(
+            payload.get("dataset_version", payload.get("dataset_version_id", ""))
+        ).strip()
+        config = payload.get("config")
+        if not dataset_version:
+            raise HTTPException(
+                status_code=422,
+                detail="dataset_version is required (name@version).",
+            )
+        result = nova.create_preference_run(
+            model,
+            dataset_version,
+            config=config if isinstance(config, dict) else None,
+            name=str(payload.get("name", "")),
+        )
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=422, detail=str(result.get("reason", "the run could not be created"))
+            )
+        return result
+
+    @app.post("/preference/runs/start")
+    async def start_preference_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Start a preference run (dry-run by default) in a worker thread."""
+        result = await nova.start_preference_run(
+            _training_id(payload),
+            override=bool(payload.get("override", False)),
+            confirm=bool(payload.get("confirm", False)),
+        )
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=409,
+                detail=str(result.get("reason", "the run could not be started")),
+            )
+        return result
+
+    @app.post("/preference/runs/pause")
+    async def pause_preference_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Pause a running preference run at its next step boundary."""
+        return _training_refused(nova.pause_preference_run(_training_id(payload)), "pause")
+
+    @app.post("/preference/runs/cancel")
+    async def cancel_preference_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """End a run: a live one at its next step, a stored one immediately."""
+        return _training_refused(
+            nova.cancel_preference_run(_training_id(payload)), "cancellation"
+        )
+
+    @app.post("/preference/runs/resume")
+    async def resume_preference_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Resume an interrupted run from its newest valid checkpoint."""
+        result = await nova.resume_preference_run(
+            _training_id(payload), checkpoint_id=str(payload.get("checkpoint_id", ""))
+        )
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=409,
+                detail=str(result.get("reason", "the run could not be resumed")),
+            )
+        return result
+
+    @app.post("/preference/runs/re-estimate")
+    async def estimate_preference_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Re-price a stored run against the current machine reading."""
+        return _training_refused(
+            nova.estimate_preference_run(_training_id(payload)), "estimate", status_code=404
+        )
+
+    @app.post("/preference/runs/evaluate")
+    async def evaluate_preference_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Compare base, SFT and candidate on the held-out pairs."""
+        result = await nova.evaluate_preference_run(
+            _training_id(payload),
+            base=payload.get("base"),
+            candidate=payload.get("candidate"),
+            sft=payload.get("sft"),
+            split=str(payload.get("split", "test")),
+            tolerance=payload.get("tolerance"),
+        )
+        return _training_refused(
+            result, "evaluation", status_code=404 if _is_missing(result) else 409
+        )
+
+    @app.post("/preference/compare")
+    async def compare_preference_models(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Compare three models on a pair dataset, without needing a run."""
+        dataset_version = str(
+            payload.get("dataset_version", payload.get("dataset_version_id", ""))
+        ).strip()
+        base = payload.get("base")
+        candidate = payload.get("candidate")
+        if not dataset_version or base is None or candidate is None:
+            raise HTTPException(
+                status_code=422,
+                detail="dataset_version, base and candidate are required.",
+            )
+        return nova.compare_preference_models(
+            dataset_version,
+            base=base,
+            candidate=candidate,
+            sft=payload.get("sft"),
+            split=str(payload.get("split", "test")),
+            tolerance=payload.get("tolerance"),
+            algorithm=str(payload.get("algorithm", "")),
+        )
+
+    @app.get("/preference/runs/{run_id}/checkpoints")
+    async def preference_checkpoints(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """A run's checkpoints with their validity and loadability."""
+        return nova.preference_checkpoints(run_id)
+
+    @app.get("/preference/runs/{run_id}")
+    async def preference_run(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """One preference run: algorithm, config, progress and checkpoints."""
+        try:
+            return nova.preference_run(run_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/preference/evaluations")
+    async def preference_evaluations(
+        limit: int = 50, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Stored comparisons with their readings and regression checks."""
+        return nova.preference_evaluations(limit=limit)
+
+    @app.get("/preference/models")
+    async def preference_models(
+        status: str = "",
+        algorithm: str = "",
+        limit: int = 50,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Registered preference models — the same registry, filtered by objective."""
+        return nova.preference_models(status=status, algorithm=algorithm, limit=limit)
+
+    @app.get("/preference/models/{model_id}")
+    async def preference_model(
+        model_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """One registered model, with the objective that produced it."""
+        try:
+            return nova.preference_model(model_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/brain/decide")
     async def brain_decide(payload: BrainDecideRequest, _principal: str = Depends(require_auth)) -> dict[str, Any]:

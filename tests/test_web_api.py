@@ -1165,8 +1165,11 @@ class Phase14ApiTests(_IsolatedApiTestCase):
     def test_the_diagnostics_route_runs_the_whole_roster(self) -> None:
         payload = self._client.get("/diagnostics").json()
 
-        self.assertEqual(len(payload["components"]), 21)
+        # Phase 16 adds the SFT subsystem's row to the Phase 14 roster, and
+        # Phase 17 adds preference optimization's.
+        self.assertEqual(len(payload["components"]), 23)
         self.assertIn("Core", {row["component"] for row in payload["components"]})
+        self.assertIn("Training", {row["component"] for row in payload["components"]})
         self.assertEqual(payload["lines"][0], "NovaControl Health")
         subset = self._client.get("/diagnostics", params={"only": "Storage,Core"}).json()
         self.assertEqual(

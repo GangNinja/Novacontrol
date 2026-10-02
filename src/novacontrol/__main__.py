@@ -15,9 +15,11 @@ from novacontrol.cli.commands import (
     run_package,
     run_plan,
     run_ask,
+    run_preference,
     run_settings,
     run_status,
     run_train,
+    run_training,
     run_vision,
 )
 from novacontrol.cli.demos import run_phase_demo
@@ -62,6 +64,48 @@ def main(argv: list[str] | None = None) -> None:
         run_settings(args.approval_mode, args.no_videos)
     elif args.command == "train":
         asyncio.run(run_train(args.goal, iterations=args.iterations, feedback=args.feedback))
+    elif args.command == "training":
+        asyncio.run(
+            run_training(
+                args.action,
+                identifier=args.id,
+                dataset_type=args.dataset_type,
+                name=args.name,
+                model=args.model,
+                dataset_version=args.dataset_version,
+                epochs=args.epochs,
+                limit=args.limit,
+                overrides=args.overrides,
+                confirm=args.confirm,
+                override=args.override,
+                reason=args.reason,
+                note=args.note,
+                approved_by=args.approved_by,
+            )
+        )
+    elif args.command == "preference":
+        asyncio.run(
+            run_preference(
+                args.action,
+                identifier=args.id,
+                dataset_type=args.dataset_type,
+                algorithm=args.algorithm,
+                name=args.name,
+                model=args.model,
+                dataset_version=args.dataset_version,
+                epochs=args.epochs,
+                beta=args.beta,
+                limit=args.limit,
+                pairs=args.pairs,
+                decision=args.decision,
+                reviewer=args.reviewer,
+                overrides=args.overrides,
+                confirm=args.confirm,
+                override=args.override,
+                reason=args.reason,
+                note=args.note,
+            )
+        )
     else:
         parser.error(f"Unsupported command: {args.command}")
 

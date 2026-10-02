@@ -121,6 +121,76 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("GET", "/diagnostics"): "no-render",
     ("GET", "/benchmark"): "no-render",
     ("POST", "/benchmark"): "no-render",
+    # Phase 15: the evaluation surface is API/CLI for now — the trajectories,
+    # scores and rewards are consumed by scripts and by whoever is reading the
+    # store, so claiming a renderer here would put a control in the contract
+    # that the frontend does not have.
+    ("GET", "/evaluation/summary"): "no-render",
+    ("GET", "/evaluation/trajectory/{trajectory_id}"): "no-render",
+    ("GET", "/evaluation/metrics"): "no-render",
+    ("GET", "/evaluation/rewards"): "no-render",
+    # Phase 16: the fine-tuning surface is API/CLI for now. Starting, cancelling
+    # or promoting are deliberate acts, and the frontend has no training panel
+    # yet, so every row here stays non-render rather than promising a control
+    # that does not exist.
+    ("GET", "/training/status"): "no-render",
+    ("GET", "/training/summary"): "no-render",
+    ("POST", "/training/estimate"): "no-render",
+    ("GET", "/training/datasets"): "no-render",
+    ("POST", "/training/datasets"): "no-render",
+    ("POST", "/training/datasets/validate"): "no-render",
+    ("GET", "/training/datasets/{dataset_version_id}"): "no-render",
+    ("GET", "/training/runs"): "no-render",
+    ("POST", "/training/runs"): "no-render",
+    ("POST", "/training/runs/start"): "no-render",
+    ("POST", "/training/runs/pause"): "no-render",
+    ("POST", "/training/runs/cancel"): "no-render",
+    ("POST", "/training/runs/resume"): "no-render",
+    ("POST", "/training/runs/re-estimate"): "no-render",
+    ("POST", "/training/runs/evaluate"): "no-render",
+    ("GET", "/training/runs/{run_id}/checkpoints"): "no-render",
+    ("GET", "/training/runs/{run_id}"): "no-render",
+    ("GET", "/training/evaluations"): "no-render",
+    ("GET", "/training/models"): "no-render",
+    ("GET", "/training/models/{model_id}"): "no-render",
+    ("POST", "/training/models/approve"): "no-render",
+    ("POST", "/training/models/promote"): "no-render",
+    ("POST", "/training/models/reject"): "no-render",
+    ("POST", "/training/models/deprecate"): "no-render",
+    ("POST", "/training/models/rollback"): "no-render",
+    # Phase 17: the preference surface is API/CLI for now, on the same reasoning
+    # as the training surface above. Reviewing a pair is the one operation that
+    # would naturally live in a UI, and until there is one the reviewer works
+    # through these routes — so the queue renders nothing rather than promising a
+    # control the frontend does not have.
+    ("GET", "/preference/status"): "no-render",
+    ("GET", "/preference/summary"): "no-render",
+    ("GET", "/preference/algorithms"): "no-render",
+    ("POST", "/preference/estimate"): "no-render",
+    ("POST", "/preference/dry-run"): "no-render",
+    ("GET", "/preference/datasets"): "no-render",
+    ("POST", "/preference/datasets"): "no-render",
+    ("POST", "/preference/datasets/validate"): "no-render",
+    ("GET", "/preference/datasets/{dataset_version_id}"): "no-render",
+    ("GET", "/preference/datasets/{dataset_version_id}/pairs/{preference_id}"): "no-render",
+    ("GET", "/preference/reviews"): "no-render",
+    ("GET", "/preference/reviews/{preference_id}"): "no-render",
+    ("POST", "/preference/reviews/submit"): "no-render",
+    ("POST", "/preference/reviews/decide"): "no-render",
+    ("GET", "/preference/runs"): "no-render",
+    ("POST", "/preference/runs"): "no-render",
+    ("POST", "/preference/runs/start"): "no-render",
+    ("POST", "/preference/runs/pause"): "no-render",
+    ("POST", "/preference/runs/cancel"): "no-render",
+    ("POST", "/preference/runs/resume"): "no-render",
+    ("POST", "/preference/runs/re-estimate"): "no-render",
+    ("POST", "/preference/runs/evaluate"): "no-render",
+    ("POST", "/preference/compare"): "no-render",
+    ("GET", "/preference/runs/{run_id}/checkpoints"): "no-render",
+    ("GET", "/preference/runs/{run_id}"): "no-render",
+    ("GET", "/preference/evaluations"): "no-render",
+    ("GET", "/preference/models"): "no-render",
+    ("GET", "/preference/models/{model_id}"): "no-render",
 }
 
 # Markers that are not renderer function names (allowed non-render roles).

@@ -9,6 +9,7 @@ from novacontrol.settings.models import (
     BRAIN_MODES,
     ApprovalMode,
     UserSettings,
+    clamp_checkpoint_cap,
     clamp_record_cap,
     clamp_retention_days,
 )
@@ -40,6 +41,19 @@ class SettingsManager:
         privacy_allow_external_tools: bool | None = None,
         privacy_allow_telemetry: bool | None = None,
         privacy_allow_remote_model: bool | None = None,
+        evaluation_enabled: bool | None = None,
+        evaluation_retention_days: int | None = None,
+        evaluation_max_records: int | None = None,
+        training_enabled: bool | None = None,
+        training_dry_run: bool | None = None,
+        training_max_checkpoints: int | None = None,
+        training_retention_days: int | None = None,
+        training_max_records: int | None = None,
+        preference_enabled: bool | None = None,
+        preference_dry_run: bool | None = None,
+        preference_max_checkpoints: int | None = None,
+        preference_retention_days: int | None = None,
+        preference_max_records: int | None = None,
     ) -> UserSettings:
         self._settings = replace(
             self._settings,
@@ -94,6 +108,53 @@ class SettingsManager:
             privacy_allow_remote_model=self._settings.privacy_allow_remote_model
             if privacy_allow_remote_model is None
             else privacy_allow_remote_model,
+            # Phase 15: the trajectory store's switches, validated on the same
+            # rule as the audit trail's retention.
+            evaluation_enabled=self._settings.evaluation_enabled
+            if evaluation_enabled is None
+            else evaluation_enabled,
+            evaluation_retention_days=self._settings.evaluation_retention_days
+            if evaluation_retention_days is None
+            else clamp_retention_days(evaluation_retention_days),
+            evaluation_max_records=self._settings.evaluation_max_records
+            if evaluation_max_records is None
+            else clamp_record_cap(evaluation_max_records),
+            # Phase 16: the training switches, validated on exactly the same
+            # rule — a cap is clamped into range, an unreadable one keeps the
+            # current value, and a flag left unset keeps its own.
+            training_enabled=self._settings.training_enabled
+            if training_enabled is None
+            else training_enabled,
+            training_dry_run=self._settings.training_dry_run
+            if training_dry_run is None
+            else training_dry_run,
+            training_max_checkpoints=self._settings.training_max_checkpoints
+            if training_max_checkpoints is None
+            else clamp_checkpoint_cap(training_max_checkpoints),
+            training_retention_days=self._settings.training_retention_days
+            if training_retention_days is None
+            else clamp_retention_days(training_retention_days),
+            training_max_records=self._settings.training_max_records
+            if training_max_records is None
+            else clamp_record_cap(training_max_records),
+            # Phase 17: the preference switches, on the same rule a third time —
+            # a cap is clamped into range, and a control left unset keeps its
+            # current value rather than being reset by whoever edited a form.
+            preference_enabled=self._settings.preference_enabled
+            if preference_enabled is None
+            else preference_enabled,
+            preference_dry_run=self._settings.preference_dry_run
+            if preference_dry_run is None
+            else preference_dry_run,
+            preference_max_checkpoints=self._settings.preference_max_checkpoints
+            if preference_max_checkpoints is None
+            else clamp_checkpoint_cap(preference_max_checkpoints),
+            preference_retention_days=self._settings.preference_retention_days
+            if preference_retention_days is None
+            else clamp_retention_days(preference_retention_days),
+            preference_max_records=self._settings.preference_max_records
+            if preference_max_records is None
+            else clamp_record_cap(preference_max_records),
         )
         return self._settings
 

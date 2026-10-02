@@ -54,6 +54,28 @@ def clamp_record_cap(value: Any) -> int:
     return min(parsed, MAX_AUDIT_RECORDS)
 
 
+#: How many training checkpoints a user setting may keep. The ceiling matches
+#: ``novacontrol.training.config.MAX_CHECKPOINTS``; kept here so the settings
+#: layer does not import the training subsystem.
+MAX_TRAINING_CHECKPOINTS = 100
+
+
+def clamp_checkpoint_cap(value: Any) -> int:
+    """How many checkpoints to keep; unusable input keeps the default (3).
+
+    Zero is not a retention policy here: "keep no checkpoints" would silently
+    make every run unresumable, so it reads as the default rather than as an
+    instruction to delete a run's only way back.
+    """
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 3
+    if parsed < 1:
+        return 3
+    return min(parsed, MAX_TRAINING_CHECKPOINTS)
+
+
 @dataclass(frozen=True, slots=True)
 class UserSettings:
     approval_mode: ApprovalMode = ApprovalMode.ASK
@@ -84,6 +106,32 @@ class UserSettings:
     privacy_allow_external_tools: bool = True
     privacy_allow_telemetry: bool = True
     privacy_allow_remote_model: bool = True
+    # Phase 15: whether this installation keeps trajectories at all, and how
+    # long it keeps them. On by default — the phase exists to collect the data
+    # a future learning phase needs — and switchable off, because "this machine
+    # records what it did" must be a choice the operator can decline.
+    evaluation_enabled: bool = True
+    evaluation_retention_days: int = 30
+    evaluation_max_records: int = 2000
+    # Phase 16: whether this installation offers supervised fine-tuning, and
+    # whether a run actually trains. On and dry-run by default: the surface is
+    # available while nothing spends hours on the CPU until the operator says
+    # so — and "do not train on my machine" stays one switch away.
+    training_enabled: bool = True
+    training_dry_run: bool = True
+    training_max_checkpoints: int = 3
+    training_retention_days: int = 30
+    training_max_records: int = 2000
+    # Phase 17: whether this installation offers preference optimization
+    # (DPO/ORPO) at all, and whether such a run actually trains. The same shape
+    # as the training switches and separate from them, because a person may be
+    # willing to fine-tune on data they verified and unwilling to optimise a
+    # model toward preferences — or the reverse.
+    preference_enabled: bool = True
+    preference_dry_run: bool = True
+    preference_max_checkpoints: int = 3
+    preference_retention_days: int = 30
+    preference_max_records: int = 2000
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -102,6 +150,19 @@ class UserSettings:
             "privacy_allow_external_tools": self.privacy_allow_external_tools,
             "privacy_allow_telemetry": self.privacy_allow_telemetry,
             "privacy_allow_remote_model": self.privacy_allow_remote_model,
+            "evaluation_enabled": self.evaluation_enabled,
+            "evaluation_retention_days": self.evaluation_retention_days,
+            "evaluation_max_records": self.evaluation_max_records,
+            "training_enabled": self.training_enabled,
+            "training_dry_run": self.training_dry_run,
+            "training_max_checkpoints": self.training_max_checkpoints,
+            "training_retention_days": self.training_retention_days,
+            "training_max_records": self.training_max_records,
+            "preference_enabled": self.preference_enabled,
+            "preference_dry_run": self.preference_dry_run,
+            "preference_max_checkpoints": self.preference_max_checkpoints,
+            "preference_retention_days": self.preference_retention_days,
+            "preference_max_records": self.preference_max_records,
         }
 
     @classmethod
@@ -137,5 +198,44 @@ class UserSettings:
             privacy_allow_telemetry=bool(payload.get("privacy_allow_telemetry", True)),
             privacy_allow_remote_model=bool(
                 payload.get("privacy_allow_remote_model", True)
+            ),
+            # The evaluation store is a file a user can hand-edit, so its
+            # retention is read on the same rule the audit trail's is: an
+            # unreadable period keeps the default rather than becoming forever.
+            evaluation_enabled=bool(payload.get("evaluation_enabled", True)),
+            evaluation_retention_days=clamp_retention_days(
+                payload.get("evaluation_retention_days", 30)
+            ),
+            evaluation_max_records=clamp_record_cap(
+                payload.get("evaluation_max_records", 2000)
+            ),
+            # Phase 16: the same rule again. The training store and the
+            # checkpoint count are read from a file a user can edit, so an
+            # unreadable value keeps the default instead of becoming "no
+            # checkpoints" or "keep everything forever".
+            training_enabled=bool(payload.get("training_enabled", True)),
+            training_dry_run=bool(payload.get("training_dry_run", True)),
+            training_max_checkpoints=clamp_checkpoint_cap(
+                payload.get("training_max_checkpoints", 3)
+            ),
+            training_retention_days=clamp_retention_days(
+                payload.get("training_retention_days", 30)
+            ),
+            training_max_records=clamp_record_cap(
+                payload.get("training_max_records", 2000)
+            ),
+            # Phase 17: the preference switches, on the same rule once more.
+            # "Do not optimise my machine's model" is a switch, and an
+            # unreadable cap keeps its default instead of becoming zero.
+            preference_enabled=bool(payload.get("preference_enabled", True)),
+            preference_dry_run=bool(payload.get("preference_dry_run", True)),
+            preference_max_checkpoints=clamp_checkpoint_cap(
+                payload.get("preference_max_checkpoints", 3)
+            ),
+            preference_retention_days=clamp_retention_days(
+                payload.get("preference_retention_days", 30)
+            ),
+            preference_max_records=clamp_record_cap(
+                payload.get("preference_max_records", 2000)
             ),
         )
