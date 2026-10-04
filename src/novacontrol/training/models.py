@@ -859,6 +859,10 @@ class TrainingRun:
     #: Objective-specific readings (a preference margin, a simulated flag). Kept
     #: apart from ``evaluation_metrics``, which is what the evaluator measured.
     preference_metrics: Mapping[str, Any] = field(default_factory=dict)
+    #: Phase 18's readings for a reinforcement-learning run: reward statistics,
+    #: the integrity breakdown and the rollout/policy summary. Empty everywhere
+    #: else, so a Phase 16 or 17 row parses unchanged.
+    rl_metrics: Mapping[str, Any] = field(default_factory=dict)
     start_time: str = ""
     end_time: str = ""
     current_epoch: int = 0
@@ -916,6 +920,7 @@ class TrainingRun:
             "backend": self.backend,
             "algorithm": self.algorithm,
             "preference_metrics": dict(self.preference_metrics),
+            "rl_metrics": dict(self.rl_metrics),
             "start_time": self.start_time,
             "end_time": self.end_time,
             "current_epoch": self.current_epoch,
@@ -949,6 +954,7 @@ class TrainingRun:
             backend=_text(data.get("backend")),
             algorithm=_text(data.get("algorithm"), "sft"),
             preference_metrics=_mapping(data.get("preference_metrics")),
+            rl_metrics=_mapping(data.get("rl_metrics")),
             start_time=_text(data.get("start_time")),
             end_time=_text(data.get("end_time")),
             current_epoch=max(0, _whole(data.get("current_epoch")) or 0),

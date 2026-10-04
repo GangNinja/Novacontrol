@@ -952,9 +952,12 @@ class Phase14ApplicationTests(unittest.IsolatedAsyncioTestCase):
             # Phase 17 adds preference optimization: the same treatment, with the
             # DPO/ORPO objectives and the pair store behind it.
             "Preference optimization",
+            # Phase 18 adds the RLHF / RLAIF subsystem: same presence reporting,
+            # with the mock-only policy optimizer named explicitly.
+            "RLHF / RLAIF",
         ):
             self.assertIn(name, components)
-        self.assertEqual(len(report["components"]), 23)
+        self.assertEqual(len(report["components"]), 24)
         for row in report["components"]:
             self.assertIn(row["status"], {state.value for state in HealthState})
             self.assertTrue(row["message"])

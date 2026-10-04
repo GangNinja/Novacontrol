@@ -13,7 +13,9 @@ evaluates the result against the base model, and registers the candidate as an
 > gate and a model registry — and the last section says exactly how a later
 > phase would consume it. (Phase 17 did: see
 > [docs/PREFERENCE.md](PREFERENCE.md) for the DPO/ORPO preferences built on this
-> interface.)
+> interface. Phase 18 did too: [docs/RLHF.md](RLHF.md) for the RLHF/RLAIF
+> subsystem built on the same datasets, trainer boundary, resource verdict,
+> evaluation gate and registry.)
 
 Three more things it deliberately does not do:
 
@@ -454,6 +456,15 @@ Phase 17 consumed these seams without reopening them: `preference/` sits beside
 unchanged, and the same registry and the same evaluation gate. See
 [docs/PREFERENCE.md](PREFERENCE.md) for what it does and, just as importantly,
 what it does not do.
+
+Phase 18 consumed the same seams a third time without reopening them: `rlhf/`
+builds reward datasets from the Phase 15 record plus the feedback and ratings,
+re-uses `RewardEngine` unchanged as one of its reward providers, inherits
+`TrainingRun`, the checkpoints, the splitter, the resource verdict, the
+evaluation gate and the registry, and ships a single mock policy optimizer so the
+pipeline is provable here. [docs/RLHF.md](RLHF.md) says what it does and what it
+deliberately does not: no RLVR, critique learning, RLCD-style training, agentic
+RL, distributed training or concrete Transformers/PEFT loop.
 
 What a later phase must **not** do is what this one was careful not to: it must
 not start large training by itself, must not require CUDA, must not train on

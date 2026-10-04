@@ -683,6 +683,21 @@ class PreferenceSettings(TrainingSettings):
 
 
 @dataclass(frozen=True, slots=True)
+class RLHFSettings(TrainingSettings):
+    """Phase 18: whether RLHF/RLAIF is offered, and how cautious.
+
+    The same fields as the other training sections, for the same reasons: an RL
+    run can occupy this machine for hours and fill a disk with checkpoints, so an
+    operator who understands one section understands this one. It is a separate
+    section because the answer may differ — and this is the section where the
+    careful answer is most likely, because only a mock policy optimizer ships
+    with the phase. Its ``dry_run`` default means the pipeline can be planned,
+    priced and simulated everywhere while a real run stays behind three doors:
+    this switch, the walled dependencies, and a wired policy-optimizer runner.
+    """
+
+
+@dataclass(frozen=True, slots=True)
 class ModuleSettings:
     enabled: bool = True
     options: Mapping[str, Any] = field(default_factory=dict)
@@ -715,6 +730,13 @@ class NovaControlConfig:
     # differently, and a deployment that wants one and not the other should not
     # have to accept both.
     preference: PreferenceSettings = field(default_factory=PreferenceSettings)
+    # Phase 18: whether RLHF/RLAIF is offered at all, how cautious it is, and
+    # the defaults an RL run inherits. Its own section for the third time, and
+    # for the same reason: recording, fine-tuning, preference optimization and
+    # reinforcement learning are four decisions a deployment may answer
+    # differently — and an installation that records and evaluates should be
+    # able to refuse RL without giving up anything else.
+    rlhf: RLHFSettings = field(default_factory=RLHFSettings)
     vision: VisionSettings = field(default_factory=VisionSettings)
     models: ModelSettings = field(default_factory=ModelSettings)
     modules: Mapping[str, ModuleSettings] = field(default_factory=dict)
@@ -750,6 +772,7 @@ class NovaControlConfig:
             preference=PreferenceSettings.from_mapping(
                 _mapping(data.get("preference", {}))
             ),
+            rlhf=RLHFSettings.from_mapping(_mapping(data.get("rlhf", {}))),
             vision=VisionSettings.from_mapping(_mapping(data.get("vision", {}))),
             models=ModelSettings.from_mapping(_mapping(data.get("models", {}))),
             modules=modules,
@@ -1004,6 +1027,48 @@ class NovaControlConfig:
                 retention_days=_days_value(
                     os.getenv("NOVACONTROL_PREFERENCE_RETENTION_DAYS"),
                     base.preference.retention_days,
+                ),
+            ),
+            # Phase 18: the RLHF switches, read on exactly the same rules, with
+            # the training section's ceilings because they are about the same two
+            # things (how many checkpoints a run may keep, how many rows the
+            # store may hold).
+            rlhf=replace(
+                base.rlhf,
+                enabled=_parse_bool(
+                    os.getenv("NOVACONTROL_RLHF_ENABLED"),
+                    default=base.rlhf.enabled,
+                ),
+                dry_run=_parse_bool(
+                    os.getenv("NOVACONTROL_RLHF_DRY_RUN"),
+                    default=base.rlhf.dry_run,
+                ),
+                allow_unsafe=_parse_bool(
+                    os.getenv("NOVACONTROL_RLHF_ALLOW_UNSAFE"),
+                    default=base.rlhf.allow_unsafe,
+                ),
+                hardware_policy=(
+                    os.getenv(
+                        "NOVACONTROL_RLHF_HARDWARE_POLICY",
+                        base.rlhf.hardware_policy,
+                    )
+                    .strip()
+                    .lower()
+                    or base.rlhf.hardware_policy
+                ),
+                max_checkpoints=_count_value(
+                    os.getenv("NOVACONTROL_RLHF_MAX_CHECKPOINTS"),
+                    base.rlhf.max_checkpoints,
+                    maximum=MAX_TRAINING_CHECKPOINTS,
+                ),
+                max_records=_count_value(
+                    os.getenv("NOVACONTROL_RLHF_MAX_RECORDS"),
+                    base.rlhf.max_records,
+                    maximum=MAX_TRAINING_RECORDS,
+                ),
+                retention_days=_days_value(
+                    os.getenv("NOVACONTROL_RLHF_RETENTION_DAYS"),
+                    base.rlhf.retention_days,
                 ),
             ),
             vision=replace(

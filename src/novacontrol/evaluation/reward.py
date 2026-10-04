@@ -25,7 +25,7 @@ phase to avoid the safety layer, which is the opposite of the intent.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from novacontrol.evaluation.evaluator import EvaluationResult
@@ -281,6 +281,13 @@ class RewardResult:
     reward_id: str = ""
     trajectory_id: str = ""
     evaluation_id: str = ""
+    #: Which kind of signal produced this reading (``human``, ``ai``, ``rule``,
+    #: ``verifier``, ``composite``). Empty on a Phase 15 row, which has one source.
+    reward_source: str = ""
+    #: How sure the source was, when the source can say. Never invented here.
+    confidence: float | None = None
+    #: The evaluator/provider that produced the signal, when there is one.
+    evaluator_id: str = ""
     total_reward: float = 0.0
     normalized_reward: float | None = None
     component_rewards: Mapping[str, float] = field(default_factory=dict)
@@ -298,6 +305,27 @@ class RewardResult:
     def applied_penalties(self) -> tuple[RewardPenalty, ...]:
         return tuple(item for item in self.penalty_breakdown if item.contribution)
 
+    def with_provenance(
+        self,
+        *,
+        source: str = "",
+        evaluator_id: str = "",
+        confidence: float | None = None,
+    ) -> RewardResult:
+        """The same reward, stamped with where it came from (Phase 18's need).
+
+        A Phase 15 reward has one source; an RL-facing one may be a human's
+        judgement, an AI rating or a rule, and a reader has to be able to tell
+        which without asking the code that stored it. Anything not stated keeps
+        what the reward already carried.
+        """
+        return replace(
+            self,
+            reward_source=source or self.reward_source,
+            evaluator_id=evaluator_id or self.evaluator_id,
+            confidence=self.confidence if confidence is None else float(confidence),
+        )
+
     def component(self, name: str) -> RewardComponent | None:
         for item in self.components:
             if item.name == name:
@@ -309,6 +337,9 @@ class RewardResult:
             "reward_id": self.reward_id,
             "trajectory_id": self.trajectory_id,
             "evaluation_id": self.evaluation_id,
+            "reward_source": self.reward_source,
+            "confidence": self.confidence,
+            "evaluator_id": self.evaluator_id,
             "total_reward": round(self.total_reward, 6),
             "normalized_reward": None
             if self.normalized_reward is None
@@ -347,6 +378,11 @@ class RewardResult:
             reward_id=str(data.get("reward_id", "")),
             trajectory_id=str(data.get("trajectory_id", "")),
             evaluation_id=str(data.get("evaluation_id", "")),
+            reward_source=str(data.get("reward_source", "")),
+            confidence=float(data["confidence"])
+            if isinstance(data.get("confidence"), (int, float))
+            else None,
+            evaluator_id=str(data.get("evaluator_id", "")),
             total_reward=float(data.get("total_reward", 0.0) or 0.0),
             normalized_reward=float(normalized) if isinstance(normalized, (int, float)) else None,
             component_rewards={

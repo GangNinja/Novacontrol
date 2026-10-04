@@ -2742,7 +2742,19 @@ class TrainingManagerTests(unittest.TestCase):
         self._tmp = TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.publisher = RecordingPublisher()
-        self.manager = as_dry_run(self._tmp.name, publish=self.publisher)
+        # A known machine reading keeps the estimate deterministic: CI has no
+        # psutil, and an unmeasured memory reading downgrades UNSAFE to WARNING.
+        self.manager = as_dry_run(
+            self._tmp.name,
+            estimator=ResourceEstimator(
+                hardware=HardwareCapabilities(
+                    cpu_count=8,
+                    available_ram_bytes=32_000_000_000,
+                    total_ram_bytes=32_000_000_000,
+                )
+            ),
+            publish=self.publisher,
+        )
 
     def _dataset(
         self,

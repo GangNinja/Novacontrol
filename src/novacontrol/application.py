@@ -91,6 +91,7 @@ from novacontrol.core.security import ApprovalDecision, ApprovalRequest, DenyByD
 from novacontrol.desktop import DesktopAutomationController, DesktopAutomationModule, LocalDesktopRunner
 from novacontrol.desktop.vision import VisionController
 from novacontrol.evaluation import (
+    AgentTrajectory,
     DataQualityFilter,
     EvaluationConfig,
     EvaluationEngine,
@@ -112,6 +113,14 @@ from novacontrol.preference import (
     PreferenceRules,
     PreferenceTrainingConfig,
     build_preference_repositories,
+)
+from novacontrol.rlhf import (
+    MODES,
+    RLHFManager,
+    RLHFModule,
+    RLTrainingConfig,
+    RewardDatasetRules,
+    build_rlhf_repositories,
 )
 from novacontrol.training import (
     ResourceEstimator,
@@ -1539,6 +1548,15 @@ class NovaControlApplication:
         # run store would be a second thing to keep honest. Only the pair
         # datasets and the review queue are new files.
         self.preference = self._build_preference_manager()
+        # ── Phase 18: RLHF / RLAIF ──────────────────────────────────────────
+        # Built on the SAME stores, the SAME registry and the SAME checkpoint
+        # management as the two training managers above: an RL run is a run, an
+        # RL candidate is a registered model, and a second run store or registry
+        # would be a second thing to keep honest. What is new is feedback,
+        # evaluator ratings, reward datasets and disagreement records — four
+        # JSONL files in the same folder. Nothing here starts training, and the
+        # default configuration is a dry run.
+        self.rlhf = self._build_rlhf_manager()
         # Phase 9.2/9.3: the capability registry is the ONE place that answers
         # what this installation can do. It is the registry the intelligence
         # layer already maintains — attached to the catalogues rather than
@@ -1693,6 +1711,12 @@ class NovaControlApplication:
         # reviewer's choice changes what a future dataset may train on and must
         # carry a name, which a bus message too easily does not.
         self.runtime.register_module(PreferenceModule(self.preference))
+        # Phase 18: the RLHF/RLAIF surface answers status/feedback/ratings/
+        # disagreement/dataset/algorithm/estimate/pipeline questions on the bus.
+        # Decisions and ratings stay off it: settling a feedback row and rating
+        # a candidate both change what a future dataset may train on, and both
+        # must carry a name.
+        self.runtime.register_module(RLHFModule(self.rlhf))
 
         # Phase 14, last boot steps: point the ONE cloud switch at the policy,
         # and give the diagnostic roster the components it reports on (every
@@ -1709,6 +1733,10 @@ class NovaControlApplication:
         # checkpoint cap), so a deployment's opinion is in place before anyone
         # asks what a DPO run would cost.
         self.apply_preference_settings()
+        # Phase 18: and for the RL defaults (mode, policy algorithm, reward
+        # provider, dry-run, checkpoint cap), so a deployment's opinion is in
+        # place before anyone asks what an RL run would cost or do.
+        self.apply_rlhf_settings()
 
     # --- Brain mode (local scratch ↔ local LLM) ---
 
@@ -4727,6 +4755,480 @@ class NovaControlApplication:
             raise KeyError(f"no trained model {model_id!r}")
         return model.to_dict()
 
+    # ── Phase 18: RLHF / RLAIF ─────────────────────────────────────────────
+
+    def _build_rlhf_manager(self) -> RLHFManager:
+        """Build the RLHF/RLAIF subsystem ON the Phase 16 stores and registry.
+
+        The run store, the checkpoint records, the model registry and the
+        evaluation records are the training manager's — one registry, one run
+        history, one place a model can be promoted from, for the third time.
+        Four JSONL files are new: feedback, ratings, reward datasets and
+        disagreement records. The evaluation dataset store is Phase 16's,
+        because an RL candidate is compared on the SAME held-out examples every
+        other model was measured on.
+        """
+        preferences = self.settings.settings
+        repos = build_rlhf_repositories(
+            self.data_dir, cap=preferences.rlhf_max_records
+        )
+        return RLHFManager(
+            datasets=repos.datasets,
+            feedback=repos.feedback,
+            ratings=repos.ratings,
+            disagreements=repos.disagreements,
+            runs=self.training.runs,
+            checkpoints=self.training.checkpoints_repo,
+            models=self.training.models,
+            evaluations=self.training.evaluations,
+            supervised_datasets=self.training.datasets,
+            output_root=self.data_dir / "rlhf_output",
+            default_config=self._rlhf_default_config(),
+            estimator=ResourceEstimator(
+                governor=self.governor,
+                monitor=getattr(self, "hardware_monitor", None),
+                model_size_lookup=getattr(self.model_manager, "model_size_bytes", None),
+            ),
+            registry=self.training.registry,
+            max_checkpoints=preferences.rlhf_max_checkpoints,
+            publish=self._rlhf_event,
+        )
+
+    def _rlhf_default_config(self) -> RLTrainingConfig:
+        """What a new RL run inherits, from the section and the settings.
+
+        ``dry_run`` is the OR of the two switches, the direction a safety switch
+        fails in: turning dry-run on anywhere keeps this machine from training,
+        and a real run needs BOTH to say otherwise.
+        """
+        settings = self.config.rlhf
+        preferences = self.settings.settings
+        mapping = dict(settings.base_config())
+        mapping["dry_run"] = bool(settings.dry_run or preferences.rlhf_dry_run)
+        mapping["max_checkpoints"] = preferences.rlhf_max_checkpoints
+        return RLTrainingConfig.from_mapping(mapping)
+
+    def _rlhf_event(self, type_: str, payload: Mapping[str, Any]) -> None:
+        """Publish an RLHF event from the manager's synchronous seams."""
+        self._announce_soon(type_, **dict(payload))
+
+    def _rlhf_enabled(self) -> bool:
+        """Whether this installation offers RLHF/RLAIF at all (install AND operator)."""
+        return bool(self.config.rlhf.enabled and self.settings.settings.rlhf_enabled)
+
+    def _rlhf_disabled(self) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "refused": True,
+            "reason": (
+                "RLHF/RLAIF is switched off in this installation "
+                "(NOVACONTROL_RLHF_ENABLED / rlhf_enabled)"
+            ),
+        }
+
+    def apply_rlhf_settings(self) -> dict[str, Any]:
+        """Re-derive the RL defaults and retention, live."""
+        config = self._rlhf_default_config()
+        self.rlhf.rl_defaults = config
+        self.rlhf.default_config = config.as_training_config()
+        self.rlhf.checkpoint_manager.max_checkpoints = max(
+            1, int(self.settings.settings.rlhf_max_checkpoints)
+        )
+        return {
+            "enabled": self._rlhf_enabled(),
+            "dry_run": config.dry_run,
+            "mode": config.mode,
+            "algorithm": config.algorithm,
+            "reward_provider": config.reward_provider,
+            "hardware_policy": config.hardware_policy,
+            "max_checkpoints": self.rlhf.checkpoint_manager.max_checkpoints,
+            "output_root": str(self.rlhf.output_root),
+        }
+
+    def rlhf_status(self) -> dict[str, Any]:
+        """The subsystem's headline state: feedback, ratings, datasets, runs."""
+        return {**self.rlhf.status(), "enabled": self._rlhf_enabled()}
+
+    def rlhf_summary(self) -> dict[str, Any]:
+        """The same, plus the newest datasets and runs by name."""
+        return {**self.rlhf.summary(), "enabled": self._rlhf_enabled()}
+
+    def rlhf_algorithms(self) -> dict[str, Any]:
+        """The modes and policy optimizers, and what this machine can do."""
+        return self.rlhf.algorithms()
+
+    # -- human feedback --------------------------------------------------------
+
+    def submit_rlhf_feedback(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Record one short, structured piece of feedback (never a reasoning trace)."""
+        if not self._rlhf_enabled():
+            return self._rlhf_disabled()
+        trajectory = None
+        raw = payload.get("trajectory")
+        if isinstance(raw, Mapping):
+            try:
+                trajectory = AgentTrajectory.from_dict(dict(raw))
+            except (TypeError, ValueError):
+                trajectory = None
+        rating = payload.get("rating")
+        confidence = payload.get("confidence")
+        return self.rlhf.submit_feedback(
+            feedback_type=str(payload.get("feedback_type", "accept")),
+            trajectory_id=str(
+                payload.get("trajectory_id", payload.get("trajectory_id", ""))
+            ),
+            task_id=str(payload.get("task_id", "")),
+            user_ref=str(payload.get("user_ref", "")),
+            session_ref=str(payload.get("session_ref", "")),
+            rating=float(rating) if isinstance(rating, (int, float)) else None,
+            selected_candidate=str(payload.get("selected_candidate", "")),
+            correction=str(payload.get("correction", "")),
+            reason_category=str(payload.get("reason_category", "")),
+            confidence=float(confidence)
+            if isinstance(confidence, (int, float))
+            else None,
+            trajectory=trajectory,
+        )
+
+    def rlhf_feedback(
+        self,
+        *,
+        status: str = "",
+        feedback_type: str = "",
+        trajectory_id: str = "",
+        pending_only: bool = False,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        rows = self.rlhf.feedback_list(
+            status=status,
+            feedback_type=feedback_type,
+            trajectory_id=trajectory_id,
+            pending_only=pending_only,
+            limit=limit,
+        )
+        return {
+            "feedback": rows,
+            "count": len(rows),
+            "stats": self.rlhf.feedback_stats(),
+        }
+
+    def decide_rlhf_feedback(
+        self, feedback_id: str, decision: str, *, reviewer: str = "", reason: str = ""
+    ) -> dict[str, Any]:
+        """Settle a held feedback row: accepted stays usable, rejected does not."""
+        if not self._rlhf_enabled():
+            return self._rlhf_disabled()
+        return self.rlhf.decide_feedback(
+            feedback_id, decision, reviewer=reviewer, reason=reason
+        )
+
+    # -- AI ratings ------------------------------------------------------------
+
+    def rate_rlhf_subject(
+        self,
+        subject: Mapping[str, Any],
+        *,
+        evaluator: str = "auto",
+        criteria: Sequence[str] = (),
+        save: bool = True,
+    ) -> dict[str, Any]:
+        """Ask an evaluator for a structured rating of observable facts."""
+        if not self._rlhf_enabled():
+            return self._rlhf_disabled()
+        return self.rlhf.rate(
+            subject, evaluator=evaluator, criteria=criteria, save=save
+        )
+
+    def rlhf_ratings(
+        self, *, trajectory_id: str = "", evaluator_id: str = "", limit: int = 50
+    ) -> dict[str, Any]:
+        rows = self.rlhf.ratings_list(
+            trajectory_id=trajectory_id, evaluator_id=evaluator_id, limit=limit
+        )
+        return {"ratings": rows, "count": len(rows), "stats": self.rlhf.rating_stats()}
+
+    def rlhf_disagreements(
+        self, *, detect: bool = False, kind: str = "", limit: int = 50
+    ) -> dict[str, Any]:
+        """Recorded disagreements, optionally detecting new ones first."""
+        if detect:
+            self.rlhf.detect_disagreements()
+        rows = self.rlhf.disagreements_list(kind=kind, limit=limit)
+        return {
+            "disagreements": rows,
+            "count": len(rows),
+            "stats": self.rlhf.disagreement_stats(),
+        }
+
+    # -- reward datasets -------------------------------------------------------
+
+    def rlhf_datasets(
+        self, *, mode: str = "", name: str = "", limit: int = 50
+    ) -> dict[str, Any]:
+        found = self.rlhf.reward_datasets_list(mode=mode, name=name, limit=limit)
+        return {"datasets": [item.to_dict() for item in found], "count": len(found)}
+
+    def rlhf_dataset(self, dataset_version_id: str) -> dict[str, Any]:
+        dataset = self.rlhf.reward_dataset(dataset_version_id)
+        if dataset is None:
+            raise KeyError(f"no reward dataset {dataset_version_id!r}")
+        return dataset.to_dict()
+
+    def create_rlhf_dataset(
+        self,
+        name: str,
+        *,
+        mode: str = "",
+        rules: Mapping[str, Any] | None = None,
+        split: Mapping[str, Any] | None = None,
+        version: str = "",
+        description: str = "",
+        tags: Sequence[str] = (),
+        max_examples: int = 0,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        """Build one immutable reward dataset version from what was recorded.
+
+        The raw material is Phase 15's store — trajectories, their evaluations
+        and their rewards — plus the feedback and ratings recorded here. Nothing
+        is invented: an installation with nothing recorded builds an empty
+        version and validation says so, rather than a dataset made of guesses.
+        """
+        if not self._rlhf_enabled():
+            return self._rlhf_disabled()
+        merged_rules = dict(rules) if isinstance(rules, Mapping) else {}
+        if max_examples > 0:
+            merged_rules.setdefault("max_examples", int(max_examples))
+        rules_config = (
+            RewardDatasetRules.from_mapping(merged_rules) if merged_rules else None
+        )
+        bounded = max(0, int(limit))
+        try:
+            dataset = self.rlhf.build_dataset(
+                name,
+                mode=mode,
+                version=version,
+                description=description,
+                rules=rules_config,
+                split=SplitConfig.from_mapping(split) if split else None,
+                trajectories=self.evaluation.list_trajectories(limit=bounded),
+                evaluations=self.evaluation.list_evaluations(limit=bounded),
+                rewards=self.evaluation.list_rewards(limit=bounded),
+                tags=tuple(str(tag) for tag in tags),
+            )
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+        return {"ok": True, "dataset": dataset.to_dict()}
+
+    def validate_rlhf_dataset(self, dataset_version_id: str) -> dict[str, Any]:
+        """Check a stored reward dataset: sources, integrity, splits, leakage."""
+        return self.rlhf.validate_dataset(dataset_version_id)
+
+    def rlhf_held(self, dataset_version_id: str) -> dict[str, Any]:
+        """Rows a dataset held back, so a person can see what was excluded and why."""
+        held = self.rlhf.held_examples(dataset_version_id)
+        return {"examples": [item.to_dict() for item in held], "count": len(held)}
+
+    # -- planning, dry run and runs --------------------------------------------
+
+    def estimate_rlhf(self, config: Mapping[str, Any]) -> dict[str, Any]:
+        """Validate an ad-hoc RL configuration and price it — no run."""
+        return self.rlhf.estimate_config(config)
+
+    def rlhf_pipeline(
+        self, config: Mapping[str, Any] | None = None, dataset_version: str = ""
+    ) -> dict[str, Any]:
+        """The stage-by-stage plan for one configuration and dataset."""
+        return self.rlhf.pipeline_plan(config, dataset_version)
+
+    def dry_run_rlhf(
+        self,
+        model: str = "",
+        dataset_version: str = "",
+        *,
+        config: Mapping[str, Any] | None = None,
+        mode: str = "",
+        algorithm: str = "",
+    ) -> dict[str, Any]:
+        """Validate, price, plan and simulate an RL run — and start nothing."""
+        if not self._rlhf_enabled():
+            return self._rlhf_disabled()
+        return self.rlhf.dry_run(
+            model, dataset_version, config=config, mode=mode, algorithm=algorithm
+        )
+
+    def rlhf_runs(
+        self, *, mode: str = "", status: str = "", limit: int = 50
+    ) -> dict[str, Any]:
+        found = self.rlhf.rl_runs(mode=mode, status=status, limit=limit)
+        return {"runs": [item.to_dict() for item in found], "count": len(found)}
+
+    def rlhf_run(self, run_id: str) -> dict[str, Any]:
+        run = self.rlhf.run(run_id)
+        if run is None:
+            raise KeyError(f"no RL run {run_id!r}")
+        return run.to_dict()
+
+    def create_rlhf_run(
+        self,
+        model: str,
+        dataset_version: str,
+        *,
+        config: Mapping[str, Any] | None = None,
+        name: str = "",
+    ) -> dict[str, Any]:
+        """Validate an RL configuration, audit its rewards, and store a CREATED run."""
+        if not self._rlhf_enabled():
+            return self._rlhf_disabled()
+        try:
+            run = self.rlhf.create_run(model, dataset_version, config=config, name=name)
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+        return {"ok": True, "run": run.to_dict()}
+
+    def estimate_rlhf_run(self, run_id: str) -> dict[str, Any]:
+        """Re-price a stored RL run against the machine as it is NOW."""
+        return self.rlhf.estimate_run(run_id)
+
+    async def start_rlhf_run(
+        self, run_id: str, *, override: bool = False, confirm: bool = False
+    ) -> dict[str, Any]:
+        """Validate, estimate and run — off the event loop, never blocking it.
+
+        The rails are Phase 16's: an UNSAFE estimate is refused unless this
+        deployment allows an override AND the caller asked for one, a real
+        (non-dry-run) configuration needs an explicit confirmation, and a real
+        run also needs a wired policy-optimizer runner — the mock cannot stand
+        in for one.
+        """
+        if not self._rlhf_enabled():
+            return self._rlhf_disabled()
+        if override and not self.config.rlhf.allow_unsafe:
+            return {
+                "ok": False,
+                "refused": True,
+                "run_id": run_id,
+                "reason": (
+                    "overriding an unsafe resource estimate is not allowed in this "
+                    "installation (NOVACONTROL_RLHF_ALLOW_UNSAFE)"
+                ),
+            }
+        return await asyncio.to_thread(
+            self.rlhf.start, run_id, override=override, confirm=confirm
+        )
+
+    async def resume_rlhf_run(
+        self, run_id: str, *, checkpoint_id: str = ""
+    ) -> dict[str, Any]:
+        """Continue a paused/failed/cancelled RL run from a checkpoint."""
+        if not self._rlhf_enabled():
+            return self._rlhf_disabled()
+        return await asyncio.to_thread(
+            self.rlhf.resume, run_id, checkpoint_id=checkpoint_id
+        )
+
+    def pause_rlhf_run(self, run_id: str) -> dict[str, Any]:
+        """Ask a running RL run to stop at its next step."""
+        return self.rlhf.pause(run_id)
+
+    def cancel_rlhf_run(self, run_id: str) -> dict[str, Any]:
+        """End an RL run: a live one at its next step, a stored one now."""
+        return self.rlhf.cancel(run_id)
+
+    def rlhf_checkpoints(self, run_id: str) -> dict[str, Any]:
+        """Every checkpoint row of one RL run, with loadability and size."""
+        found = self.rlhf.checkpoints(run_id)
+        return {"checkpoints": list(found), "count": len(found)}
+
+    # -- evaluation and the registry -------------------------------------------
+
+    async def evaluate_rlhf_run(
+        self,
+        run_id: str,
+        *,
+        base: Any = None,
+        candidate: Any = None,
+        sft: Any = None,
+        preference: Any = None,
+        dataset_version: str = "",
+        split: str = "test",
+        tolerance: float | None = None,
+    ) -> dict[str, Any]:
+        """Base, SFT and preference models against the RL candidate, measured.
+
+        The run's reward is recorded BESIDE the comparison and never used as its
+        verdict: a model that learned to earn a bigger number has not thereby
+        been shown to be better at anything.
+        """
+        if not self._rlhf_enabled():
+            return self._rlhf_disabled()
+        return await asyncio.to_thread(
+            self.rlhf.evaluate_run,
+            run_id,
+            base=base,
+            candidate=candidate,
+            sft=sft,
+            preference=preference,
+            dataset_version=dataset_version,
+            split=split,
+            tolerance=tolerance,
+        )
+
+    def compare_rlhf_models(
+        self,
+        dataset_version: str,
+        *,
+        base: Any,
+        candidate: Any,
+        sft: Any = None,
+        preference: Any = None,
+        split: str = "test",
+        tolerance: float | None = None,
+        run_id: str = "",
+    ) -> dict[str, Any]:
+        """Compare up to four models without a run: the same evaluator, on demand."""
+        if not self._rlhf_enabled():
+            return self._rlhf_disabled()
+        return self.rlhf.compare_models(
+            dataset_version,
+            base=base,
+            candidate=candidate,
+            sft=sft,
+            preference=preference,
+            split=split,
+            tolerance=tolerance,
+            run_id=run_id,
+        )
+
+    def rlhf_evaluations(self, *, limit: int = 50) -> dict[str, Any]:
+        """Every stored comparison, newest first, with its regressions."""
+        found = self.rlhf.rl_evaluations_list(limit=limit)
+        return {"evaluations": found, "count": len(found)}
+
+    def rlhf_models(
+        self, *, status: str = "", mode: str = "", limit: int = 50
+    ) -> dict[str, Any]:
+        """Registered models, filtered to the RL modes.
+
+        The registry is Phase 16's — the same records, the same statuses, the
+        same explicit approval path — so this is a VIEW, not a second registry.
+        """
+        wanted = mode.strip().lower()
+        found = [
+            item
+            for item in self.training.models_list(status=status, limit=0)
+            if item.algorithm in MODES and (not wanted or item.algorithm == wanted)
+        ]
+        if limit and limit > 0:
+            found = found[:limit]
+        return {"models": [item.to_dict() for item in found], "count": len(found)}
+
+    def rlhf_model(self, model_id: str) -> dict[str, Any]:
+        model = self.training.model(model_id)
+        if model is None:
+            raise KeyError(f"no trained model {model_id!r}")
+        return model.to_dict()
+
     # ── Phase 14: execution mode, privacy, resources, cost and diagnostics ──
 
     @property
@@ -5403,6 +5905,64 @@ class NovaControlApplication:
         self.diagnostics.register(
             "Preference optimization", preference, category="systems"
         )
+
+        def rlhf() -> DiagnosticResult:
+            """The RLHF/RLAIF subsystem: wired, and honest about what it cannot do.
+
+            Nothing here loads a model or probes a runtime: the capability
+            reading is the one the training row already took. A machine without
+            the optional dependencies is DEGRADED (planning, reward generation,
+            dry runs and estimation all work), and an installation that switched
+            RL off is SKIPPED rather than broken. The row names the policy
+            optimizer, because "mock only" is the honest headline.
+            """
+            defaults = self.rlhf.rl_defaults
+            if not self._rlhf_enabled():
+                return row(
+                    "RLHF / RLAIF",
+                    HealthState.SKIPPED,
+                    "RLHF/RLAIF is switched off in this installation",
+                    enabled=False,
+                    dry_run=defaults.dry_run,
+                    modes=list(MODES),
+                )
+            capabilities = self.rlhf.rl_estimator.capabilities()
+            missing = capabilities.missing_dependencies()
+            payload = {
+                "enabled": True,
+                "dry_run": defaults.dry_run,
+                "mode": defaults.mode,
+                "algorithm": defaults.algorithm,
+                "modes": list(MODES),
+                "feedback_pending": len(self.rlhf.pending_feedback()),
+                "disagreements": self.rlhf.disagreement_stats().get("rows", 0),
+                "note": (
+                    "only the mock policy optimizer ships in this phase: dry runs, "
+                    "reward generation and evaluation all run; a real RL algorithm "
+                    "is a future phase"
+                ),
+            }
+            if missing:
+                return row(
+                    "RLHF / RLAIF",
+                    HealthState.DEGRADED,
+                    "the RLHF/RLAIF subsystem is wired; dry-run works, a real run "
+                    "needs: " + ", ".join(missing),
+                    remediation=(
+                        "pip install " + " ".join(missing)
+                        + " to enable a real training backend"
+                    ),
+                    **payload,
+                )
+            return row(
+                "RLHF / RLAIF",
+                HealthState.OK,
+                "the RLHF/RLAIF subsystem is wired and its training dependencies "
+                "are installed",
+                **payload,
+            )
+
+        self.diagnostics.register("RLHF / RLAIF", rlhf, category="systems")
 
     def _record_audit(
         self,

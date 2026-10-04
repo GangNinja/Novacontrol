@@ -3301,3 +3301,129 @@ and are recorded so the verification stays auditable:
 No behaviour changed for any other case: the split content is byte-identical
 across rebuilds before and after, and the immutability rule refuses a rewrite of
 a real dataset version exactly as it did before the fixture was corrected.
+
+## 44. Phase 18: RLHF and RLAIF, on top of what was verified
+
+Phase 18 adds `src/novacontrol/rlhf/` (16 modules, ~10.3k lines) and
+`tests/test_rlhf.py`: it turns the feedback the system already receives — a
+person's structured verdict and an evaluator's structured rating — into a reward
+with provenance and an integrity verdict, a versioned reward dataset, a
+simulated rollout, and an experimental policy update that only a measured
+comparison can approve. It consumes the seams Phases 15–17 left open rather than
+opening new ones: Phase 15's `RewardEngine` is re-used as a provider, Phase 16's
+datasets, run lifecycle, checkpoints, resource verdict, evaluation gate and
+model registry are inherited, and Phase 17's deterministic splitter is shared.
+
+What is genuinely new is the reward, and the phase's decisions are all about not
+trusting one:
+
+* **A reward is a claim with provenance.** `RewardProvider` has four voices —
+  `HumanRewardProvider`, `AIRatingRewardProvider`, `EvaluationRewardProvider`
+  (Phase 15's engine, untouched) and `CompositeRewardProvider` — and every
+  `RewardResult` records source, confidence, evaluator identity, policy version,
+  component and penalty breakdowns, per-source weights and evidence strings
+  naming observable facts ("verification passed", "unsafe action detected").
+  The default weights keep the voices distinguishable (human 1.0, verifier 0.8,
+  rule 0.6, AI 0.4); a named provider wires only its own sources, so a
+  human-only run cannot accidentally learn from an AI score.
+* **Normalisation keeps meaning.** The raw total is always kept beside the
+  normalised signal, a safety penalty stays its own component with a floor, and
+  a refusal is still not penalised — the Phase 15 rule that punishing the safety
+  layer would teach the next phase to avoid it.
+* **Rewards are audited before they are taught.** `RewardIntegrityChecker`
+  returns VALID / SUSPICIOUS / INVALID / NEEDS_REVIEW with named findings (an
+  unsafe run scoring high, a failed run scoring at all, length gaming, repeated
+  actions inflating the total, reward without verification, without evidence,
+  low confidence, a disallowed source, two sources far apart). The dataset rules
+  hold a suspicious row and refuse an invalid one, and **nothing is deleted** —
+  `held` lists exactly what was excluded and why.
+* **Human is not AI.** Every row records whether its reward came from a person,
+  an evaluator, a rule or a verifier; `FeedbackDisagreementDetector` records a
+  `human_vs_ai` disagreement with `recommended: review` and never picks a
+  winner; an `rlhf` dataset refuses evaluator-only rows and an `rlaif` dataset
+  refuses human-backed rows, while a `mixed` dataset keeps both kinds of row
+  side by side.
+* **The optimizer boundary is explicit about what is real.** `mock_policy` is
+  implemented and does not learn; `ppo` and `grpo` are names in the vocabulary
+  that are refused with "not implemented"; every simulated figure is labelled
+  `simulated`; `dry_run` is true by default and creating a run has no side
+  effects; a real run needs the deployment's permission, an explicit
+  confirmation and a wired runner, none of which ship. `RLResourceEstimator`
+  counts the reference model only when `kl_coefficient > 0` and treats UNSAFE as
+  a refusal, on a machine with no CUDA assumed at all.
+* **A higher reward is not an evaluation.** `RLModelEvaluator.compare` compares
+  base, candidate, SFT and preference models on held-out data, the verdict comes
+  from the worst comparison, and `reward_metrics_consulted` is False; without
+  two predictors nothing was measured and approval stays impossible. Approval
+  and promotion are the registry's own explicit transitions — nothing
+  auto-promotes.
+* **The pipeline is planable before it is runnable.** Ten named stages
+  (`data_preparation` → `registration`); `RLPipeline.plan()` never raises and
+  names the blocked stages instead, and `dry-run` records `started: false` so
+  nothing that reads it can mistake it for a run.
+
+No hidden chain-of-thought anywhere: feedback has no field for a trace, the
+reasoning-key list is discarded on the way in and recorded as discarded
+testimony, and corrections are redacted before storage.
+
+The public surface follows the existing conventions: 31 `/rlhf/*` routes (176
+routes in total, `docs/API.md` regenerated and in sync), a 30-action
+`novacontrol rlhf` CLI that dispatches to the application's own methods, a
+`rlhf:` config section plus five user settings and `NOVACONTROL_RLHF_*`
+overrides, seven `rlhf.*` events on the existing bus, a runtime module that
+answers questions and starts nothing, and a 24th diagnostics row (`RLHF /
+RLAIF`) that is SKIPPED when the subsystem is off. It implements **no** RLVR,
+critique-based learning, RLCD-style training, agentic RL or distributed
+training, and no concrete Transformers/PEFT loop — the optimizer interface is
+where that lands.
+
+## 45. Phase 18 re-verified against its requirements, four defects repaired
+
+The numbered requirements were re-derived from the source and driven end to end
+on the frozen tree — record trajectories, submit and settle feedback, rate a
+subject, build and validate both modes of reward dataset, plan and dry-run both
+loops, create, start and read back a run, compare four models, approve a model,
+read the HTTP surface and the CLI — rather than read off the layer that makes
+the claim. The four gates were then re-run on the frozen tree: pytest in three
+file groups — **2953 passed / 12 skipped** (641 + 761 + 620 subtests, of which
+`tests/test_rlhf.py` is 165); mypy clean in both platform views (305 source
+files); `docs/API.md` in sync (176 routes, 31 of them `/rlhf/*`); ruff clean on
+`rlhf/` and `tests/test_rlhf.py`.
+
+One compatibility note: Phase 18 registers an `RLHF / RLAIF` row in the Phase 14
+diagnostic roster, so the two tests that pinned the roster's size (23) now name
+the new component and expect 24. That is the roster test doing its job — a new
+subsystem is a new row — and those are the only pre-existing tests this phase
+changed.
+
+Four source defects escaped the phase's own tests; each is now pinned by one.
+
+* **A `mixed` dataset rejected every row, and an `rlaif` dataset rejected rows
+  that also carried human feedback.** The audit compared a row's signal mode
+  with the dataset's declared mode for literal equality, so the tests' fixture
+  rows — human feedback with an evaluator rating beside it — were refused by
+  both loops. A row's mode now *satisfies* the dataset's mode: either side may
+  be `mixed`, and a row with both signals fits either loop.
+
+* **`rl_metrics["simulated"]` was false for `mock_policy`.** The flag was
+  derived from "is the algorithm implemented", but the mock optimizer is
+  implemented and does **not** learn — so a run whose figures are all simulated
+  reported itself as real. It is now `dry_run or not learns`, which is what the
+  optimizer's own `describe()["simulated"]` already said.
+
+* **A stored comparison could not be written.** `RLModelEvaluator.compare`
+  built its `TrainingEvaluation` without an `evaluation_id`, and the repository
+  refuses a row without one — so the four-model comparison succeeded in memory
+  and then failed to store. It now derives the id from the run (or the dataset)
+  the comparison belongs to.
+
+* **The feedback route's default filter matched no status.** `GET
+  /rlhf/feedback` defaulted `status="pending"`, which is not a feedback status
+  (`accepted` / `rejected` / `needs_review` are), so the default list silently
+  returned zero rows. The default is now the empty string, which means "every
+  status"; the route's own tests pin the non-empty default list.
+
+A fifth finding was in the audit, not the code: two planned test classes (the
+HTTP surface over an isolated application, and the CLI's parser and dispatch)
+were written and added, taking the phase's suite from 153 to 165 tests. No
+behaviour changed for any other case.

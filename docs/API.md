@@ -151,6 +151,37 @@ The Phase 12 API subsystem provides REST and WebSocket entrypoints through FastA
 - `GET /preference/evaluations`: Recorded preference comparisons with their regression checks. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /preference/models`: Registered preference models, filtered by objective (same registry as training). *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /preference/models/{model_id}`: One registered preference model, with the objective that produced it. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlhf/status`: RLHF/RLAIF state: feedback, ratings, datasets, runs, readiness. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlhf/summary`: Feedback, ratings, datasets and runs, at a glance. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlhf/algorithms`: The RL modes and policy optimizers, and what this machine can do. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlhf/estimate`: Estimate an RL config's resources without starting anything. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlhf/dry-run`: Validate, price, plan and simulate an RL run — starting nothing. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlhf/pipeline`: The stage-by-stage RLHF/RLAIF plan for a configuration and dataset. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlhf/feedback`: Human feedback rows, newest first, with their verdicts. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlhf/feedback`: Submit human feedback for a trajectory (never deletes; quality-filtered). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlhf/feedback/{feedback_id}/decide`: Settle a held feedback row: accept keeps it usable, reject does not. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlhf/rate`: Ask an evaluator for a structured rating of observable facts. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlhf/ratings`: Stored AI ratings, newest first, with the source breakdown. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlhf/disagreements`: Recorded human-vs-AI disagreements, optionally detecting new ones. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlhf/datasets`: Reward dataset versions, newest first, filtered by mode or name. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlhf/datasets`: Build a reward dataset version from feedback and ratings, split deterministically. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlhf/datasets/{dataset_version_id}/validate`: Validate a reward dataset: provenance, integrity, splits and leakage. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlhf/datasets/{dataset_version_id}/held`: Rows a dataset held back, and why they were excluded. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlhf/datasets/{dataset_version_id}`: One reward dataset version with its splits and statistics. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlhf/runs`: RLHF/RLAIF runs, newest first, filtered by mode or status. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlhf/runs`: Create an RL run from a config (never starts it; rewards are audited first). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlhf/runs/start`: Start an RL run; unsafe estimates and unconfirmed real runs are refused. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlhf/runs/pause`: Pause a running RL run at the next step boundary. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlhf/runs/cancel`: Cancel an RL run; its checkpoints are kept. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlhf/runs/resume`: Resume an interrupted RL run from its newest valid checkpoint. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlhf/runs/re-estimate`: Re-estimate a run's resources against the current machine reading. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlhf/runs/evaluate`: Compare base, SFT, preference and RL candidate on held-out data. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlhf/compare`: Compare up to four models on a reward dataset without needing a run. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlhf/runs/{run_id}/checkpoints`: An RL run's checkpoints with their validity and loadability. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlhf/runs/{run_id}`: One RL run: mode, algorithm, config, metrics and checkpoints. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlhf/evaluations`: Recorded RL comparisons with their regression checks. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlhf/models`: Registered RL models, filtered by mode (same registry as training). *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlhf/models/{model_id}`: One registered RL model, with the mode that produced it. *(frontend: no web panel - API/CLI or infrastructure)*
 
 <!-- END GENERATED: api-reference -->
 

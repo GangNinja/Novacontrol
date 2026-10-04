@@ -356,6 +356,21 @@ def create_app() -> Any:
                 if "preference_max_records" in payload
                 else None
             )
+            rlhf_max_checkpoints = (
+                int(payload["rlhf_max_checkpoints"])
+                if "rlhf_max_checkpoints" in payload
+                else None
+            )
+            rlhf_retention_days = (
+                int(payload["rlhf_retention_days"])
+                if "rlhf_retention_days" in payload
+                else None
+            )
+            rlhf_max_records = (
+                int(payload["rlhf_max_records"])
+                if "rlhf_max_records" in payload
+                else None
+            )
         except (TypeError, ValueError) as exc:
             raise HTTPException(
                 status_code=422, detail="Retention must be a whole number."
@@ -418,6 +433,15 @@ def create_app() -> Any:
             preference_max_checkpoints=preference_max_checkpoints,
             preference_retention_days=preference_retention_days,
             preference_max_records=preference_max_records,
+            rlhf_enabled=bool(payload["rlhf_enabled"])
+            if "rlhf_enabled" in payload
+            else None,
+            rlhf_dry_run=bool(payload["rlhf_dry_run"])
+            if "rlhf_dry_run" in payload
+            else None,
+            rlhf_max_checkpoints=rlhf_max_checkpoints,
+            rlhf_retention_days=rlhf_retention_days,
+            rlhf_max_records=rlhf_max_records,
         )
         # The audit logger holds its own copy of the retention policy, so a changed
         # setting is re-applied here rather than waiting for the next restart.
@@ -435,6 +459,9 @@ def create_app() -> Any:
         # Phase 17: and the preference defaults — the same two switches, for the
         # DPO/ORPO subsystem, applied without waiting for a restart.
         nova.apply_preference_settings()
+        # Phase 18: and the RLHF/RLAIF defaults — the same two switches, for the
+        # feedback-as-reward subsystem, applied without waiting for a restart.
+        nova.apply_rlhf_settings()
         nova.persist()
         return settings.to_dict()
 
@@ -1935,6 +1962,388 @@ def create_app() -> Any:
         """One registered model, with the objective that produced it."""
         try:
             return nova.preference_model(model_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    # ── Phase 18: RLHF / RLAIF (feedback-as-reward training) ────────────────
+    # Same discipline as /preference: reads do not start anything; a refused
+    # action is its own HTTP status; a missing thing is a 404; real runs need
+    # explicit confirmation and an unsafe override. RLHF/RLAIF is OFF by
+    # default and never starts a real optimizer automatically.
+
+    @app.get("/rlhf/status")
+    async def rlhf_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """RLHF / RLAIF state: enabled, mode, feedback, ratings, datasets, runs."""
+        return nova.rlhf_status()
+
+    @app.get("/rlhf/summary")
+    async def rlhf_summary(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """The same, plus the newest datasets and runs by name."""
+        return nova.rlhf_summary()
+
+    @app.get("/rlhf/algorithms")
+    async def rlhf_algorithms(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """The RL modes and policy optimizers, and what this machine can do."""
+        return nova.rlhf_algorithms()
+
+    @app.post("/rlhf/estimate")
+    async def estimate_rlhf(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Validate an RL configuration and price it; trains nothing."""
+        raw = payload.get("config")
+        cfg = raw if isinstance(raw, dict) else {}
+        return nova.estimate_rlhf(cfg)
+
+    @app.post("/rlhf/dry-run")
+    async def dry_run_rlhf(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Validate, price, plan and simulate an RL run; starts nothing."""
+        cfg = payload.get("config") if isinstance(payload.get("config"), dict) else None
+        return nova.dry_run_rlhf(
+            model=str(payload.get("model", "")),
+            dataset_version=str(payload.get("dataset_version", "")),
+            config=cfg,
+            mode=str(payload.get("mode", "")),
+            algorithm=str(payload.get("algorithm", "")),
+        )
+
+    @app.post("/rlhf/pipeline")
+    async def rlhf_pipeline(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Build and report the RLHF/RLAIF pipeline plan; starts nothing."""
+        cfg = payload.get("config") if isinstance(payload.get("config"), dict) else None
+        return nova.rlhf_pipeline(
+            config=cfg,
+            dataset_version=str(payload.get("dataset_version", "")),
+        )
+
+    @app.get("/rlhf/feedback")
+    async def rlhf_feedback(
+        status: str = "",  # empty means every status; "pending" is not a status
+        feedback_type: str = "",
+        trajectory_id: str = "",
+        pending_only: bool = True,
+        limit: int = 100,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """List human feedback rows (status / type / trajectory filters)."""
+        return nova.rlhf_feedback(
+            status=status,
+            feedback_type=feedback_type,
+            trajectory_id=trajectory_id,
+            pending_only=pending_only,
+            limit=limit,
+        )
+
+    @app.post("/rlhf/feedback")
+    async def submit_rlhf_feedback(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Submit human feedback for a trajectory/action (never deletes)."""
+        return nova.submit_rlhf_feedback(payload)
+
+    @app.post("/rlhf/feedback/{feedback_id}/decide")
+    async def decide_rlhf_feedback(
+        feedback_id: str, payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Settle a held feedback row: accept keeps it usable, reject does not."""
+        result = nova.decide_rlhf_feedback(
+            feedback_id,
+            str(payload.get("decision") or ""),
+            reviewer=str(payload.get("reviewer") or ""),
+            reason=str(payload.get("reason") or ""),
+        )
+        if not result.get("ok"):
+            reason = str(result.get("reason", "the decision was refused"))
+            raise HTTPException(
+                status_code=404 if reason.startswith("no feedback") else 422,
+                detail=reason,
+            )
+        return result
+
+    @app.post("/rlhf/rate")
+    async def rate_rlhf_subject(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Ask an evaluator for a structured rating of observable facts."""
+        criteria = payload.get("criteria")
+        return nova.rate_rlhf_subject(
+            payload.get("subject") or {},
+            evaluator=str(payload.get("evaluator") or "auto"),
+            criteria=(
+                [str(item) for item in criteria]
+                if isinstance(criteria, (list, tuple))
+                else ()
+            ),
+            save=bool(payload.get("save", True)),
+        )
+
+    @app.get("/rlhf/ratings")
+    async def rlhf_ratings(
+        trajectory_id: str = "",
+        evaluator_id: str = "",
+        limit: int = 100,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Stored AI ratings, newest first, with the source breakdown."""
+        return nova.rlhf_ratings(
+            trajectory_id=trajectory_id, evaluator_id=evaluator_id, limit=limit
+        )
+
+    @app.get("/rlhf/disagreements")
+    async def rlhf_disagreements(
+        detect: bool = False,
+        kind: str = "",
+        limit: int = 100,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Recorded human-vs-AI disagreements, optionally detecting new ones."""
+        return nova.rlhf_disagreements(detect=detect, kind=kind, limit=limit)
+
+    @app.get("/rlhf/datasets")
+    async def rlhf_datasets(
+        mode: str = "",
+        name: str = "",
+        limit: int = 100,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Reward dataset versions, newest first, optionally by mode or name."""
+        return nova.rlhf_datasets(mode=mode, name=name, limit=limit)
+
+    @app.post("/rlhf/datasets")
+    async def create_rlhf_dataset(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Build one immutable reward dataset version from what was recorded."""
+        name = str(payload.get("name") or "").strip()
+        mode = str(payload.get("mode") or "").strip()
+        if not name or not mode:
+            raise HTTPException(
+                status_code=422, detail="name and mode are required."
+            )
+        rules = payload.get("rules")
+        split = payload.get("split")
+        tags = payload.get("tags")
+        result = nova.create_rlhf_dataset(
+            name,
+            mode=mode,
+            rules=rules if isinstance(rules, dict) else None,
+            split=split if isinstance(split, dict) else None,
+            version=str(payload.get("version") or ""),
+            description=str(payload.get("description") or ""),
+            tags=[str(tag) for tag in tags]
+            if isinstance(tags, (list, tuple))
+            else (),
+        )
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=422,
+                detail=str(
+                    result.get("reason", "the reward dataset could not be built")
+                ),
+            )
+        return result
+
+    @app.get("/rlhf/datasets/{dataset_version_id}/validate")
+    async def validate_rlhf_dataset(dataset_version_id: str, _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return nova.validate_rlhf_dataset(dataset_version_id)
+
+    @app.get("/rlhf/datasets/{dataset_version_id}/held")
+    async def rlhf_held(dataset_version_id: str, _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return nova.rlhf_held(dataset_version_id)
+
+    @app.get("/rlhf/datasets/{dataset_version_id}")
+    async def rlhf_dataset(dataset_version_id: str, _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        try:
+            return nova.rlhf_dataset(dataset_version_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.get("/rlhf/runs")
+    async def rlhf_runs(
+        mode: str = "",
+        status: str = "",
+        limit: int = 100,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """RLHF/RLAIF runs, newest first, optionally filtered by mode or status."""
+        return nova.rlhf_runs(mode=mode, status=status, limit=limit)
+
+    @app.post("/rlhf/runs")
+    async def create_rlhf_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Validate an RL configuration, audit its rewards, and store it CREATED."""
+        model = str(payload.get("model") or "").strip()
+        dataset_version = str(
+            payload.get("dataset_version") or payload.get("dataset_version_id") or ""
+        ).strip()
+        config = payload.get("config")
+        if not dataset_version:
+            raise HTTPException(
+                status_code=422,
+                detail="dataset_version is required (name@version).",
+            )
+        result = nova.create_rlhf_run(
+            model,
+            dataset_version,
+            config=config if isinstance(config, dict) else None,
+            name=str(payload.get("name") or ""),
+        )
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=422,
+                detail=str(result.get("reason", "the run could not be created")),
+            )
+        return result
+
+    @app.post("/rlhf/runs/start")
+    async def start_rlhf_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Start an RL run in a worker thread (simulated/dry-run by default)."""
+        result = await nova.start_rlhf_run(
+            _training_id(payload),
+            override=bool(payload.get("override", False)),
+            confirm=bool(payload.get("confirm", False)),
+        )
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=409,
+                detail=str(result.get("reason", "the run could not be started")),
+            )
+        return result
+
+    @app.post("/rlhf/runs/pause")
+    async def pause_rlhf_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Pause a running RL run at its next step boundary."""
+        return _training_refused(nova.pause_rlhf_run(_training_id(payload)), "pause")
+
+    @app.post("/rlhf/runs/cancel")
+    async def cancel_rlhf_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """End an RL run: a live one at its next step, a stored one now."""
+        return _training_refused(
+            nova.cancel_rlhf_run(_training_id(payload)), "cancellation"
+        )
+
+    @app.post("/rlhf/runs/resume")
+    async def resume_rlhf_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Resume an interrupted RL run from its newest valid checkpoint."""
+        result = await nova.resume_rlhf_run(
+            _training_id(payload),
+            checkpoint_id=str(payload.get("checkpoint_id") or ""),
+        )
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=409,
+                detail=str(result.get("reason", "the run could not be resumed")),
+            )
+        return result
+
+    @app.post("/rlhf/runs/re-estimate")
+    async def estimate_rlhf_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Re-price a stored RL run against the current machine reading."""
+        return _training_refused(
+            nova.estimate_rlhf_run(_training_id(payload)), "estimate", status_code=404
+        )
+
+    @app.post("/rlhf/runs/evaluate")
+    async def evaluate_rlhf_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Compare base, SFT, preference and RL candidate on held-out data."""
+        result = await nova.evaluate_rlhf_run(
+            _training_id(payload),
+            base=payload.get("base"),
+            candidate=payload.get("candidate"),
+            sft=payload.get("sft"),
+            preference=payload.get("preference"),
+            dataset_version=str(payload.get("dataset_version") or ""),
+            split=str(payload.get("split") or "test"),
+            tolerance=payload.get("tolerance"),
+        )
+        return _training_refused(
+            result, "evaluation", status_code=404 if _is_missing(result) else 409
+        )
+
+    @app.post("/rlhf/compare")
+    async def compare_rlhf_models(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Compare up to four models on a reward dataset, without needing a run."""
+        dataset_version = str(
+            payload.get("dataset_version") or payload.get("dataset_version_id") or ""
+        ).strip()
+        base = payload.get("base")
+        candidate = payload.get("candidate")
+        if not dataset_version or base is None or candidate is None:
+            raise HTTPException(
+                status_code=422,
+                detail="dataset_version, base and candidate are required.",
+            )
+        return nova.compare_rlhf_models(
+            dataset_version,
+            base=base,
+            candidate=candidate,
+            sft=payload.get("sft"),
+            preference=payload.get("preference"),
+            split=str(payload.get("split") or "test"),
+            tolerance=payload.get("tolerance"),
+            run_id=str(payload.get("run_id") or ""),
+        )
+
+    @app.get("/rlhf/runs/{run_id}/checkpoints")
+    async def rlhf_checkpoints(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """A run's checkpoints with their validity and loadability."""
+        return nova.rlhf_checkpoints(run_id)
+
+    @app.get("/rlhf/runs/{run_id}")
+    async def rlhf_run(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """One RL run: mode, algorithm, config, progress and checkpoints."""
+        try:
+            return nova.rlhf_run(run_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/rlhf/evaluations")
+    async def rlhf_evaluations(
+        limit: int = 50, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Stored RL comparisons with their readings and regression checks."""
+        return nova.rlhf_evaluations(limit=limit)
+
+    @app.get("/rlhf/models")
+    async def rlhf_models(
+        status: str = "",
+        mode: str = "",
+        limit: int = 50,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Registered RL models — the same registry, filtered by mode."""
+        return nova.rlhf_models(status=status, mode=mode, limit=limit)
+
+    @app.get("/rlhf/models/{model_id}")
+    async def rlhf_model(
+        model_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """One registered model, with the RL mode that produced it."""
+        try:
+            return nova.rlhf_model(model_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

@@ -536,6 +536,285 @@ def _optional_mapping(pair: Mapping[str, Any], key: str) -> dict[str, Any] | Non
     return dict(value) if isinstance(value, Mapping) else None
 
 
+async def run_rlhf(
+    action: str,
+    *,
+    identifier: str = "",
+    mode: str = "",
+    algorithm: str = "",
+    name: str = "",
+    model: str = "",
+    dataset_version: str = "",
+    feedback_type: str = "",
+    trajectory: str = "",
+    task: str = "",
+    rating: float | None = None,
+    confidence: float | None = None,
+    candidate: str = "",
+    reason_category: str = "",
+    evaluator: str = "",
+    criteria: str = "",
+    limit: int = 50,
+    file: str = "",
+    decision: str = "",
+    reviewer: str = "",
+    overrides: Sequence[str] = (),
+    confirm: bool = False,
+    override: bool = False,
+    detect: bool = False,
+    reason: str = "",
+    note: str = "",
+) -> None:
+    """RLHF / RLAIF: feedback, reward datasets, rollout simulation and runs.
+
+    Same contract as the `preference` and `training` commands beside it:
+    read-only actions answer with what is stored, changing actions go through
+    the application's own methods (so the CLI can do nothing the API could
+    not), a refusal exits non-zero, and nothing here starts a real run without
+    --confirm. `rlhf dry-run` is the safe first look.
+    """
+    app = NovaControlApplication(data_dir=Path("data"))
+    await app.start()
+    try:
+        result = await _rlhf_action(
+            app,
+            action,
+            identifier=identifier,
+            mode=mode,
+            algorithm=algorithm,
+            name=name,
+            model=model,
+            dataset_version=dataset_version,
+            feedback_type=feedback_type,
+            trajectory=trajectory,
+            task=task,
+            rating=rating,
+            confidence=confidence,
+            candidate=candidate,
+            reason_category=reason_category,
+            evaluator=evaluator,
+            criteria=criteria,
+            limit=limit,
+            file=file,
+            decision=decision,
+            reviewer=reviewer,
+            overrides=overrides,
+            confirm=confirm,
+            override=override,
+            detect=detect,
+            reason=reason,
+            note=note,
+        )
+    except (KeyError, ValueError, TypeError, OSError) as exc:
+        print_json({"status": "error", "reason": f"{type(exc).__name__}: {exc}"})
+        raise SystemExit(1) from exc
+    finally:
+        await app.stop()
+    refused = not result.get("ok", True)
+    print_json({"status": "refused" if refused else "ok", "rlhf": result})
+    if refused:
+        raise SystemExit(1)
+
+
+async def _rlhf_action(
+    app: NovaControlApplication, action: str, **args: Any
+) -> dict[str, Any]:
+    """Dispatch one RLHF/RLAIF action to the application method that owns it.
+
+    The CLI can do nothing the API could not: every action lands on the same
+    application method the route calls, so a refusal reads the same either way.
+    """
+    identifier = str(args["identifier"])
+    limit = int(args["limit"])
+    mode = str(args["mode"])
+    algorithm = str(args["algorithm"])
+    trajectory = str(args["trajectory"])
+    if action == "status":
+        return app.rlhf_status()
+    if action == "summary":
+        return app.rlhf_summary()
+    if action == "algorithms":
+        return app.rlhf_algorithms()
+    if action == "feedback":
+        return app.rlhf_feedback(
+            feedback_type=str(args["feedback_type"]),
+            trajectory_id=trajectory,
+            limit=limit,
+        )
+    if action == "submit":
+        return app.submit_rlhf_feedback(_rlhf_feedback_payload(args))
+    if action == "decide":
+        if not str(args["decision"]):
+            raise ValueError("decide needs --decision accept|reject")
+        return app.decide_rlhf_feedback(
+            identifier,
+            str(args["decision"]),
+            reviewer=str(args["reviewer"]),
+            reason=str(args["reason"]),
+        )
+    if action == "rate":
+        return app.rate_rlhf_subject(
+            _rlhf_rating_subject(args),
+            evaluator=str(args["evaluator"]) or "auto",
+            criteria=tuple(
+                part.strip()
+                for part in str(args["criteria"]).split(",")
+                if part.strip()
+            ),
+        )
+    if action == "ratings":
+        return app.rlhf_ratings(trajectory_id=trajectory, limit=limit)
+    if action == "disagreements":
+        return app.rlhf_disagreements(detect=bool(args["detect"]), limit=limit)
+    if action == "datasets":
+        return app.rlhf_datasets(mode=mode, limit=limit)
+    if action == "dataset":
+        return app.rlhf_dataset(identifier)
+    if action == "build":
+        if not mode:
+            raise ValueError("build needs --mode rlhf|rlaif")
+        return app.create_rlhf_dataset(
+            str(args["name"]) or mode,
+            mode=mode,
+            rules=_training_overrides(args["overrides"]) or None,
+            description=str(args["note"]),
+        )
+    if action == "validate":
+        return app.validate_rlhf_dataset(identifier)
+    if action == "held":
+        return app.rlhf_held(identifier)
+    if action == "estimate":
+        return app.estimate_rlhf(_rlhf_config_args(args))
+    if action == "dry-run":
+        return app.dry_run_rlhf(
+            str(args["model"]),
+            str(args["dataset_version"]),
+            config=_rlhf_config_args(args) or None,
+            mode=mode,
+            algorithm=algorithm,
+        )
+    if action == "pipeline":
+        return app.rlhf_pipeline(
+            config=_rlhf_config_args(args) or None,
+            dataset_version=str(args["dataset_version"]),
+        )
+    if action == "create":
+        return app.create_rlhf_run(
+            str(args["model"]),
+            str(args["dataset_version"]),
+            config=_rlhf_config_args(args) or None,
+            name=str(args["name"]),
+        )
+    if action == "runs":
+        return app.rlhf_runs(mode=mode, limit=limit)
+    if action == "run":
+        return app.rlhf_run(identifier)
+    if action == "checkpoints":
+        return app.rlhf_checkpoints(identifier)
+    if action == "start":
+        return await app.start_rlhf_run(
+            identifier, confirm=bool(args["confirm"]), override=bool(args["override"])
+        )
+    if action == "pause":
+        return app.pause_rlhf_run(identifier)
+    if action == "resume":
+        return await app.resume_rlhf_run(identifier)
+    if action == "cancel":
+        return app.cancel_rlhf_run(identifier)
+    if action == "evaluate":
+        return await app.evaluate_rlhf_run(identifier)
+    if action == "evaluations":
+        return app.rlhf_evaluations(limit=limit)
+    if action == "compare":
+        return app.compare_rlhf_models(**_rlhf_compare_args(args))
+    if action == "models":
+        return app.rlhf_models(mode=mode, limit=limit)
+    if action == "model":
+        return app.rlhf_model(identifier)
+    raise ValueError(f"unsupported rlhf action {action!r}")
+
+
+def _rlhf_config_args(args: Mapping[str, Any]) -> dict[str, Any]:
+    """The configuration flags shared by `estimate`, `dry-run` and `create`."""
+    config: dict[str, Any] = _training_overrides(args["overrides"])
+    if args["mode"]:
+        config["mode"] = str(args["mode"])
+    if args["algorithm"]:
+        config["algorithm"] = str(args["algorithm"])
+    if args["model"]:
+        config["base_model"] = str(args["model"])
+    if args["dataset_version"]:
+        config["reward_dataset_version"] = str(args["dataset_version"])
+    return config
+
+
+def _rlhf_feedback_payload(args: Mapping[str, Any]) -> dict[str, Any]:
+    """One feedback row: flags, or a JSON file when the row is easier to write out."""
+    path = str(args["file"])
+    if path:
+        payload = _read_json_file(path)
+        if not isinstance(payload, Mapping):
+            raise ValueError("--file needs a JSON object for a feedback row")
+        return dict(payload)
+    feedback_type = str(args["feedback_type"])
+    if not feedback_type:
+        raise ValueError("submit needs --feedback-type or --file")
+    payload = {
+        "feedback_type": feedback_type,
+        "trajectory_id": str(args["trajectory"]),
+        "task_id": str(args["task"]),
+        "selected_candidate": str(args["candidate"]),
+        "reason_category": str(args["reason_category"]),
+        "reason": str(args["reason"]),
+    }
+    if args["rating"] is not None:
+        payload["rating"] = float(args["rating"])
+    if args["confidence"] is not None:
+        payload["confidence"] = float(args["confidence"])
+    return payload
+
+
+def _rlhf_rating_subject(args: Mapping[str, Any]) -> dict[str, Any]:
+    """The observable facts an evaluator rates, from a JSON file.
+
+    A file rather than flags because a subject is structured — a task, a
+    candidate output or action, the constraints it had to respect and the
+    outcome that was observed — and inventing flag syntax for each field would
+    be a worse interface than the structure it is describing.
+    """
+    path = str(args["file"])
+    if not path:
+        raise ValueError("rate needs --file pointing at the subject JSON")
+    subject = _read_json_file(path)
+    if not isinstance(subject, Mapping):
+        raise ValueError("--file needs a JSON object for a rating subject")
+    return dict(subject)
+
+
+def _rlhf_compare_args(args: Mapping[str, Any]) -> dict[str, Any]:
+    """A comparison from a JSON file: dataset_version, base and candidate."""
+    path = str(args["file"])
+    if not path:
+        raise ValueError("compare needs --file with the models to compare")
+    raw = _read_json_file(path)
+    if not isinstance(raw, Mapping):
+        raise ValueError("--file needs a JSON object for a comparison")
+    dataset_version = str(raw.get("dataset_version", args["dataset_version"]))
+    base = raw.get("base")
+    candidate = raw.get("candidate")
+    if not dataset_version or base is None or candidate is None:
+        raise ValueError("the comparison needs dataset_version, base and candidate")
+    return {
+        "dataset_version": dataset_version,
+        "base": base,
+        "candidate": candidate,
+        "sft": raw.get("sft"),
+        "preference": raw.get("preference"),
+        "split": str(raw.get("split", "test")),
+        "run_id": str(raw.get("run_id", "")),
+    }
+
+
 async def run_ask(request: str) -> None:
     """Ask NovaControl through the integrated app router."""
     app = NovaControlApplication()

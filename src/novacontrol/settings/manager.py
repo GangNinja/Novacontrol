@@ -54,6 +54,11 @@ class SettingsManager:
         preference_max_checkpoints: int | None = None,
         preference_retention_days: int | None = None,
         preference_max_records: int | None = None,
+        rlhf_enabled: bool | None = None,
+        rlhf_dry_run: bool | None = None,
+        rlhf_max_checkpoints: int | None = None,
+        rlhf_retention_days: int | None = None,
+        rlhf_max_records: int | None = None,
     ) -> UserSettings:
         self._settings = replace(
             self._settings,
@@ -155,6 +160,24 @@ class SettingsManager:
             preference_max_records=self._settings.preference_max_records
             if preference_max_records is None
             else clamp_record_cap(preference_max_records),
+            # Phase 18: the RLHF switches, on the same rule again — a cap is
+            # clamped into range, and a control left unset keeps its current
+            # value rather than being reset by whoever edited a form.
+            rlhf_enabled=self._settings.rlhf_enabled
+            if rlhf_enabled is None
+            else rlhf_enabled,
+            rlhf_dry_run=self._settings.rlhf_dry_run
+            if rlhf_dry_run is None
+            else rlhf_dry_run,
+            rlhf_max_checkpoints=self._settings.rlhf_max_checkpoints
+            if rlhf_max_checkpoints is None
+            else clamp_checkpoint_cap(rlhf_max_checkpoints),
+            rlhf_retention_days=self._settings.rlhf_retention_days
+            if rlhf_retention_days is None
+            else clamp_retention_days(rlhf_retention_days),
+            rlhf_max_records=self._settings.rlhf_max_records
+            if rlhf_max_records is None
+            else clamp_record_cap(rlhf_max_records),
         )
         return self._settings
 

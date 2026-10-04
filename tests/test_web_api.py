@@ -1165,9 +1165,10 @@ class Phase14ApiTests(_IsolatedApiTestCase):
     def test_the_diagnostics_route_runs_the_whole_roster(self) -> None:
         payload = self._client.get("/diagnostics").json()
 
-        # Phase 16 adds the SFT subsystem's row to the Phase 14 roster, and
-        # Phase 17 adds preference optimization's.
-        self.assertEqual(len(payload["components"]), 23)
+        # Phase 16 adds the SFT subsystem's row to the Phase 14 roster, Phase 17 adds
+        # preference optimization's, and Phase 18 adds the RLHF / RLAIF row.
+        self.assertEqual(len(payload["components"]), 24)
+        self.assertIn("RLHF / RLAIF", {row["component"] for row in payload["components"]})
         self.assertIn("Core", {row["component"] for row in payload["components"]})
         self.assertIn("Training", {row["component"] for row in payload["components"]})
         self.assertEqual(payload["lines"][0], "NovaControl Health")

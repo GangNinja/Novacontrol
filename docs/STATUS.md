@@ -1,12 +1,12 @@
 # Project Status
 
-Current phase: **Phase 17 — Preference Optimization (DPO/ORPO)**
+Current phase: **Phase 18 — Reinforcement Learning from Human and AI Feedback (RLHF + RLAIF)**
 
 Status: **Complete**
 
 > The original baseline ended at Phase 15; the staged build that followed it — what
 > it verified, what it changed, and what remains — is recorded below under
-> "Completed Staged-Build Verification (Phases 1–7)" and the Phase 8 … Phase 17
+> "Completed Staged-Build Verification (Phases 1–7)" and the Phase 8 … Phase 18
 > sections that continue it.
 
 Verified with:
@@ -968,6 +968,75 @@ optimization`).
 RL, distributed training, and the concrete Transformers/PEFT loop (the adapter
 boundary is where it lands). Tests use mocks, synthetic rows and dry runs — no
 model is downloaded and no GPU is required.
+
+## Completed Reinforcement Learning from Human and AI Feedback (Phase 18)
+
+Phase 18 in one line: it turns the feedback the system already receives — a
+person's verdict and an evaluator's structured rating — into a reward with
+provenance and an integrity verdict, a versioned reward dataset, a simulated
+rollout and an experimental policy update that only a measured comparison can
+approve. It is documented in [docs/RLHF.md](RLHF.md) and pinned by
+`tests/test_rlhf.py` (165 tests). It adds no second store, no second registry, no
+second trajectory format and no second event bus, and normal NovaControl
+operation works with every RL dependency absent.
+
+**Rewards are claims with provenance** — `RewardProvider` abstracts four voices:
+human (`HumanRewardProvider`), AI (`AIRatingRewardProvider`), Phase 15's weighted
+engine re-used untouched (`EvaluationRewardProvider`), and a weighted composite.
+Every `RewardResult` carries source, confidence, evaluator identity, reward
+version, component and penalty breakdowns and evidence; the default weights keep
+the sources distinguishable (human 1.0 / verifier 0.8 / rule 0.6 / AI 0.4), each
+feedback type maps to a signed value, and normalisation keeps the raw total while
+keeping a safety penalty its own component with a floor. A provider asked for a
+source the run has none of returns a refusal, never a guessed number.
+
+**Rewards are audited before they are taught** — `RewardIntegrityChecker`
+returns VALID / SUSPICIOUS / INVALID / NEEDS_REVIEW with named findings (an
+unsafe run with a positive reward, a failed run scoring high, length gaming,
+repeated actions, reward without verification, without evidence, low confidence,
+a disallowed source, two sources disagreeing). `RewardDatasetRules` holds a
+suspicious row and refuses an invalid one, and **nothing is deleted** — `held`
+lists exactly what was excluded and why.
+
+**Human is not AI** — feedback, ratings, rewards and dataset rows each record
+their source; `FeedbackDisagreementDetector` records a `human_vs_ai`
+disagreement with `recommended: review` and never picks a winner; an `rlhf`
+dataset refuses evaluator-only rows, an `rlaif` dataset refuses human-backed
+rows, and a `mixed` dataset keeps both kinds of row.
+
+**The reward dataset** — immutable `name@version` versions built from stored
+trajectories, evaluations, rewards, feedback and ratings; every refusal has a
+name and the counts stay on the version; splits reuse Phase 16's deterministic,
+leak-free group walk; content-fingerprinted and rebuild-stable.
+
+**The optimizer boundary** — `mock_policy` is implemented and does not learn;
+`ppo` and `grpo` are named in the vocabulary and refused with "not implemented".
+Every simulated figure is labelled `simulated`. `dry_run` is true by default and
+creating a run has no side effects; a real run needs the deployment's permission,
+an explicit confirmation and a wired runner. `RLResourceEstimator` reuses Phase
+16's walk, counts the reference model only when KL > 0, assumes no CUDA, and an
+UNSAFE verdict is a refusal.
+
+**Runs and the gate** — a run is Phase 16's `TrainingRun` with the same
+checkpoints, pause/resume/cancel and worker-thread start; `create_run` also
+audits the dataset (RLHF needs human-backed rows, RLAIF rating-backed) and lists
+what failed. `RLModelEvaluator` compares base, candidate, SFT and preference
+models on held-out data, the verdict is taken from the worst comparison, and
+`reward_metrics_consulted: false` — a higher reward is never the verdict.
+Approval and promotion stay the registry's own explicit transitions.
+
+**Surfaces** — 31 `/rlhf/*` routes, a 30-action `novacontrol rlhf` CLI that
+dispatches to the application's own methods, a `rlhf:` config section plus five
+user settings and `NOVACONTROL_RLHF_*` overrides, seven `rlhf.*` events on the
+existing bus, a runtime module that answers questions and starts nothing, and a
+24th diagnostics row (`RLHF / RLAIF`).
+
+**Not implemented, on purpose:** RLVR, critique-based learning, RLCD-style
+training, agentic RL, game agents, distributed training, and the concrete
+Transformers/PEFT loop (the adapter boundary is where it lands). Tests use mocks,
+deterministic environments, synthetic rewards and dry runs — no model is
+downloaded and no CUDA or GPU is required. The phase stopped here, before
+Phase 19, as instructed.
 
 ## Next Work
 

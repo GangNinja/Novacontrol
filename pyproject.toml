@@ -106,7 +106,8 @@ strict = true
 
 # Optional extras' third-party packages. CI's type check installs only
 # `.[dev]`, so sqlalchemy/alembic (database), redis, playwright (browser),
-# PySide6 (gui), psutil, and the yaml stubs are genuinely absent there —
+# PySide6 (gui), psutil, torch (the optional training runtime that the
+# hardware report probes), and the yaml stubs are genuinely absent there —
 # strict mode turned every unresolved import into an error and failed the
 # job. Per-module ignore_missing_imports must name the IMPORTED module
 # (mypy consults the override for the module it couldn't resolve), so these
@@ -119,6 +120,7 @@ module = [
   "playwright.*",
   "PySide6.*",
   "psutil.*",
+  "torch.*",
   "yaml.*",
 ]
 ignore_missing_imports = true

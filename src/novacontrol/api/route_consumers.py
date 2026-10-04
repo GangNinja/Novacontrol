@@ -191,6 +191,42 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("GET", "/preference/evaluations"): "no-render",
     ("GET", "/preference/models"): "no-render",
     ("GET", "/preference/models/{model_id}"): "no-render",
+    # Phase 18: the RLHF/RLAIF surface is API/CLI for now, on the same reasoning
+    # as the training and preference surfaces above. Submitting feedback is the
+    # one operation that would naturally live in a UI, and until there is one
+    # the reviewer works through these routes — so the surface renders nothing
+    # rather than promising a control the frontend does not have.
+    ("GET", "/rlhf/status"): "no-render",
+    ("GET", "/rlhf/summary"): "no-render",
+    ("GET", "/rlhf/algorithms"): "no-render",
+    ("POST", "/rlhf/estimate"): "no-render",
+    ("POST", "/rlhf/dry-run"): "no-render",
+    ("POST", "/rlhf/pipeline"): "no-render",
+    ("GET", "/rlhf/feedback"): "no-render",
+    ("POST", "/rlhf/feedback"): "no-render",
+    ("POST", "/rlhf/feedback/{feedback_id}/decide"): "no-render",
+    ("POST", "/rlhf/rate"): "no-render",
+    ("GET", "/rlhf/ratings"): "no-render",
+    ("GET", "/rlhf/disagreements"): "no-render",
+    ("GET", "/rlhf/datasets"): "no-render",
+    ("POST", "/rlhf/datasets"): "no-render",
+    ("GET", "/rlhf/datasets/{dataset_version_id}/validate"): "no-render",
+    ("GET", "/rlhf/datasets/{dataset_version_id}/held"): "no-render",
+    ("GET", "/rlhf/datasets/{dataset_version_id}"): "no-render",
+    ("GET", "/rlhf/runs"): "no-render",
+    ("POST", "/rlhf/runs"): "no-render",
+    ("POST", "/rlhf/runs/start"): "no-render",
+    ("POST", "/rlhf/runs/pause"): "no-render",
+    ("POST", "/rlhf/runs/cancel"): "no-render",
+    ("POST", "/rlhf/runs/resume"): "no-render",
+    ("POST", "/rlhf/runs/re-estimate"): "no-render",
+    ("POST", "/rlhf/runs/evaluate"): "no-render",
+    ("POST", "/rlhf/compare"): "no-render",
+    ("GET", "/rlhf/runs/{run_id}/checkpoints"): "no-render",
+    ("GET", "/rlhf/runs/{run_id}"): "no-render",
+    ("GET", "/rlhf/evaluations"): "no-render",
+    ("GET", "/rlhf/models"): "no-render",
+    ("GET", "/rlhf/models/{model_id}"): "no-render",
 }
 
 # Markers that are not renderer function names (allowed non-render roles).

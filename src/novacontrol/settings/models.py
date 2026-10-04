@@ -132,6 +132,17 @@ class UserSettings:
     preference_max_checkpoints: int = 3
     preference_retention_days: int = 30
     preference_max_records: int = 2000
+    # Phase 18: whether this installation offers RLHF/RLAIF at all. The same
+    # shape once more, and separate for the strongest version of the same
+    # reason: only a mock policy optimizer ships with the phase, so an operator
+    # may well want the pipeline planned and simulated here while refusing a
+    # real run — and this switch is how they say so without disabling anything
+    # else they use.
+    rlhf_enabled: bool = True
+    rlhf_dry_run: bool = True
+    rlhf_max_checkpoints: int = 3
+    rlhf_retention_days: int = 30
+    rlhf_max_records: int = 2000
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -163,6 +174,11 @@ class UserSettings:
             "preference_max_checkpoints": self.preference_max_checkpoints,
             "preference_retention_days": self.preference_retention_days,
             "preference_max_records": self.preference_max_records,
+            "rlhf_enabled": self.rlhf_enabled,
+            "rlhf_dry_run": self.rlhf_dry_run,
+            "rlhf_max_checkpoints": self.rlhf_max_checkpoints,
+            "rlhf_retention_days": self.rlhf_retention_days,
+            "rlhf_max_records": self.rlhf_max_records,
         }
 
     @classmethod
@@ -237,5 +253,19 @@ class UserSettings:
             ),
             preference_max_records=clamp_record_cap(
                 payload.get("preference_max_records", 2000)
+            ),
+            # Phase 18: the RLHF switches, on the same rule once more. An
+            # unreadable cap keeps its default rather than becoming zero, and
+            # "do not run reinforcement learning on my machine" is one switch.
+            rlhf_enabled=bool(payload.get("rlhf_enabled", True)),
+            rlhf_dry_run=bool(payload.get("rlhf_dry_run", True)),
+            rlhf_max_checkpoints=clamp_checkpoint_cap(
+                payload.get("rlhf_max_checkpoints", 3)
+            ),
+            rlhf_retention_days=clamp_retention_days(
+                payload.get("rlhf_retention_days", 30)
+            ),
+            rlhf_max_records=clamp_record_cap(
+                payload.get("rlhf_max_records", 2000)
             ),
         )

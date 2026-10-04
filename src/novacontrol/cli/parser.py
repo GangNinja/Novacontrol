@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 
 from novacontrol.preference import PreferenceAlgorithm, PreferenceDatasetType
+from novacontrol.rlhf import HumanFeedbackType, PolicyAlgorithm, RLMode
 from novacontrol.training import DatasetType
 
 COMPLETED_PHASES = (
@@ -174,6 +175,102 @@ def build_parser() -> argparse.ArgumentParser:
     )
     preference.add_argument("--reason", default="")
     preference.add_argument("--note", default="")
+
+    # RLHF / RLAIF (Phase 18). Same shape as `preference` beside it: read-only
+    # actions answer with what is stored, changing actions go through the
+    # application's own methods, and nothing here starts a real run without
+    # --confirm. `rlhf dry-run` is the safe first look.
+    rlhf = subparsers.add_parser(
+        "rlhf",
+        help="RLHF / RLAIF: feedback, reward datasets, rollout simulation and runs.",
+    )
+    rlhf.add_argument(
+        "action",
+        choices=(
+            "status", "summary", "algorithms", "feedback", "submit", "decide",
+            "rate", "ratings", "disagreements", "datasets", "dataset", "build",
+            "validate", "held", "estimate", "dry-run", "pipeline", "create",
+            "runs", "run", "checkpoints", "start", "pause", "resume", "cancel",
+            "evaluate", "evaluations", "compare", "models", "model",
+        ),
+        help="What to do; `rlhf status` is a safe first look.",
+    )
+    rlhf.add_argument(
+        "--id", default="", help="Run id, dataset version id, feedback id or model id."
+    )
+    rlhf.add_argument(
+        "--mode",
+        default="",
+        choices=("", *(item.value for item in RLMode)),
+        help="The feedback loop: rlhf (human) or rlaif (AI).",
+    )
+    rlhf.add_argument(
+        "--algorithm",
+        default="",
+        choices=("", *(item.value for item in PolicyAlgorithm)),
+        help="Policy optimizer: mock_policy now; ppo/grpo are planned and refused.",
+    )
+    rlhf.add_argument("--name", default="", help="Dataset or run name.")
+    rlhf.add_argument("--model", default="", help="Base model a run names.")
+    rlhf.add_argument(
+        "--dataset-version", default="", help="Reward dataset version a run trains on."
+    )
+    rlhf.add_argument(
+        "--feedback-type",
+        default="",
+        choices=("", *(item.value for item in HumanFeedbackType)),
+        help="What a person is asserting about a trajectory.",
+    )
+    rlhf.add_argument("--trajectory", default="", help="Trajectory a feedback row names.")
+    rlhf.add_argument("--task", default="", help="Task id a feedback row names.")
+    rlhf.add_argument("--rating", type=float, default=None, help="A numeric rating.")
+    rlhf.add_argument("--confidence", type=float, default=None)
+    rlhf.add_argument("--candidate", default="", help="A selected candidate label.")
+    rlhf.add_argument("--reason-category", default="")
+    rlhf.add_argument("--evaluator", default="", help="Which evaluator rates a subject.")
+    rlhf.add_argument(
+        "--criteria",
+        default="",
+        help="Comma-separated criterion names for a rating (default: the evaluator's own).",
+    )
+    rlhf.add_argument("--limit", type=int, default=50, help="How many rows to list.")
+    rlhf.add_argument(
+        "--file",
+        default="",
+        help="JSON file: one feedback row (submit) or one rating subject (rate).",
+    )
+    rlhf.add_argument(
+        "--decision",
+        default="",
+        choices=("accept", "reject"),
+        help="A reviewer's answer about a held feedback row.",
+    )
+    rlhf.add_argument("--reviewer", default="", help="Who decided, for the record.")
+    rlhf.add_argument(
+        "--set",
+        dest="overrides",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Config override, repeatable (e.g. --set rollout_count=2).",
+    )
+    rlhf.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Confirm a REAL (non-dry-run) RL run; without it it is refused.",
+    )
+    rlhf.add_argument(
+        "--override",
+        action="store_true",
+        help="Override an UNSAFE resource verdict (the deployment must allow it).",
+    )
+    rlhf.add_argument(
+        "--detect",
+        action="store_true",
+        help="For `disagreements`: detect new ones before listing them.",
+    )
+    rlhf.add_argument("--reason", default="")
+    rlhf.add_argument("--note", default="")
 
     ask = subparsers.add_parser("ask", help="Ask NovaControl through the integrated app router.")
     ask.add_argument("request")

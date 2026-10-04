@@ -550,6 +550,10 @@ class AgentTrajectory:
     resource_usage: ResourceUsage = field(default_factory=ResourceUsage)
     user_feedback: UserFeedback | None = None
     reward: Mapping[str, Any] | None = None
+    #: Phase 18's optional step/intermediate/terminal/cumulative reading of the
+    #: same run. Empty for every Phase 15 row, so the schema stays compatible;
+    #: the keys are written by the RL reward propagator, never inferred here.
+    reward_breakdown: Mapping[str, Any] = field(default_factory=dict)
     quality: Mapping[str, Any] | None = None
     evaluation_id: str = ""
     event_count: int = 0
@@ -659,6 +663,7 @@ class AgentTrajectory:
             "resource_usage": self.resource_usage.to_dict(),
             "user_feedback": self.user_feedback.to_dict() if self.user_feedback else None,
             "reward": dict(self.reward) if self.reward is not None else None,
+            "reward_breakdown": dict(self.reward_breakdown),
             "quality": dict(self.quality) if self.quality is not None else None,
             "evaluation_id": self.evaluation_id,
             "event_count": self.event_count,
@@ -713,6 +718,7 @@ class AgentTrajectory:
             if isinstance(feedback, Mapping)
             else None,
             reward=dict(reward) if isinstance(reward, Mapping) else None,
+            reward_breakdown=_mapping(data.get("reward_breakdown")),
             quality=dict(quality) if isinstance(quality, Mapping) else None,
             evaluation_id=_text(data.get("evaluation_id")),
             event_count=int(_number(data.get("event_count")) or 0),
@@ -728,6 +734,10 @@ class AgentTrajectory:
 
     def with_reward(self, reward: Mapping[str, Any]) -> AgentTrajectory:
         return replace(self, reward=dict(reward))
+
+    def with_reward_breakdown(self, breakdown: Mapping[str, Any]) -> AgentTrajectory:
+        """The same run, plus the RL reading of its rewards (Phase 18)."""
+        return replace(self, reward_breakdown=dict(breakdown))
 
     def with_feedback(self, feedback: UserFeedback) -> AgentTrajectory:
         return replace(self, user_feedback=feedback)
