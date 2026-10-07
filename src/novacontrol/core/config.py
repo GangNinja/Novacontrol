@@ -698,6 +698,59 @@ class RLHFSettings(TrainingSettings):
 
 
 @dataclass(frozen=True, slots=True)
+class RLVRSettings(TrainingSettings):
+    """Phase 19: whether RLVR and critique-based learning are offered at all.
+
+    The same cautious fields as the other training sections — ``dry_run`` on by
+    default, ``allow_unsafe`` off, one place to write down a usual base model or
+    LoRA rank — plus the two switches that are RLVR's own:
+
+      * ``deterministic_only`` keeps an AI evaluator out of the loop entirely,
+        so a reward can only ever come from a check a machine can repeat;
+      * ``require_evidence`` refuses a reward whose verifications cite no
+        observable fact.
+
+    The section is optional by construction: nothing in normal NovaControl
+    operation imports it, and an installation that never turns it on still
+    records, evaluates, fine-tunes and preference-optimizes exactly as before.
+    """
+
+    deterministic_only: bool = True
+    require_evidence: bool = True
+    critique_enabled: bool = True
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> Self:
+        # Explicit two-argument ``super`` on purpose: ``@dataclass(slots=True)``
+        # rebuilds the class, so the zero-argument form's ``__class__`` cell
+        # still points at the pre-slots class and raises ``TypeError``.
+        base = super(RLVRSettings, cls).from_mapping(data)
+        defaults = cls()
+        return replace(
+            base,
+            deterministic_only=_bool_setting(
+                data, "deterministic_only", defaults.deterministic_only
+            ),
+            require_evidence=_bool_setting(
+                data, "require_evidence", defaults.require_evidence
+            ),
+            critique_enabled=_bool_setting(
+                data, "critique_enabled", defaults.critique_enabled
+            ),
+        )
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            # Explicit two-argument ``super`` for the same reason as
+            # ``from_mapping`` above (``slots=True`` rebuilds the class).
+            **super(RLVRSettings, self).to_mapping(),
+            "deterministic_only": self.deterministic_only,
+            "require_evidence": self.require_evidence,
+            "critique_enabled": self.critique_enabled,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ModuleSettings:
     enabled: bool = True
     options: Mapping[str, Any] = field(default_factory=dict)
@@ -737,6 +790,10 @@ class NovaControlConfig:
     # differently — and an installation that records and evaluates should be
     # able to refuse RL without giving up anything else.
     rlhf: RLHFSettings = field(default_factory=RLHFSettings)
+    # Phase 19: verifiable rewards and critique-based learning. A separate
+    # section for the fourth time, and for the same reason: an installation may
+    # run RLHF and still refuse RLVR (or refuse to let a model score itself).
+    rlvr: RLVRSettings = field(default_factory=RLVRSettings)
     vision: VisionSettings = field(default_factory=VisionSettings)
     models: ModelSettings = field(default_factory=ModelSettings)
     modules: Mapping[str, ModuleSettings] = field(default_factory=dict)
@@ -773,6 +830,7 @@ class NovaControlConfig:
                 _mapping(data.get("preference", {}))
             ),
             rlhf=RLHFSettings.from_mapping(_mapping(data.get("rlhf", {}))),
+            rlvr=RLVRSettings.from_mapping(_mapping(data.get("rlvr", {}))),
             vision=VisionSettings.from_mapping(_mapping(data.get("vision", {}))),
             models=ModelSettings.from_mapping(_mapping(data.get("models", {}))),
             modules=modules,
@@ -1069,6 +1127,59 @@ class NovaControlConfig:
                 retention_days=_days_value(
                     os.getenv("NOVACONTROL_RLHF_RETENTION_DAYS"),
                     base.rlhf.retention_days,
+                ),
+            ),
+            # Phase 19: the RLVR switches, read on exactly the same rules. The
+            # two phase-specific flags default in the cautious direction too:
+            # deterministic-only verification and mandatory evidence.
+            rlvr=replace(
+                base.rlvr,
+                enabled=_parse_bool(
+                    os.getenv("NOVACONTROL_RLVR_ENABLED"),
+                    default=base.rlvr.enabled,
+                ),
+                dry_run=_parse_bool(
+                    os.getenv("NOVACONTROL_RLVR_DRY_RUN"),
+                    default=base.rlvr.dry_run,
+                ),
+                allow_unsafe=_parse_bool(
+                    os.getenv("NOVACONTROL_RLVR_ALLOW_UNSAFE"),
+                    default=base.rlvr.allow_unsafe,
+                ),
+                hardware_policy=(
+                    os.getenv(
+                        "NOVACONTROL_RLVR_HARDWARE_POLICY",
+                        base.rlvr.hardware_policy,
+                    )
+                    .strip()
+                    .lower()
+                    or base.rlvr.hardware_policy
+                ),
+                max_checkpoints=_count_value(
+                    os.getenv("NOVACONTROL_RLVR_MAX_CHECKPOINTS"),
+                    base.rlvr.max_checkpoints,
+                    maximum=MAX_TRAINING_CHECKPOINTS,
+                ),
+                max_records=_count_value(
+                    os.getenv("NOVACONTROL_RLVR_MAX_RECORDS"),
+                    base.rlvr.max_records,
+                    maximum=MAX_TRAINING_RECORDS,
+                ),
+                retention_days=_days_value(
+                    os.getenv("NOVACONTROL_RLVR_RETENTION_DAYS"),
+                    base.rlvr.retention_days,
+                ),
+                deterministic_only=_parse_bool(
+                    os.getenv("NOVACONTROL_RLVR_DETERMINISTIC_ONLY"),
+                    default=base.rlvr.deterministic_only,
+                ),
+                require_evidence=_parse_bool(
+                    os.getenv("NOVACONTROL_RLVR_REQUIRE_EVIDENCE"),
+                    default=base.rlvr.require_evidence,
+                ),
+                critique_enabled=_parse_bool(
+                    os.getenv("NOVACONTROL_RLVR_CRITIQUE_ENABLED"),
+                    default=base.rlvr.critique_enabled,
                 ),
             ),
             vision=replace(

@@ -363,6 +363,43 @@ class ApiSurface:
                 ApiRoute("GET", "/rlhf/evaluations", "Recorded RL comparisons with their regression checks.", authenticated=True),
                 ApiRoute("GET", "/rlhf/models", "Registered RL models, filtered by mode (same registry as training).", authenticated=True),
                 ApiRoute("GET", "/rlhf/models/{model_id}", "One registered RL model, with the mode that produced it.", authenticated=True),
+                # Phase 19: RLVR + critique-based learning. Verifiable rewards
+                # come from registered deterministic verifiers, failures become
+                # structured critiques, corrections become datasets, and an
+                # RLVR run is created, priced, planned and started explicitly.
+                # An RLVR model registers in the SAME registry, so approving
+                # and promoting use /training/models.
+                ApiRoute("GET", "/rlvr/status", "RLVR state: verifiers, critiques, corrections, datasets, runs.", authenticated=True),
+                ApiRoute("GET", "/rlvr/summary", "The same, plus the newest critiques, corrections and datasets.", authenticated=True),
+                ApiRoute("GET", "/rlvr/verifiers", "Registered verifiers with categories, versions and integrity state.", authenticated=True),
+                ApiRoute("POST", "/rlvr/verifiers/disable", "Stop a verifier supporting rewards (tamper protection: disable, never edit).", authenticated=True),
+                ApiRoute("POST", "/rlvr/verifiers/enable", "Let a disabled verifier support rewards again.", authenticated=True),
+                ApiRoute("POST", "/rlvr/verify", "Verify checkable questions; expectations are frozen before each check.", authenticated=True),
+                ApiRoute("POST", "/rlvr/reward", "Turn verification results into a reward, with its integrity audit.", authenticated=True),
+                ApiRoute("POST", "/rlvr/critiques", "Generate structured critiques from recorded evidence and store them.", authenticated=True),
+                ApiRoute("GET", "/rlvr/critiques", "Stored critiques, newest first, filtered by category and severity.", authenticated=True),
+                ApiRoute("GET", "/rlvr/corrections", "Corrected examples and their verdicts; held rows are reviewable.", authenticated=True),
+                ApiRoute("POST", "/rlvr/corrections", "Propose corrections for stored critiques; unverified ones are held.", authenticated=True),
+                ApiRoute("GET", "/rlvr/datasets", "Critique dataset versions, newest first, filtered by name.", authenticated=True),
+                ApiRoute("POST", "/rlvr/datasets", "Build an immutable critique dataset version from critiques and corrections.", authenticated=True),
+                ApiRoute("GET", "/rlvr/datasets/{dataset_version_id}/validate", "Whether a critique dataset can train anything, and what is missing.", authenticated=True),
+                ApiRoute("GET", "/rlvr/datasets/{dataset_version_id}/held", "Corrections a dataset held back, so a person can settle them.", authenticated=True),
+                ApiRoute("GET", "/rlvr/datasets/{dataset_version_id}/pairs", "The Phase 17 preference pairs a critique dataset yields.", authenticated=True),
+                ApiRoute("GET", "/rlvr/datasets/{dataset_version_id}", "One critique dataset version with its splits and statistics.", authenticated=True),
+                ApiRoute("POST", "/rlvr/estimate", "Estimate an RLVR config's resources without starting anything.", authenticated=True),
+                ApiRoute("POST", "/rlvr/pipeline", "The ten-stage RLVR plan for a configuration and task set.", authenticated=True),
+                ApiRoute("POST", "/rlvr/dry-run", "Walk all ten RLVR stages on deterministic inputs; starts nothing.", authenticated=True),
+                ApiRoute("POST", "/rlvr/evaluate", "Verifier-side metrics against labels recorded before the call.", authenticated=True),
+                ApiRoute("GET", "/rlvr/runs", "RLVR runs, newest first, filtered by status.", authenticated=True),
+                ApiRoute("POST", "/rlvr/runs", "Create an RLVR run from a critique dataset (never starts it).", authenticated=True),
+                ApiRoute("POST", "/rlvr/runs/start", "Start an RLVR run; unsafe estimates and unconfirmed real runs are refused.", authenticated=True),
+                ApiRoute("POST", "/rlvr/runs/pause", "Pause a running RLVR run at the next step boundary.", authenticated=True),
+                ApiRoute("POST", "/rlvr/runs/cancel", "Cancel an RLVR run; its checkpoints are kept.", authenticated=True),
+                ApiRoute("POST", "/rlvr/runs/resume", "Resume an interrupted RLVR run from its newest valid checkpoint.", authenticated=True),
+                ApiRoute("POST", "/rlvr/runs/re-estimate", "Re-estimate a run's resources against the current machine reading.", authenticated=True),
+                ApiRoute("POST", "/rlvr/runs/evaluate", "Compare base, SFT and preference models against the RLVR candidate.", authenticated=True),
+                ApiRoute("GET", "/rlvr/runs/{run_id}/checkpoints", "An RLVR run's checkpoints with their validity and loadability.", authenticated=True),
+                ApiRoute("GET", "/rlvr/runs/{run_id}", "One RLVR run: configuration, metrics and verifier snapshot.", authenticated=True),
             ),
             websocket_paths=("/ws/events",),
         )

@@ -182,6 +182,37 @@ The Phase 12 API subsystem provides REST and WebSocket entrypoints through FastA
 - `GET /rlhf/evaluations`: Recorded RL comparisons with their regression checks. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /rlhf/models`: Registered RL models, filtered by mode (same registry as training). *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /rlhf/models/{model_id}`: One registered RL model, with the mode that produced it. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlvr/status`: RLVR state: verifiers, critiques, corrections, datasets, runs. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlvr/summary`: The same, plus the newest critiques, corrections and datasets. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlvr/verifiers`: Registered verifiers with categories, versions and integrity state. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlvr/verifiers/disable`: Stop a verifier supporting rewards (tamper protection: disable, never edit). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlvr/verifiers/enable`: Let a disabled verifier support rewards again. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlvr/verify`: Verify checkable questions; expectations are frozen before each check. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlvr/reward`: Turn verification results into a reward, with its integrity audit. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlvr/critiques`: Generate structured critiques from recorded evidence and store them. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlvr/critiques`: Stored critiques, newest first, filtered by category and severity. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlvr/corrections`: Corrected examples and their verdicts; held rows are reviewable. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlvr/corrections`: Propose corrections for stored critiques; unverified ones are held. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlvr/datasets`: Critique dataset versions, newest first, filtered by name. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlvr/datasets`: Build an immutable critique dataset version from critiques and corrections. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlvr/datasets/{dataset_version_id}/validate`: Whether a critique dataset can train anything, and what is missing. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlvr/datasets/{dataset_version_id}/held`: Corrections a dataset held back, so a person can settle them. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlvr/datasets/{dataset_version_id}/pairs`: The Phase 17 preference pairs a critique dataset yields. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlvr/datasets/{dataset_version_id}`: One critique dataset version with its splits and statistics. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlvr/estimate`: Estimate an RLVR config's resources without starting anything. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlvr/pipeline`: The ten-stage RLVR plan for a configuration and task set. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlvr/dry-run`: Walk all ten RLVR stages on deterministic inputs; starts nothing. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlvr/evaluate`: Verifier-side metrics against labels recorded before the call. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlvr/runs`: RLVR runs, newest first, filtered by status. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlvr/runs`: Create an RLVR run from a critique dataset (never starts it). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlvr/runs/start`: Start an RLVR run; unsafe estimates and unconfirmed real runs are refused. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlvr/runs/pause`: Pause a running RLVR run at the next step boundary. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlvr/runs/cancel`: Cancel an RLVR run; its checkpoints are kept. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlvr/runs/resume`: Resume an interrupted RLVR run from its newest valid checkpoint. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlvr/runs/re-estimate`: Re-estimate a run's resources against the current machine reading. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /rlvr/runs/evaluate`: Compare base, SFT and preference models against the RLVR candidate. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlvr/runs/{run_id}/checkpoints`: An RLVR run's checkpoints with their validity and loadability. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /rlvr/runs/{run_id}`: One RLVR run: configuration, metrics and verifier snapshot. *(frontend: no web panel - API/CLI or infrastructure)*
 
 <!-- END GENERATED: api-reference -->
 

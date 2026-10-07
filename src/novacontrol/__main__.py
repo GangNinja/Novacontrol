@@ -17,6 +17,7 @@ from novacontrol.cli.commands import (
     run_ask,
     run_preference,
     run_rlhf,
+    run_rlvr,
     run_settings,
     run_status,
     run_train,
@@ -136,6 +137,29 @@ def main(argv: list[str] | None = None) -> None:
                 detect=args.detect,
                 reason=args.reason,
                 note=args.note,
+            )
+        )
+    elif args.command == "rlvr":
+        asyncio.run(
+            run_rlvr(
+                args.action,
+                identifier=args.id,
+                name=args.name,
+                model=args.model,
+                dataset_version=args.dataset_version,
+                category=args.category,
+                severity=args.severity,
+                status=args.status,
+                limit=args.limit,
+                file=args.file,
+                labels=args.labels,
+                tasks=args.tasks,
+                overrides=args.overrides,
+                confirm=args.confirm,
+                override=args.override,
+                reason=args.reason,
+                note=args.note,
+                pending_only=args.pending_only,
             )
         )
     else:

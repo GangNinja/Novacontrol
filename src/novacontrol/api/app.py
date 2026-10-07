@@ -2149,11 +2149,18 @@ def create_app() -> Any:
 
     @app.get("/rlhf/datasets/{dataset_version_id}/validate")
     async def validate_rlhf_dataset(dataset_version_id: str, _principal: str = Depends(require_auth)) -> dict[str, Any]:
-        return nova.validate_rlhf_dataset(dataset_version_id)
+        try:
+            return nova.validate_rlhf_dataset(dataset_version_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
 
     @app.get("/rlhf/datasets/{dataset_version_id}/held")
     async def rlhf_held(dataset_version_id: str, _principal: str = Depends(require_auth)) -> dict[str, Any]:
-        return nova.rlhf_held(dataset_version_id)
+        result = nova.rlhf_held(dataset_version_id)
+        if not result.get("ok", True):
+            detail = str(result.get("reason") or "no such dataset")
+            raise HTTPException(status_code=404, detail=detail)
+        return result
 
     @app.get("/rlhf/datasets/{dataset_version_id}")
     async def rlhf_dataset(dataset_version_id: str, _principal: str = Depends(require_auth)) -> dict[str, Any]:
@@ -2308,7 +2315,10 @@ def create_app() -> Any:
         run_id: str, _principal: str = Depends(require_auth)
     ) -> dict[str, Any]:
         """A run's checkpoints with their validity and loadability."""
-        return nova.rlhf_checkpoints(run_id)
+        result = nova.rlhf_checkpoints(run_id)
+        if not result.get("ok", True):
+            raise HTTPException(status_code=404, detail=str(result.get("reason") or "no such run"))
+        return result
 
     @app.get("/rlhf/runs/{run_id}")
     async def rlhf_run(
@@ -2344,6 +2354,334 @@ def create_app() -> Any:
         """One registered model, with the RL mode that produced it."""
         try:
             return nova.rlhf_model(model_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    # ── Phase 19: RLVR + critique-based learning ────────────────────────────
+    # Same discipline as /rlhf: reads do not start anything, a refused action
+    # is its own status, a missing thing is a 404, and real runs need explicit
+    # confirmation and an unsafe override. RLVR is OFF by default, never loads
+    # a model, and a verifier can be disabled but never edited into passing.
+
+    @app.get("/rlvr/status")
+    async def rlvr_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """RLVR state: verifiers, critiques, corrections, datasets, runs."""
+        return nova.rlvr_status()
+
+    @app.get("/rlvr/summary")
+    async def rlvr_summary(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """The same, plus the newest critiques, corrections and datasets."""
+        return nova.rlvr_summary()
+
+    @app.get("/rlvr/verifiers")
+    async def rlvr_verifiers(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Registered verifiers, their categories, versions and integrity state."""
+        return nova.rlvr_verifiers()
+
+    @app.post("/rlvr/verifiers/disable")
+    async def disable_rlvr_verifier(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Stop a verifier supporting rewards. Disabling is the only "edit"."""
+        result = nova.disable_rlvr_verifier(
+            str(payload.get("verifier_id") or ""),
+            reason=str(payload.get("reason") or ""),
+        )
+        if not result.get("ok"):
+            raise HTTPException(status_code=404, detail=str(result.get("reason")))
+        return result
+
+    @app.post("/rlvr/verifiers/enable")
+    async def enable_rlvr_verifier(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Let a previously disabled verifier support rewards again."""
+        result = nova.enable_rlvr_verifier(str(payload.get("verifier_id") or ""))
+        if not result.get("ok"):
+            raise HTTPException(status_code=404, detail=str(result.get("reason")))
+        return result
+
+    @app.post("/rlvr/verify")
+    async def verify_rlvr(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Verify checkable questions; each expectation is frozen first."""
+        return nova.verify_rlvr(payload)
+
+    @app.post("/rlvr/reward")
+    async def rlvr_reward(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Turn verifications into a reward, with its integrity audit."""
+        return nova.rlvr_reward(payload)
+
+    @app.post("/rlvr/critiques")
+    async def record_rlvr_critiques(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Generate structured critiques from recorded evidence and store them."""
+        return nova.record_rlvr_critiques(payload)
+
+    @app.get("/rlvr/critiques")
+    async def rlvr_critiques(
+        trajectory_id: str = "",
+        category: str = "",
+        severity: str = "",
+        source: str = "",
+        limit: int = 100,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Stored critiques, newest first, filterable by what failed and how badly."""
+        return nova.rlvr_critiques(
+            trajectory_id=trajectory_id,
+            category=category,
+            severity=severity,
+            source=source,
+            limit=limit,
+        )
+
+    @app.get("/rlvr/corrections")
+    async def rlvr_corrections(
+        status: str = "",
+        pending_only: bool = False,
+        limit: int = 100,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Corrected examples and their verdicts; held ones are reviewable."""
+        return nova.rlvr_corrections(status=status, limit=limit, pending_only=pending_only)
+
+    @app.post("/rlvr/corrections")
+    async def propose_rlvr_corrections(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Propose corrections for stored critiques; unverified ones are held."""
+        return nova.propose_rlvr_corrections(payload)
+
+    @app.get("/rlvr/datasets")
+    async def rlvr_critique_datasets(
+        name: str = "", limit: int = 50, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Critique dataset versions, newest first, filtered by name."""
+        return nova.rlvr_critique_datasets(name=name, limit=limit)
+
+    @app.post("/rlvr/datasets")
+    async def create_rlvr_critique_dataset(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Build a critique dataset version; it is immutable once stored."""
+        return nova.create_rlvr_critique_dataset(payload)
+
+    @app.get("/rlvr/datasets/{dataset_version_id}/validate")
+    async def validate_rlvr_critique_dataset(
+        dataset_version_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Whether a critique dataset can train anything, and what is missing."""
+        try:
+            return nova.validate_rlvr_critique_dataset(dataset_version_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/rlvr/datasets/{dataset_version_id}/held")
+    async def rlvr_held(
+        dataset_version_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Corrections a dataset held back, so a person can settle them."""
+        return nova.rlvr_held(dataset_version_id)
+
+    @app.get("/rlvr/datasets/{dataset_version_id}/pairs")
+    async def rlvr_preference_pairs(
+        dataset_version_id: str,
+        verified_only: bool = True,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """The Phase 17 preference pairs a critique dataset yields."""
+        try:
+            return nova.rlvr_preference_pairs(
+                dataset_version_id, verified_only=verified_only
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/rlvr/datasets/{dataset_version_id}")
+    async def rlvr_critique_dataset(
+        dataset_version_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """One critique dataset version with its splits and statistics."""
+        try:
+            return nova.rlvr_critique_dataset(dataset_version_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/rlvr/estimate")
+    async def estimate_rlvr(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Validate an RLVR configuration and price it; trains nothing."""
+        raw = payload.get("config")
+        cfg = raw if isinstance(raw, dict) else {}
+        return nova.estimate_rlvr(cfg)
+
+    @app.post("/rlvr/pipeline")
+    async def rlvr_pipeline(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """The ten-stage RLVR plan for this configuration and task set."""
+        cfg = payload.get("config") if isinstance(payload.get("config"), dict) else None
+        tasks = payload.get("tasks")
+        return nova.rlvr_pipeline(
+            cfg,
+            tasks=[dict(item) for item in tasks if isinstance(item, dict)]
+            if isinstance(tasks, (list, tuple))
+            else (),
+            dataset_version=str(payload.get("dataset_version", "")),
+        )
+
+    @app.post("/rlvr/dry-run")
+    async def dry_run_rlvr(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Walk all ten stages on deterministic inputs; starts nothing."""
+        cfg = payload.get("config") if isinstance(payload.get("config"), dict) else None
+        tasks = payload.get("tasks")
+        labels = payload.get("labels")
+        return nova.dry_run_rlvr(
+            cfg,
+            tasks=[dict(item) for item in tasks if isinstance(item, dict)]
+            if isinstance(tasks, (list, tuple))
+            else (),
+            dataset_version=str(payload.get("dataset_version", "")),
+            labels={
+                str(key): str(value) for key, value in labels.items()
+            }
+            if isinstance(labels, dict)
+            else None,
+        )
+
+    @app.get("/rlvr/runs")
+    async def rlvr_runs(
+        status: str = "", limit: int = 50, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """RLVR runs, newest first, filtered by status."""
+        return nova.rlvr_runs(status=status, limit=limit)
+
+    @app.post("/rlvr/runs")
+    async def create_rlvr_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Create an RLVR run from a critique dataset (never starts it)."""
+        result = nova.create_rlvr_run(
+            str(payload.get("model") or ""),
+            str(payload.get("dataset_version") or ""),
+            config=payload.get("config") if isinstance(payload.get("config"), dict) else None,
+            name=str(payload.get("name") or ""),
+        )
+        if not result.get("ok"):
+            raise HTTPException(status_code=422, detail=str(result.get("reason")))
+        return result
+
+    @app.post("/rlvr/runs/start")
+    async def start_rlvr_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Start an RLVR run; unsafe estimates and unconfirmed real runs refused."""
+        return await nova.start_rlvr_run(
+            str(payload.get("run_id") or ""),
+            override=bool(payload.get("override")),
+            confirm=bool(payload.get("confirm")),
+        )
+
+    @app.post("/rlvr/runs/pause")
+    async def pause_rlvr_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Pause a running RLVR run at the next step boundary."""
+        return nova.pause_rlvr_run(str(payload.get("run_id") or ""))
+
+    @app.post("/rlvr/runs/cancel")
+    async def cancel_rlvr_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Cancel an RLVR run; its checkpoints are kept."""
+        return nova.cancel_rlvr_run(str(payload.get("run_id") or ""))
+
+    @app.post("/rlvr/runs/resume")
+    async def resume_rlvr_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Resume an interrupted RLVR run from its newest valid checkpoint."""
+        return await nova.resume_rlvr_run(
+            str(payload.get("run_id") or ""),
+            checkpoint_id=str(payload.get("checkpoint_id") or ""),
+        )
+
+    @app.post("/rlvr/runs/re-estimate")
+    async def estimate_rlvr_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Re-estimate a run's resources against the current machine reading."""
+        return nova.estimate_rlvr_run(str(payload.get("run_id") or ""))
+
+    @app.post("/rlvr/runs/evaluate")
+    async def evaluate_rlvr_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Compare base, SFT and preference models against the RLVR candidate."""
+        return await nova.evaluate_rlvr_run(
+            str(payload.get("run_id") or ""),
+            base=payload.get("base"),
+            candidate=payload.get("candidate"),
+            sft=payload.get("sft"),
+            preference=payload.get("preference"),
+            dataset_version=str(payload.get("dataset_version") or ""),
+            split=str(payload.get("split") or "test"),
+            tolerance=payload.get("tolerance")
+            if isinstance(payload.get("tolerance"), (int, float))
+            else None,
+        )
+
+    @app.post("/rlvr/evaluate")
+    async def rlvr_evaluation(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Verifier-side metrics against labels recorded before the call."""
+        def rows(key: str) -> list[dict[str, Any]]:
+            value = payload.get(key)
+            if not isinstance(value, (list, tuple)):
+                return []
+            return [dict(item) for item in value if isinstance(item, dict)]
+
+        labels = payload.get("labels")
+        categories = payload.get("expected_categories")
+        return nova.rlvr_evaluation(
+            verifications=rows("verifications"),
+            labels={str(key): str(value) for key, value in labels.items()}
+            if isinstance(labels, dict)
+            else None,
+            critiques=rows("critiques"),
+            expected_categories={
+                str(key): str(value) for key, value in categories.items()
+            }
+            if isinstance(categories, dict)
+            else None,
+            integrity=rows("integrity"),
+            dataset_version=str(payload.get("dataset_version") or ""),
+            run_id=str(payload.get("run_id") or ""),
+        )
+
+    @app.get("/rlvr/runs/{run_id}/checkpoints")
+    async def rlvr_checkpoints(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """An RLVR run's checkpoints with their validity and loadability."""
+        return nova.rlvr_checkpoints(run_id)
+
+    @app.get("/rlvr/runs/{run_id}")
+    async def rlvr_run(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """One RLVR run: configuration, metrics, verifier snapshot."""
+        try:
+            return nova.rlvr_run(run_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

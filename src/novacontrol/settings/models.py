@@ -143,6 +143,16 @@ class UserSettings:
     rlhf_max_checkpoints: int = 3
     rlhf_retention_days: int = 30
     rlhf_max_records: int = 2000
+    # Phase 19: whether this installation offers RLVR and critique-based
+    # learning. The same shape once more, and separate because the question is
+    # genuinely separate: an operator may trust verifiable rewards and still
+    # want an AI evaluator out of the loop, or want critiques recorded without
+    # ever building a dataset from them.
+    rlvr_enabled: bool = True
+    rlvr_dry_run: bool = True
+    rlvr_max_checkpoints: int = 3
+    rlvr_retention_days: int = 30
+    rlvr_max_records: int = 2000
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -179,6 +189,11 @@ class UserSettings:
             "rlhf_max_checkpoints": self.rlhf_max_checkpoints,
             "rlhf_retention_days": self.rlhf_retention_days,
             "rlhf_max_records": self.rlhf_max_records,
+            "rlvr_enabled": self.rlvr_enabled,
+            "rlvr_dry_run": self.rlvr_dry_run,
+            "rlvr_max_checkpoints": self.rlvr_max_checkpoints,
+            "rlvr_retention_days": self.rlvr_retention_days,
+            "rlvr_max_records": self.rlvr_max_records,
         }
 
     @classmethod
@@ -267,5 +282,19 @@ class UserSettings:
             ),
             rlhf_max_records=clamp_record_cap(
                 payload.get("rlhf_max_records", 2000)
+            ),
+            # Phase 19: the RLVR switches, on the same rule once more. The
+            # default is the cautious one everywhere: the surface exists, the
+            # dry run is what runs, and a real run needs an operator's say-so.
+            rlvr_enabled=bool(payload.get("rlvr_enabled", True)),
+            rlvr_dry_run=bool(payload.get("rlvr_dry_run", True)),
+            rlvr_max_checkpoints=clamp_checkpoint_cap(
+                payload.get("rlvr_max_checkpoints", 3)
+            ),
+            rlvr_retention_days=clamp_retention_days(
+                payload.get("rlvr_retention_days", 30)
+            ),
+            rlvr_max_records=clamp_record_cap(
+                payload.get("rlvr_max_records", 2000)
             ),
         )

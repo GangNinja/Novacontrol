@@ -272,6 +272,78 @@ def build_parser() -> argparse.ArgumentParser:
     rlhf.add_argument("--reason", default="")
     rlhf.add_argument("--note", default="")
 
+    rlvr = subparsers.add_parser(
+        "rlvr",
+        help="RLVR + critique learning: verifiers, verifiable rewards, critiques, datasets, runs.",
+    )
+    rlvr.add_argument(
+        "action",
+        choices=(
+            "status", "summary", "verifiers", "verify", "reward", "critiques",
+            "critique", "corrections", "propose", "datasets", "dataset", "build",
+            "validate", "held", "pairs", "estimate", "pipeline", "dry-run",
+            "create", "runs", "run", "checkpoints", "start", "pause", "resume",
+            "cancel", "evaluate",
+        ),
+        help="What to do; `rlvr status` is a safe first look.",
+    )
+    rlvr.add_argument(
+        "--id", default="", help="Run id, critique dataset version id or critique id."
+    )
+    rlvr.add_argument("--name", default="", help="Critique dataset or run name.")
+    rlvr.add_argument("--model", default="", help="Base model a run names.")
+    rlvr.add_argument(
+        "--dataset-version", default="", help="Critique dataset version a run trains on."
+    )
+    rlvr.add_argument("--category", default="", help="Filter critiques by category.")
+    rlvr.add_argument("--severity", default="", help="Filter critiques by severity.")
+    rlvr.add_argument(
+        "--status",
+        default="",
+        help="Filter corrections (accepted/rejected/needs_review) or runs by status.",
+    )
+    rlvr.add_argument("--limit", type=int, default=50, help="How many rows to list.")
+    rlvr.add_argument(
+        "--file",
+        default="",
+        help="JSON file: questions (verify), verifications (reward/critique), payload (build).",
+    )
+    rlvr.add_argument(
+        "--labels",
+        default="",
+        help="JSON file of recorded labels, for `evaluate` and `dry-run`.",
+    )
+    rlvr.add_argument(
+        "--tasks",
+        default="",
+        help="JSON file with the deterministic task set, for `pipeline` and `dry-run`.",
+    )
+    rlvr.add_argument(
+        "--set",
+        dest="overrides",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Config override, repeatable (e.g. --set algorithm=mock_policy).",
+    )
+    rlvr.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Confirm a REAL (non-dry-run) RLVR run; without it it is refused.",
+    )
+    rlvr.add_argument(
+        "--override",
+        action="store_true",
+        help="Override an UNSAFE resource verdict (the deployment must allow it).",
+    )
+    rlvr.add_argument("--reason", default="")
+    rlvr.add_argument("--note", default="")
+    rlvr.add_argument(
+        "--pending-only",
+        action="store_true",
+        help="For `corrections`: only rows no evidence settled yet.",
+    )
+
     ask = subparsers.add_parser("ask", help="Ask NovaControl through the integrated app router.")
     ask.add_argument("request")
 

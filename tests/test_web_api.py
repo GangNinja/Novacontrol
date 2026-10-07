@@ -1166,9 +1166,11 @@ class Phase14ApiTests(_IsolatedApiTestCase):
         payload = self._client.get("/diagnostics").json()
 
         # Phase 16 adds the SFT subsystem's row to the Phase 14 roster, Phase 17 adds
-        # preference optimization's, and Phase 18 adds the RLHF / RLAIF row.
-        self.assertEqual(len(payload["components"]), 24)
+        # preference optimization's, Phase 18 adds the RLHF / RLAIF row, and Phase 19
+        # adds RLVR + critique learning's.
+        self.assertEqual(len(payload["components"]), 25)
         self.assertIn("RLHF / RLAIF", {row["component"] for row in payload["components"]})
+        self.assertIn("RLVR", {row["component"] for row in payload["components"]})
         self.assertIn("Core", {row["component"] for row in payload["components"]})
         self.assertIn("Training", {row["component"] for row in payload["components"]})
         self.assertEqual(payload["lines"][0], "NovaControl Health")

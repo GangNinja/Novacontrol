@@ -815,6 +815,268 @@ def _rlhf_compare_args(args: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+async def run_rlvr(
+    action: str,
+    *,
+    identifier: str = "",
+    name: str = "",
+    model: str = "",
+    dataset_version: str = "",
+    category: str = "",
+    severity: str = "",
+    status: str = "",
+    limit: int = 50,
+    file: str = "",
+    labels: str = "",
+    tasks: str = "",
+    overrides: Sequence[str] = (),
+    confirm: bool = False,
+    override: bool = False,
+    reason: str = "",
+    note: str = "",
+    pending_only: bool = False,
+) -> None:
+    """RLVR + critique learning: verifiers, rewards, critiques, datasets, runs.
+
+    Same contract as the `rlhf` command beside it: read-only actions answer with
+    what is stored, changing actions go through the application's own methods (so
+    the CLI can do nothing the API could not), a refusal exits non-zero, and
+    nothing here starts a real run without --confirm. `rlvr dry-run` is the safe
+    first look; it verifies deterministic inputs and trains nothing.
+    """
+    app = NovaControlApplication(data_dir=Path("data"))
+    await app.start()
+    try:
+        result = await _rlvr_action(
+            app,
+            action,
+            identifier=identifier,
+            name=name,
+            model=model,
+            dataset_version=dataset_version,
+            category=category,
+            severity=severity,
+            status=status,
+            limit=limit,
+            file=file,
+            labels=labels,
+            tasks=tasks,
+            overrides=overrides,
+            confirm=confirm,
+            override=override,
+            reason=reason,
+            note=note,
+            pending_only=pending_only,
+        )
+    except (KeyError, ValueError, TypeError, OSError) as exc:
+        print_json({"status": "error", "reason": f"{type(exc).__name__}: {exc}"})
+        raise SystemExit(1) from exc
+    finally:
+        await app.stop()
+    refused = not result.get("ok", True)
+    print_json({"status": "refused" if refused else "ok", "rlvr": result})
+    if refused:
+        raise SystemExit(1)
+
+
+async def _rlvr_action(
+    app: NovaControlApplication, action: str, **args: Any
+) -> dict[str, Any]:
+    """Dispatch one RLVR action to the application method that owns it.
+
+    The CLI can do nothing the API could not: every action lands on the same
+    application method the route calls, so a refusal reads the same either way.
+    A payload or config file is read, never guessed.
+    """
+    identifier = str(args["identifier"])
+    limit = int(args["limit"])
+    dataset_version = str(args["dataset_version"])
+    if action == "status":
+        return app.rlvr_status()
+    if action == "summary":
+        return app.rlvr_summary()
+    if action == "verifiers":
+        return app.rlvr_verifiers()
+    if action == "verify":
+        questions = _rlvr_payload(args, "questions")
+        if not isinstance(questions, list):
+            raise ValueError("verify needs --file with a JSON list under 'questions'")
+        return app.verify_rlvr(
+            {"questions": questions, "config": _rlvr_config_args(args) or None}
+        )
+    if action == "reward":
+        verifications = _rlvr_payload(args, "verifications")
+        if not isinstance(verifications, list):
+            raise ValueError(
+                "reward needs --file with a JSON list under 'verifications'"
+            )
+        payload = _rlvr_payload(args, "")
+        return app.rlvr_reward(
+            {
+                "verifications": verifications,
+                "task_id": str(payload.get("task_id", "")),
+                "trajectory_id": str(payload.get("trajectory_id", "")),
+                "correction_verified": bool(payload.get("correction_verified")),
+                "config": _rlvr_config_args(args) or None,
+            }
+        )
+    if action == "critiques":
+        return app.rlvr_critiques(
+            category=str(args["category"]),
+            severity=str(args["severity"]),
+            limit=limit,
+        )
+    if action == "critique":
+        payload = _rlvr_payload(args, "")
+        verifications = payload.get("verifications")
+        return app.record_rlvr_critiques(
+            {
+                "verifications": [
+                    dict(item) for item in verifications if isinstance(item, Mapping)
+                ]
+                if isinstance(verifications, (list, tuple))
+                else [],
+                "trajectory": payload.get("trajectory")
+                if isinstance(payload.get("trajectory"), Mapping)
+                else None,
+                "config": _rlvr_config_args(args) or None,
+            }
+        )
+    if action == "corrections":
+        return app.rlvr_corrections(
+            status=str(args["status"]),
+            limit=limit,
+            pending_only=bool(args["pending_only"]),
+        )
+    if action == "propose":
+        return app.propose_rlvr_corrections(_rlvr_payload(args, ""))
+    if action == "datasets":
+        return app.rlvr_critique_datasets(name=str(args["name"]), limit=limit)
+    if action == "dataset":
+        return app.rlvr_critique_dataset(identifier)
+    if action == "build":
+        payload = _rlvr_payload(args, "")
+        if not str(args["name"]):
+            raise ValueError("build needs --name for the critique dataset version")
+        return app.create_rlvr_critique_dataset(
+            {
+                **payload,
+                "name": str(args["name"]),
+                "description": str(args["note"]),
+            }
+        )
+    if action == "validate":
+        return app.validate_rlvr_critique_dataset(identifier)
+    if action == "held":
+        return app.rlvr_held(identifier)
+    if action == "pairs":
+        return app.rlvr_preference_pairs(identifier)
+    if action == "estimate":
+        return app.estimate_rlvr(_rlvr_config_args(args))
+    if action == "pipeline":
+        return app.rlvr_pipeline(
+            _rlvr_config_args(args) or None,
+            tasks=_rlvr_tasks(args),
+            dataset_version=dataset_version,
+        )
+    if action == "dry-run":
+        return app.dry_run_rlvr(
+            _rlvr_config_args(args) or None,
+            tasks=_rlvr_tasks(args),
+            dataset_version=dataset_version,
+            labels=_rlvr_labels(args),
+        )
+    if action == "create":
+        return app.create_rlvr_run(
+            str(args["model"]), dataset_version, config=_rlvr_config_args(args) or None
+        )
+    if action == "runs":
+        return app.rlvr_runs(status=str(args["status"]), limit=limit)
+    if action == "run":
+        return app.rlvr_run(identifier)
+    if action == "checkpoints":
+        return app.rlvr_checkpoints(identifier)
+    if action == "start":
+        return await app.start_rlvr_run(
+            identifier, override=bool(args["override"]), confirm=bool(args["confirm"])
+        )
+    if action == "pause":
+        return app.pause_rlvr_run(identifier)
+    if action == "resume":
+        return await app.resume_rlvr_run(identifier)
+    if action == "cancel":
+        return app.cancel_rlvr_run(identifier)
+    if action == "evaluate":
+        return app.rlvr_evaluation(
+            verifications=tuple(_rlvr_rows(args, "verifications")),
+            labels=_rlvr_labels(args),
+            critiques=tuple(_rlvr_rows(args, "critiques")),
+            dataset_version=dataset_version,
+            run_id=identifier,
+        )
+    raise ValueError(f"unsupported rlvr action {action!r}")
+
+
+def _rlvr_payload(args: Mapping[str, Any], key: str) -> Any:
+    """Read the JSON payload file; ``key`` selects a sub-object when present."""
+    path = str(args.get("file", ""))
+    if not path:
+        return None if key else {}
+    loaded = _read_json_file(path)
+    if key and isinstance(loaded, Mapping):
+        return loaded.get(key)
+    return loaded
+
+
+def _rlvr_rows(args: Mapping[str, Any], key: str) -> list[dict[str, Any]]:
+    """Read one list-of-mappings section from the payload file."""
+    value = _rlvr_payload(args, key)
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [dict(item) for item in value if isinstance(item, Mapping)]
+
+
+def _rlvr_labels(args: Mapping[str, Any]) -> dict[str, str] | None:
+    """Read the recorded labels file, when one was given."""
+    path = str(args.get("labels", ""))
+    if not path:
+        return None
+    loaded = _read_json_file(path)
+    if not isinstance(loaded, Mapping):
+        raise ValueError("the labels file must contain a JSON object")
+    return {str(key): str(value) for key, value in loaded.items()}
+
+
+def _rlvr_tasks(args: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Read the deterministic task set file, when one was given."""
+    path = str(args.get("tasks", ""))
+    if not path:
+        return ()
+    loaded = _read_json_file(path)
+    if not isinstance(loaded, (list, tuple)):
+        raise ValueError("the tasks file must contain a JSON list")
+    return tuple(dict(item) for item in loaded if isinstance(item, Mapping))
+
+
+def _rlvr_config_args(args: Mapping[str, Any]) -> dict[str, Any]:
+    """The RLVR configuration a command names: overrides plus the command's pins.
+
+    ``--dataset-version`` pins the critique dataset the run learns from and
+    ``--model`` names the base model, both as flat keys: the manager routes a
+    Phase 18 field into the ``rl`` block it belongs to, so a plan or a dry run
+    validates against the model the caller named instead of reporting that one
+    is missing.
+    """
+    overrides = _training_overrides(args["overrides"])
+    dataset_version = str(args.get("dataset_version", ""))
+    if dataset_version:
+        overrides["critique_dataset_version"] = dataset_version
+    model = str(args.get("model", ""))
+    if model:
+        overrides["base_model"] = model
+    return overrides
+
+
 async def run_ask(request: str) -> None:
     """Ask NovaControl through the integrated app router."""
     app = NovaControlApplication()

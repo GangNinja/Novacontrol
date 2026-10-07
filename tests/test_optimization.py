@@ -955,9 +955,12 @@ class Phase14ApplicationTests(unittest.IsolatedAsyncioTestCase):
             # Phase 18 adds the RLHF / RLAIF subsystem: same presence reporting,
             # with the mock-only policy optimizer named explicitly.
             "RLHF / RLAIF",
+            # Phase 19 adds RLVR + critique learning: verifiers and rewards are
+            # reported as present (or switched off) like the rest.
+            "RLVR",
         ):
             self.assertIn(name, components)
-        self.assertEqual(len(report["components"]), 24)
+        self.assertEqual(len(report["components"]), 25)
         for row in report["components"]:
             self.assertIn(row["status"], {state.value for state in HealthState})
             self.assertTrue(row["message"])

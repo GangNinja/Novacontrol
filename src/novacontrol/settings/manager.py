@@ -59,6 +59,11 @@ class SettingsManager:
         rlhf_max_checkpoints: int | None = None,
         rlhf_retention_days: int | None = None,
         rlhf_max_records: int | None = None,
+        rlvr_enabled: bool | None = None,
+        rlvr_dry_run: bool | None = None,
+        rlvr_max_checkpoints: int | None = None,
+        rlvr_retention_days: int | None = None,
+        rlvr_max_records: int | None = None,
     ) -> UserSettings:
         self._settings = replace(
             self._settings,
@@ -178,6 +183,25 @@ class SettingsManager:
             rlhf_max_records=self._settings.rlhf_max_records
             if rlhf_max_records is None
             else clamp_record_cap(rlhf_max_records),
+            # Phase 19: RLVR's switches, validated like every other section's.
+            # The flags that make a reward checkable rather than opinionable
+            # (deterministic-only, required evidence) live in the config file
+            # and its environment, where the rest of the verifier policy is.
+            rlvr_enabled=self._settings.rlvr_enabled
+            if rlvr_enabled is None
+            else rlvr_enabled,
+            rlvr_dry_run=self._settings.rlvr_dry_run
+            if rlvr_dry_run is None
+            else rlvr_dry_run,
+            rlvr_max_checkpoints=self._settings.rlvr_max_checkpoints
+            if rlvr_max_checkpoints is None
+            else clamp_checkpoint_cap(rlvr_max_checkpoints),
+            rlvr_retention_days=self._settings.rlvr_retention_days
+            if rlvr_retention_days is None
+            else clamp_retention_days(rlvr_retention_days),
+            rlvr_max_records=self._settings.rlvr_max_records
+            if rlvr_max_records is None
+            else clamp_record_cap(rlvr_max_records),
         )
         return self._settings
 

@@ -11,7 +11,7 @@ import shlex
 import shutil
 import socket
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from collections.abc import Callable, Coroutine, Mapping, Sequence
@@ -122,6 +122,20 @@ from novacontrol.rlhf import (
     RewardDatasetRules,
     build_rlhf_repositories,
 )
+from novacontrol.rlvr import (
+    CritiqueConfig,
+    RLVRManager,
+    RLVRModule,
+    RLVREvaluator,
+    RLVRTrainingConfig,
+    VerifiableRewardConfig,
+    VerifierPolicyConfig,
+    build_rlvr_repositories,
+)
+# Aliased on purpose. ``Verifier`` above is the agentcore action verifier (Phase
+# 12); an RLVR verifier is a different object that answers a checkable question
+# about an observation, and importing it under its own name would shadow it.
+from novacontrol.rlvr.verifiers import Verifier as RLVRVerifier
 from novacontrol.training import (
     ResourceEstimator,
     SFTModelRegistry,
@@ -1557,6 +1571,14 @@ class NovaControlApplication:
         # JSONL files in the same folder. Nothing here starts training, and the
         # default configuration is a dry run.
         self.rlhf = self._build_rlhf_manager()
+        # ── Phase 19: RLVR + critique-based learning ────────────────────────
+        # Optional and experimental by construction: three stores of its own
+        # (critiques, corrections, critique dataset versions) and a verifier
+        # registry, built on the SAME run store, model registry, checkpoint
+        # management and event bus. Nothing here starts training, no model is
+        # loaded to answer a question, and the default configuration is a dry
+        # run with deterministic-only verification.
+        self.rlvr = self._build_rlvr_manager()
         # Phase 9.2/9.3: the capability registry is the ONE place that answers
         # what this installation can do. It is the registry the intelligence
         # layer already maintains — attached to the catalogues rather than
@@ -1717,6 +1739,11 @@ class NovaControlApplication:
         # a candidate both change what a future dataset may train on, and both
         # must carry a name.
         self.runtime.register_module(RLHFModule(self.rlhf))
+        # Phase 19: the RLVR surface answers status/verifier/critique/correction/
+        # dataset/pipeline/dry-run questions on the bus. Recording a critique or
+        # a correction stays off it, for Phase 18's reason: both change what a
+        # future dataset may train on and both must carry a name.
+        self.runtime.register_module(RLVRModule(self.rlvr))
 
         # Phase 14, last boot steps: point the ONE cloud switch at the policy,
         # and give the diagnostic roster the components it reports on (every
@@ -1737,6 +1764,10 @@ class NovaControlApplication:
         # provider, dry-run, checkpoint cap), so a deployment's opinion is in
         # place before anyone asks what an RL run would cost or do.
         self.apply_rlhf_settings()
+        # Phase 19: and for the RLVR defaults (verifier policy, reward policy,
+        # critique policy, dry-run, checkpoint cap), so this deployment's idea
+        # of what may count as evidence is in place before anything is verified.
+        self.apply_rlvr_settings()
 
     # --- Brain mode (local scratch ↔ local LLM) ---
 
@@ -5021,13 +5052,32 @@ class NovaControlApplication:
         return {"ok": True, "dataset": dataset.to_dict()}
 
     def validate_rlhf_dataset(self, dataset_version_id: str) -> dict[str, Any]:
-        """Check a stored reward dataset: sources, integrity, splits, leakage."""
+        """Check a stored reward dataset: sources, integrity, splits, leakage.
+
+        A version that does not exist is reported as missing, not as invalid:
+        "there is no such dataset" and "this dataset is faulty" are different
+        answers, and only the second one is a verdict about the data.
+        """
+        if self.rlhf.reward_dataset(dataset_version_id) is None:
+            raise KeyError(f"no reward dataset version {dataset_version_id!r}")
         return self.rlhf.validate_dataset(dataset_version_id)
 
     def rlhf_held(self, dataset_version_id: str) -> dict[str, Any]:
-        """Rows a dataset held back, so a person can see what was excluded and why."""
+        """Rows a dataset held back, so a person can see what was excluded and why.
+
+        A missing version says so instead of answering with an empty list: "this
+        dataset held nothing back" and "there is no such dataset" are different
+        facts and a reader must not have to guess which one it got.
+        """
+        if self.rlhf.reward_dataset(dataset_version_id) is None:
+            return {
+                "ok": False,
+                "reason": f"no reward dataset version {dataset_version_id!r}",
+                "examples": [],
+                "count": 0,
+            }
         held = self.rlhf.held_examples(dataset_version_id)
-        return {"examples": [item.to_dict() for item in held], "count": len(held)}
+        return {"ok": True, "examples": [item.to_dict() for item in held], "count": len(held)}
 
     # -- planning, dry run and runs --------------------------------------------
 
@@ -5136,9 +5186,20 @@ class NovaControlApplication:
         return self.rlhf.cancel(run_id)
 
     def rlhf_checkpoints(self, run_id: str) -> dict[str, Any]:
-        """Every checkpoint row of one RL run, with loadability and size."""
+        """Every checkpoint row of one RL run, with loadability and size.
+
+        A run that does not exist is named, for the same reason: an empty list
+        would be indistinguishable from a run that has not checkpointed yet.
+        """
+        if self.rlhf.runs.get(run_id) is None:
+            return {
+                "ok": False,
+                "reason": f"no run {run_id!r}",
+                "checkpoints": [],
+                "count": 0,
+            }
         found = self.rlhf.checkpoints(run_id)
-        return {"checkpoints": list(found), "count": len(found)}
+        return {"ok": True, "checkpoints": list(found), "count": len(found)}
 
     # -- evaluation and the registry -------------------------------------------
 
@@ -5228,6 +5289,575 @@ class NovaControlApplication:
         if model is None:
             raise KeyError(f"no trained model {model_id!r}")
         return model.to_dict()
+
+    # ── Phase 19: RLVR + critique-based learning ────────────────────────────
+
+    def _build_rlvr_manager(self) -> RLVRManager:
+        """Build the RLVR subsystem ON the Phase 16/18 stores and the registry.
+
+        The run store, the checkpoint records, the model registry and the
+        evaluation records are the training manager's — one run history, one
+        place a model can be promoted from, for the fourth time. Three JSONL
+        files are new: critiques, corrections and critique dataset versions.
+        The verifier registry is this subsystem's own, because a verifier is a
+        check, not a model, and its integrity state belongs beside the runs
+        that depend on it.
+        """
+        preferences = self.settings.settings
+        repos = build_rlvr_repositories(
+            self.data_dir, cap=preferences.rlvr_max_records
+        )
+        return RLVRManager(
+            critiques=repos.critiques,
+            corrections=repos.corrections,
+            critique_datasets=repos.datasets,
+            datasets=self.rlhf.reward_datasets,
+            feedback=self.rlhf.feedback,
+            ratings=self.rlhf.ratings,
+            disagreements=self.rlhf.disagreements,
+            runs=self.training.runs,
+            checkpoints=self.training.checkpoints_repo,
+            models=self.training.models,
+            evaluations=self.training.evaluations,
+            supervised_datasets=self.training.datasets,
+            output_root=self.data_dir / "rlvr_output",
+            default_config=self._rlvr_default_config().rl,
+            estimator=ResourceEstimator(
+                governor=self.governor,
+                monitor=getattr(self, "hardware_monitor", None),
+                model_size_lookup=getattr(self.model_manager, "model_size_bytes", None),
+            ),
+            registry=self.training.registry,
+            max_checkpoints=preferences.rlvr_max_checkpoints,
+            publish=self._rlvr_event,
+        )
+
+    def _rlvr_default_config(self) -> RLVRTrainingConfig:
+        """What a new RLVR run inherits, from the section and the settings.
+
+        ``dry_run`` is the OR of the two switches, the direction a safety switch
+        fails in, and the two flags that make a reward checkable —
+        deterministic-only verification and mandatory evidence — come from the
+        section, where an operator writes down what may count as proof.
+        """
+        settings = self.config.rlvr
+        preferences = self.settings.settings
+        mapping = dict(settings.base_config())
+        mapping["dry_run"] = bool(settings.dry_run or preferences.rlvr_dry_run)
+        mapping["max_checkpoints"] = preferences.rlvr_max_checkpoints
+        rl = RLTrainingConfig.from_mapping(mapping)
+        return RLVRTrainingConfig(
+            rl=rl,
+            verifiers=replace(
+                VerifierPolicyConfig(),
+                deterministic_only=bool(settings.deterministic_only),
+            ),
+            reward=replace(
+                VerifiableRewardConfig(),
+                require_evidence=bool(settings.require_evidence),
+            ),
+            critique=replace(
+                CritiqueConfig(), enabled=bool(settings.critique_enabled)
+            ),
+        )
+
+    def _rlvr_event(self, type_: str, payload: Mapping[str, Any]) -> None:
+        """Publish an RLVR event from the manager's synchronous seams."""
+        self._announce_soon(type_, **dict(payload))
+
+    def _rlvr_enabled(self) -> bool:
+        """Whether this installation offers RLVR at all (install AND operator)."""
+        return bool(self.config.rlvr.enabled and self.settings.settings.rlvr_enabled)
+
+    def _rlvr_disabled(self) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "refused": True,
+            "reason": (
+                "RLVR is switched off in this installation "
+                "(NOVACONTROL_RLVR_ENABLED / rlvr_enabled)"
+            ),
+        }
+
+    def apply_rlvr_settings(self) -> dict[str, Any]:
+        """Re-derive the RLVR defaults and retention, live."""
+        config = self._rlvr_default_config()
+        self.rlvr.rlvr_defaults = config
+        self.rlvr.default_config = config.rl.as_training_config()
+        self.rlvr.checkpoint_manager.max_checkpoints = max(
+            1, int(self.settings.settings.rlvr_max_checkpoints)
+        )
+        self.rlvr.method.config = config.critique
+        self.rlvr.method.reward_config = config.reward
+        self.rlvr.verifiers_registry.policy = config.verifiers
+        return {
+            "enabled": self._rlvr_enabled(),
+            "dry_run": config.dry_run,
+            "algorithm": config.algorithm,
+            "deterministic_only": config.verifiers.deterministic_only,
+            "require_evidence": config.reward.require_evidence,
+            "critique_enabled": config.critique.enabled,
+            "max_checkpoints": self.rlvr.checkpoint_manager.max_checkpoints,
+            "output_root": str(self.rlvr.output_root),
+        }
+
+    def rlvr_status(self) -> dict[str, Any]:
+        """The subsystem's headline state: verifiers, critiques, datasets, runs."""
+        return {**self.rlvr.rlvr_status(), "enabled": self._rlvr_enabled()}
+
+    def rlvr_summary(self) -> dict[str, Any]:
+        """The same, plus the newest critiques and datasets by name."""
+        return {**self.rlvr.rlvr_summary(), "enabled": self._rlvr_enabled()}
+
+    # -- verifiers -------------------------------------------------------------
+
+    def rlvr_verifiers(self) -> dict[str, Any]:
+        """Every registered verifier, with the registry's integrity state."""
+        return {"ok": True, **self.rlvr.verifiers()}
+
+    def register_rlvr_verifier(
+        self, verifier: RLVRVerifier, *, replace_existing: bool = False
+    ) -> dict[str, Any]:
+        """Register a verifier (a plugin or a capability registers its checks)."""
+        if not self._rlvr_enabled():
+            return self._rlvr_disabled()
+        return self.rlvr.register_verifier(verifier, replace_existing=replace_existing)
+
+    def register_plugin_verifiers(self) -> dict[str, Any]:
+        """Ask every loaded plugin for domain verifiers and register them.
+
+        The Plugin SDK stays the ONE plugin architecture: a plugin exposes
+        ``verifiers()`` (Verifier objects) and this method is how they reach the
+        registry. Nothing is discovered that the existing plugin manager did not
+        load, and a plugin that raises is reported, not trusted.
+        """
+        found: list[str] = []
+        problems: dict[str, str] = {}
+        for record in self.plugins.plugins():
+            plugin_id = str(getattr(record, "plugin_id", "") or "plugin")
+            plugin = (
+                getattr(record, "plugin", None)
+                or getattr(record, "instance", None)
+                or getattr(record, "target", None)
+            )
+            getter = getattr(plugin, "verifiers", None)
+            if not callable(getter):
+                continue
+            try:
+                items = list(getter() or ())
+            except Exception as exc:  # noqa: BLE001 - a plugin bug is not ours
+                problems[plugin_id] = f"{type(exc).__name__}: {exc}"
+                continue
+            for item in items:
+                if not isinstance(item, RLVRVerifier):
+                    problems[plugin_id] = "verifiers() returned a non-verifier"
+                    continue
+                outcome = self.rlvr.register_verifier(item)
+                if outcome.get("ok"):
+                    found.append(item.verifier_id)
+                else:
+                    problems[plugin_id] = str(outcome.get("reason", "registration refused"))
+        return {"ok": True, "registered": found, "problems": problems}
+
+    def disable_rlvr_verifier(
+        self, verifier_id: str, *, reason: str = ""
+    ) -> dict[str, Any]:
+        """Stop a verifier from supporting rewards. It cannot be edited into passing."""
+        return self.rlvr.disable_verifier(verifier_id, reason=reason)
+
+    def enable_rlvr_verifier(self, verifier_id: str) -> dict[str, Any]:
+        return self.rlvr.enable_verifier(verifier_id)
+
+    # -- verification, rewards and critiques ------------------------------------
+
+    def verify_rlvr(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Verify a batch of checkable questions against frozen expectations."""
+        if not self._rlvr_enabled():
+            return self._rlvr_disabled()
+        questions = payload.get("questions")
+        rows = [dict(item) for item in questions] if isinstance(questions, (list, tuple)) else []
+        config = payload.get("config")
+        return self.rlvr.verify(
+            rows, config=config if isinstance(config, Mapping) else None
+        )
+
+    def rlvr_reward(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """A verifiable reward from verification results, with its integrity audit."""
+        if not self._rlvr_enabled():
+            return self._rlvr_disabled()
+        results = payload.get("verifications")
+        rows = [dict(item) for item in results] if isinstance(results, (list, tuple)) else []
+        config = payload.get("config")
+        return self.rlvr.reward_for(
+            rows,
+            config=config if isinstance(config, Mapping) else None,
+            task_id=str(payload.get("task_id", "") or ""),
+            trajectory_id=str(payload.get("trajectory_id", "") or ""),
+            correction_verified=bool(payload.get("correction_verified")),
+        )
+
+    def record_rlvr_critiques(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Generate structured critiques from recorded evidence and store them."""
+        if not self._rlvr_enabled():
+            return self._rlvr_disabled()
+        results = payload.get("verifications")
+        rows = [dict(item) for item in results] if isinstance(results, (list, tuple)) else []
+        trajectory = payload.get("trajectory")
+        config = payload.get("config")
+        return self.rlvr.record_critiques(
+            rows,
+            trajectory=trajectory if isinstance(trajectory, Mapping) else None,
+            config=config if isinstance(config, Mapping) else None,
+            store=bool(payload.get("store", True)),
+        )
+
+    def rlvr_critiques(
+        self,
+        *,
+        trajectory_id: str = "",
+        category: str = "",
+        severity: str = "",
+        source: str = "",
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        found = self.rlvr.critiques_list(
+            trajectory_id=trajectory_id,
+            category=category,
+            severity=severity,
+            source=source,
+            limit=limit,
+            newest_first=True,
+        )
+        return {
+            "critiques": [item.to_dict() for item in found],
+            "count": len(found),
+            "stats": self.rlvr.critique_stats(),
+        }
+
+    def rlvr_corrections(
+        self, *, status: str = "", limit: int = 50, pending_only: bool = False
+    ) -> dict[str, Any]:
+        found = (
+            self.rlvr.corrections_pending(limit=limit)
+            if pending_only
+            else self.rlvr.corrections_list(status=status, limit=limit, newest_first=True)
+        )
+        return {
+            "corrections": [item.to_dict() for item in found],
+            "count": len(found),
+            "stats": self.rlvr.correction_stats(),
+        }
+
+    def propose_rlvr_corrections(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Propose corrections for stored critiques and record the verdicts."""
+        if not self._rlvr_enabled():
+            return self._rlvr_disabled()
+        critique_ids = payload.get("critique_ids")
+        proposals = payload.get("proposals")
+        inputs = payload.get("original_inputs")
+        outputs = payload.get("original_outputs")
+        critiques = payload.get("critiques")
+        return self.rlvr.propose_corrections(
+            critiques=[dict(item) for item in critiques]
+            if isinstance(critiques, (list, tuple))
+            else [],
+            critique_ids=[str(item) for item in critique_ids]
+            if isinstance(critique_ids, (list, tuple))
+            else [],
+            proposals={
+                str(key): dict(value)
+                for key, value in proposals.items()
+                if isinstance(value, Mapping)
+            }
+            if isinstance(proposals, Mapping)
+            else None,
+            original_inputs={
+                str(key): dict(value)
+                for key, value in inputs.items()
+                if isinstance(value, Mapping)
+            }
+            if isinstance(inputs, Mapping)
+            else None,
+            original_outputs={
+                str(key): dict(value)
+                for key, value in outputs.items()
+                if isinstance(value, Mapping)
+            }
+            if isinstance(outputs, Mapping)
+            else None,
+            config=payload.get("config") if isinstance(payload.get("config"), Mapping) else None,
+        )
+
+    # -- critique datasets -------------------------------------------------------
+
+    def create_rlvr_critique_dataset(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Build and store one immutable critique dataset version."""
+        if not self._rlvr_enabled():
+            return self._rlvr_disabled()
+        name = str(payload.get("name", "") or "")
+        if not name:
+            return {"ok": False, "reason": "a critique dataset needs a name"}
+        critique_ids = payload.get("critique_ids")
+        correction_ids = payload.get("correction_ids")
+        critiques = payload.get("critiques")
+        corrections = payload.get("corrections")
+        tags = payload.get("tags")
+        return self.rlvr.build_critique_dataset(
+            name,
+            critiques=[dict(item) for item in critiques]
+            if isinstance(critiques, (list, tuple))
+            else [],
+            critique_ids=[str(item) for item in critique_ids]
+            if isinstance(critique_ids, (list, tuple))
+            else [],
+            corrections=[dict(item) for item in corrections]
+            if isinstance(corrections, (list, tuple))
+            else [],
+            correction_ids=[str(item) for item in correction_ids]
+            if isinstance(correction_ids, (list, tuple))
+            else [],
+            version=str(payload.get("version", "") or ""),
+            description=str(payload.get("description", "") or ""),
+            tags=[str(item) for item in tags] if isinstance(tags, (list, tuple)) else [],
+        )
+
+    def rlvr_critique_datasets(self, *, name: str = "", limit: int = 50) -> dict[str, Any]:
+        found = self.rlvr.critique_datasets_list(name=name, limit=limit)
+        return {
+            "datasets": [item.to_dict() for item in found],
+            "count": len(found),
+        }
+
+    def rlvr_critique_dataset(self, dataset_version_id: str) -> dict[str, Any]:
+        payload = self.rlvr.dataset_preview(dataset_version_id)
+        if not payload.get("ok"):
+            raise KeyError(f"no critique dataset {dataset_version_id!r}")
+        return payload
+
+    def validate_rlvr_critique_dataset(self, dataset_version_id: str) -> dict[str, Any]:
+        """Whether this dataset can train anything, and what is missing."""
+        if self.rlvr.critique_dataset(dataset_version_id) is None:
+            raise KeyError(f"no critique dataset {dataset_version_id!r}")
+        return self.rlvr.validate_critique_dataset(dataset_version_id)
+
+    def rlvr_held(self, dataset_version_id: str) -> dict[str, Any]:
+        """Rows this dataset held back, so a person can settle them."""
+        if self.rlvr.critique_dataset(dataset_version_id) is None:
+            return {
+                "ok": False,
+                "reason": f"no critique dataset {dataset_version_id!r}",
+                "corrections": [],
+                "count": 0,
+            }
+        found = self.rlvr.held_critique_examples(dataset_version_id)
+        return {
+            "ok": True,
+            "corrections": [item.to_dict() for item in found],
+            "count": len(found),
+        }
+
+    def rlvr_preference_pairs(
+        self, dataset_version_id: str, *, verified_only: bool = True
+    ) -> dict[str, Any]:
+        """The Phase 17 pairs this dataset yields — corrections over failures."""
+        if self.rlvr.critique_dataset(dataset_version_id) is None:
+            raise KeyError(f"no critique dataset {dataset_version_id!r}")
+        return self.rlvr.to_preference_pairs(
+            dataset_version_id, verified_only=verified_only
+        )
+
+    # -- configuration, planning and dry runs ------------------------------------
+
+    def estimate_rlvr(self, config: Mapping[str, Any]) -> dict[str, Any]:
+        """Price an RLVR configuration without starting anything."""
+        return self.rlvr.estimate_config(dict(config or {}))
+
+    def rlvr_pipeline(
+        self,
+        config: Mapping[str, Any] | None = None,
+        *,
+        tasks: Sequence[Mapping[str, Any]] = (),
+        dataset_version: str = "",
+    ) -> dict[str, Any]:
+        """Plan the ten RLVR stages for this configuration and task set."""
+        return self.rlvr.pipeline_plan(config, tasks=tasks, dataset_version=dataset_version)
+
+    def dry_run_rlvr(
+        self,
+        config: Mapping[str, Any] | None = None,
+        *,
+        tasks: Sequence[Mapping[str, Any]] = (),
+        dataset_version: str = "",
+        labels: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Simulate all ten stages on deterministic inputs; train nothing."""
+        if not self._rlvr_enabled():
+            return self._rlvr_disabled()
+        return self.rlvr.dry_run(
+            config=config,
+            tasks=tasks,
+            dataset_version=dataset_version,
+            labels=labels,
+        )
+
+    # -- runs --------------------------------------------------------------------
+
+    def rlvr_runs(self, *, status: str = "", limit: int = 50) -> dict[str, Any]:
+        found = self.rlvr.rlvr_runs(status=status, limit=limit)
+        return {"runs": [item.to_dict() for item in found], "count": len(found)}
+
+    def rlvr_run(self, run_id: str) -> dict[str, Any]:
+        run = self.rlvr.run(run_id)
+        if run is None:
+            raise KeyError(f"no RLVR run {run_id!r}")
+        return run.to_dict()
+
+    def create_rlvr_run(
+        self,
+        model: str,
+        dataset_version: str,
+        *,
+        config: Mapping[str, Any] | None = None,
+        name: str = "",
+    ) -> dict[str, Any]:
+        """Validate an RLVR configuration and critique dataset, store a CREATED run."""
+        if not self._rlvr_enabled():
+            return self._rlvr_disabled()
+        try:
+            run = self.rlvr.create_run(model, dataset_version, config=config, name=name)
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+        return {"ok": True, "run": run.to_dict()}
+
+    def estimate_rlvr_run(self, run_id: str) -> dict[str, Any]:
+        """Re-price a stored RLVR run against the machine as it is NOW."""
+        return self.rlvr.estimate_run(run_id)
+
+    async def start_rlvr_run(
+        self, run_id: str, *, override: bool = False, confirm: bool = False
+    ) -> dict[str, Any]:
+        """Validate, estimate and run — off the event loop, never blocking it.
+
+        The rails are Phase 16's, unchanged: an UNSAFE estimate is refused unless
+        this deployment allows an override AND the caller asked for one, a real
+        (non-dry-run) configuration needs an explicit confirmation, and a real
+        run also needs a wired runner — the mock cannot stand in for one.
+        """
+        if not self._rlvr_enabled():
+            return self._rlvr_disabled()
+        if override and not self.config.rlvr.allow_unsafe:
+            return {
+                "ok": False,
+                "refused": True,
+                "run_id": run_id,
+                "reason": (
+                    "overriding an unsafe resource estimate is not allowed in this "
+                    "installation (NOVACONTROL_RLVR_ALLOW_UNSAFE)"
+                ),
+            }
+        return await asyncio.to_thread(
+            self.rlvr.start, run_id, override=override, confirm=confirm
+        )
+
+    async def resume_rlvr_run(
+        self, run_id: str, *, checkpoint_id: str = ""
+    ) -> dict[str, Any]:
+        """Continue a paused/failed/cancelled RLVR run from a checkpoint."""
+        if not self._rlvr_enabled():
+            return self._rlvr_disabled()
+        return await asyncio.to_thread(
+            self.rlvr.resume, run_id, checkpoint_id=checkpoint_id
+        )
+
+    def pause_rlvr_run(self, run_id: str) -> dict[str, Any]:
+        """Ask a running RLVR run to stop at its next step."""
+        return self.rlvr.pause(run_id)
+
+    def cancel_rlvr_run(self, run_id: str) -> dict[str, Any]:
+        """End an RLVR run: a live one at its next step, a stored one now."""
+        return self.rlvr.cancel(run_id)
+
+    def rlvr_checkpoints(self, run_id: str) -> dict[str, Any]:
+        """Every checkpoint row of one RLVR run, with loadability and size."""
+        if self.rlvr.runs.get(run_id) is None:
+            return {
+                "ok": False,
+                "reason": f"no run {run_id!r}",
+                "checkpoints": [],
+                "count": 0,
+            }
+        found = self.rlvr.checkpoints(run_id)
+        return {"ok": True, "checkpoints": list(found), "count": len(found)}
+
+    async def evaluate_rlvr_run(
+        self,
+        run_id: str,
+        *,
+        base: Any = None,
+        candidate: Any = None,
+        sft: Any = None,
+        preference: Any = None,
+        dataset_version: str = "",
+        split: str = "test",
+        tolerance: float | None = None,
+    ) -> dict[str, Any]:
+        """Base, SFT and preference models against the RLVR candidate.
+
+        Phase 18's comparison, unchanged: the run's verifiable reward is recorded
+        BESIDE the comparison and never used as its verdict, because a model that
+        learned to earn a bigger number has not thereby been shown to be better
+        at anything.
+        """
+        if not self._rlvr_enabled():
+            return self._rlvr_disabled()
+        return await asyncio.to_thread(
+            self.rlvr.evaluate_run,
+            run_id,
+            base=base,
+            candidate=candidate,
+            sft=sft,
+            preference=preference,
+            dataset_version=dataset_version,
+            split=split,
+            tolerance=tolerance,
+        )
+
+    def rlvr_evaluation(
+        self,
+        *,
+        verifications: Sequence[Mapping[str, Any]] = (),
+        labels: Mapping[str, str] | None = None,
+        critiques: Sequence[Mapping[str, Any]] = (),
+        expected_categories: Mapping[str, str] | None = None,
+        integrity: Sequence[Mapping[str, Any]] = (),
+        dataset_version: str = "",
+        run_id: str = "",
+    ) -> dict[str, Any]:
+        """The verifier-side evaluation: accuracy, agreement, false readings.
+
+        Reads observations and labels that were recorded BEFORE the call — the
+        evaluator has no way to invent a truth to score against, and a call with
+        no labels reports zero labelled cases rather than a perfect score.
+        """
+        from novacontrol.rlhf.models import RewardIntegrityCheck
+        from novacontrol.rlvr import CritiqueResult, VerificationResult
+
+        evaluator = RLVREvaluator()
+        results = tuple(VerificationResult.from_dict(dict(item)) for item in verifications)
+        rows = tuple(CritiqueResult.from_dict(dict(item)) for item in critiques)
+        checks = tuple(RewardIntegrityCheck.from_dict(dict(item)) for item in integrity)
+        return {
+            "ok": True,
+            "evaluation": evaluator.evaluate(
+                results=results,
+                ground_truth=dict(labels or {}),
+                critiques=rows,
+                expected_categories=dict(expected_categories or {}),
+                integrity=checks,
+                run_id=run_id,
+                dataset_version=dataset_version,
+            ).to_dict(),
+        }
 
     # ── Phase 14: execution mode, privacy, resources, cost and diagnostics ──
 
@@ -5963,6 +6593,67 @@ class NovaControlApplication:
             )
 
         self.diagnostics.register("RLHF / RLAIF", rlhf, category="systems")
+
+        def rlvr() -> DiagnosticResult:
+            """The RLVR subsystem: verifiers, critiques, and what is missing.
+
+            Nothing here loads a model or runs a check: the verifier count is the
+            registry's, and the capability reading is the one the training row
+            already took. A machine without the optional dependencies is
+            DEGRADED (verification, critiques, datasets, planning and dry runs
+            all work), and an installation that switched RLVR off is SKIPPED
+            rather than broken. The row names the determinism policy, because
+            "deterministic only" is the honest headline.
+            """
+            defaults = self.rlvr.rlvr_defaults
+            if not self._rlvr_enabled():
+                return row(
+                    "RLVR",
+                    HealthState.SKIPPED,
+                    "RLVR is switched off in this installation",
+                    enabled=False,
+                    dry_run=defaults.dry_run,
+                )
+            metadata = self.rlvr.verifiers_registry.list()
+            missing = self.rlvr.rl_estimator.capabilities().missing_dependencies()
+            payload: dict[str, Any] = {
+                "enabled": True,
+                "dry_run": defaults.dry_run,
+                "verifiers": len(metadata),
+                "deterministic": sum(1 for item in metadata if item.deterministic),
+                "deterministic_only": bool(defaults.verifiers.deterministic_only),
+                "require_evidence": bool(defaults.reward.require_evidence),
+                "critiques": len(self.rlvr.critiques.rows()),
+                "corrections_pending": len(self.rlvr.corrections.pending()),
+                "critique_datasets": len(self.rlvr.critique_datasets.rows()),
+                "note": (
+                    "verifiable rewards and critique learning are optional and "
+                    "experimental: nothing starts automatically, no large model is "
+                    "loaded, and a verifier can be disabled but never edited into "
+                    "passing"
+                ),
+            }
+            if missing:
+                return row(
+                    "RLVR",
+                    HealthState.DEGRADED,
+                    "the RLVR subsystem is wired; dry runs, verification and "
+                    "critique datasets work, a real run needs: " + ", ".join(missing),
+                    remediation=(
+                        "pip install " + " ".join(missing)
+                        + " to enable a real training backend"
+                    ),
+                    **payload,
+                )
+            return row(
+                "RLVR",
+                HealthState.OK,
+                "the RLVR subsystem is wired and its training dependencies are "
+                "installed",
+                **payload,
+            )
+
+        self.diagnostics.register("RLVR", rlvr, category="systems")
 
     def _record_audit(
         self,
