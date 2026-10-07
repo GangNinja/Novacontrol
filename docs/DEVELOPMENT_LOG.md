@@ -3762,3 +3762,51 @@ length) from the phase that added that file.
 one test's check, the state store, and one API test class's setup. Phase 15 rows,
 the route set, the diagnostics roster and both mypy platform views are as they
 were, and every phase suite that was green before this pass is green after it.
+
+## 50. The push turned CI red: a verdict test measured the runner, and the store still crashed on undecodable bytes
+
+The push of Phases 19–20 was the first time this suite ran on GitHub's runners,
+and it went red on one test:
+`tests/test_agentic_rl.py::ResourceTests::test_an_unsafe_configuration_is_refused_by_the_estimator`,
+which expected `unsafe` and was given `warning`.
+
+* **The test measured the runner, not the subsystem.** The verdict is the
+  requirement compared against what THIS machine reports, and `psutil` is not a
+  declared dependency — it is probed optionally. Both CI legs install `.[dev]`
+  on ubuntu, so free memory cannot be measured there at all and the estimator
+  lands on WARNING *before* it compares anything: the 1,172 GB requirement of
+  that configuration (4096 episodes × 512 steps × 100 k sequence length) never
+  entered the decision. Reproduced locally by emulating a psutil-less runner (a
+  `sitecustomize.py` whose `find_spec` raises `ModuleNotFoundError`): one
+  failure, the same assertion, out of 175 tests in that file. Fixed by pinning a
+  known machine — `AgenticResourceEstimator(capabilities=bare())`, 4 cpu / 16 GB
+  total / 8 GB available — which makes the verdict UNSAFE against 7.5 GB of
+  usable memory on any host, with `required_bytes > usable_bytes` asserted
+  beside the label so the arithmetic, not the constant, carries the refusal.
+  This is §49's RLHF defect in a second place: an assertion about a resource
+  verdict is an assertion about the machine unless the machine is pinned.
+  Production was never affected — every application path constructs its
+  estimator with the governor and the hardware monitor, which read
+  `/proc/meminfo` (Linux) or win32 (Windows) without psutil.
+* **The rest of the phase's surface was audited in the same environment.** With
+  psutil absent: `test_rlvr.py` 188 passed, `test_training.py` 259,
+  `test_optimization.py` + `test_telemetry.py` + `test_telemetry_e2e.py`
+  98 passed / 3 skipped, and the agentic file 174 + the one above. No other test
+  in the phase's surface reads the host, which CI's own log agrees with.
+* **The store's forgiving read had a second door.** Driving `JsonStateStore`
+  through a probe rather than through its tests showed a snapshot whose bytes are
+  not UTF-8 text — a file another tool wrote in UTF-16, or one whose last byte
+  was cut inside a multi-byte character mid-write — still raised
+  `UnicodeDecodeError` out of `NovaControlApplication.__init__`, because
+  `UnicodeDecodeError` is a `ValueError` and the catch named only `OSError`. The
+  read now catches `(OSError, UnicodeError)`, and three byte-valued cases joined
+  the table in `tests/test_persistence.py`; each one fails against the
+  `OSError`-only version (mutation-checked). An end-to-end probe then corrupted
+  all ten snapshots of a real application (empty, truncated, UTF-16, binary) and
+  confirmed it boots, reads empty state, writes, reboots and reads that write
+  back — with no staging file left anywhere in the cycle.
+
+**Gates on the repaired tree.** 3,325 passed / 12 skipped / 2,102 subtests across
+108 files in six parallel groups (593 + 560 + 627 + 611 + 510 + 424, every group
+exit 0), `mypy src` and `mypy src --platform win32` clean over 333 files, and
+`generate_api_reference.py --check` reporting `docs/API.md: in sync`.

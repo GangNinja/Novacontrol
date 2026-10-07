@@ -25,11 +25,14 @@ class JsonStateStore:
     request that recorded it.
 
     * **Reads are forgiving.** A missing file, an empty one, a truncated or
-      hand-edited one, and one that holds something other than an object all
-      report the same answer as "nothing was stored yet" — and the next write
-      replaces it. A process killed mid-write (or a second one mid-replacement)
-      used to leave an empty file and fail the whole application with a
-      ``JSONDecodeError`` before it could start.
+      hand-edited one, one that holds something other than an object, and one
+      whose bytes are not UTF-8 text at all all report the same answer as
+      "nothing was stored yet" — and the next write replaces it. A process
+      killed mid-write (or a second one mid-replacement) used to leave an empty
+      file and fail the whole application with a ``JSONDecodeError`` before it
+      could start; the same door is open to bytes no decoder accepts (a tool
+      writing UTF-16, or a kill that split a multi-byte character), so the read
+      closes both.
     * **Writes stage and replace.** The payload goes to a unique temporary file
       in the store's own directory and is moved into place with ``os.replace``,
       the rule the audit trail, the benchmark store and the evaluation stores
@@ -50,7 +53,10 @@ class JsonStateStore:
         path = self.root / f"{name}.json"
         try:
             text = path.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeError):
+            # Unreadable, or not text this store can decode — a file another
+            # tool wrote, or a kill mid-write that split a character. Either
+            # way there is no state here, and certainly no crash.
             return {}
         try:
             payload = json.loads(text)

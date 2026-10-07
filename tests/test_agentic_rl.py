@@ -106,6 +106,24 @@ def limits(**overrides: object) -> RolloutLimits:
     return RolloutLimits(**values)  # type: ignore[arg-type]
 
 
+def bare() -> HardwareCapabilities:
+    """A machine with nothing optional installed — the CI/dependency baseline.
+
+    The verdict is the requirement measured against what THIS machine reports,
+    and ``psutil`` is an optional dependency the project does not declare: an
+    unpinned assertion about a verdict is an assertion about the host. It held on
+    a developer machine that had psutil and failed on the runner that did not
+    (every requirement became a WARNING, because free memory could not be
+    measured at all), which is the whole reason this fixture exists.
+    """
+    return HardwareCapabilities(
+        cpu_count=4,
+        total_ram_bytes=16_000_000_000,
+        available_ram_bytes=8_000_000_000,
+        backends=("cpu",),
+    )
+
+
 #: Constructor arguments of the MANAGER, as opposed to the LIMITS. They are
 #: split here so a test can say `manager(clock=...)` or `manager(max_steps=2)`
 #: without caring which of the two owns the name.
@@ -1744,11 +1762,15 @@ class ResourceTests(unittest.TestCase):
         huge = AgenticRLConfig(
             episodes=4096, max_episode_steps=512, max_planning_horizon=512, max_sequence_length=100_000
         )
-        estimate = AgenticResourceEstimator().estimate(huge)
+        estimate = AgenticResourceEstimator(capabilities=bare()).estimate(huge)
 
         self.assertEqual(estimate.level, "unsafe")
         self.assertTrue(estimate.override_required)
         self.assertFalse(estimate.allows_training)
+        # The refusal follows from the arithmetic rather than from the label: the
+        # requirement is orders of magnitude past the pinned machine's usable
+        # memory, so the verdict cannot drift with a constant or with the host.
+        self.assertGreater(estimate.required_bytes, estimate.usable_bytes or 0)
 
     def test_the_estimate_counts_what_an_agentic_run_adds(self) -> None:
         estimate = AgenticResourceEstimator().estimate(AgenticRLConfig())

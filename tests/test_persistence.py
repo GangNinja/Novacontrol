@@ -22,17 +22,29 @@ class StateStoreRobustnessTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             store = JsonStateStore(root)
-            cases = {
+            cases: dict[str, str | bytes] = {
                 "empty": "",
                 "whitespace": "   \n",
                 "truncated": '{"value": 1',
                 "not-an-object": "[1, 2, 3]",
                 "scalar": '"text"',
                 "garbage": "not json at all",
+                # Bytes no UTF-8 decoder accepts. ``UnicodeDecodeError`` is a
+                # ``ValueError``, not an ``OSError``: the read has to name it or
+                # this file still stops the build from starting.
+                "utf16": '{"value": 1}'.encode("utf-16"),
+                "binary": bytes([0x00, 0xFF, 0xFE, 0x81, 0x7F]),
+                # A kill mid-write can cut a multi-byte character in half: this
+                # is a valid JSON prefix whose last byte starts an é.
+                "split-multibyte": '{"name": "caf\u00e9'.encode("utf-8")[:-1],
             }
-            for name, text in cases.items():
+            for name, raw in cases.items():
                 with self.subTest(case=name):
-                    (root / f"{name}.json").write_text(text, encoding="utf-8")
+                    path = root / f"{name}.json"
+                    if isinstance(raw, bytes):
+                        path.write_bytes(raw)
+                    else:
+                        path.write_text(raw, encoding="utf-8")
 
                     self.assertEqual(store.read(name), {})
             # A directory where the snapshot should be is unreadable too.
