@@ -285,6 +285,9 @@ and a live application driven through `handle_request` with **no model loaded**.
 
 ## Gates
 
-pytest in three file groups — **2,362 passed / 12 skipped** (1,846 subtests);
-`docs/API.md` in sync (92 routes); mypy clean in both platform views (264 source
-files); ruff clean on the new package and its tests.
+The gate this phase was verified with, as it stood then (the tree has grown a
+phase at a time since — §49 of [DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md) records
+the current whole-tree result): pytest in three file groups — **2,362 passed /
+12 skipped** (1,846 subtests); `docs/API.md` in sync (92 routes); mypy clean in
+both platform views (264 source files); ruff clean on the new package and its
+tests.

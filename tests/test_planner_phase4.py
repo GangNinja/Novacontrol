@@ -950,6 +950,7 @@ class ApplicationPlannerTests(unittest.IsolatedAsyncioTestCase):
     """The planner as the application actually wires it."""
 
     async def asyncSetUp(self) -> None:
+        self._prev_allow_llm = os.environ.get("NOVACONTROL_NLU_ALLOW_LLM")
         os.environ["NOVACONTROL_NLU_ALLOW_LLM"] = "false"
         from novacontrol.application import NovaControlApplication
 
@@ -958,6 +959,10 @@ class ApplicationPlannerTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         await self.app.stop()
+        if self._prev_allow_llm is None:
+            os.environ.pop("NOVACONTROL_NLU_ALLOW_LLM", None)
+        else:
+            os.environ["NOVACONTROL_NLU_ALLOW_LLM"] = self._prev_allow_llm
 
     async def test_a_goal_plans_with_tools_and_effects(self) -> None:
         plan = self.app.plan_for(SPEC_GOAL)
@@ -1139,6 +1144,7 @@ class ApiContractTests(unittest.TestCase):
 
 class EscalationWithoutAModelTests(unittest.IsolatedAsyncioTestCase):
     async def test_escalation_reports_instead_of_inventing_an_answer(self) -> None:
+        prev_allow_llm = os.environ.get("NOVACONTROL_NLU_ALLOW_LLM")
         os.environ["NOVACONTROL_NLU_ALLOW_LLM"] = "false"
         from novacontrol.application import NovaControlApplication
 
@@ -1151,6 +1157,10 @@ class EscalationWithoutAModelTests(unittest.IsolatedAsyncioTestCase):
             )
         finally:
             await app.stop()
+            if prev_allow_llm is None:
+                os.environ.pop("NOVACONTROL_NLU_ALLOW_LLM", None)
+            else:
+                os.environ["NOVACONTROL_NLU_ALLOW_LLM"] = prev_allow_llm
 
         if not app.brain.model_configured:
             self.assertIn("reasoning", text.lower())

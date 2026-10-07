@@ -1,12 +1,12 @@
 # Project Status
 
-Current phase: **Phase 18 — Reinforcement Learning from Human and AI Feedback (RLHF + RLAIF)**
+Current phase: **Phase 20 — Agentic Reinforcement Learning**
 
 Status: **Complete**
 
 > The original baseline ended at Phase 15; the staged build that followed it — what
 > it verified, what it changed, and what remains — is recorded below under
-> "Completed Staged-Build Verification (Phases 1–7)" and the Phase 8 … Phase 18
+> "Completed Staged-Build Verification (Phases 1–7)" and the Phase 8 … Phase 20
 > sections that continue it.
 
 Verified with:
@@ -976,7 +976,7 @@ person's verdict and an evaluator's structured rating — into a reward with
 provenance and an integrity verdict, a versioned reward dataset, a simulated
 rollout and an experimental policy update that only a measured comparison can
 approve. It is documented in [docs/RLHF.md](RLHF.md) and pinned by
-`tests/test_rlhf.py` (165 tests). It adds no second store, no second registry, no
+`tests/test_rlhf.py` (171 tests). It adds no second store, no second registry, no
 second trajectory format and no second event bus, and normal NovaControl
 operation works with every RL dependency absent.
 
@@ -1037,6 +1037,209 @@ Transformers/PEFT loop (the adapter boundary is where it lands). Tests use mocks
 deterministic environments, synthetic rewards and dry runs — no model is
 downloaded and no CUDA or GPU is required. The phase stopped here, before
 Phase 19, as instructed.
+
+## Completed Reinforcement Learning with Verifiable Rewards (Phase 19)
+
+Phase 19 in one line: it turns a verifier the machine can re-run into the
+ground truth of a reward, and turns a verifier's finding into a corrected
+example — without touching the architectures Phase 15–18 already own. It is
+documented in [docs/RLVR.md](RLVR.md) and pinned by `tests/test_rlvr.py`
+(188 tests), and it extends the existing diagnostics roster to 25 rows.
+
+**A reward is evidence, not opinion.** `VerifiableRewardProvider` is a
+`RewardProvider` voice (`reward_source="verifier"`) that scores a trajectory by
+replaying it through registered, re-runnable verifiers and summing the verified
+checks — each contributing a signed term with an evidence trail and the
+`verifier_policy_version` that produced it. An un-checked claim contributes
+nothing; a human/AI component can still compose in, but it rides beside the
+verifiable signal. The Phase 18 `RewardIntegrityChecker` runs unchanged on every
+row; RLVR widens what counts as a safety failure (adding `error_category`) and
+adds the policy-fingerprint reuse guard.
+
+**Critique earns correction earns examples.** `CritiqueEngine` turns structured
+verifier findings into `CritiqueResult`s, `CritiqueCorrector` proposes
+corrections, and `CorrectedExampleBuilder` turns a verified correction into a
+`CorrectedExample` — verified before acceptance (hidden-reasoning corrections
+are refused outright), feeding a later SFT pass. `CritiqueDatasetBuilder` writes
+immutable, content-fingerprinted datasets whose `accepted_examples()` train and
+whose `held()` never do — a dataset with no accepted example is **refused**
+before the run can start.
+
+**Security gates.** `novacontrol.rlvr.security` owns the protections: no
+self-reward (`expected_result_changed`), no editing a verifier into passing
+(`verification_control`), policy-locked rewards
+(`verifiers_changed`/`reward_config_changed`), no hidden chain-of-thought
+(`HIDDEN_REASONING_KEYS` discarded on intake, no field for it anywhere), no
+secrets (Phase 15 redaction), and `confirmation_required` when a real step is
+attempted without explicit confirmation.
+
+**Nothing starts by itself.** `dry_run` is the default, `create` has no side
+effects, `mock_policy` is the only shipped optimizer (figures labelled
+`simulated`), `ppo`/`grpo` are named and refused as "not implemented",
+`RLVRTrainingConfig` rejects a `critique_dataset_version` on `RLTrainingConfig`
+where it has no home, and no model is loaded or downloaded — no CUDA or NVIDIA
+GPU is required. The RLVR switch is **off by default**; with `rlvr_enabled`
+false, mutating actions answer `ok: false` with the reason.
+
+**Surfaces** — 31 `/rlvr/*` routes, a `novacontrol rlvr` CLI dispatching to
+the application's own methods, a `rlvr:` config section plus
+`NOVACONTROL_RLVR_*` overrides, seven `rlvr.*` request/reply event pairs on the
+existing bus (`rlvr.status_*`/`rlvr.verifiers_*`/`rlvr.critiques_*`/`
+rlvr.corrections_*`/`rlvr.datasets_*`/`rlvr.pipeline_*`/`rlvr.dry_run_*`), and
+the 25th diagnostics row (`RLVR` — SKIPPED when switched off, DEGRADED when the
+optional training dependencies are absent, OK when installed).
+
+**Reused** — `RLVRManager` extends `RLHFManager` (which extends the Phase 16
+`TrainingManager`); a run is the same `TrainingRun` with `algorithm="rlvr"` and
+`RLVREvaluation` carrying the run-scoped verdict. `RLTrainingConfig.from_training_config` projects a Phase 16 caller's configuration onto the RL schedule, and `resolve_rlvr_config` routes flat CLI keys into the nested `rl` block via `_RLVR_KEYS`/`_RL_KEYS`.
+
+**Not implemented, on purpose:** agentic RL, game agents, distributed training, and
+the concrete Transformers/PEFT optimisation loop (the optimizer boundary Phase 18
+named — RLVR only fills it). The phase stops here, before Phase 20.
+
+**Dry-run status** — a deterministic dry run walks all ten stages as `done`:
+2 tasks, t-ok reward `1.0`, t-fail reward `-1.0`, reward total `0.0`, reward
+validation findings `[]`, integrity `{valid: 2}`, verification accuracy `1.0`,
+fp/fn `0`. Critiques surfaced two honest `output_format_error` findings from the
+failing task, which became corrected examples and were held back from the
+dataset.
+
+**Gates** — `pytest tests/ -q` (188 new tests pass, plus the 25-row diagnostics
+roster pins in `tests/test_optimization.py` and `tests/test_web_api.py`);
+`generate_api_reference.py --check` (docs in sync, 207 routes, 31 `/rlvr/*`);
+mypy clean on both platforms (320 source files). Ruff is local-only and not a CI
+gate; `rlvr/` is ruff-clean apart from the documented `E501` baseline.
+
+## Completed Agentic Reinforcement Learning (Phase 20)
+
+Phase 20 in one line: it makes a whole multi-step TASK the unit of learning —
+goal, state, observation, decision, action, outcome, verification, reward and
+state transition — on top of everything Phases 15–19 already own, without adding
+a second trajectory format, reward engine, registry, verifier, retry loop or risk
+table. It is documented in [docs/AGENTIC_RL.md](AGENTIC_RL.md), reported in
+[docs/PHASE20_REPORT.md](PHASE20_REPORT.md) and pinned by `tests/test_agentic_rl.py`
+(175 tests + 6 subtests).
+
+**Optional and inert.** Nothing in `src/novacontrol/agentic/` is imported by the
+application, the API, the CLI or the runtime — the only file outside the package
+that names it is its own test file — so normal NovaControl operation is
+unchanged. `dry_run` is `True` by default, `mock_agentic_policy` is the only
+implemented optimizer (`learns: False`), PPO/GRPO/actor-critic/policy-gradient
+are named as planned and refused as not implemented, no model is loaded or
+downloaded, and **no CUDA or NVIDIA GPU is required**. `agentic.DEFERRED_PHASES`
+and `agentic.overview()` state all of it, including
+`automatic_training: false`, `automatic_model_loading: false` and
+`stores_hidden_reasoning: false`.
+
+**The mask is the safety boundary.** `ActionMasker` asks four questions of every
+candidate — is it `unavailable` in this state, `unauthorized` by the
+`PermissionManager`, `unsafe` (irreversible and unapproved) or `incompatible`
+with the environment — and a fifth (`confirmation_required`) when an approval is
+needed and nobody can give one. The mask also NAMES the actions it kept only
+because a person is reachable, so the rollout asks about every one of them: an
+unanswerable ask is a refusal, an approval already given is not re-asked, and a
+hook that raises is never a yes. A decision is validated, never trusted: an
+action the mask did not allow is refused and recorded (`executed: false`), and an
+INVENTED action that declares it needs approval, cannot be undone or is rated
+HIGH or worse ends the episode as a `safety_stop` rather than a quiet failure.
+
+**Verification stays in the loop, and recovery stays bounded.** An action that
+changes something is verified by the environment's own observation, with a wired
+Phase 8 `VerificationEngine` and an optional verifier hook composing in; the most
+cautious MEANINGFUL verdict wins (a `fail` outranks a `pass`, a check that did
+not run never overturns one that did), a crashed engine becomes `inconclusive`,
+and every non-winning verdict keeps its reason so a check that ran and exploded
+cannot disappear. Recovery reuses Phase 8's rules: never a destructive or
+external action, never a refusal, never a missing dependency, always inside the
+plan's retry ceiling. Every episode ends for one of seven recorded reasons
+(`success`, `failure`, `max_steps`, `cancelled`, `timeout`, `safety_stop`,
+`environment_error`) and every bound is explicit (steps, planning horizon,
+retries, wall-clock timeout, resource budget, refusal tolerance).
+
+**Rewards keep their dimensions apart.** Nine dimensions
+(`task_success`, `verification`, `safety`, `efficiency`, `latency`,
+`resource_usage`, `tool_correctness`, `planning_efficiency`,
+`recovery_quality`) with six signals and nine penalties, all stored beside the
+total — **safety is never averaged into efficiency** — the shaped (intermediate)
+share is capped and the cap is reported, and the episode projects into Phase 15's
+`RewardResult`. `CreditAssigner` implements five methods with a configurable
+discount factor and backwards-accumulated returns that stay stable over long
+episodes. Exploration is seeded, draws only from the mask, refuses to explore
+into a HIGH-risk, irreversible or confirmation-requiring action, and stops on one
+of six named budget reasons.
+
+**Evidence decides, and a person promotes.** Task success is measured over
+DECIDED episodes (a bounded run is neither a success nor a failure), safety and
+efficiency are reported as separate blocks, unmeasurable figures are `None` with
+a reason, and a higher average reward is explicitly **not** evidence. The
+ten-task default set can meet the default minimum sample, so the default
+configuration and the default task distribution do not contradict each other. Shadow mode lets a
+policy only propose (`shadow_executed_anything: false`), A/B switches nothing,
+and promotion runs ten configurable checks — sample size, success, verification,
+safety, latency, resources, three regressions and a NAMED approver — where the
+safety checks REJECT. `PolicyRegistry` tracks the six statuses and refuses a
+promotion the gates did not approve.
+
+**Nothing unsafe starts.** An UNSAFE resource estimate is a refusal
+(`allows_training: false`, `override_required: true`), the trainer's real-run path
+refuses when the optional training dependencies are absent rather than
+pretending, checkpoints carry the policy/model/config/curriculum/environment
+versions with an integrity digest and a rollback target, and `run_agentic_dry_run`
+walks all thirteen stages (`environment` → `state` → `policy` → `action` →
+`execution` → `verification` → `reward` → `credit_assignment` →
+`state_transition` → `episode_termination` → `evaluation` → `checkpoint` →
+`registration`) reporting `trained: false`, `model_loaded: false`.
+
+**Nine defects in the phase's own code were found and fixed by driving it against
+its specification** (all pinned by tests, all recorded in
+[docs/PHASE20_REPORT.md](PHASE20_REPORT.md) §16): a random `action_id` made the
+same action unrecognisable between calls; an APPROVED action could be refused
+while an action kept only because a person was reachable could run unasked; an
+invented action declaring itself unsafe ended as a plain failure; a crashed
+verification engine left no trace in the record; the default task set could not
+meet its own minimum sample size; `ENVIRONMENT_LEVELS` and the derived
+difficulty gave two different answers for the same task; the trainer recorded an
+evaluation against a policy that was never registered; a shadow that proposed
+nothing had no way to say so; and eight mypy errors sat in the new package. No
+suppressions were added and no assertion was weakened.
+
+**Deferred, on purpose** — Phases 21–26 (real-time perception, world model and
+state reasoning, interactive learning, planning/action-policy research, embodied
+and game agents, generalization + ARC + intelligence evaluation), real optimizer
+implementations, real environments, and any promotion of a learned policy into
+production. The phase stops here.
+
+### Phases 15–20 verified end to end against their requirements
+
+The whole learning-and-training stack — 15 (evaluation and reward), 16
+(supervised fine-tuning), 17 (preference optimization), 18 (RLHF/RLAIF), 19 (RLVR
+and critique learning) and 20 (agentic RL) — was re-verified on the frozen tree:
+each phase's own suite, the shared gates, and each phase's public surface driven
+directly rather than read off the layer that describes itself.
+
+- **Every phase's surface answered as specified.** `/evaluation/*` (4 routes),
+  `/training/*` (25), `/preference/*` (28), `/rlhf/*` (31) and `/rlvr/*` (31) make
+  up the 208-route surface `docs/API.md` is generated from, and Phase 20 adds none
+  by design: its interface is the package, and `overview()` reports the thirteen
+  dry-run stages, `trained: false`, `model_loaded: false`,
+  `automatic_training: false`, `automatic_model_loading: false`,
+  `cuda_required: false`, `stores_hidden_reasoning: false`,
+  `mock_agentic_policy` as the only implemented optimizer, and the six deferred
+  phases.
+- **The defaults are still the careful ones.** `dry_run` is `True` in all four
+  training configurations (`training`, `preference`, `rlhf`, `rlvr`), the RLHF and
+  RLVR algorithm is the non-learning `mock_policy`, RLVR registers the eight
+  deterministic verifiers, and importing `novacontrol.application` pulls in none
+  of `agentic`, `rlvr`, `rlhf` or `preference`.
+- **Compatibility held.** A Phase 15 `AgentTrajectory` row is unchanged — all
+  nineteen agentic fields optional, `is_agentic` false, `to_dict`/`from_dict`
+  round-tripping equal — and Phase 20 required no change to the diagnostic
+  roster, the route set or the generated API reference.
+- **Three defects were found and repaired**, none of them in a phase's own
+  learning code: a test that asserted a process-global property its own module had
+  already polluted, a state store that could raise out of the application's
+  constructor, and an API assertion that measured how loaded the host machine was.
+  Each is recorded in [docs/DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md) §49.
 
 ## Next Work
 

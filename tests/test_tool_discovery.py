@@ -404,6 +404,7 @@ class ApplicationDiscoveryTests(unittest.IsolatedAsyncioTestCase):
     """Discovery as the application wires it, including what the model is shown."""
 
     async def asyncSetUp(self) -> None:
+        self._prev_allow_llm = os.environ.get("NOVACONTROL_NLU_ALLOW_LLM")
         os.environ["NOVACONTROL_NLU_ALLOW_LLM"] = "false"
         from novacontrol.application import NovaControlApplication, _escalation_prompt
 
@@ -413,6 +414,10 @@ class ApplicationDiscoveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         await self.app.stop()
+        if self._prev_allow_llm is None:
+            os.environ.pop("NOVACONTROL_NLU_ALLOW_LLM", None)
+        else:
+            os.environ["NOVACONTROL_NLU_ALLOW_LLM"] = self._prev_allow_llm
 
     async def test_a_shortlist_carries_a_real_call_shape(self) -> None:
         entry = next(

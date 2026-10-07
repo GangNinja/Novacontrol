@@ -23,6 +23,8 @@ vision_*.png
 screenshot*.png
 data/
 tmp/
+# Training runs write checkpoints and adapters here at runtime (Phase 16+)
+training_output/
 *.sqlite3
 *.db
 audit.md

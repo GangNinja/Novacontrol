@@ -3427,3 +3427,338 @@ A fifth finding was in the audit, not the code: two planned test classes (the
 HTTP surface over an isolated application, and the CLI's parser and dispatch)
 were written and added, taking the phase's suite from 153 to 165 tests. No
 behaviour changed for any other case.
+## 46. Phase 18 audited through its interfaces, three more defects repaired
+
+Phase 18 was verified a second time by driving it the way an operator does — the
+CLI in a fresh data directory and the real server over HTTP — instead of reading
+the layer that describes itself. The counts were confirmed independently: 176
+routes in the registry and 31 of them `/rlhf/*`, the same 31 on the live server,
+a feedback → decide → dataset → run round trip over HTTP with its refusals
+reported as HTTP errors, and every read-only CLI action answering empty state
+rather than an error on an empty installation.
+
+Three defects the phase's own tests had not caught were repaired, each now pinned
+by one. The reward-hacking guard's repeat rule counted *distinct* tools that
+repeated, so a single tool called five times stayed below `repeat_action_limit` —
+the finding now counts repeats per action and compares the worst single action
+against the limit. A source disagreement was recorded a second time under
+`unnecessary_action_detected`, which names the wrong fact; the redundant finding
+is gone and the disagreement is recorded once, under `source_disagreement`. And
+`GET /rlhf/datasets/{id}/validate`, `/held` and `GET /rlhf/runs/{id}/checkpoints`
+answered 200 for a parent that does not exist, with a body a reader could not
+distinguish from "this dataset held nothing back"; they now name the missing
+version or run and answer 404, and the application payloads carry `ok: false`
+with the reason, so the CLI exits non-zero for the same case.
+
+`tests/test_rlhf.py` grew from 165 to 171 tests with the six regressions. The
+phase's four gates were re-run on the frozen tree afterwards: pytest — **2956
+passed / 13 skipped, 2019 subtests, 0 failed** (the 106 files split across four
+parallel processes, each exiting 0); mypy clean in both platform views (305
+source files); `docs/API.md` in sync (176 routes, 31 of them `/rlhf/*`); ruff
+clean on `rlhf/` and `tests/test_rlhf.py`.
+
+## 47. Phase 19 — RLVR + Critique-Based Learning
+
+Phase 19 adds reinforcement learning with **verifiable** rewards and the
+critique-based learning that turns a verifier's finding into a corrected
+example, built directly on Phase 15–18 rather than beside them.
+
+**What was built.** A new `novacontrol/rlvr/` package (15 modules) provides
+re-runnable verifiers (`FileVerifier`, `ProcessVerifier`, `TestVerifier`,
+`HTTPVerifier`, `DatabaseVerifier`, `GitVerifier`, `OutputVerifier`,
+`SchemaVerifier`, `CustomVerifier`) behind a `VerifierRegistry` at
+`self.verifiers_registry` (never shadowing the inherited `self.registry` /
+`SFTModelRegistry`). `VerifiableRewardProvider` is a `RewardProvider` voice
+(`reward_source="verifier"`) that scores a trajectory by replaying it through
+registered verifiers and summing signed, evidence-backed contributions,
+each carrying a `verifier_policy_version` fingerprint so a score cannot be
+replayed after the policy changed. `CritiqueEngine` turns findings into
+`CritiqueResult`s, `CritiqueCorrector` proposes corrections, and
+`CorrectedExampleBuilder` turns a verified correction into a
+`CorrectedExample` (rejecting hidden-reasoning corrections outright).
+`CritiqueDatasetBuilder` writes immutable, content-fingerprinted datasets whose
+`accepted_examples()` train and `held()` never do — a dataset with no accepted
+example is refused before it can train. `RLVRManager` extends `RLHFManager`
+(which extends `TrainingManager`), so a run is the same `TrainingRun`; the
+verifier registry is `self.verifiers_registry` and RLVR's pipeline is
+`self.rlvr_pipeline`. The ten-stage pipeline (`environment` → `model_action` →
+`verifier_selection` → `verification` → `reward_calculation` →
+`reward_validation` → `critique_generation` → `dataset_generation` →
+`training_configuration` → `evaluation`) walks on a plan and on a dry run; the
+dry run records `started: false` and changes nothing on disk.
+
+**Security gates.** `novacontrol.rlvr.security` owns five narrow, named codes
+(`protected_target`, `verification_control`, `expected_result_changed`,
+`reward_config_changed`, `verifiers_changed`, `confirmation_required`) as
+`(code, principal, context, decision)` records: no self-reward, no editing a
+verifier into passing, policy-locked rewards, no hidden chain-of-thought
+(`HIDDEN_REASONING_KEYS` discarded on intake), no secrets (Phase 15
+redaction), and explicit confirmation for any real step.
+
+**Wiring.** `RLVRSettings` in `core/config.py`; `rlvr_*` settings in
+settings models/manager; 31 `/rlvr/*` routes in `api/app.py` (payloads in
+`api/models.py`, handlers in `api/route_consumers.py`) dispatching to
+application `rlvr_*` methods; a `novacontrol rlvr` CLI (16 actions) with a
+`rlvr` subparser in `cli/parser.py`; `_RLVR_KEYS`/`_RL_KEYS` route flat CLI
+keys into the nested config. The RLVR switch is off by default; `dry_run` is
+`True`; `mock_policy` is the only shipped optimizer (`ppo`/`grpo` refused).
+
+**Bugs fixed during the phase.** The RLVR package was wired as an additive
+subsystem on top of Phase 18 — the primary bugs were integration, not
+substitutes: (1) `RLVRManager` must not shadow the inherited `self.registry`
+(SFTModelRegistry) — the verifier registry lives at `self.verifiers_registry`.
+(2) `RLVRManager.pipeline` must not shadow the inherited Phase 18
+`RLPipeline` — RLVR's pipeline is `self.rlvr_pipeline`. (3) `application.py`
+imports agentcore `Verifier`; RLVR's are aliased `RLVRVerifier`. (4) The
+rollout fallback for a step ending with no terminal message now reads the
+last observation. (5) `duplicate_verification` keyed on
+`(verifier_id, subject_key(), status)` instead of a broader key. (6)
+`_is_safety_failure` was widened to match `safety`/`unsafe` in detail and
+evidence tokens and to honour `error_category`. (7)
+`CritiqueTrainingMethod.dry_run` reads `metadata["verified"]`. (8)
+`resolve_rlvr_config` adds a `TrainingConfig` branch and routes flat keys via
+`_RLVR_KEYS`/`_RL_KEYS`. (9) CLI `_rlvr_config_args` sets `base_model` from
+`--model`. (10) The 25th diagnostics row (`RLVR`) is reported as SKIPPED when
+off, DEGRADED when the optional deps are absent, OK when installed.
+
+**Documentation.** `docs/RLVR.md` (15.10 event names corrected to the actual
+`rlvr.*` constants from `rlvr/runtime.py`: `status`/`verifiers`/`critiques`/
+`corrections`/`datasets`/`pipeline`/`dry_run`, each with a `_requested`
+pair, all `_completed` for replies). See `docs/PHASE19_REPORT.md` for the
+full checklist.
+
+**Tests.** `tests/test_rlvr.py` — 188 tests, deterministic mocks/synthetic/
+dry-run, no model loaded, no GPU. The diagnostics-roster pins
+(`test_optimization.py` L958–963: 25 components, RLVR is 25th; `test_web_api.py`
+L1170–1173: 25 components, RLVR in set) were updated and verified green.
+
+**Gates (this session).** `mypy src` — clean (320 files). `mypy src --platform
+win32` — clean (320 files). `generate_api_reference.py --check` — in sync
+(207 routes, 31 `/rlvr/*`). `pytest tests/test_rlvr.py -q` — **188 passed**,
+39 warnings, 179s. Diagnostics-roster tests: 2 passed.
+
+**Not done, on purpose.** Agentic RL, game agents, distributed training, and the
+concrete Transformers/PEFT optimisation loop (the optimizer boundary Phase 18
+named — RLVR only fills the `mock_policy` side). The phase stops here, before
+Phase 20.
+
+## 48. Phase 20 — Agentic Reinforcement Learning
+
+Phase 20 makes a whole multi-step **task** the unit of learning: a goal, a
+sequence of states, observations, decisions, actions, outcomes, verification,
+rewards and state transitions. It is built on Phases 15–19 and the Phase 8
+reliability layer rather than beside them.
+
+**What was built.** A new `novacontrol/agentic/` package (13 modules,
+~9,000 lines) provides the phase's vocabulary (`AgentState`, `AgentAction`,
+`StepReward`/`MultiObjectiveReward`, `PolicyDecision`/`PolicyFeedback`,
+`StateTransition`, `Episode`, `CreditAssignmentResult`, `PolicyRecord`,
+`TaskDifficulty`, and ten enums), the action mask (`ActionMasker` over the
+existing `PermissionManager`), six deterministic environments — one per
+curriculum level (`simple`, `multi_step`, `tool_selection`, `recovery`,
+`planning`, `contextual`), each declaring a difficulty whose DIMENSIONS derive
+the level it is registered at — policies (`RuleBasedPolicy`, `MockPolicy`,
+`LLMPolicyAdapter`), the rollout (`AgenticRolloutManager`: reset → mask → decide
+→ validate → execute → verify → reward → next state → terminate), the
+multi-objective reward engine with `CreditAssigner`, seeded exploration behind a
+budget with six named stop reasons, the `CurriculumManager` with earned
+advancement and guarded regression, evaluation with shadow and A/B modes,
+promotion gates plus a policy registry, and the `AgenticRLTrainer`
+(mock optimizer, Phase 16 checkpoints, resource estimation, thirteen-stage dry
+run).
+
+**Reuse, not duplication.** `AgentTrajectory` gained nineteen OPTIONAL agentic
+fields (a Phase 15 row is byte-identical and round-trips); an episode projects
+into Phase 18's `Rollout` and Phase 15's `RewardResult`; the trainer subclasses
+Phase 16's `SFTTrainer`, so a run IS a `TrainingRun` with the same checkpoints,
+retention, integrity checks, resume/cancel/finalize and registry; permissions,
+verification and recovery are Phase 8's own layers, asked through their own
+interfaces; the optimizer boundary is Phase 18's `PolicyOptimizer`.
+
+**Inert by construction.** Nothing in `src/novacontrol/agentic/` is imported by
+the application, the API, the CLI or the runtime — the only file outside the
+package that names it is its own test file. `dry_run` is `True` by default,
+`mock_agentic_policy` is the only implemented algorithm (PPO/GRPO/actor-critic/
+policy-gradient are named as planned and refused), no model is loaded or
+downloaded, no CUDA or NVIDIA GPU is required, and there is no field anywhere for
+a model's private reasoning.
+
+**Defects found and fixed while driving the phase against its own specification**
+(nine in the package, five wrong expectations in the tests). The package ones:
+(1) `AgentAction.action_id` was a random uuid, so the same action was
+unrecognisable between calls — seeded exploration stopped being reproducible, the
+mask's membership test became instance-based (a policy that built the very action
+the mask allowed was refused) and the environment compared by name as a
+workaround; the id is now a content hash of the action's identity and
+`with_arguments()` re-derives it. (2) An APPROVED action could be refused (the
+rollout's confirmation check consulted `allow_confirmation` but ignored the
+masker's `approved` set) while an action kept only because a person was reachable
+could run UNASKED — the mask now names those actions
+(`ActionMask.confirmation_required`), the rollout asks about every one of them
+through an optional `confirmation` hook, an approval already given is not
+re-asked, and an unanswerable ask (or a hook that raises) is a safety refusal.
+(3) An invented action that declared it needed approval or could not be undone
+ended as a plain failure; it is now a SAFETY stop. (4) `_combine` kept only the
+winning verification verdict, so an engine that RAN and crashed left no trace;
+non-winning verdicts now keep their reasons. (5) `default_tasks()` returned six
+tasks while `EvaluationConfig.minimum_sample_size` defaulted to eight, so the
+default evaluation could never meet its own minimum; the default set is now ten
+tasks covering every slice twice. (6) `ENVIRONMENT_LEVELS` and the derived
+`TaskDifficulty.level` gave two different answers for `simple` and `multi_step`;
+the derivation now puts recovery before a long horizon (as its own docstring
+said), calls tool selection the level for a task whose hard part is CHOOSING
+among tools, and stops counting decoys as tools the task needs — so all six
+environments derive the level they are declared at. (7) `AgenticRLTrainer.evaluate()`
+recorded an evaluation against a policy that was never registered (`KeyError`);
+it now registers the candidate as EXPERIMENTAL first, still without promoting
+anything. (8) A shadow comparison had no way to say "the shadow proposed
+nothing"; `comparable`/`uncompared` now name it. (9) Eight mypy errors in the new
+package (un-narrowed optionals, a `str` where a tuple was declared, a dict key
+type, the widened `step()` parameter). No suppressions were added and no
+assertion was weakened. The test-side corrections: a synthetic episode with
+`success=None` was stored as a FAILURE (now a bounded `max_steps`); a 400-step
+discounted return was compared against the infinite-horizon sum; a step-ceiling
+test expected `max_steps` for a run that actually stopped on its retry budget;
+the A/B candidate used a `MockPolicy` whose exhausted script deliberately falls
+back to the first useful action (so it SUCCEEDED); and three assertions had a
+sign, a wording or an actor wrong (a safety penalty is negative, a read-only
+verdict comes from the environment's own wording, and the "denied action" test
+asserted an empty episode for an environment where only one of three candidates
+was denied — it now pins the stronger property that the denied action appears in
+neither the recorded transitions nor the environment's own step log).
+
+**A pre-existing Phase 19 defect the Phase 20 gate surfaced.** The full-suite run
+went red on three `tests/test_config.py` cases, and they failed in isolation too
+— so it was not test pollution. `RLVRSettings` (added to `core/config.py` by
+Phase 19, inside that phase's uncommitted change) is a
+`@dataclass(frozen=True, slots=True)`; `slots=True` makes `dataclasses` build a
+NEW class object while a method's zero-argument `super()` still points at the
+pre-slots class, so **both** `RLVRSettings.from_mapping` and
+`RLVRSettings.to_mapping` raised `TypeError: super(type, obj): obj (type
+RLVRSettings) is not an instance or subtype of type (RLVRSettings)`. Since
+`NovaControlConfig.from_mapping` reads every section, config loading itself
+raised. `RLHFSettings` and `PreferenceSettings` escaped only because they inherit
+`TrainingSettings.from_mapping` instead of overriding it. Fixed with the explicit
+two-argument form (`super(RLVRSettings, cls)` / `super(RLVRSettings, self)`); an
+AST sweep of the whole tree confirms this was the only occurrence (a `slots=True`
+dataclass whose body contains a zero-arg `super()`). This is a two-line repair
+inside someone else's uncommitted hunk; it changes no behaviour other than making
+two methods that always crashed work.
+
+**Gates (this session).** `pytest tests/test_agentic_rl.py -q` — **175 passed**
++ 6 subtests. `tests/test_config.py` — **6 passed** (the three that were red are
+green again). `mypy src` and `mypy src --platform win32` — clean (333 files).
+`ruff check src/novacontrol/agentic tests/test_agentic_rl.py` — 0 non-`E501`
+findings (its three real findings, `F841`/`SIM102`/`C416`, are fixed; `E501` is
+not enforced by CI, which runs only `pytest` and the two `mypy` views, and the
+repository carries ~956 pre-existing `E501` findings). `tests/test_evaluation.py`
+— 108 passed + 6 subtests (the Phase 15 record the package extends is unchanged).
+Config loading was additionally verified end-to-end through its real interfaces:
+`RLVRSettings` round-trip, `NovaControlConfig.from_mapping` (17 sections),
+`from_environment`, and `from_file` on a real YAML file.
+
+**One pre-existing, environment-only test failure was found, then repaired.**
+`tests/test_rlvr.py::NoReasoningRegressionTests::test_the_package_imports_no_optional_heavy_dependency`
+asserted `psutil` was absent from `sys.modules`, but the same test module imports
+`novacontrol.api.app` at its top, and `api/app.py` ends with a module-level
+`app = create_app()`, which constructs Phase 14's `HardwareMonitor` and eagerly
+imports psutil. Nothing Phase 20 touched references psutil, and CI stayed green
+because psutil is not a declared dependency — so the assertion could only hold on
+a machine WITHOUT psutil, and it failed on any dev machine that happens to have it
+installed. The check now asserts the property it names in a FRESH interpreter
+(`import novacontrol.rlvr` in a subprocess, then `torch` / `transformers` /
+`psutil` must all be absent from the child's `sys.modules`), which tests what it
+means on every machine instead of asserting on process state the module itself
+had already polluted.
+
+**Not done, on purpose.** Phases 21–26 (real-time perception, world model and
+state reasoning, interactive learning, planning/action-policy research, embodied
+and game agents, generalization + ARC + intelligence evaluation), real optimizers,
+real environments, and the promotion of a learned policy into production.
+`agentic.DEFERRED_PHASES` names all six phases and `overview()` reports them
+alongside `automatic_training: false`, `automatic_model_loading: false`,
+`stores_hidden_reasoning: false`, `cuda_required: false`. The phase stops here.
+
+## 49. Phases 15–20 re-verified end to end; three defects repaired
+
+The whole learning-and-training stack was re-verified as a whole rather than
+phase by phase — 15 (data collection, evaluation and reward), 16 (supervised
+fine-tuning), 17 (preference optimization), 18 (RLHF/RLAIF), 19 (RLVR and
+critique-based learning) and 20 (agentic RL) — by running each phase's own suite,
+re-running the shared gates, and driving each phase's public surface directly
+instead of reading off the layer that describes itself.
+
+**What was driven, and what it answered.** The surfaces were exercised outside
+the suites as well: `/evaluation/*` (4 routes), `/training/*` (25),
+`/preference/*` (28), `/rlhf/*` (31) and `/rlvr/*` (31) of the 208 routes
+`docs/API.md` is generated from; `RLVRTrainingConfig` registering the eight
+deterministic verifiers; `dry_run` still `True` in all four training
+configurations (`training`, `preference`, `rlhf`, `rlvr`) with `mock_policy` the
+only shipped RLHF/RLVR optimizer; a Phase 15 `AgentTrajectory` still round-
+tripping unchanged with its nineteen optional agentic fields (`is_agentic`
+false); and Phase 20's own two ends — `run_agentic_dry_run()` walking all
+thirteen stages with `trained: false` and `model_loaded: false`, and `overview()`
+reporting `automatic_training: false`, `automatic_model_loading: false`,
+`cuda_required: false`, `stores_hidden_reasoning: false`, one implemented
+algorithm and the six deferred phases. Importing `novacontrol.application` still
+pulls in none of `agentic`, `rlvr`, `rlhf` or `preference`.
+
+**Gates on the frozen tree.** pytest: **3,325 passed / 12 skipped, 2,099 subtests
+passed, 0 failed** — the whole `tests/` tree, 108 files, split into six groups the
+way CI splits its own work (one process per group). mypy `src` and `mypy src
+--platform win32`: clean, 333 source files. `docs/API.md` in sync (208 routes;
+Phase 20 adds none). ruff clean on every file this pass changed, apart from
+`tests/test_rlvr.py`'s pre-existing findings (unused imports, `E501` line
+length) from the phase that added that file.
+
+**Three defects were found and repaired. Each is pinned by a test.**
+
+* **A test asserted a process-global property its own module had already
+  polluted.** `tests/test_rlvr.py`'s optional-dependency check asserted `psutil`
+  was absent from `sys.modules` — but the same module imports
+  `novacontrol.api.app`, whose module-level `app = create_app()` builds the whole
+  application and reaches the telemetry layer's optional psutil probe. The
+  assertion could therefore only hold on a machine WITHOUT psutil, which is why CI
+  was green and this machine (7.1.3 installed) was not, with the property it names
+  true in both cases. It now asserts that property in a FRESH interpreter —
+  `import novacontrol.rlvr` in a subprocess, after which `torch`, `transformers`
+  and `psutil` must all be absent from the child's `sys.modules` — so it is
+  meaningful everywhere instead of vacuous on one machine and false on another.
+
+* **The JSON state store could raise out of the application's constructor.** The
+  suite failed with `json.decoder.JSONDecodeError: Expecting value: line 1 column
+  1 (char 0)` inside `NovaControlApplication.__init__` →
+  `TaskCenter.from_dict(self.state_store.read("tasks"))`: `JsonStateStore.read`
+  handed whatever bytes the file held straight to `json.loads`, so a snapshot that
+  was empty or truncated — a process killed mid-write, or a second process
+  replacing the file at that instant — stopped the application from starting at
+  all. Reads are now forgiving (a missing, empty, truncated, hand-edited or
+  non-object snapshot reports "nothing was stored yet", and the next write
+  replaces it) and writes stage to a unique temporary file in the store's own
+  directory and move it into place with `os.replace`. Windows refuses that move
+  while another process holds either path — the same pass hit
+  `PermissionError: [WinError 5]` on `data/chat_transcript.json` once several
+  suites were writing it at once — so a refused replace degrades to the previous
+  in-place write and the failure ends there: a snapshot is auxiliary, and losing
+  one must not fail the request that recorded it. Three tests in
+  `tests/test_persistence.py` pin the forgiving read, the replace that leaves no
+  staging file behind, and the boot that survives an empty snapshot; a
+  six-process writer/reader probe confirmed the contended path (no raises, no
+  staging files left, a complete final snapshot).
+
+* **An API assertion measured how loaded the machine was.** `RLHFApiTests`
+  (`tests/test_rlhf.py`) asserted `ok` for `POST /rlhf/dry-run` and `COMPLETED`
+  for `POST /rlhf/runs/start`, and both answers come from a resource ESTIMATE that
+  reads the host's free memory: on a loaded desktop the estimate is UNSAFE, which
+  blocks the plan's `resource_estimation` stage and refuses the start. The failure
+  was reproduced deliberately — driving the application's own wiring with a 400 MB
+  free-memory reading returned exactly the observed payload (`ok: false`, empty
+  `errors`) — and is fixed by pinning a known machine in the class's `_isolated`
+  app builder, the same `bare()` idiom the file's manager-level tests already use.
+  The assertions stay as strict as they were; what changed is that they no longer
+  depend on how busy the host is.
+
+**Nothing else changed.** No phase's behaviour was modified: the three repairs are
+one test's check, the state store, and one API test class's setup. Phase 15 rows,
+the route set, the diagnostics roster and both mypy platform views are as they
+were, and every phase suite that was green before this pass is green after it.

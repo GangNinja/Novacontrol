@@ -708,8 +708,16 @@ class VisionRoutingTests(unittest.TestCase):
     """Which requests reach the pipeline at all."""
 
     def setUp(self) -> None:
+        self._prev_allow_llm = os.environ.get("NOVACONTROL_NLU_ALLOW_LLM")
         os.environ["NOVACONTROL_NLU_ALLOW_LLM"] = "false"
         self.gil = GlobalInputIntelligence()
+
+    def tearDown(self) -> None:
+        if self._prev_allow_llm is None:
+            os.environ.pop("NOVACONTROL_NLU_ALLOW_LLM", None)
+        else:
+            os.environ["NOVACONTROL_NLU_ALLOW_LLM"] = self._prev_allow_llm
+        super().tearDown()
 
     def _vision(self, text: str, *, has_image: bool = False) -> bool:
         return self.gil.understand(text, has_image=has_image).intent.requires_vision
@@ -797,6 +805,7 @@ class ApplicationVisionPipelineTests(unittest.IsolatedAsyncioTestCase):
     """The pipeline as the application wires it."""
 
     async def asyncSetUp(self) -> None:
+        self._prev_allow_llm = os.environ.get("NOVACONTROL_NLU_ALLOW_LLM")
         os.environ["NOVACONTROL_NLU_ALLOW_LLM"] = "false"
         from novacontrol.application import NovaControlApplication
 
@@ -805,6 +814,10 @@ class ApplicationVisionPipelineTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         await self.app.stop()
+        if self._prev_allow_llm is None:
+            os.environ.pop("NOVACONTROL_NLU_ALLOW_LLM", None)
+        else:
+            os.environ["NOVACONTROL_NLU_ALLOW_LLM"] = self._prev_allow_llm
 
     async def test_configuration_of_none_refuses_a_vision_model(self) -> None:
         """`vision.provider: none` must reach the pipeline, not just the file.
