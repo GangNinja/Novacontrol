@@ -29,7 +29,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, ClassVar
 from uuid import uuid4
 
 from novacontrol.audit.models import json_safe
@@ -554,6 +554,40 @@ class AgentTrajectory:
     #: same run. Empty for every Phase 15 row, so the schema stays compatible;
     #: the keys are written by the RL reward propagator, never inferred here.
     reward_breakdown: Mapping[str, Any] = field(default_factory=dict)
+    #: ── Phase 20: the AGENTIC reading of the same work ─────────────────────
+    #: A Phase 15 row is a whole run; an agentic episode is that run read as a
+    #: sequence of steps, and these fields are the step it is about. They are
+    #: OPTIONAL and empty on every Phase 15/18/19 row, so the schema stays
+    #: compatible in both directions, and they carry STRUCTURED state,
+    #: observation, action, outcome, verification, critique and reward data —
+    #: never a model's private reasoning, for which there is deliberately no
+    #: field here or anywhere in the agentic layer.
+    episode_id: str = ""
+    step_index: int = 0
+    state: Mapping[str, Any] = field(default_factory=dict)
+    observation: Mapping[str, Any] = field(default_factory=dict)
+    action: Mapping[str, Any] = field(default_factory=dict)
+    action_type: str = ""
+    action_arguments: Mapping[str, Any] = field(default_factory=dict)
+    action_result: Mapping[str, Any] = field(default_factory=dict)
+    next_state: Mapping[str, Any] = field(default_factory=dict)
+    step_reward: float | None = None
+    cumulative_reward: float | None = None
+    #: The check THIS step's outcome was run through. The run-level list of every
+    #: check is :attr:`verification_results`; this is the one record the step is
+    #: about, so a step can be read without searching the whole run.
+    verification_result: Mapping[str, Any] = field(default_factory=dict)
+    critique: Mapping[str, Any] = field(default_factory=dict)
+    recovery_event: Mapping[str, Any] = field(default_factory=dict)
+    policy_metadata: Mapping[str, Any] = field(default_factory=dict)
+    value_estimate: float | None = None
+    advantage_estimate: float | None = None
+    #: Whether THIS STEP ended the episode. The run-level :attr:`terminal`
+    #: property (derived from ``status``) is unchanged and stays the authority on
+    #: whether the run ended; this one is step-scoped evidence, and ``None`` when
+    #: nothing said.
+    step_terminal: bool | None = None
+    termination_reason: str = ""
     quality: Mapping[str, Any] | None = None
     evaluation_id: str = ""
     event_count: int = 0
@@ -664,6 +698,25 @@ class AgentTrajectory:
             "user_feedback": self.user_feedback.to_dict() if self.user_feedback else None,
             "reward": dict(self.reward) if self.reward is not None else None,
             "reward_breakdown": dict(self.reward_breakdown),
+            "episode_id": self.episode_id,
+            "step_index": self.step_index,
+            "state": dict(self.state),
+            "observation": dict(self.observation),
+            "action": dict(self.action),
+            "action_type": self.action_type,
+            "action_arguments": dict(self.action_arguments),
+            "action_result": dict(self.action_result),
+            "next_state": dict(self.next_state),
+            "step_reward": self.step_reward,
+            "cumulative_reward": self.cumulative_reward,
+            "verification_result": dict(self.verification_result),
+            "critique": dict(self.critique),
+            "recovery_event": dict(self.recovery_event),
+            "policy_metadata": dict(self.policy_metadata),
+            "value_estimate": self.value_estimate,
+            "advantage_estimate": self.advantage_estimate,
+            "step_terminal": self.step_terminal,
+            "termination_reason": self.termination_reason,
             "quality": dict(self.quality) if self.quality is not None else None,
             "evaluation_id": self.evaluation_id,
             "event_count": self.event_count,
@@ -719,6 +772,25 @@ class AgentTrajectory:
             else None,
             reward=dict(reward) if isinstance(reward, Mapping) else None,
             reward_breakdown=_mapping(data.get("reward_breakdown")),
+            episode_id=_text(data.get("episode_id")),
+            step_index=int(_number(data.get("step_index")) or 0),
+            state=_mapping(data.get("state")),
+            observation=_mapping(data.get("observation")),
+            action=_mapping(data.get("action")),
+            action_type=_text(data.get("action_type")),
+            action_arguments=_mapping(data.get("action_arguments")),
+            action_result=_mapping(data.get("action_result")),
+            next_state=_mapping(data.get("next_state")),
+            step_reward=_number(data.get("step_reward")),
+            cumulative_reward=_number(data.get("cumulative_reward")),
+            verification_result=_mapping(data.get("verification_result")),
+            critique=_mapping(data.get("critique")),
+            recovery_event=_mapping(data.get("recovery_event")),
+            policy_metadata=_mapping(data.get("policy_metadata")),
+            value_estimate=_number(data.get("value_estimate")),
+            advantage_estimate=_number(data.get("advantage_estimate")),
+            step_terminal=_flag(data.get("step_terminal")),
+            termination_reason=_text(data.get("termination_reason")),
             quality=dict(quality) if isinstance(quality, Mapping) else None,
             evaluation_id=_text(data.get("evaluation_id")),
             event_count=int(_number(data.get("event_count")) or 0),
@@ -745,6 +817,55 @@ class AgentTrajectory:
     def with_metadata(self, **extra: Any) -> AgentTrajectory:
         merged = {**self.metadata, **extra}
         return replace(self, metadata=merged)
+
+    #: ── Phase 20: the agentic step view ──────────────────────────────────────
+
+    #: The agentic fields, by their stored name, so a caller can copy a step
+    #: into (or out of) a trajectory without listing the names twice.
+    AGENTIC_FIELDS: ClassVar[tuple[str, ...]] = (
+        "episode_id",
+        "step_index",
+        "state",
+        "observation",
+        "action",
+        "action_type",
+        "action_arguments",
+        "action_result",
+        "next_state",
+        "step_reward",
+        "cumulative_reward",
+        "verification_result",
+        "critique",
+        "recovery_event",
+        "policy_metadata",
+        "value_estimate",
+        "advantage_estimate",
+        "step_terminal",
+        "termination_reason",
+    )
+
+    def agentic_fields(self) -> dict[str, Any]:
+        """This row's agentic fields, as plain data (empty on a Phase 15 row)."""
+        return {
+            name: json_safe(getattr(self, name)) for name in AgentTrajectory.AGENTIC_FIELDS
+        }
+
+    @property
+    def is_agentic(self) -> bool:
+        """Whether this row carries an agentic step at all."""
+        return bool(self.episode_id or self.action_type or self.step_index)
+
+    def with_agentic_step(self, step: Mapping[str, Any]) -> AgentTrajectory:
+        """The same run, extended with one agentic step's structured data.
+
+        Unknown keys are ignored rather than stored: the set of agentic fields
+        is fixed, and letting a caller bolt arbitrary keys onto a trajectory
+        would make the stored shape whatever the last writer felt like.
+        """
+        known = {name: step[name] for name in AgentTrajectory.AGENTIC_FIELDS if name in step}
+        if not known:
+            return self
+        return replace(self, **known)
 
 
 def json_safe_trajectory(trajectory: AgentTrajectory) -> dict[str, Any]:
