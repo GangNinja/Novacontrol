@@ -145,8 +145,12 @@ by accident.
 NEEDS_REVIEW with named reasons: `unknown_feedback_type`,
 `missing_feedback_target`, `invalid_rating`, `missing_rating`,
 `low_confidence`, `duplicate_feedback`, `contradictory_feedback`,
-`feedback_on_incomplete_task`, `sensitive_content`, `impossible_values`,
-`invalid_candidate_reference`. **A rejected row is never deleted** — it keeps
+`feedback_on_incomplete_task`, `impossible_values`,
+`invalid_candidate_reference`. A correction that contained a credential is
+redacted before it is judged — a `REDACTED` value replaces it — and the row keeps
+its verdict: the redaction is recorded as a note plus `sensitive_content_redacted`
+evidence rather than as a status change, because "this feedback was not usable"
+and "this feedback contained a secret" are different findings. **A rejected row is never deleted** — it keeps
 its identity and its status, because "this feedback was not usable" is itself
 worth being able to audit. A held row can be settled by a person
 (`decide_feedback`: `accept` keeps it usable, `reject` does not; both record
@@ -319,7 +323,10 @@ pipeline, feedback (submit / list / decide), rate, ratings, disagreements,
 datasets (build / list / read / validate / held), runs (create / list / read /
 start / pause / resume / cancel / re-estimate / evaluate / checkpoints),
 compare, evaluations, models. Every route answers with the application's own
-method's shape, including refusals, which are HTTP errors with the reason.
+method's shape, including refusals, which are HTTP errors with the reason — a
+sub-resource asked about a version or a run that does not exist names it and
+answers 404, rather than an empty 200 a reader could mistake for "nothing held
+back" or "nothing checkpointed yet".
 * **A 30-action `novacontrol rlhf` CLI** — `rlhf status` is a safe first look,
 and every action dispatches to the same application method the route calls, so
 the CLI can do nothing the API could not. `rlhf dry-run --mode rlaif` plans

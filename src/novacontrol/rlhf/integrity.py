@@ -24,7 +24,7 @@ exactly the wrong lesson.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -33,7 +33,6 @@ from novacontrol.evaluation.reward import RewardResult
 from novacontrol.rlhf.config import RewardPolicyConfig
 from novacontrol.rlhf.evaluators import outcome_facts
 from novacontrol.rlhf.models import (
-    EVIDENCE_UNNECESSARY_ACTION,
     EVIDENCE_UNSAFE_ACTION,
     AIRating,
     Disagreement,
@@ -72,6 +71,25 @@ def _text(value: Any, default: str = "") -> str:
 #: Anything that carries a reading: a reward, a rating, a feedback row, or
 #: several rows from one source (which read as their mean).
 Reading = RewardResult | AIRating | HumanFeedback
+
+
+def _repeats(names: Iterable[str]) -> tuple[int, int]:
+    """How often actions repeat: (total repeats, the worst single action).
+
+    The unit matches Phase 15's penalty and the mock environment's own
+    arithmetic: the FIRST call of an action is not a repeat, so an action called
+    twice has one repeat. Both numbers are returned because they answer different
+    questions — the total says how much repetition there was, the worst single
+    action is what the policy's limit is about: "the same action repeated more
+    than twice" is one action inflating a count, which is not the same smell as
+    three different actions each taken twice.
+    """
+    counts: dict[str, int] = {}
+    for name in names:
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+    repeats = [max(0, value - 1) for value in counts.values()]
+    return (sum(repeats), max(repeats, default=0))
 
 
 def _reading(value: Reading | Sequence[Reading] | None) -> float | None:
@@ -119,6 +137,9 @@ class IntegrityContext:
     unsafe_actions: int = 0
     unnecessary_actions: int = 0
     repeated_actions: int = 0
+    #: The most any ONE action was repeated beyond its first call. This is what
+    #: the policy's ``repeat_action_limit`` is compared against.
+    max_action_repeats: int = 0
     response_tokens: int = 0
     latency_ms: float | None = None
     sources: Mapping[str, float | None] = field(default_factory=dict)
@@ -133,6 +154,11 @@ class IntegrityContext:
         sources: Mapping[str, float | None] | None = None,
     ) -> IntegrityContext:
         facts = outcome_facts(trajectory)
+        repeated, worst = _repeats(
+            str(getattr(call, "tool", "") or "")
+            for call in trajectory.tool_calls
+            if getattr(call, "succeeded", False)
+        )
         return cls(
             subject_id=trajectory.trajectory_id,
             task_succeeded=trajectory.success,
@@ -140,7 +166,8 @@ class IntegrityContext:
             verification_failed=int(facts.get("verification_failed") or 0),
             unsafe_actions=int(facts.get("unsafe_actions") or 0),
             unnecessary_actions=len(tuple(facts.get("repeated_tools") or ())),
-            repeated_actions=len(tuple(facts.get("repeated_tools") or ())),
+            repeated_actions=repeated,
+            max_action_repeats=worst,
             response_tokens=int(response_tokens),
             latency_ms=facts.get("latency_ms"),
             sources=dict(sources or {}),
@@ -151,14 +178,7 @@ class IntegrityContext:
         cls, rollout: Rollout, *, sources: Mapping[str, float | None] | None = None
     ) -> IntegrityContext:
         actions = [str(step.action.get("action", "")) for step in rollout.steps]
-        repeated = 0
-        seen: set[str] = set()
-        for name in actions:
-            if not name:
-                continue
-            if name in seen:
-                repeated += 1
-            seen.add(name)
+        repeated, worst = _repeats(actions)
         succeeded = None
         if _text(rollout.status) == "completed":
             succeeded = True
@@ -168,6 +188,7 @@ class IntegrityContext:
             subject_id=rollout.trajectory_id or rollout.rollout_id,
             task_succeeded=succeeded,
             repeated_actions=repeated,
+            max_action_repeats=worst,
             unnecessary_actions=repeated,
             sources=dict(sources or {}),
         )
@@ -181,6 +202,7 @@ class IntegrityContext:
             unsafe_actions=self.unsafe_actions,
             unnecessary_actions=self.unnecessary_actions,
             repeated_actions=self.repeated_actions,
+            max_action_repeats=self.max_action_repeats,
             response_tokens=self.response_tokens,
             latency_ms=self.latency_ms,
             sources={**self.sources, **sources},
@@ -276,11 +298,16 @@ class RewardIntegrityChecker:
                 f"{facts.response_tokens} tokens were produced with no measured "
                 "gain: length is not evidence of quality",
             )
-        if facts.repeated_actions > self.policy.repeat_action_limit:
+        # "The same action repeated more than twice" is about ONE action, so the
+        # worst single action is what the limit is compared against. A context a
+        # caller assembled by hand may only know the total, which is the fallback.
+        repeats = facts.max_action_repeats or facts.repeated_actions
+        if repeats > self.policy.repeat_action_limit:
             warn(
                 INTEGRITY_REPEATED_ACTIONS,
-                f"{facts.repeated_actions} repeated action(s) were taken, which can "
-                "inflate a count-based metric without doing any work",
+                f"the same action was repeated {repeats} time(s) beyond its first "
+                f"call (this policy tolerates {self.policy.repeat_action_limit}), "
+                "which can inflate a count-based metric without doing any work",
             )
         if not reward.evidence:
             review(
@@ -306,13 +333,6 @@ class RewardIntegrityChecker:
                 f"source {name!r} reads {other:+.2f} while this reward reads "
                 f"{mine:+.2f}: the difference is larger than "
                 f"{self.policy.suspicious_gap:.2f}",
-            )
-            findings.append(
-                RewardIntegrityFinding(
-                    EVIDENCE_UNNECESSARY_ACTION,
-                    "info",
-                    f"disagreement with source {name!r}",
-                )
             )
 
         status = RewardIntegrityStatus.VALID.value

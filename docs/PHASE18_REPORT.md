@@ -28,7 +28,7 @@ required.
 | `src/novacontrol/rlhf/manager.py` | `RLHFManager`, the bus events, the disagreement detector wiring |
 | `src/novacontrol/rlhf/runtime.py` | The runtime module (answers requests, starts nothing) |
 | `src/novacontrol/rlhf/__init__.py` | 133 exports |
-| `tests/test_rlhf.py` | 165 tests, 2807 lines |
+| `tests/test_rlhf.py` | 171 tests, 2888 lines |
 | `docs/RLHF.md` | The phase's documentation |
 | `docs/PHASE18_REPORT.md` | This report |
 
@@ -123,7 +123,7 @@ On a bare machine with the default config: `warning` / `dry_run`.
 
 ## Tests added
 
-`tests/test_rlhf.py` — 165 tests across 14 classes: schema and vocabulary guard,
+`tests/test_rlhf.py` — 171 tests across 15 classes: schema and vocabulary guard,
 reward providers and composition, normalisation/clipping with the safety floor,
 every integrity finding and status, the quality filter and redaction, all eight
 feedback types, the evaluator set and `EvaluatorUnavailable`, hidden-reasoning
@@ -141,16 +141,24 @@ application (12 tests), and the CLI parser and every dispatch (3 tests).
 
 | Gate | Command | Result |
 |------|---------|--------|
-| Tests (group 1) | `pytest` files 1–35 | **750 passed / 3 skipped, 641 subtests** |
-| Tests (group 2) | `pytest` files 36–70 | **874 passed / 2 skipped, 761 subtests** |
-| Tests (group 3) | `pytest` files 71–106 | **1329 passed / 7 skipped, 620 subtests** |
-| Total | — | **2953 passed / 12 skipped** |
+| Tests (bucket 1) | `pytest` files 1–25 | **784 passed, 629 subtests** |
+| Tests (bucket 2) | `pytest` files 26–52 | **749 passed / 2 skipped, 719 subtests** |
+| Tests (bucket 3) | `pytest` files 53–78 | **679 passed / 8 skipped, 200 subtests** |
+| Tests (bucket 4) | `pytest` files 79–106 | **744 passed / 3 skipped, 471 subtests** |
+| Total | — | **2956 passed / 13 skipped, 2019 subtests, 0 failed** |
 | API docs | `generate_api_reference.py --check` | in sync (176 routes, 31 `/rlhf/*`) |
 | Types | `mypy src` | clean, 305 source files |
 | Types (Windows) | `mypy src --platform win32` | clean, 305 source files |
 | Ruff | `ruff check src/novacontrol/rlhf/ tests/test_rlhf.py` | clean |
 
-Phase 18's own suite: `tests/test_rlhf.py` — **165 passed**.
+The run above is the final one, on the tree carrying the audit repairs (defects
+5–7) and the environment-cleanup test fixes; every bucket exited 0. This machine
+runs the same 106 files as four parallel `pytest` processes rather than one, and
+Python 3.12 is not installed locally, so the matrix's 3.12 leg is unverified here
+— every result above is 3.13, as are the type and docs gates.
+
+Phase 18's own suite: `tests/test_rlhf.py` — **171 passed** in 329 s, re-run alone
+after the fixes.
 
 ## Defects found and repaired during validation
 
@@ -194,3 +202,34 @@ Phase 18's own suite: `tests/test_rlhf.py` — **165 passed**.
 * No other compatibility issues: no removed API, no changed default of an
   existing subsystem, and normal NovaControl operation works with every RL
   dependency absent.
+## Second verification pass
+
+The phase was audited again after the CI repairs, through its own interfaces —
+the CLI in a fresh data directory and the live server over HTTP — rather than by
+reading the layer that reports on itself. Two behaviour defects and one
+interface inconsistency were found and fixed, each pinned by a test.
+
+5. **A repeated action was only flagged once several different actions had
+   repeated.** The integrity context counted the *distinct* tools that repeated,
+   so one tool called five times read as a single repeat and stayed under
+   `repeat_action_limit` — the exact reward-hacking shape the finding exists for.
+   `IntegrityContext` now counts repeats per action, the limit is compared against
+   the worst single action, and three different actions taken twice are no longer
+   confused with one action taken five times.
+6. **A source disagreement was recorded as an "unnecessary action".** The extra
+   finding borrowed `unnecessary_action_detected` for a fact that has its own
+   code (`source_disagreement`), so a report named the wrong reason. The
+   redundant finding is gone: the disagreement is recorded once, under its own
+   code.
+7. **Three sub-resource routes answered 200 for a parent that does not exist.**
+   `GET /rlhf/datasets/{id}/validate`, `GET /rlhf/datasets/{id}/held` and
+   `GET /rlhf/runs/{id}/checkpoints` returned a 200 whose body could not be told
+   apart from "this dataset held nothing back" or "this run has not checkpointed
+   yet", while their sibling routes answered 404. They now name the missing
+   version or run and answer 404; the application payloads carry `ok: false` with
+   the reason, so the CLI exits non-zero for the same case.
+
+The same pass confirmed the surface counts from the live server and the route
+registry (176 routes, 31 of them `/rlhf/*`), a full feedback → decide → dataset →
+run round trip over HTTP including the refusals, and that every read-only CLI
+action answers with empty state (not an error) in a fresh data directory.

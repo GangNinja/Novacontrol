@@ -194,6 +194,7 @@ def trajectory(
     status: str = "completed",
     source: str = "test",
     tool: str = "desktop.launch",
+    tool_repeats: int = 1,
     unsafe: bool = False,
     metadata: Mapping[str, Any] | None = None,
 ) -> AgentTrajectory:
@@ -206,12 +207,13 @@ def trajectory(
     calls = [
         ToolCallRecord(
             tool=tool,
-            step_id="s1",
+            step_id=f"s{index + 1}",
             capability="desktop",
             arguments={"app": "calculator"},
             status="completed" if success else "failed",
             duration_ms=120.0,
         )
+        for index in range(max(1, tool_repeats))
     ]
     if unsafe:
         calls.append(
@@ -897,6 +899,40 @@ class RewardIntegrityTests(unittest.TestCase):
         self.assertEqual(check.status, RewardIntegrityStatus.SUSPICIOUS.value)
         self.assertIn(INTEGRITY_REPEATED_ACTIONS, check.codes())
 
+    def test_one_action_repeated_past_the_limit_is_found_in_the_run(self) -> None:
+        context = IntegrityContext.from_trajectory(
+            trajectory("traj-1", tool_repeats=4)
+        )
+        check = self.check(raw_reward(total_reward=0.4), context)
+
+        self.assertEqual(context.max_action_repeats, 3)
+        self.assertEqual(context.repeated_actions, 3)
+        self.assertEqual(check.status, RewardIntegrityStatus.SUSPICIOUS.value)
+        self.assertIn(INTEGRITY_REPEATED_ACTIONS, check.codes())
+
+    def test_a_repeat_within_the_limit_is_not_flagged(self) -> None:
+        context = IntegrityContext.from_trajectory(
+            trajectory("traj-1", tool_repeats=3)
+        )
+        check = self.check(raw_reward(total_reward=0.4), context)
+
+        self.assertEqual(context.max_action_repeats, 2)
+        self.assertNotIn(INTEGRITY_REPEATED_ACTIONS, check.codes())
+
+    def test_different_actions_are_not_one_action_inflating_a_count(self) -> None:
+        check = self.check(
+            raw_reward(total_reward=0.4),
+            IntegrityContext(
+                subject_id="traj-1",
+                task_succeeded=True,
+                verification_total=1,
+                repeated_actions=3,
+                max_action_repeats=1,
+            ),
+        )
+
+        self.assertNotIn(INTEGRITY_REPEATED_ACTIONS, check.codes())
+
     def test_a_reward_citing_nothing_is_held_for_review(self) -> None:
         check = self.check(
             raw_reward(total_reward=0.3, evidence=()),
@@ -938,6 +974,20 @@ class RewardIntegrityTests(unittest.TestCase):
 
         self.assertEqual(check.status, RewardIntegrityStatus.NEEDS_REVIEW.value)
         self.assertIn(INTEGRITY_SOURCE_DISAGREEMENT, check.codes())
+
+    def test_a_disagreement_is_recorded_under_its_own_code(self) -> None:
+        check = self.check(
+            raw_reward(reward_source="human", normalized_reward=-0.7),
+            IntegrityContext(
+                subject_id="traj-1",
+                task_succeeded=True,
+                verification_total=1,
+                sources={"ai": 0.9},
+            ),
+        )
+
+        self.assertIn(INTEGRITY_SOURCE_DISAGREEMENT, check.codes())
+        self.assertNotIn("unnecessary_action_detected", check.codes())
 
     def test_each_source_is_audited_with_the_others_as_cross_evidence(self) -> None:
         checks = RewardIntegrityChecker().check_sources(
@@ -2334,8 +2384,22 @@ class ApplicationRLHFTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(dataset["examples"]), 3)
         self.assertEqual(dataset["statistics"]["accepted"], 3)
         self.assertEqual(held["count"], 0)
+        self.assertTrue(held["ok"])
         with self.assertRaises(KeyError):
             self.app.rlhf_dataset("nope@v1")
+
+    def test_a_missing_dataset_or_run_is_named_rather_than_answered_empty(self) -> None:
+        held = self.app.rlhf_held("nope@v1")
+        checkpoints = self.app.rlhf_checkpoints("nope")
+
+        self.assertFalse(held["ok"])
+        self.assertEqual(held["count"], 0)
+        self.assertIn("no reward dataset version", held["reason"])
+        self.assertFalse(checkpoints["ok"])
+        self.assertEqual(checkpoints["count"], 0)
+        self.assertIn("no run", checkpoints["reason"])
+        with self.assertRaises(KeyError):
+            self.app.validate_rlhf_dataset("nope@v1")
 
     def test_a_run_is_created_and_waits_until_it_is_started(self) -> None:
         dataset_version = self.built_dataset()
@@ -2491,6 +2555,14 @@ class RLHFApiTests(unittest.TestCase):
     def _isolated(self, **kwargs: Any) -> NovaControlApplication:
         kwargs["data_dir"] = self._tmp.name
         app = NovaControlApplication(**kwargs)
+        # Pin the machine, exactly as the manager-level tests do: a dry run's
+        # plan and a run's `start` both carry a resource ESTIMATE, and the
+        # estimate reads the HOST's free memory. A loaded desktop answers
+        # UNSAFE, which blocks the plan's resource_estimation stage and refuses
+        # the start — so `ok`/`COMPLETED` would assert how busy this machine is
+        # rather than what the subsystem does. A known machine is deterministic.
+        app.rlhf.estimator = ResourceEstimator(hardware=bare())
+        app.rlhf.rl_estimator = RLResourceEstimator(estimator=app.rlhf.estimator)
         self._nova = app
         return app
 
@@ -2573,6 +2645,15 @@ class RLHFApiTests(unittest.TestCase):
         self.assertTrue(validated.json()["ok"], validated.json()["issues"])
         self.assertEqual(held.json()["count"], 0)
         self.assertEqual(missing.status_code, 404)
+
+    def test_the_sub_resources_of_a_missing_dataset_or_run_are_404(self) -> None:
+        for path in (
+            "/rlhf/datasets/nope@v1/validate",
+            "/rlhf/datasets/nope@v1/held",
+            "/rlhf/runs/nope/checkpoints",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(self._client.get(path).status_code, 404)
 
     def test_a_build_without_a_name_or_a_mode_is_a_422(self) -> None:
         nameless = self._client.post("/rlhf/datasets", json={"mode": "rlhf"})
