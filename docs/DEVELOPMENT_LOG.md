@@ -3810,3 +3810,203 @@ which expected `unsafe` and was given `warning`.
 108 files in six parallel groups (593 + 560 + 627 + 611 + 510 + 424, every group
 exit 0), `mypy src` and `mypy src --platform win32` clean over 333 files, and
 `generate_api_reference.py --check` reporting `docs/API.md: in sync`.
+
+## 51. Phase 21 — Real-Time Perception & Abstraction
+
+Phase 21 turns the vision layer into a **perception layer**: screen, camera, image
+and frame-stream input becomes a structured, temporally consistent, abstract
+representation — built **on** Phase 6 rather than beside it. `src/novacontrol/perception/`
+(15 modules) owns the whole shape: frames → preprocessing → fast perception (real
+OCR text geometry + classical regions/masks) → VLM escalation **through the
+existing `VisionManager`** → spatial → tracking → temporal → structured scene →
+abstraction → confidence, all under a resource gate that asks the SAME
+`ResourceGovernor` the rest of the build uses. The fast path always runs first and
+usually is the answer; a refusal is a result that names the capability responsible
+(`no vision model is wired`, `no camera backend is wired`) — nothing returns
+SUCCESS because *something* happened. Wiring: the engine is constructed with the
+live `VisionManager`, the governor/monitor/model-manager gate and the
+approval-gated screen capture; the 8 capability rows register on the ONE registry
+(`category="perception"`); `status()["perception_pipeline"]` sits beside
+`vision_pipeline`; 8 typed lifecycle events travel through the injected observer
+seam; `PerceptionSettings` plus the fps/side/object ceilings clamp the config; and
+three routes (`POST /perception`, `GET /perception/status`,
+`GET /perception/capabilities`) were added in all five contract places — 210 routes
+= 210 consumers, `docs/API.md` regenerated. Honesty is pinned, not promised:
+`overview()` reports `cuda_required` / `automatic_model_loading` /
+`automatic_model_downloads` / `stores_raw_frames` / `stores_masks` /
+`stores_hidden_reasoning` / `action_execution` / `predicts_future_state` all false,
+`DEFERRED_PHASES` names Phases 22–26, and the capability table classifies with the
+six-word vocabulary (`implemented` ×5, `partially_implemented` ×2,
+`provider_dependent` ×1 — live availability `no vision model is wired`). Measured
+on this machine (report §24): text read 409 ms (`fast_sufficient`), objects+masks
+724 ms with 6 relations, a two-frame 24 px move reported as `object_moved`, screen
+48 objects/157 lines with 1.39 s of stages, camera honestly UNAVAILABLE, and a
+12-frame stream peaking at 3.54 MB of Python heap.
+
+**Ten defects were caught by driving the implementation against its own
+specification** (report §26 1–10, each pinned): a still image walked twelve times;
+`frame=` accepted and ignored; `temporal_context` dead (a fresh look could report
+bogus disappearances); the sampler's decision recorded but not enforced; missing
+per-stage latency; a failed deep path reported as SUCCESS; a deterministic
+capability reason implying a provider dependency; two mypy errors in the wiring; a
+test expectation contradicting the tracker's own tolerance; and ruff debt in the
+new code.
+
+**The full six-group regression then surfaced an eleventh, and it was not load.**
+`test_telemetry.py::test_polling_is_cheap` failed — 10 polls of
+`/system/telemetry` took 20.5 s against a 1.0 s budget — and it failed *solo* too.
+The chain: `gate.status()` asked `model_manager.runtime_status()`, one HTTP round
+trip to the local runtime (a 2 s timeout while Ollama is not running), and
+`gate.status()` rides in `perception.status()` → `status()["perception_pipeline"]`
+→ `app.status()`, which that endpoint calls on every request. The same read had
+two more bugs behind it (defect 12): it looked up `status.resident` while
+`ModelRuntimeStatus` calls the field `loaded_models`, so the governor was always
+told `loaded=()` (eviction list always empty) while paying the two seconds; and
+`gate.status()` called `monitor.memory()`, a method `HardwareMonitor` does not
+have, so every status said "the memory probe failed" with `available_ram_bytes`
+`None` — on a machine that measures fine. The fix follows the precedent
+`models_status()` already states (probe-free status; measured figures live on
+probe-allowed surfaces): residency now comes from the governor's own assessment
+row already computed in the same call, memory from
+`available_ram_bytes()`/`total_ram_bytes()`, and the runtime probe is confined to
+`admit()` — the rare model-backed path, which `_escalate` only reaches when a
+model is actually wired. `gate.status()` went 2,014 ms → **1.2 ms**,
+`nova.status()` 2,079 ms → 49–78 ms, and four regression pins were added and
+mutation-checked (`test_status_never_asks_the_model_runtime`, the assessment
+source, the monitor's real figures, and the `loaded_models` field on the decision
+path); the file now carries 90 tests.
+
+**The regression driver itself taught one operational lesson.** The six groups
+first ran to "no tests ran in 0.02s" across all six: the group list in
+`/tmp/nc_groups6.txt` had CRLF endings, so each line's last file carried a trailing
+`\r`, pytest rejected the path, and the whole group aborted as a usage error —
+which had masqueraded as "tests/test_training.py not found". The driver now strips
+`\r` per line. Same class of defect as §50's, one layer lower: a command that exits
+without running anything must never read as a result.
+
+**Gates on the repaired tree.** Six-group regression over 109 files: 3,410 passed /
+12 skipped / 2,108 subtests (574 + 624 + 582 + 542 + 580 + 508 across the six
+groups, plus the one failure in group 5), the single
+failure being the telemetry budget defect above; after the repair
+`tests/test_telemetry.py` 23 passed, `tests/test_perception.py` 90 passed, and the
+contract surface re-run against the final files (test_api + route_shape_contract +
+api_reference_sync + events + web_platform) 94 passed / 553 subtests with
+`generate_api_reference.py --check` reporting `docs/API.md: in sync`. `mypy src`
+and `mypy src --platform win32` clean over 348 files; `ruff check` clean on the
+perception package and its test file, and net-zero against HEAD on every file the
+event touched (models.py 193 = HEAD, route_consumers.py 3 = HEAD, app.py 68 =
+HEAD, application.py 100 = HEAD — the 374 remaining errors are pre-existing
+debt, byte-identical to the committed tree).
+
+## 52. Phase 22 — World Model, Memory & State Reasoning
+
+Phase 22 turns Phase 21's perception output into a **structured,
+uncertainty-aware state of the environment**: a versioned world state updated
+from observations, remembered over time, queried currently and historically,
+reasoned about through named deterministic rules, and honest about prediction.
+`src/novacontrol/world/` (16 modules + `__init__`, 9,121 lines) owns the whole
+shape: observation normalization → state estimation → world state → entity
+tracking → relationship graph → temporal memory → state transitions → change
+detection → 11 query kinds → 7 named reasoning rules → a prediction boundary.
+Built **on** what exists rather than beside it: `JsonWorldRepository` wraps the
+SAME `JsonStateStore` (staged temp file, forgiving reads, one sanitized key per
+world); 9 typed events travel through an injected observer seam into the ONE bus;
+the 12 capability rows register on the ONE `CapabilityRegistry` (11 IMPLEMENTED,
+`world.prediction` PROVIDER_DEPENDENT — live availability reads *no predictive
+provider is wired; this build ships a state store, not a learned world model*);
+Phase 21's `derive_relationships` decides geometry; and the SAME
+`ResourceGovernor` gate stands in front of any model-backed prediction, so a
+refusal is `RESOURCE_BLOCKED` and the provider is never called. Wiring:
+`_build_world_model` + `self.world` + `register_world_capabilities`,
+`status()["world_model"]`, the flat content-light `_world_summary` on telemetry,
+`persist()` → `world.save()` and a boot `restore()`, a `world:` config section
+(19 policy fields), and five routes added in all five contract places — **215
+routes = 215 consumers**, `docs/API.md` regenerated.
+
+**Honesty is enforced in code, not promised.** A fact that was not observed is
+never stored as observed (every `EntityAttribute` carries a `FactBasis` and an
+evidence reference); an unmeasured figure is `None`, never 0 (a fresh entity's
+`identity_confidence`, an unprobed availability, an unmeasured latency); absence
+needs a *complete* observation before it moves an entity off `present`; an
+ambiguous identity stays provisional with an `ambiguous_identity` uncertainty row;
+a stale relation is kept and labelled, never deleted; a historical question returns
+`NOT_FOUND` with a limitation saying it was **not substituted**; and the only
+projection that ships is `RuleProjectionProvider`, labelled `rule_based=True` with
+`confidence=None` and opt-in via `settings.rule_projection`.
+
+**Nine real defects were caught by driving the implementation through its own nine
+workflows and then through an independent audit of every requirement question**
+(report §25, each fixed in the source and pinned by a new test):
+`estimation._conditions` counted `previous.entities`, so the `entity_count`
+condition was always one version stale; `ingest.observation_from_perception` raised
+`UnboundLocalError` for a bare `SceneRepresentation` (`source_id` was only assigned
+in the `PerceptionResult` branch) and could leak `status`/`reason`; a failed look
+(`PerceptionResult` with `scene=None`) was rejected as "reports nothing" instead of
+being recorded, and now carries an OBSERVED `perception_status` condition fact;
+because of that, `EPHEMERAL_CONDITIONS = {"perception_status"}` was added so a
+failed look can never linger as a stale success (or the reverse); `engine._ordering`
+had the staleness test **inverted** (`age < 0`) — a future observation was flagged
+stale while a genuinely old one was not; `queries._evidence` treated an unresolved
+subject as "no filter" and returned unrelated rows for a claim that does not exist;
+and `observe()` ignored the observation's own `correlation_id`.
+
+**The audit then found two more, both about a cap being reported as something it is
+not.** `ingest._bounded` folded three different things into one counter — entities
+past `MAX_INGESTED_ENTITIES`, facts past `MAX_INGESTED_FACTS`, and genuinely
+unreadable rows — and `validate` rendered the total as "N unusable entity row(s)
+dropped", so a caller who sent 300 VALID rows was told 172 were "unusable" and a
+dropped fact was reported as an unreadable entity. The counters are now separate
+(`dropped_entities` vs `truncated_entities`/`truncated_facts`) and the reason names
+the ceiling. Separately, the STATE ceiling reported nothing when the overage was
+live entities: `_bounded` retires expired entities first and records
+`metadata["retired_entities"]`, which is zero when every surplus entity is live, so
+a state could hold 480 live entities while `status()["policy"]["max_entities"]` said
+256 — with no field anywhere reconciling them. Live facts are still never destroyed
+to satisfy a policy number (that property is deliberate and kept), but the overage
+is now stamped on the state and published as `status()["entities_over_ceiling"]`.
+Two existing test expectations that had encoded the conflation were corrected
+(they asserted `dropped_entities` for truncated rows and dropped facts), and both
+new behaviours are pinned.
+
+**Measured on this machine** (report §24, Windows 11 / Python 3.13): 200 entities →
+`observe()` mean 12.9 ms (10 entities 2.37 ms, 50 entities 8.06 ms),
+`query(entities, limit=200)` 0.31 ms, single-entity 0.009 ms, `state_at` 0.068 ms,
+`reason()` 0.33 ms, `changes()` 0.25 ms, `state_summary()` 0.24 ms, rule projection
+0.019 ms, no-provider 0.020 ms; 200 entities × 32 retained snapshots → 4.1 MiB
+tracemalloc peak, 6.0 MiB serialized payload, and a 10.2 MB stored file with
+`save()` ~118 ms / `restore()` ~243 ms. **Snapshots are full states, not deltas**,
+so a large world's history is the phase's dominant cost — bounded by
+`max_snapshots` (32), `max_transitions` (500), `max_observation_refs` (128),
+`retention_seconds` (86400) and `prune()`.
+
+**Gates.** Three-group full regression over 110 files: **3,666 passed / 12 skipped /
+2,146 subtests, all three groups exit 0** (1,399 / 1,124 / 1,143, group times
+5:05:31, 0:55:10 and 0:30:25), started after the last source edit of the build
+(12:53 vs 12:02) and after the test file was finalized (12:48). That sweep predates
+the two ceiling defects above — a ~1,800-file sweep takes hours, so the post-fix
+evidence is the COMPLETE world suite (254 passed + 28 subtests) plus every suite
+that touches ingest, the status document or the API contract (`test_telemetry`,
+`test_web_platform`, `test_api`, `test_route_shape_contract`,
+`test_api_reference_sync`, `test_events`, `test_perception`: 207 passed + 563
+subtests) and `test_application.py` (32 passed + 12 subtests), with ruff clean,
+both mypy views clean over 365 files and the API reference in sync — all re-run
+after the fixes and all green.
+`tests/test_world_model.py` alone: 254 tests + 28 subtests across 29 test classes
+(plus 11 doubles),
+including workflows A–I (initial observation, state update, entity continuity,
+historical query, conflicting observations, restart and recovery, evidence query,
+prediction boundary, resource fallback) and generated tests walking each of the 7
+reasoning rules' own `examples`. `mypy src` and `mypy src --platform win32` clean
+over 365 files; `ruff check src/novacontrol/world tests/test_world_model.py` clean;
+`generate_api_reference.py --check` → `docs/API.md: in sync`; routes == consumers at
+215 = 215 with missing/extra both empty.
+
+**Two operational lessons.** (1) The in-repo scratch directory earned its keep
+again: `/tmp` is not writable as a literal path from this Python on Windows (it
+resolves to `\tmp`), so regression group lists and logs live in `.nc22_tmp/` inside
+the repo and must be deleted before finishing — and the group lists still need
+`\r` stripped per line (the §51 lesson). (2) A remote-style workspace detail worth
+recording: the benchmark's JSON persistence section had to be written against the
+real `JsonStateStore` (a directory root, then `world_<id>.json`) rather than a
+path-shaped repository, because the store's own forgiving-read contract is what the
+repository wraps.

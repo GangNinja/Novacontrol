@@ -21,6 +21,7 @@ from novacontrol.core.events import Event
 from novacontrol.explore import ExploreRequest
 from novacontrol.explore.trending import TrendingTopicsProvider
 from novacontrol.optimization.models import PrivacyAction
+from novacontrol.perception import DEFERRED_PHASES, PERCEPTION_SCHEMA_VERSION
 from novacontrol.planning import PlanningEngine
 from novacontrol.release import ReleaseHardeningChecker, RuntimePackageBuilder, SystemHealthMonitor
 from novacontrol.settings import ApprovalMode
@@ -82,6 +83,25 @@ def _never_cache_headers() -> dict[str, str]:
         "Pragma": "no-cache",
         "Expires": "0",
     }
+
+
+def _observation_batch(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """The observations one ``/world/observe`` body carries — one or many.
+
+    Accepts a single observation, an ``observations`` list, or a ``perception`` /
+    ``scene`` payload folded into one observation. The batch shape exists because
+    a caller replaying a capture has several observations and should not need one
+    round trip per frame.
+    """
+    many = payload.get("observations")
+    if isinstance(many, list) and many:
+        shared = {key: value for key, value in payload.items() if key != "observations"}
+        merged: list[dict[str, Any]] = []
+        for item in many:
+            if isinstance(item, dict):
+                merged.append({**shared, **item})
+        return merged or [payload]
+    return [payload]
 
 
 def sse_frame(event: Event) -> str:
@@ -926,6 +946,164 @@ def create_app() -> Any:
         except ValueError as exc:
             # Command-shaped labels and empty plans are user-fixable errors.
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # ── Phase 21: real-time perception and abstraction ────────────────
+    @app.get("/perception/status")
+    async def perception_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """What the perception layer is wired to right now — and what it can do.
+
+        Providers and their LIVE availability, the budgets in force, the
+        tracker and temporal state, the telemetry counters, and the identity of
+        the last scene. Deliberately no frame path, no text and no pixels: this
+        is an operator surface, not a window into somebody's screen.
+        """
+        return nova.perception.status()
+
+    @app.get("/perception/capabilities")
+    async def perception_capabilities(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """The capability classification, with availability probed live.
+
+        Every row says what it IS (implemented / partially implemented /
+        provider-dependent / unavailable / future) and whether it can run on
+        THIS machine, so "no vision model is wired" is answered here rather
+        than discovered from a request that quietly returned nothing.
+        """
+        rows = nova.perception.capabilities()
+        return {
+            "schema_version": PERCEPTION_SCHEMA_VERSION,
+            "capabilities": rows,
+            "count": len(rows),
+            "deferred": list(DEFERRED_PHASES),
+        }
+
+    @app.post("/perception")
+    async def perception_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Perceive an image, a frame sequence, the screen or a camera.
+
+        READING ONLY: nothing here clicks, types, opens or runs anything — the
+        approval gate stands in front of the action, not in front of the
+        looking, and this endpoint never crosses it. An unreadable frame is a
+        422 naming the problem; a refused deep path is a 200 whose status is
+        PARTIAL or UNAVAILABLE and whose reason names the capability that could
+        not answer.
+        """
+        source = str(payload.get("source", "") or "").strip()
+        source_kind = str(payload.get("source_kind", "") or "image").strip().lower()
+        if not source and source_kind not in {"screen", "camera"}:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "A 'source' is required (a path, or a ';'-separated frame list), "
+                    "or set source_kind to 'screen' or 'camera'."
+                ),
+            )
+        result = await nova.perception.perceive(payload)
+        return result.to_dict()
+
+    # ── Phase 22: world model, memory and state reasoning ────────────────
+    @app.get("/world/status")
+    async def world_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """What the world model holds and can do, and what it refuses to claim.
+
+        Versions, entity and relationship counts, the policies and retention in
+        force, the open uncertainty, and the honest prediction posture (which is
+        normally "no predictive model is wired"). Deliberately no attribute
+        values, no observation bodies and no reasoning: this is an operator
+        surface, not a window into what the system has seen.
+        """
+        return nova.world.status()
+
+    @app.get("/world/state")
+    async def world_state(
+        entity_id: str = "", limit: int = 50, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """A bounded, content-light view of the current state.
+
+        Entity labels, statuses, boxes and confidences; relationships; and the
+        open uncertainty. Attribute VALUES are not included — a caller that wants
+        a value asks ``/world/query`` for it, which is where confidence, basis and
+        evidence travel with it.
+        """
+        summary = nova.world.state_summary()
+        if entity_id:
+            summary["entities"] = [
+                item for item in summary.get("entities", []) if item.get("entity_id") == entity_id
+            ]
+        bounded = max(1, min(200, int(limit or 50)))
+        summary["entities"] = summary.get("entities", [])[:bounded]
+        summary["relationships"] = summary.get("relationships", [])[:bounded]
+        summary["requested_entity_id"] = entity_id
+        return summary
+
+    @app.post("/world/observe")
+    async def world_observe(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Ingest one observation and advance the world state (RECORDING only).
+
+        Nothing here executes an action: this endpoint remembers what was
+        reported and nothing else. An observation that carries nothing to record
+        is a 422 naming the accepted shapes; one that is merely unreadable in part
+        is a 200 whose status is ``partial`` and whose reason says what was
+        unreadable.
+        """
+        shapes = {"entities", "facts", "observations", "perception", "scene"}
+        if not shapes & set(payload):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "An observation needs 'entities' (a list of thing/id/label/bbox "
+                    "records), 'facts', a Phase 21 'perception' result or a 'scene'. "
+                    "Set 'complete' to true when the source covered the whole scope, "
+                    "so absence can mean something."
+                ),
+            )
+        reports: list[dict[str, Any]] = []
+        for item in _observation_batch(payload):
+            report = nova.world.observe(item)
+            if report.status.value == "rejected":
+                raise HTTPException(status_code=422, detail=report.reason)
+            reports.append(report.to_dict())
+        if len(reports) == 1:
+            return {**reports[0], "batch": 1}
+        return {
+            "batch": len(reports),
+            "version": nova.world.state().version,
+            "state_id": nova.world.state().state_id,
+            "reports": reports,
+        }
+
+    @app.post("/world/query")
+    async def world_query(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Answer a bounded structured question about current or historical state.
+
+        Kinds: entities, entity, entity_history, entity_seen, relationships,
+        changes_since, state_at, uncertain, stale, evidence, diff. A question that
+        is missing what it needs is a 422 naming the field; a historical question
+        nothing retained covers is a 200 whose status is ``not_found`` and whose
+        limitations say the current state was NOT substituted for that moment.
+        """
+        result = nova.world.query(payload)
+        if result.status.value == "invalid":
+            raise HTTPException(status_code=422, detail=result.reason)
+        return result.to_dict()
+
+    @app.post("/world/predict")
+    async def world_predict(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Ask for a future state, and receive the honest answer.
+
+        This build wires no predictive model, so the normal answer is
+        ``model_unavailable``. When a rule projection is enabled the answer is
+        ``predicted`` with ``rule_based: true`` and a limitation saying no model
+        was involved. A prediction is NEVER fabricated to satisfy the call.
+        """
+        return nova.world.predict(payload).to_dict()
 
     @app.get("/intelligence")
     async def intelligence_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:

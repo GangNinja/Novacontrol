@@ -226,10 +226,236 @@ class VisionSettings:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class PerceptionSettings:
+    """How much attention real-time perception may spend, and on what.
+
+    The profile is the coarse decision — ``low_resource``/``balanced``/
+    ``performance`` — and it sets the sampling rate, the preview size and the
+    object ceiling together, because those three move as a unit: increasing the
+    rate while keeping the preview small buys samples nobody can see anything in.
+    The individual numbers exist so a deployment can be more specific than a
+    profile without having to be, and every one of them is a CEILING: perception
+    may spend less, never more.
+
+    ``allow_vlm`` is the phase's own switch, separate from ``vision.provider``:
+    that one says whether a model may be used for vision at all, and this one
+    says whether the PERCEPTION pipeline may escalate to it. A deployment that
+    wants the Vision panel to keep working while live perception stays on the
+    cheap path sets exactly this to false.
+    """
+
+    profile: str = "balanced"
+    target_fps: float = 0.0
+    max_fps: float = 0.0
+    min_interval_ms: int = 0
+    max_frame_side: int = 0
+    max_objects: int = 0
+    allow_vlm: bool = True
+    allow_segmentation: bool = False
+    temporal_context: bool = False
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "profile": self.profile,
+            "target_fps": self.target_fps,
+            "max_fps": self.max_fps,
+            "min_interval_ms": self.min_interval_ms,
+            "max_frame_side": self.max_frame_side,
+            "max_objects": self.max_objects,
+            "allow_vlm": self.allow_vlm,
+            "allow_segmentation": self.allow_segmentation,
+            "temporal_context": self.temporal_context,
+        }
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> PerceptionSettings:
+        """Settings from a mapping; an unknown profile keeps the default.
+
+        A typo in a profile name must not be the reason the perception layer is
+        unreachable — the same decision ``vision.provider`` already makes.
+        """
+        defaults = cls()
+        profile = str(data.get("profile", defaults.profile) or defaults.profile).strip().lower()
+        if profile not in _PERCEPTION_PROFILES:
+            profile = defaults.profile
+        return cls(
+            profile=profile,
+            target_fps=_rate_setting(
+                data, "target_fps", defaults.target_fps, maximum=MAX_PERCEPTION_FPS
+            ),
+            max_fps=_rate_setting(data, "max_fps", defaults.max_fps, maximum=MAX_PERCEPTION_FPS),
+            min_interval_ms=_count_setting(
+                data, "min_interval_ms", defaults.min_interval_ms, maximum=5000
+            ),
+            max_frame_side=_count_setting(
+                data, "max_frame_side", defaults.max_frame_side, maximum=MAX_PERCEPTION_FRAME_SIDE
+            ),
+            max_objects=_count_setting(
+                data, "max_objects", defaults.max_objects, maximum=MAX_PERCEPTION_OBJECTS
+            ),
+            allow_vlm=_bool_setting(data, "allow_vlm", defaults.allow_vlm),
+            allow_segmentation=_bool_setting(
+                data, "allow_segmentation", defaults.allow_segmentation
+            ),
+            temporal_context=_bool_setting(data, "temporal_context", defaults.temporal_context),
+        )
+
+
+#: The performance profiles perception understands. The vocabulary lives here and
+#: the budgets live in ``perception/governance.py``, so a configuration cannot
+#: invent a profile the pipeline would have to guess at.
+_PERCEPTION_PROFILES = frozenset({"low_resource", "balanced", "performance"})
+
+#: Ceilings for the perception knobs: 30 fps is faster than any screen refresh a
+#: person reads, a 4096-pixel preview is already the whole of most captures, and
+#: 512 objects is more markup than any answer should carry.
+MAX_PERCEPTION_FPS = 30.0
+MAX_PERCEPTION_FRAME_SIDE = 4096
+MAX_PERCEPTION_OBJECTS = 512
+
+
 #: The provider vocabulary. Small on purpose: the vision model itself is
 #: configured where it lives (the Vision panel / the persisted model store), and
 #: these only say whether one may be used.
 _VISION_PROVIDERS = frozenset({"auto", "none"})
+
+
+@dataclass(frozen=True, slots=True)
+class WorldModelSettings:
+    """What the world model remembers, for how long, and how cautiously. Phase 22.
+
+    Every number here is a POLICY rather than a capability, and the defaults are
+    the careful ones: a fact stays until the evidence contradicts it, absence needs
+    a complete observation before it means anything, and identity is only asserted
+    when the geometry agrees. The ceilings exist so a long session cannot grow the
+    state without bound, and none of them requires a model to be loaded.
+
+    ``enabled`` is the phase's own switch. A deployment that wants perception to
+    run without any world state being kept sets exactly this to false, and the
+    engine is then not constructed at all.
+    """
+
+    enabled: bool = True
+    world_id: str = "default"
+    missing_after: int = 2
+    stale_after_seconds: int = 60
+    entity_ttl_seconds: int = 900
+    identity_iou_threshold: float = 0.35
+    identity_distance_px: int = 40
+    identity_ambiguous_margin: float = 0.25
+    position_change_px: int = 8
+    confidence_change: float = 0.1
+    max_entities: int = 256
+    max_snapshots: int = 32
+    max_transitions: int = 500
+    max_observation_refs: int = 128
+    retention_seconds: int = 86400
+    derive_relationships: bool = True
+    autosave: bool = True
+    allow_prediction: bool = True
+    rule_projection: bool = False
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "world_id": self.world_id,
+            "missing_after": self.missing_after,
+            "stale_after_seconds": self.stale_after_seconds,
+            "entity_ttl_seconds": self.entity_ttl_seconds,
+            "identity_iou_threshold": self.identity_iou_threshold,
+            "identity_distance_px": self.identity_distance_px,
+            "identity_ambiguous_margin": self.identity_ambiguous_margin,
+            "position_change_px": self.position_change_px,
+            "confidence_change": self.confidence_change,
+            "max_entities": self.max_entities,
+            "max_snapshots": self.max_snapshots,
+            "max_transitions": self.max_transitions,
+            "max_observation_refs": self.max_observation_refs,
+            "retention_seconds": self.retention_seconds,
+            "derive_relationships": self.derive_relationships,
+            "autosave": self.autosave,
+            "allow_prediction": self.allow_prediction,
+            "rule_projection": self.rule_projection,
+        }
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> WorldModelSettings:
+        """Settings from a mapping, with every number clamped to its ceiling.
+
+        A world id is sanitized to something that can name a store key rather than
+        rejected: a deployment that mistypes an id should get its own world, not a
+        boot failure. The store sanitizes again on the way in (§12).
+        """
+        defaults = cls()
+        world_id = str(data.get("world_id", defaults.world_id) or defaults.world_id).strip()
+        return cls(
+            enabled=_bool_setting(data, "enabled", defaults.enabled),
+            world_id=world_id[:MAX_WORLD_ID] or defaults.world_id,
+            missing_after=_count_setting(
+                data, "missing_after", defaults.missing_after, maximum=100
+            ),
+            stale_after_seconds=_count_setting(
+                data, "stale_after_seconds", defaults.stale_after_seconds, maximum=86400
+            ),
+            entity_ttl_seconds=_count_setting(
+                data, "entity_ttl_seconds", defaults.entity_ttl_seconds, maximum=604800
+            ),
+            identity_iou_threshold=_ratio_setting(
+                data, "identity_iou_threshold", defaults.identity_iou_threshold
+            ),
+            identity_distance_px=_count_setting(
+                data, "identity_distance_px", defaults.identity_distance_px, maximum=10000
+            ),
+            identity_ambiguous_margin=_ratio_setting(
+                data, "identity_ambiguous_margin", defaults.identity_ambiguous_margin
+            ),
+            position_change_px=_count_setting(
+                data, "position_change_px", defaults.position_change_px, maximum=10000
+            ),
+            confidence_change=_ratio_setting(
+                data, "confidence_change", defaults.confidence_change
+            ),
+            max_entities=_count_setting(
+                data, "max_entities", defaults.max_entities, maximum=MAX_WORLD_ENTITIES
+            ),
+            max_snapshots=_count_setting(
+                data, "max_snapshots", defaults.max_snapshots, maximum=1000
+            ),
+            max_transitions=_count_setting(
+                data, "max_transitions", defaults.max_transitions, maximum=100000
+            ),
+            max_observation_refs=_count_setting(
+                data, "max_observation_refs", defaults.max_observation_refs, maximum=10000
+            ),
+            retention_seconds=_count_setting(
+                data, "retention_seconds", defaults.retention_seconds, maximum=31536000
+            ),
+            derive_relationships=_bool_setting(
+                data, "derive_relationships", defaults.derive_relationships
+            ),
+            autosave=_bool_setting(data, "autosave", defaults.autosave),
+            allow_prediction=_bool_setting(
+                data, "allow_prediction", defaults.allow_prediction
+            ),
+            rule_projection=_bool_setting(data, "rule_projection", defaults.rule_projection),
+        )
+
+
+#: Ceilings for the world-model knobs. A 4,096-entity state is already far past
+#: what any question needs; the caps exist so a runaway source cannot make the
+#: state unsaveable.
+MAX_WORLD_ID = 64
+MAX_WORLD_ENTITIES = 4096
+
+
+def _ratio_setting(data: Mapping[str, Any], key: str, default: float) -> float:
+    """A 0..1 ratio from a mapping — out-of-range input clamps, never raises."""
+    try:
+        value = float(data.get(key, default))
+    except (TypeError, ValueError):
+        return default
+    return max(0.0, min(1.0, value))
 
 #: Headroom ceiling for a model load, in megabytes. Half of this machine's RAM
 #: is the largest reserve that still leaves the desktop room to run; above that
@@ -795,6 +1021,11 @@ class NovaControlConfig:
     # run RLHF and still refuse RLVR (or refuse to let a model score itself).
     rlvr: RLVRSettings = field(default_factory=RLVRSettings)
     vision: VisionSettings = field(default_factory=VisionSettings)
+    perception: PerceptionSettings = field(default_factory=PerceptionSettings)
+    # Phase 22: what the world model remembers and how cautiously. Its own section
+    # because it answers a different question from perception's — that one is about
+    # how much attention a frame gets, this one about what is kept afterwards.
+    world: WorldModelSettings = field(default_factory=WorldModelSettings)
     models: ModelSettings = field(default_factory=ModelSettings)
     modules: Mapping[str, ModuleSettings] = field(default_factory=dict)
 
@@ -832,6 +1063,8 @@ class NovaControlConfig:
             rlhf=RLHFSettings.from_mapping(_mapping(data.get("rlhf", {}))),
             rlvr=RLVRSettings.from_mapping(_mapping(data.get("rlvr", {}))),
             vision=VisionSettings.from_mapping(_mapping(data.get("vision", {}))),
+            perception=PerceptionSettings.from_mapping(_mapping(data.get("perception", {}))),
+            world=WorldModelSettings.from_mapping(_mapping(data.get("world", {}))),
             models=ModelSettings.from_mapping(_mapping(data.get("models", {}))),
             modules=modules,
         )
@@ -1268,6 +1501,31 @@ def _count_setting(data: Mapping[str, Any], key: str, default: int, *, maximum: 
     if parsed < 1:
         return default
     return min(parsed, maximum)
+
+
+def _rate_value(value: Any, default: float, *, maximum: float) -> float:
+    """A rate in frames per second, or the default when it is not a usable one.
+
+    Zero and negatives are NOT accepted as "no limit": a rate is a ceiling the
+    pipeline spends against, and a configuration that says zero is either a
+    mistake or an attempt to switch sampling off, neither of which should turn
+    into unbounded processing. Above the ceiling the value is clamped, because a
+    1000 fps request is not a permission slip for a busy loop.
+    """
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed <= 0:
+        return default
+    return min(parsed, maximum)
+
+
+def _rate_setting(data: Mapping[str, Any], key: str, default: float, *, maximum: float) -> float:
+    """The mapping-side twin of :func:`_rate_value`."""
+    return _rate_value(data.get(key), default, maximum=maximum)
 
 
 def _tick_value(value: Any, default: float) -> float:

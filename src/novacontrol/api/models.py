@@ -196,6 +196,62 @@ class ApiSurface:
                 ApiRoute("POST", "/vision/model/clear", "Remove the configured vision model; element location returns to OCR-only.", authenticated=True),
                 ApiRoute("POST", "/vision/describe", "Capture the screen and describe it (vision model or window probe).", authenticated=True),
                 ApiRoute("POST", "/vision/click", "Vision-locate a labeled element on screen, click it, and verify.", authenticated=True),
+                ApiRoute(
+                    "GET",
+                    "/perception/status",
+                    "Perception layer report: providers, budgets, tracking and "
+                    "telemetry (no content).",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/perception/capabilities",
+                    "Perception capability classification with live availability "
+                    "on this machine.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "POST",
+                    "/perception",
+                    "Perceive an image, frame list, screen or camera into a structured scene "
+                    "(reading only - nothing is executed).",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/world/status",
+                    "World model report: versions, entities, policies, retention and the "
+                    "honest prediction posture (no content).",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/world/state",
+                    "Bounded, content-light view of the current world state "
+                    "(labels, statuses, boxes - no attribute values).",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "POST",
+                    "/world/observe",
+                    "Ingest one observation (or a batch) and advance the world state - "
+                    "recording only, nothing is executed.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "POST",
+                    "/world/query",
+                    "Answer a bounded structured question about current or historical "
+                    "world state, including evidence, uncertainty and staleness.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "POST",
+                    "/world/predict",
+                    "Ask for a future state; reports model_unavailable when no "
+                    "predictive model is wired and never fabricates a prediction.",
+                    authenticated=True,
+                ),
                 ApiRoute("GET", "/intelligence", "Global Intelligence Layer: telemetry, findings, and capabilities.", authenticated=True),
                 ApiRoute(
                     "GET",

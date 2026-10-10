@@ -271,6 +271,17 @@ from novacontrol.tools import (
     build_tool_catalog,
     tool_descriptions,
 )
+# ── Phase 21: real-time perception and abstraction ───────────────────────
+# Imported beside the vision layer because it EXTENDS it: the same
+# ``VisionManager`` answers the deep questions, the same OCR chain reads text
+# first, and a screen frame arrives through the same approval-gated capture.
+from novacontrol.perception import (
+    CameraFrameSource,
+    PerceptionEngine,
+    PerceptionResourceGate,
+    ScreenFrameSource,
+    register_perception_capabilities,
+)
 from novacontrol.vision import (
     NullVisionProvider,
     VisionManager,
@@ -283,6 +294,23 @@ from novacontrol.vision import (
 )
 from novacontrol.vision.providers import build_vision_provider as build_vision_pipeline_provider
 from novacontrol.voice import VoiceModule
+# ── Phase 22: world model, memory and state reasoning ────────────────────
+# Imported beside the perception layer because it CONSUMES it: a Phase 21
+# result becomes a normalized observation, Phase 21's spatial arithmetic is
+# what decides a geometric relation, and the state is persisted through the
+# SAME JsonStateStore every other subsystem uses.
+from novacontrol.world import (
+    JsonWorldRepository,
+    WorldModelEngine,
+    WorldRetentionPolicy,
+    register_world_capabilities,
+)
+from novacontrol.world.estimation import EstimationPolicy
+from novacontrol.world.prediction import (
+    NoPredictionProvider,
+    PredictionService,
+    RuleProjectionProvider,
+)
 
 _APPROVAL_TTL_SECONDS = 300.0  # A planned desktop action must be approved within 5 minutes.
 
@@ -1421,6 +1449,36 @@ class NovaControlApplication:
         # the prose a person read. This is the "structured vision result ->
         # planner" hand-off: one bounded object, replaced each time.
         self._last_vision_result: VisionResult | None = None
+        # ── Phase 21: real-time perception and abstraction ────────────────
+        # The manager above answers "what is in this image"; this engine is what
+        # makes that answer reusable over TIME — frames with identity, a fast
+        # OCR/classical pass that always runs before any model, spatial
+        # relationships with their arithmetic, tracking, observed temporal
+        # change, and one structured scene with its confidence. It is built ON
+        # the vision layer rather than beside it: a deep question is handed to
+        # the SAME manager, the SAME OCR chain reads text, and a screen frame
+        # arrives through the SAME approval-gated capture the Vision panel
+        # uses. The expensive path is admitted through the SAME governor that
+        # guards every other model load, so a machine with nothing to spare is
+        # refused rather than surprised. Nothing here loads, downloads or
+        # trains anything; it OBSERVES.
+        self.perception = PerceptionEngine(
+            vision=self.vision_manager,
+            gate=PerceptionResourceGate(
+                governor=self.governor,
+                monitor=self.hardware_monitor,
+                model_manager=self.model_manager,
+                profile=self.config.perception.profile,
+            ),
+            observer=self._perception_event,
+            profile=self.config.perception.profile,
+            max_objects=self.config.perception.max_objects,
+            screen_source=ScreenFrameSource(capture=self._perception_screen_capture),
+            # No camera backend ships with this build, and the source says so
+            # rather than failing somewhere deeper: a camera request ends as
+            # UNAVAILABLE naming the missing provider.
+            camera_source=CameraFrameSource(),
+        )
         # THE Global Intelligence Layer — the single language brain every
         # entry point consumes before any subsystem sees raw text. It shares
         # the brain's LLM provider (semantic fallback only when deterministic
@@ -1428,6 +1486,28 @@ class NovaControlApplication:
         self.intelligence = GlobalInputIntelligence(
             completion_provider=self.brain.completion_provider,
         )
+        # The perception capabilities are declared on the ONE registry the
+        # orchestrator plans from, with availability probed live from the
+        # engine — so "this machine has no vision model" is the same fact in
+        # the capability table, the status surface and a planned step.
+        register_perception_capabilities(self.intelligence.capabilities, self.perception)
+        # ── Phase 22: world model, memory and state reasoning ──────────────
+        # The perception engine above answers "what is in this frame". This
+        # engine is what makes that answer REMEMBERED: observations reconciled
+        # into entity identities, durable relationships, versions with their
+        # transitions, a bounded history, bounded queries and deterministic
+        # reasoning. It is built ON the layers before it — Phase 21's scenes are
+        # its input, Phase 21's spatial arithmetic decides its relations, the
+        # SAME JsonStateStore persists it, and the SAME capability registry and
+        # resource governor are what it declares and asks. Nothing here loads,
+        # downloads or trains anything, and nothing here decides to act.
+        self.world = self._build_world_model()
+
+        # The world capabilities are declared on the ONE registry the
+        # orchestrator plans from, with availability probed live — so "no world
+        # store is configured" and "no predictive model is wired" are the same
+        # facts in the capability table, the status surface and a planned step.
+        register_world_capabilities(self.intelligence.capabilities, self.world)
         # ── Decision engine (Phase 3) ────────────────────────────────
         # Between understanding and execution: which machinery does this request
         # deserve — a deterministic capability, a subsystem handler, the planner,
@@ -2338,6 +2418,9 @@ class NovaControlApplication:
         self.state_store.write("automation_tasks", self.automation_engine.to_dict())
         self.state_store.write("tasks", self.tasks.to_dict())
         self.state_store.write("settings", self.settings.to_dict())
+        # Phase 22: the world survives a restart — versions, transitions and
+        # observation REFERENCES (never contents), one key per world id.
+        self.world.save()
 
     # -- Global Intelligence Layer --------------------------------------------
 
@@ -3150,6 +3233,106 @@ class NovaControlApplication:
         """
         result = self._last_vision_result
         return result.to_dict() if result is not None else {}
+
+    # ── Phase 21: the perception engine's two seams ──────────────────────
+
+    def _perception_event(self, event_type: str, payload: Mapping[str, Any]) -> None:
+        """Relay one perception event onto the application's ONE event bus.
+
+        The engine announces through an injected seam and never looks the bus up
+        itself, and this is that seam: the type is translated into the build's
+        vocabulary and published with ``_announce_soon``, so a payload that does
+        not match its type's declared fields is caught where the mistake is.
+        An unknown type is dropped rather than guessed at — silence is honest,
+        inventing an event type is not.
+        """
+        try:
+            type_ = EventType(event_type)
+        except ValueError:  # a vocabulary this build does not have
+            return
+        self._announce_soon(type_, **payload)
+
+    # ── Phase 22: the world model's builder and its one seam ────────────
+
+    def _build_world_model(self) -> WorldModelEngine:
+        """The world model, wired to the collaborators this application owns.
+
+        Every collaborator is the one the rest of the build already uses: the
+        shared JSON state store for persistence, the shared governor for any
+        model-backed prediction, and the shared event bus (through
+        ``_world_event``). Prediction is wired to the RULE provider only when a
+        deployment asks for it, and to nothing otherwise — an installation that
+        has not asked for projections gets the honest ``MODEL_UNAVAILABLE``.
+
+        A disabled section returns an engine with NO repository, so the status
+        surface says "no world store is configured" and nothing is written: the
+        switch means "do not remember across restarts", not "do not work".
+        """
+        settings = self.config.world
+        policy = EstimationPolicy.from_mapping(settings.to_mapping())
+        retention = WorldRetentionPolicy.from_mapping(settings.to_mapping())
+        repository = (
+            JsonWorldRepository(self.state_store)
+            if self.state_store is not None and settings.enabled
+            else None
+        )
+        provider = RuleProjectionProvider() if settings.rule_projection else NoPredictionProvider()
+        prediction = PredictionService(
+            provider=provider,
+            gate=PerceptionResourceGate(
+                governor=self.governor,
+                monitor=self.hardware_monitor,
+                model_manager=self.model_manager,
+                profile=self.config.perception.profile,
+            ),
+        )
+        engine = WorldModelEngine(
+            world_id=settings.world_id,
+            observer=self._world_event,
+            policy=policy,
+            retention=retention,
+            repository=repository,
+            gate=None,
+            prediction=prediction,
+            autosave=False,
+        )
+        # Boot restore, reported and never raised: a corrupt or absent store
+        # leaves an empty world, which is the same state a first run has. An
+        # autosave-after-every-ingest would make the cheap path pay a disk write,
+        # so persistence happens on ``persist()`` (shutdown and explicit saves).
+        if settings.enabled and repository is not None:
+            engine.restore()
+        return engine
+
+    def _world_event(self, event_type: str, payload: Mapping[str, Any]) -> None:
+        """Relay one world-model event onto the application's ONE event bus.
+
+        The engine announces through an injected seam, and this is that seam: the
+        type is translated into the build's vocabulary and published with
+        ``_announce_soon``, so a payload that does not match its type's declared
+        fields is caught where the mistake is. An unknown type is dropped rather
+        than guessed at — silence is honest, inventing an event type is not.
+        """
+        try:
+            type_ = EventType(event_type)
+        except ValueError:  # a vocabulary this build does not have
+            return
+        fields = dict(payload)
+        correlation = str(fields.pop("correlation_id", "") or "")
+        self._announce_soon(type_, correlation_id=correlation, **fields)
+
+    async def _perception_screen_capture(self) -> str:
+        """The approval-gated screenshot, adapted to what a frame source wants.
+
+        ``VisionController.capture_screen()`` is the ONE way this build takes a
+        screenshot and it already stands behind the approval gate, so a screen
+        frame is obtained exactly the way the Vision panel's Describe Screen
+        obtains one. This method only turns that envelope into the path a frame
+        source reads; a refusal yields an empty string, and the source reports
+        the missing image rather than a traceback.
+        """
+        captured = await self.vision.capture_screen()
+        return str(captured.get("screenshot", "") or "")
 
     # ── Phase 4: planning, executing and escalating ──────────────────────
 
@@ -8326,6 +8509,15 @@ class NovaControlApplication:
             # answer, which model (if any) would be consulted, and whether the
             # cheap OCR path is tried first.
             "vision_pipeline": dict(self.vision_manager.status()),
+            # Phase 21: what the perception layer is wired to right now — the
+            # capability table with live availability, the budgets in force, and
+            # the identity of the last scene. No frame, no text, no pixels.
+            "perception_pipeline": dict(self.perception.status()),
+            # Phase 22: what the world model holds and can do — versions,
+            # entities, transitions, retention and the honest prediction posture.
+            # Read from objects the engine already owns, so this costs nothing on
+            # a polled path and never probes a model or a disk.
+            "world_model": dict(self.world.status()),
             "phone_bridge": self.phone.status().to_dict(),
             "settings": self.settings.to_dict(),
             # Global Intelligence Layer: interpretation health + the capability

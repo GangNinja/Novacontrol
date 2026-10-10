@@ -1,12 +1,12 @@
 # Project Status
 
-Current phase: **Phase 20 — Agentic Reinforcement Learning**
+Current phase: **Phase 22 — World Model, Memory & State Reasoning**
 
 Status: **Complete**
 
 > The original baseline ended at Phase 15; the staged build that followed it — what
 > it verified, what it changed, and what remains — is recorded below under
-> "Completed Staged-Build Verification (Phases 1–7)" and the Phase 8 … Phase 20
+> "Completed Staged-Build Verification (Phases 1–7)" and the Phase 8 … Phase 22
 > sections that continue it.
 
 Verified with:
@@ -1240,6 +1240,175 @@ directly rather than read off the layer that describes itself.
   already polluted, a state store that could raise out of the application's
   constructor, and an API assertion that measured how loaded the host machine was.
   Each is recorded in [docs/DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md) §49.
+
+## Completed Real-Time Perception & Abstraction (Phase 21)
+
+Phase 21 in one line: it turns a frame — screen, camera, image or frame stream —
+into a **structured, temporally consistent, abstract representation** that a later
+difference can consume, cheaply when the cheap path suffices and honestly when it
+does not. It is built **on** the Phase 6 vision layer rather than beside it: the
+same `VisionManager` answers the deep questions, the same `OcrEngine` chain reads
+text, the same `VisionProvider` boundary decides whether a model can see at all.
+It is reported in [docs/PHASE21_REPORT.md](PHASE21_REPORT.md) and pinned by
+`tests/test_perception.py` (90 tests).
+
+**The pipeline is one shape.** frames → preprocessing → fast perception → VLM
+escalation via Phase 6 → spatial → temporal → structured scene → abstraction →
+confidence/uncertainty, all under `src/novacontrol/perception/` (15 modules). Three
+rules are enforced in code: the fast path (OCR + classical regions) always runs
+first and usually *is* the answer; escalation builds a `VisionRequest` and calls
+the `VisionManager` the application already owns, so there is one place a model is
+asked about an image; and **a refusal is a result** — no vision model, a provider
+that raised, an unreadable frame, a capability switched off — each produces a
+status that names the capability responsible, never SUCCESS because *something*
+happened.
+
+**Honest by construction.** The 8-row capability table classifies `ocr` and
+`tracking`/`relationships`/`temporal`/`abstraction` IMPLEMENTED, `detection` and
+`segmentation` PARTIALLY_IMPLEMENTED (region/text level, no classes), and `vlm`
+PROVIDER_DEPENDENT — live availability on this machine reads `no vision model is
+wired`. `overview()` reports `cuda_required`, `automatic_model_loading`,
+`automatic_model_downloads`, `stores_raw_frames`, `stores_masks`,
+`stores_hidden_reasoning`, `action_execution` and `predicts_future_state` all
+false, and `DEFERRED_PHASES` names Phases 22–26 explicitly.
+
+**Wired into the running application, not beside it.** The engine is constructed
+with the live `VisionManager`, the real resource governor/monitor/model-manager
+gate, the approval-gated screen capture and an event observer; the 8 capabilities
+register on the ONE `CapabilityRegistry` (`category="perception"`);
+`status()["perception_pipeline"]` sits beside `vision_pipeline`; and 8 typed
+events (`perception.started/completed/failed`, `perception.frame`,
+`perception.scene_changed`, `perception.object_appeared/disappeared/moved`) travel
+through the same `_announce_soon` every other publisher uses — payloads carry
+identifiers and measurements, never a frame path, never text.
+
+**Three API routes** (five-place contract, 210 routes total, `docs/API.md`
+regenerated): `POST /perception` (reading only — nothing clicks, types or runs;
+missing source is a 422 naming what to send), `GET /perception/status` (providers,
+budgets, telemetry, the *shape* of the last scene — no path, no text, no pixels)
+and `GET /perception/capabilities` (the classification table with live
+availability). Consumers: the result's accessor surface, Phase 20's agentic loop
+via `perception_observation` (bounded lists, duck-typed `attach_observation`), and
+the event bus.
+
+**Measured on this machine** (no GPU, real OCR chain): text read 409 ms
+(`fast_sufficient`), objects+masks 724 ms with 6 relations, a two-frame 24 px move
+reported as `object_moved: moved 23px right`, screen capture 48 objects/157 lines
+with stages totalling 1.39 s, camera UNAVAILABLE with its reason, describe-without-
+model PARTIAL naming `vlm`, and a 12-frame stream peaking at **3.54 MB** of Python
+heap. Stage latency is reported per stage and `total` sums it.
+
+**Ten defects were found and fixed by driving the implementation against its
+specification** (all pinned by tests, all recorded in
+[docs/PHASE21_REPORT.md](PHASE21_REPORT.md) §26): a still image was read twelve
+times; `frame=` was accepted and ignored; `temporal_context` was dead API surface
+(a fresh look could report bogus disappearances); the sampler's decision was
+recorded but not enforced; per-stage latency was missing; a failed deep path was
+reported as SUCCESS; a deterministic capability's reason implied a provider
+dependency; two mypy errors in the new wiring; one test expectation contradicted
+the tracker's own tolerance; and ruff debt in the new code. No suppressions were
+added and no assertion was weakened.
+
+**Deferred, on purpose** — Phases 22–26, semantic object detection (no ONNX/torch
+detector was added: no heavy dependency, no auto-download), a camera backend,
+class-labelled masks, identity recognition (tracking is spatial), future-state
+prediction, and any action execution (the layer reads; it never clicks, types,
+opens or runs).
+
+## Completed World Model, Memory & State Reasoning (Phase 22)
+
+Phase 22 in one line: it turns Phase 21's perception output into a **structured,
+uncertainty-aware state of the environment** that is updated from observations,
+remembered over time, queried currently and historically, and reasoned about — and
+that says plainly when it cannot predict. It is reported in
+[docs/PHASE22_REPORT.md](PHASE22_REPORT.md) and pinned by
+`tests/test_world_model.py` (254 tests + 28 subtests).
+
+**The pipeline is one shape.** observation normalization (content key, duplicate,
+ordering) → state estimation (identity, attributes, absence, expiration) → world
+state (entities, relationships, conditions, uncertainty) → entity tracking →
+relationship graph → temporal memory → state transitions → change detection → 11
+query kinds → 7 named deterministic reasoning rules → an honest prediction
+boundary, all under `src/novacontrol/world/` (16 modules + `__init__`, 9,121
+lines). Built **on** what exists rather than beside it: the shared `JsonStateStore`
+persists a world (one sanitized key per world), the ONE event bus carries 9 typed
+events through an injected observer seam, the ONE `CapabilityRegistry` holds the 12
+capability rows, Phase 21's own `derive_relationships` decides geometry, and the
+SAME resource governor stands in front of any model-backed prediction.
+
+**Honest by construction.** The 12-row capability table classifies 11 rows
+IMPLEMENTED and `world.prediction` **PROVIDER_DEPENDENT** — live availability reads
+`no predictive provider is wired; this build ships a state store, not a learned
+world model`. `overview()` reports `cuda_required`, `automatic_model_loading`,
+`automatic_model_downloads`, `stores_raw_frames`, `stores_observation_content`,
+`stores_hidden_reasoning`, `exposes_chain_of_thought`, `action_execution`,
+`predicts_future_state`, `predictive_model_available` and `trains_anything` all
+false, with `rule_projection_available` true and Phases 23–26 named in `deferred`.
+The only projection that ships is `RuleProjectionProvider` — a constant-velocity
+extrapolation from two measured versions, labelled `rule_based=True` with
+`confidence=None`, opt-in via `settings.rule_projection`.
+
+**The honesty rules are enforced in code, not promised.** A fact that was not
+observed is never stored as observed (every attribute carries a `FactBasis` and an
+evidence reference); an unmeasured figure is `None`, never 0 (a fresh entity's
+`identity_confidence`, an unprobed availability, an unmeasured latency); absence
+needs a *complete* observation before it means anything; an ambiguous identity stays
+provisional with an `ambiguous_identity` uncertainty row; a stale relation is kept
+and labelled rather than deleted; a historical question is answered `NOT_FOUND`
+with a limitation that says it was **not substituted**; and nothing here acts,
+trains or downloads anything.
+
+**Wiring.** `_build_world_model` constructs the engine with the shared store, the
+Phase 21 gate and (only when `rule_projection` is on) the rule provider;
+`register_world_capabilities` declares 12 rows on the ONE registry;
+`status()["world_model"]` sits beside `perception_pipeline` and the telemetry
+service exposes a **flat, content-light** slice on `/status`; `persist()` saves the
+world and boot restores it; 9 `world.*` event types are declared in
+`EVENT_PAYLOAD_FIELDS`; and five routes (`GET /world/status`, `GET /world/state`,
+`POST /world/observe`, `POST /world/query`, `POST /world/predict`) were added in all
+five contract places — **215 routes = 215 consumers**, `docs/API.md` regenerated and
+in sync.
+
+**Nine defects were found by driving the implementation through its own nine
+workflows and then through an independent audit of every requirement question**
+(report §25, each pinned): `_conditions` counted the previous version's
+entities so `entity_count` was always one version stale; `observation_from_perception`
+raised `UnboundLocalError` for a bare `SceneRepresentation`; a failed look
+(`scene=None`) was rejected as "reports nothing" instead of being recorded as a
+`perception_status` fact; ephemeral conditions could linger, so `EPHEMERAL_CONDITIONS`
+now drops `perception_status` on carry-forward; `_ordering` had the staleness test
+inverted (`age < 0`), flagging a future observation and not an old one;
+`queries._evidence` treated an unresolved subject as "no filter" and returned
+unrelated rows; `observe()` ignored the observation's own `correlation_id`; and the
+audit that followed found two more, both about a cap being reported as something it
+is not — `ingest._bounded` folded entities past the ingest ceiling, facts past the
+fact ceiling and genuinely unreadable rows into ONE counter that `validate`
+rendered as "N unusable entity row(s) dropped" (a caller who sent 300 valid rows
+was told 172 were unusable), and the state ceiling reported nothing when the
+overage was live entities, so a state could hold 480 entities while
+`status()["policy"]["max_entities"]` said 256. Both are fixed — truncated rows are
+counted as truncated and the reason names the ceiling, and the live overage is
+published as `status()["entities_over_ceiling"]` — with two existing expectations
+corrected from the conflation and three new tests pinning the corrected behaviour.
+
+**Measured on this machine** (report §24): 200 entities → `observe()` mean 12.9 ms,
+`query(entities, 200)` 0.31 ms, single-entity 0.009 ms, `reason()` 0.33 ms,
+`changes()` 0.25 ms, rule projection 0.019 ms; 200 entities × 32 retained snapshots
+→ 4.1 MiB tracemalloc peak, 6.0 MiB serialized, 10.2 MB stored and ~118 ms to save
+(snapshots are full states, not deltas — the phase's dominant cost, bounded by
+`max_snapshots`/`max_transitions`/`retention_seconds`).
+
+**Gates on the final tree.** Three-group full regression: **3,666 passed / 12
+skipped / 2,146 subtests, all three groups exit 0** (1,399 + 1,124 + 1,143), run
+after the last source edit. `mypy src` and `mypy src --platform win32` clean over
+365 files; `ruff check src/novacontrol/world tests/test_world_model.py` clean;
+`generate_api_reference.py --check` → `docs/API.md: in sync`; routes == consumers at
+215 = 215 with missing/extra both empty.
+
+**Deferred, on purpose** — Phases 23–26 (interactive learning and exploration
+environments, planning/reasoning/action policy, embodied and game agents,
+generalization/ARC/evaluation), a learned predictive world model, attribute schema
+inference, cross-world queries, delta-encoded snapshots, and any action execution.
 
 ## Next Work
 

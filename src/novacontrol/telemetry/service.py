@@ -156,7 +156,37 @@ class SystemTelemetry:
                 "browser_available": bool(status.get("browser_adapter_available")),
             },
             "phone_bridge": status.get("phone_bridge"),
+            # Phase 22: the world model's COUNTS and its honest prediction posture.
+            # Flat figures read from the status document the call above already
+            # built — no extra probe, no attribute values, no observation bodies.
+            "world_model": _world_summary(status.get("world_model")),
         }
+
+
+def _world_summary(rows: object) -> dict[str, Any]:
+    """The flat, UI-safe slice of the world-model status: counts, never contents.
+
+    A world that has never been observed is reported as absent rather than as an
+    empty object, so a reader can tell "not wired" from "nothing has happened yet".
+    """
+    if not isinstance(rows, dict):
+        return {"available": False, "reason": "the world model is not attached"}
+    memory = rows.get("memory")
+    memory_rows = memory if isinstance(memory, dict) else {}
+    prediction = rows.get("prediction")
+    prediction_rows = prediction if isinstance(prediction, dict) else {}
+    return {
+        "available": True,
+        "observed": bool(rows.get("observed")),
+        "version": int(rows.get("version") or 0),
+        "entities": int(rows.get("entities") or 0),
+        "relationships": int(rows.get("relationships") or 0),
+        "uncertainty": int(rows.get("uncertainty") or 0),
+        "transitions": int(memory_rows.get("transitions") or 0),
+        "snapshots": int(memory_rows.get("snapshots") or 0),
+        "prediction_provider": prediction_rows.get("provider") or "none",
+        "prediction_available": bool(prediction_rows.get("available")),
+    }
 
 
 __all__ = ["DEFAULT_CADENCE_SECONDS", "SystemTelemetry"]

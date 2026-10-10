@@ -56,6 +56,14 @@ The Phase 12 API subsystem provides REST and WebSocket entrypoints through FastA
 - `POST /vision/model/clear`: Remove the configured vision model; element location returns to OCR-only. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /vision/describe`: Capture the screen and describe it (vision model or window probe). *(frontend: web panel `renderGeneric`)*
 - `POST /vision/click`: Vision-locate a labeled element on screen, click it, and verify. *(frontend: web panel `renderGeneric`)*
+- `GET /perception/status`: Perception layer report: providers, budgets, tracking and telemetry (no content). *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /perception/capabilities`: Perception capability classification with live availability on this machine. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /perception`: Perceive an image, frame list, screen or camera into a structured scene (reading only - nothing is executed). *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /world/status`: World model report: versions, entities, policies, retention and the honest prediction posture (no content). *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /world/state`: Bounded, content-light view of the current world state (labels, statuses, boxes - no attribute values). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /world/observe`: Ingest one observation (or a batch) and advance the world state - recording only, nothing is executed. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /world/query`: Answer a bounded structured question about current or historical world state, including evidence, uncertainty and staleness. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /world/predict`: Ask for a future state; reports model_unavailable when no predictive model is wired and never fabricates a prediction. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /intelligence`: Global Intelligence Layer: telemetry, findings, and capabilities. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /capabilities`: Every capability this installation has (declared, tool, action), with its availability, risk, permissions, tools, inputs and outputs. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /capabilities/discover`: What capabilities are available for this task? Query parameters: `query` (required), `intent`, `category`, `tools`, `models`, `include_unavailable`, `limit`. Discovery only - nothing runs. *(frontend: no web panel - API/CLI or infrastructure)*

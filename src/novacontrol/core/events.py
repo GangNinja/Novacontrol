@@ -90,6 +90,34 @@ class EventType(StrEnum):
     KNOWLEDGE_INDEXED = "knowledge.indexed"
     KNOWLEDGE_RETRIEVED = "knowledge.retrieved"
 
+    # -- real-time perception (Phase 21) --------------------------------------
+    # A frame and a scene are ANNOUNCEMENTS, not deliveries: the payloads carry
+    # identity, counts and the measured change, never an image, a path or a text
+    # block — a notification channel is the wrong place for someone's screen.
+    PERCEPTION_STARTED = "perception.started"
+    PERCEPTION_COMPLETED = "perception.completed"
+    PERCEPTION_FAILED = "perception.failed"
+    FRAME_RECEIVED = "perception.frame"
+    SCENE_CHANGED = "perception.scene_changed"
+    OBJECT_APPEARED = "perception.object_appeared"
+    OBJECT_DISAPPEARED = "perception.object_disappeared"
+    OBJECT_MOVED = "perception.object_moved"
+
+    # -- world model and state reasoning (Phase 22) ---------------------------
+    # A state change is an ANNOUNCEMENT: the payload carries ids, kinds and counts,
+    # never an observation body, a frame, a text block or a reasoning trace. The
+    # world id is not in the payload either — an event already knows its publisher,
+    # and a world is a scope rather than a field.
+    WORLD_OBSERVATION_INGESTED = "world.observation_ingested"
+    WORLD_STATE_UPDATED = "world.state_updated"
+    WORLD_TRANSITION_CREATED = "world.transition_created"
+    WORLD_ENTITY_CHANGED = "world.entity_changed"
+    WORLD_RELATIONSHIP_CHANGED = "world.relationship_changed"
+    WORLD_CONFLICT_DETECTED = "world.conflict_detected"
+    WORLD_STATE_RESTORED = "world.state_restored"
+    WORLD_PREDICTION_COMPLETED = "world.prediction_completed"
+    WORLD_PREDICTION_FAILED = "world.prediction_failed"
+
     # -- scheduled work (Phase 13) --------------------------------------------
     # ``automation_id`` is the STABLE id of the scheduled request, and ``run_id``
     # names one execution of it: a watcher that wants the schedule keys on the
@@ -154,12 +182,36 @@ EVENT_PAYLOAD_FIELDS: Mapping[EventType, tuple[str, ...]] = {
     EventType.PLUGIN_DISABLED: ("plugin_id",),
     EventType.PLUGIN_UNLOADED: ("plugin_id",),
     EventType.PLUGIN_FAILED: ("plugin_id", "error"),
+    # The perception vocabulary. ``source_kind`` rather than ``source``: every
+    # event's envelope already carries a ``source`` (the publisher's name), and a
+    # payload field that shadows it could never be set through ``emit``.
+    EventType.PERCEPTION_STARTED: ("mode", "source_kind"),
+    EventType.PERCEPTION_COMPLETED: ("status", "objects", "escalated"),
+    EventType.PERCEPTION_FAILED: ("status", "error"),
+    EventType.FRAME_RECEIVED: ("frame_id", "sequence"),
+    EventType.SCENE_CHANGED: ("scene_id", "changes"),
+    EventType.OBJECT_APPEARED: ("object_id", "label"),
+    EventType.OBJECT_DISAPPEARED: ("object_id", "label"),
+    EventType.OBJECT_MOVED: ("object_id", "label", "distance"),
     # ``sources``/``chunks`` are counts of what one ingest did (an ingest may
     # cover a whole directory); ``source_id`` names the single source it was
     # about. ``status`` carries the IngestReport outcome, so a watcher sees
     # added/updated/unchanged/skipped rather than a bare "something happened".
     EventType.KNOWLEDGE_INDEXED: ("sources", "chunks"),
     EventType.KNOWLEDGE_RETRIEVED: ("query", "hits", "sources"),
+    # The world vocabulary. ``source_kind`` rather than ``source`` for the same
+    # reason the perception vocabulary uses it: the envelope already carries
+    # ``source``. ``entities``/``relationships`` are COUNTS of what moved, not the
+    # records themselves — a notification channel is the wrong place for a state.
+    EventType.WORLD_OBSERVATION_INGESTED: ("observation_id", "source_kind", "entities"),
+    EventType.WORLD_STATE_UPDATED: ("state_id", "version", "entities"),
+    EventType.WORLD_TRANSITION_CREATED: ("transition_id", "kind", "state_id"),
+    EventType.WORLD_ENTITY_CHANGED: ("entity_id", "change"),
+    EventType.WORLD_RELATIONSHIP_CHANGED: ("relationship_id", "kind", "status"),
+    EventType.WORLD_CONFLICT_DETECTED: ("subject", "detail"),
+    EventType.WORLD_STATE_RESTORED: ("state_id", "version"),
+    EventType.WORLD_PREDICTION_COMPLETED: ("status", "provider"),
+    EventType.WORLD_PREDICTION_FAILED: ("status", "error"),
     EventType.AUTOMATION_CREATED: ("automation_id",),
     EventType.AUTOMATION_UPDATED: ("automation_id", "status"),
     EventType.AUTOMATION_CANCELLED: ("automation_id",),

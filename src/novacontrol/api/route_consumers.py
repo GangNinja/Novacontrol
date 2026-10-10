@@ -87,6 +87,17 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("POST", "/vision/model/clear"): "no-render",  # vision model card remove button; refreshes card
     ("POST", "/vision/describe"): "renderGeneric",  # Vision panel Describe Screen
     ("POST", "/vision/click"): "renderGeneric",  # Vision panel guided click
+    # Phase 21 has no panel of its own yet: these are the API/CLI surfaces for the
+    # perception layer, and claiming a renderer here would put a control in the
+    # contract that does not exist (the same reasoning as POST /plan/run).
+    ("GET", "/perception/status"): "no-render",  # operator surface: providers + telemetry
+    ("GET", "/perception/capabilities"): "no-render",  # capability classification
+    ("POST", "/perception"): "no-render",  # structured scene for API callers; reading only
+    ("GET", "/world/status"): "no-render",  # operator surface: versions + retention
+    ("GET", "/world/state"): "no-render",  # state inspection, read-only, no panel yet
+    ("POST", "/world/observe"): "no-render",  # ingest for API callers; recording only
+    ("POST", "/world/query"): "no-render",  # structured state query for API callers
+    ("POST", "/world/predict"): "no-render",  # prediction boundary; often unavailable
     ("GET", "/intelligence"): "no-render",  # GIL telemetry (API/CLI surface; surfaced via /status)
     ("GET", "/capabilities"): "no-render",  # capability browser for API/CLI callers
     ("GET", "/capabilities/discover"): "no-render",  # 9.3: answers a question, runs nothing
