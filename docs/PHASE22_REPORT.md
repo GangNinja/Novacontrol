@@ -715,9 +715,11 @@ by `max_snapshots`/`max_transitions`/`retention_seconds` (§26).
 
 ## 25. Failures Discovered and Fixed
 
-Nine real defects were found by writing the workflows, the source-conversion tests
-and an independent audit that drove every requirement question through the public
-surface, fixed in the source, and pinned by new tests:
+Ten real defects were found by writing the workflows, the source-conversion tests,
+an independent audit that drove every requirement question through the public
+surface, and finally by CI — the only thing that could have found the tenth, since
+it does not exist on the platform this suite was written on. Each was fixed in the
+source and pinned by new tests:
 
 1. **`estimation.py::_conditions` counted the wrong entity list.** It counted
    `previous.entities`, so the `entity_count` condition was always one version
@@ -764,6 +766,24 @@ surface, fixed in the source, and pinned by new tests:
    stamped on the state as `metadata["entities_over_ceiling"]` and published as
    `status()["entities_over_ceiling"]`, so the declared ceiling and the count
    beside it can never contradict each other silently.
+10. **The shared state store raised out of its own constructor for a root that
+    cannot be created — on Linux only, and only CI could see it.**
+    `persistence/json_store.py` documents that it must never raise into the work
+    that produced a snapshot, because `NovaControlApplication` builds it while
+    starting; its reads and writes were guarded accordingly, and its `mkdir` was
+    not. So `JsonStateStore("/definitely/not/a/directory")` raised
+    `PermissionError` out of the call on Linux, while on Windows that same
+    absolute path silently *became* a real directory — the world-model test that
+    used it as its "unreadable store" therefore passed locally, exercised nothing
+    on Windows, and wrote a snapshot outside the repo (`C:\definitely\not\a\directory`).
+    The constructor now degrades like every other door (an uncreatable root reads
+    as "nothing was stored yet" and drops its snapshots), staging a write is inside
+    the same guard, and the test names a root that cannot exist on *either*
+    platform — its parent is a regular file, so the refusal is a
+    `NotADirectoryError` in both. Both new pins were mutation-checked against the
+    unguarded constructor. This is the defect the local suite structurally could
+    not find: 3,669 green tests on two Windows interpreters and both mypy views,
+    against one Linux run that found it in its first four minutes.
 
 ## 26. Known Limitations
 
@@ -854,9 +874,23 @@ lesson is that a parallel sweep re-runs resource-sensitive slices alone.
 | CI check | Status here |
 | --- | --- |
 | `test` (py3.13) — `python -m pytest tests/ -q` | **Verified** — the 14-slice full-suite run above; this machine's interpreter is 3.13.0 |
-| `test` (py3.12) | **Not locally verifiable** — no 3.12 interpreter on this machine (`py -0` lists only 3.13 and 3.10; no `/c/Python312`). The leg runs the identical command as the 3.13 leg, and the sources are 3.12-compatible by syntax (`requires-python = ">=3.12"`; the only construct an older interpreter rejects is a PEP 701 f-string backslash, which 3.12 introduced). Runtime differences are *not* covered by that argument, and are reported as unverified. |
+| `test` (py3.12) | **Verified on the platform itself** — no 3.12 is installed on this machine (`py -0` lists only 3.13 and 3.10), so this leg was reproduced on **Linux through WSL** with Python **3.12.3** and the same command: the suites that failed in CI are **260 passed** there. It was reported as unverified before CI ran, and run #25 showed exactly why that mattered (§25.10). |
 | `docs-sync` — `generate_api_reference.py --check` | **Verified** — `docs/API.md: in sync` (exit 0) |
 | `typecheck` — `mypy src` and `mypy src --platform win32` | **Verified** — `Success: no issues found in 365 source files` (both, exit 0) |
+
+**CI itself, which is the check that decides it** — `.github/workflows/ci.yml`, four
+jobs, on the pushed commits:
+
+| Run | Commit | Result |
+| --- | --- | --- |
+| #25 | `19d18ae` (Phases 21–22) | **FAILED** — both `Test` jobs, on `StoreTests::test_an_unreadable_store_reads_as_nothing`, the `PermissionError` of §25.10. `docs-sync` and `typecheck` passed. |
+| #26 | `0089e89` (the §25.10 fix) | **All four jobs success** — `Test (py3.12)`, `Test (py3.13)`, `API reference in sync`, `Type check`. |
+
+Run #25 is the honest answer to "did the suite pass?": the 14-slice Windows sweep,
+both mypy views, the docs check and 260 focused tests were all green, and one Linux
+run found a real defect in its first four minutes. The local numbers above are what
+they are — evidence, not proof — and the CI result is what this phase's claims rest
+on.
 
 For continuity, the three-group sweep this audit began with — it ran on the tree as
 it stood *before* the §25.8–9 fixes, which is why the slice run above supersedes it:
@@ -942,9 +976,9 @@ each is classified honestly:
 | — | **UNAVAILABLE: none** | No world capability is unavailable on this machine — the layer is pure computation plus the shared store. |
 | Phases 23–26 | **DEFERRED** | Named in `overview()["deferred"]` and `DEFERRED_PHASES`; not started. |
 
-The nine defects in §25 were real failures surfaced by real workflows and by an
-independent audit of every requirement question, and each was fixed in the source —
-not worked around in tests. Two existing expectations were corrected because they
+The ten defects in §25 were real failures surfaced by real workflows, by an
+independent audit of every requirement question, and — for the last one — by CI,
+and each was fixed in the source — not worked around in tests. Two existing expectations were corrected because they
 had pinned a defect (a ceiling reported as "unusable" rows); the replacements assert
 both counters and the reason text, so they are stronger than what they replaced.
 
@@ -954,9 +988,10 @@ On the final, fixed tree the **whole suite is green — 3,669 passed, 0 failed,
 post-fix targeted suites are **207 passed / 563 subtests** and the application suite
 **32 passed / 12 subtests**, both mypy views are clean over **365 files**, ruff is
 clean over the new package and its tests, the API reference is in sync, and the
-route/consumer contract holds at **215 = 215**. Of the four CI checks, three are
-verified locally and the `test` (py3.12) leg could not be — no 3.12 interpreter is
-installed on this machine; §28 says so plainly rather than implying otherwise.
+route/consumer contract holds at **215 = 215**. All four CI checks are green on the
+pushed tree (**run #26**), after **run #25** found a tenth defect on Linux that the
+local suite structurally could not see (§25.10) — which is why the CI result, and
+not the local one, is the claim this report stands on.
 
 What Phase 22 delivers is exactly what it scoped: **a reliable, bounded,
 uncertainty-aware state-and-memory foundation**, with the prediction boundary honest

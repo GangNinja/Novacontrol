@@ -3934,8 +3934,9 @@ a stale relation is kept and labelled, never deleted; a historical question retu
 projection that ships is `RuleProjectionProvider`, labelled `rule_based=True` with
 `confidence=None` and opt-in via `settings.rule_projection`.
 
-**Nine real defects were caught by driving the implementation through its own nine
-workflows and then through an independent audit of every requirement question**
+**Ten real defects were caught by driving the implementation through its own nine
+workflows, through an independent audit of every requirement question, and — the
+tenth — by CI, which is the only place it could be caught**
 (report §25, each fixed in the source and pinned by a new test):
 `estimation._conditions` counted `previous.entities`, so the `entity_count`
 condition was always one version stale; `ingest.observation_from_perception` raised
@@ -3967,6 +3968,20 @@ is now stamped on the state and published as `status()["entities_over_ceiling"]`
 Two existing test expectations that had encoded the conflation were corrected
 (they asserted `dropped_entities` for truncated rows and dropped facts), and both
 new behaviours are pinned.
+
+**The tenth came from CI, on the platform this suite is not written on.** Run #25
+went red on both test jobs: `JsonStateStore("/definitely/not/a/directory")` — the
+world model's "unreadable store" — raised `PermissionError` out of the store's
+**constructor** on Linux. Reads and writes were guarded; `mkdir` was not, so the one
+door the class's own docstring forbids being open was open. Windows had hidden it
+completely: that same absolute path silently became a real directory there, so the
+test passed locally, exercised nothing, and wrote a snapshot into
+`C:\definitely\not\a\directory`. The constructor now degrades like every other door,
+staging a write moved inside the same guard, and the test names a root that cannot
+exist on either platform (its parent is a regular file). Both pins were
+mutation-checked against the unguarded constructor. Run #26 is green in all four
+jobs; the whole-suite numbers below were green *before* that fix and are kept as
+what they are — evidence, not proof.
 
 **Measured on this machine** (report §24, Windows 11 / Python 3.13): 200 entities →
 `observe()` mean 12.9 ms (10 entities 2.37 ms, 50 entities 8.06 ms),

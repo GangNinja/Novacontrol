@@ -1369,9 +1369,9 @@ world and boot restores it; 9 `world.*` event types are declared in
 five contract places — **215 routes = 215 consumers**, `docs/API.md` regenerated and
 in sync.
 
-**Nine defects were found by driving the implementation through its own nine
-workflows and then through an independent audit of every requirement question**
-(report §25, each pinned): `_conditions` counted the previous version's
+**Ten defects were found by driving the implementation through its own nine
+workflows, through an independent audit of every requirement question, and — the
+last one — by CI on Linux** (report §25, each pinned): `_conditions` counted the previous version's
 entities so `entity_count` was always one version stale; `observation_from_perception`
 raised `UnboundLocalError` for a bare `SceneRepresentation`; a failed look
 (`scene=None`) was rejected as "reports nothing" instead of being recorded as a
@@ -1390,6 +1390,15 @@ overage was live entities, so a state could hold 480 entities while
 counted as truncated and the reason names the ceiling, and the live overage is
 published as `status()["entities_over_ceiling"]` — with two existing expectations
 corrected from the conflation and three new tests pinning the corrected behaviour.
+The tenth was found the only way it could be: CI run #25 went red on both test jobs
+because the shared `persistence/json_store.py` called `mkdir` in its **constructor**
+unguarded, so `JsonStateStore("/definitely/not/a/directory")` raised
+`PermissionError` on Linux while Windows silently created that directory — and the
+world model's own "unreadable store" test wrote a snapshot into it, outside the
+repo, without exercising the case it named. The constructor now degrades like the
+reads and writes beside it, and the test names a root that cannot exist on either
+platform (its parent is a regular file). Both pins were mutation-checked against the
+unguarded constructor, and CI run #26 on the fixed commit is green in all four jobs.
 
 **Measured on this machine** (report §24): 200 entities → `observe()` mean 12.9 ms,
 `query(entities, 200)` 0.31 ms, single-entity 0.009 ms, `reason()` 0.33 ms,
