@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import unittest
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
@@ -2583,9 +2584,21 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(len(restarted.state().find("laptop")), 1)
 
     def test_an_unreadable_store_reads_as_nothing(self) -> None:
-        repo = JsonWorldRepository(JsonStateStore("/definitely/not/a/directory"))
-        self.assertEqual(repo.load("default"), {})
-        self.assertTrue(repo.clear("default"))
+        # A root that cannot exist on EITHER platform: its parent is a regular file,
+        # so creating the store's directory is refused (``NotADirectoryError`` on
+        # Linux, a ``FileNotFoundError``/``NotADirectoryError`` on Windows). The
+        # absolute path this used to name was host-dependent and hid the defect
+        # twice over: Linux could not create it at all (CI went red, in the
+        # constructor), while Windows quietly created ``C:\definitely\not\a\directory``
+        # and wrote a snapshot into it — so the case it claimed to pin only ran on
+        # one of the two platforms.
+        with TemporaryDirectory() as directory:
+            blocker = Path(directory) / "blocker"
+            blocker.write_text("not a directory", encoding="utf-8")
+            repo = JsonWorldRepository(JsonStateStore(blocker / "store"))
+
+            self.assertEqual(repo.load("default"), {})
+            self.assertTrue(repo.clear("default"))
 
     def test_two_worlds_never_share_a_payload(self) -> None:
         with TemporaryDirectory() as directory:

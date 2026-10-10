@@ -64,6 +64,23 @@ class StateStoreRobustnessTests(unittest.IsolatedAsyncioTestCase):
             # mistake for state.
             self.assertEqual([path.name for path in root.iterdir()], ["demo.json"])
 
+    def test_a_root_that_cannot_be_created_is_not_a_failed_boot(self) -> None:
+        """A root the filesystem refuses is "no state yet", never a raise.
+
+        This is the shape CI caught: the constructor used to call ``mkdir``
+        unguarded, so a root that cannot be created (its parent is a file here)
+        raised out of ``JsonStateStore(...)`` on Linux, while Windows silently
+        created the directory and hid it.
+        """
+        with TemporaryDirectory() as temp_dir:
+            blocker = Path(temp_dir) / "blocker"
+            blocker.write_text("not a directory", encoding="utf-8")
+            store = JsonStateStore(blocker / "nested")
+
+            self.assertEqual(store.read("demo"), {})
+            store.write("demo", {"value": 1})  # must not raise into the caller
+            self.assertEqual(store.read("demo"), {})
+
     async def test_an_empty_snapshot_does_not_stop_the_application_booting(self) -> None:
         with TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)

@@ -43,11 +43,24 @@ class JsonStateStore:
       virus scanner). The previous in-place write is then used instead: the
       forgiving read above is what makes that safe, and a raise here would fail
       the work that merely wanted to record that it happened.
+    * **An unusable root degrades, it does not raise.** A root that no filesystem
+      will create — a read-only or missing parent, or a path that is not a
+      directory — leaves a store that reads as "nothing was stored yet" and drops
+      its snapshots. The constructor is on that same rule because the application
+      builds the store while it is starting.
     """
 
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
-        self.root.mkdir(parents=True, exist_ok=True)
+        # Creating the root is a convenience, never a precondition. This call is
+        # where the rule above was broken: on Linux a root like
+        # ``/definitely/not/a/directory`` cannot be created and the constructor
+        # raised out into its caller, while on Windows that exact path silently
+        # became a real directory, so the call looked safe everywhere it was
+        # exercised. Reads and writes below were already guarded; this was the one
+        # door left open.
+        with contextlib.suppress(OSError):
+            self.root.mkdir(parents=True, exist_ok=True)
 
     def read(self, name: str) -> dict[str, Any]:
         path = self.root / f"{name}.json"
@@ -68,10 +81,16 @@ class JsonStateStore:
         path = self.root / f"{name}.json"
         text = json.dumps(payload, indent=2, sort_keys=True, default=str)
         # A unique staging name, so two writers never share one file: a fixed
-        # ``name.json.tmp`` was the thing another process could hold open.
-        handle, staged = tempfile.mkstemp(
-            dir=str(self.root), prefix=f"{name}-", suffix=".tmp"
-        )
+        # ``name.json.tmp`` was the thing another process could hold open. Staging
+        # needs a root that exists and accepts writes, so it is inside the guard
+        # too: a store whose root is unusable drops the snapshot instead of raising
+        # at the work that merely wanted to record that it happened.
+        try:
+            handle, staged = tempfile.mkstemp(
+                dir=str(self.root), prefix=f"{name}-", suffix=".tmp"
+            )
+        except OSError:
+            return
         temporary = Path(staged)
         try:
             with os.fdopen(handle, "w", encoding="utf-8") as stream:
