@@ -4025,3 +4025,465 @@ recording: the benchmark's JSON persistence section had to be written against th
 real `JsonStateStore` (a directory root, then `world_<id>.json`) rather than a
 path-shaped repository, because the store's own forgiving-read contract is what the
 repository wraps.
+
+## 53. Phase 23 — Interactive Learning & Exploration
+
+Phase 23 gives NovaControl a **controlled way to learn from its own experience**:
+a bounded question becomes a bounded experiment, the outcome is compared with what
+was expected, and the answer is kept only when the evidence supports it.
+`src/novacontrol/interactive/` (16 Python files including `__init__.py`, 9,414 lines in the current tree) owns the whole
+shape: objective → hypothesis → candidate experiment → safety/budget gate →
+bounded action → observation → comparison → knowledge update → evaluation → next
+experiment, with `ObjectiveStatus`/`HypothesisStatus`/`ExperimentStatus`/
+`RuleStatus`/`PredictionBasis`/`ConfidenceKind`/`EvidenceRole`×`EvidenceKind`
+making every distinction the phase asks for a value rather than a convention. Only
+`completed` means an experiment ran; a rejected, blocked, timed-out, cancelled or
+interrupted one is a different state, and `interactive.model_training` is DEFERRED
+by design (this phase never trains, downloads or acts outside a registered
+environment).
+
+Built **on** what exists rather than beside it: `JsonLearningRepository` wraps the
+SAME `JsonStateStore` (one sanitized key per objective); 15 typed `learning.*`
+events are declared in `EVENT_PAYLOAD_FIELDS` and published through an injected
+observer seam that the application relays with `_announce_soon`; the 12 capability
+rows register on the ONE `CapabilityRegistry` (8 IMPLEMENTED, `interactive.prediction`
+and `interactive.real_environment_actions` PROVIDER_DEPENDENT,
+`interactive.world_observation` PARTIAL, `interactive.model_training` DEFERRED);
+the Phase 8 permission/risk layer is what the `SafetyGate` asks about real actions
+and a real action with no layer wired is REFUSED, not assumed allowed; every ceiling
+is a policy from the new `learning:` config section (23 fields, six hard maxima);
+and Phase 22's world state is read through a `WorldStateEnvironment` that exposes
+**no action at all**. Wiring: `_build_interactive_learning` + `self.learning` +
+`register_learning_capabilities`, `status()["interactive_learning"]` (with the boot
+restore report), `save()` on stop, 16 thin `learning_*` application methods, and 16
+routes added in all five contract places — **231 routes = 231 consumers**,
+`docs/API.md` regenerated and in sync. No CLI command and no frontend panel were
+added; the routes are declared `no-render` in the consumer registry rather than
+implying a control that does not exist.
+
+**Honesty is enforced in code, not promised.** No hypothesis is invented (candidate
+explanations come from the environment's declared space — a device that declares
+nothing stops `unjustified`); no prediction is fabricated (with no declared rule, no
+learned rule and no bridge the run is `basis: unavailable` and the comparison is
+`unable_to_evaluate` — a prediction that was not available is not a wrong one and is
+NOT scored); one successful experiment never establishes a rule (promotion needs
+`support_threshold` = 3 independent supporting observations and fewer than
+`contradiction_threshold` = 2 contradicting ones, and the refusal is recorded as a
+`NO_CHANGE` update naming the counts); repeated observations from one source are not
+independent evidence; contradictory evidence is counted and kept on the hypothesis
+and the rule; confidence is labelled `heuristic`/`stated`/`insufficient_evidence`
+and an unmeasured figure is `None`; a partial observation cannot confirm absence; and
+every report and metric repeats that the shipped environments are **simulators**.
+
+**Nine real defects were found by building, testing and re-testing the phase** and
+each is pinned by a test or by the workflow that found it (report §13): independent
+support never accumulated (the count is now recomputed from the evidence references
+rather than incremented per update, so a rule can actually reach its threshold); two
+hand-written field copies silently dropped any field added to the model (both now go
+through `with_updates`/`replace()`); the manager and the package each assembled a
+capability table and the prediction probe recursed through `status()` (there is now
+ONE `CAPABILITY_TABLE` whose probe reads the manager's own records); a preview
+before any run showed nothing (it now builds the hypotheses the cycle WOULD propose,
+labels them `dry_run`, and still executes and records nothing); and refusals were
+invisible in the run response (the refused experiments, with their reasons, now
+travel with the report). The last four came from driving a REAL uvicorn server
+rather than the in-process test client: a restart came back with `rules: 0` because
+`restore()` had an early branch that restored achieved/stopped objectives as bare
+summaries — dropping their rules, evidence, hypotheses and runs — and because each
+payload's whole rule book was ASSIGNED rather than merged, so a payload written
+before a later rule erased it (both fixed: every objective's record restores in
+full, and `RuleBook.absorb()` merges by id with the higher version winning and
+updates deduplicated). Also fixed: `timed_out` was set for the whole retry loop, so
+an earlier timeout could label a later ordinary failure as a timeout (the final
+attempt now decides); and the destructive refusal's reason now says that a
+destructive action is never approved, so a caller does not go looking for a consent
+flow that cannot exist. One harness defect: the workflow tests read the event bus
+synchronously while announcements are scheduled on the loop, so event assertions
+raced between runs (different tests failed on different runs) — `_action_events()`
+now waits, bounded, for the history to stop growing: a slow event is waited for, a
+missing one still fails. Three consecutive runs of the file are green. The other
+harness defect came from the FULL suite rather than the file: 7 `test_training.py`
+failures, all the live application's training estimate reading THIS machine's free
+memory — late in a long single-process sweep the reading flipped to unsafe and runs
+that should start were refused. Those tests now pin the machine reading at 32 GB
+(`_pin_training_machine_reading`); the resource verdict keeps its own tests with
+explicit hardware readings, and the final full run is green with the pin in place.
+Housekeeping: the phase's own files are ruff-clean (46 issues fixed — long lines,
+unused imports, a needless comprehension, `TypeVar` → a PEP 695 parameter, and the
+two runtime cleanups above).
+
+**Measured on this machine** (report §12, Windows 11 / Python 3.13): learning an
+unknown transition (3 independent experiments) 2.05 ms; one decisive experiment
+between competing hypotheses 0.88 ms; a contradicted rule's failed prediction
+0.77 ms; a partial observation's two inconclusive experiments 1.05 ms; a device that
+declares nothing stops with 0 experiments in 0.12 ms; and after one rule is learned,
+**200 new questions were answered with 0 experiments at 0.258 ms each**. The
+transfer check reports `agreed: 1` of 2 caller-supplied cases (the mismatch is named
+as a mismatch), `improvement: 1 → 0` experiments, with the "this build cannot verify
+the cases were held out" limitation attached.
+
+**Gates.** `python -m pytest tests/ -q` → **3,696 passed, 12 skipped, 2,178
+subtests, exit 0** (one run, 8:50, after the last edit); `mypy src` and
+`mypy src --platform win32` clean over 381 files;
+`ruff check src/novacontrol/interactive tests/test_interactive_learning_workflows.py`
+clean; `generate_api_reference.py --check` → `docs/API.md: in sync`; routes ==
+consumers at 231 = 231 with missing/extra both empty. `tests/test_interactive_learning_workflows.py`
+drives workflows A–K through the REAL `create_app()` application (26 tests), and a
+real uvicorn server on `127.0.0.1:8001` passed a 17/17 scripted HTTP workflow plus a
+restart that restored 4 objectives and the learned rule and answered a new question
+with 0 experiments.
+
+**Two operational lessons.** (1) An in-process test client and a real server are not
+the same witness: the restart defects above were invisible to TestClient tests that
+restarted the application through the same fixture but only asserted the objective
+list — the live server, with its own data directory and lifecycle, is what showed
+the learned rule was gone. (2) A scratch directory is still the right place for
+measurement scripts and smoke logs, and it must be deleted before finishing; the
+smoke server runs from inside it so its `data/` directory never touches the repo.
+
+## 54. Phase 24 — Planning, Reasoning & Action Policy
+
+Phase 24 is the layer between "the user said something" and "something happened".
+Before it, NovaControl could compile a goal into a plan and run steps; what it could
+not do was decide between several plans, refuse one on evidence, re-check a step's
+premises immediately before running it, or tell "the steps finished" apart from "the
+goal is done". All four now exist, and the whole flow is one pipeline:
+
+ground → decompose → candidate plans (two planners) → precondition and safety checks →
+outcome estimation → selection → bounded execution through the SAME executor →
+verification → reassessment → `completed | blocked | denied | failed | partial |
+needs_observation`.
+
+**Nine new modules, no second anything.** `planning/` gained `goals` (contracts and
+the seven `IssueKind` validations), `grounding` (Phase 22 read-only), `candidates`
+(`BaselineOrderPlanner` + a bounded `CostAwarePlanner`), `ranking` (the documented
+selection method), `estimation` (four `EstimateBasis` values), `policy` (exclusions and
+approval conditions over the Phase 8 permission layer), `monitor` (revalidation,
+observation-vs-prediction, completion, replan decision), `goal_manager` (the
+orchestrator) and `capabilities` (20 declared rows). Steps still run on
+`application.workflow_executor`, results are still checked by Phase 8's
+`VerificationEngine`, and the only shared file touched was `planning/models.py` — where
+one property was *wrong*, see below.
+
+**The honesty rules are the feature, not the commentary.** A field the caller did not
+state stays empty; a success condition with no expected value is not measurable and
+answers `None` rather than `False`; an asserted initial state is `basis=caller_assertion`,
+never an observation; a stale or conflicting fact is deliberately not offered to a
+precondition; unknown state produces `needs_observation` instead of an attempt; an
+unmeasurable goal is refused with the reason; every estimate names its basis
+(`world_model` → scoped `learned_rule` → `rule_based` declaration → `unavailable`) with
+`confidence=None` when nothing measured it; a retired or out-of-scope Phase 23 rule is
+never borrowed; a truncated beam says `truncated=true`; an infeasible candidate is never
+selected for execution; a plan with no steps is the skip path and not a refusal; and
+completion requires the goal's own conditions to be **observed** holding — a run whose
+condition nobody observed reports `needs_observation` with `verified=false`, which is
+exactly what the live probe saw on its first run.
+
+**Six defects, each fixed at the cause.** (1) `StepOutcome.executed` was `status not in
+(SKIPPED, BLOCKED)`, so a `DENIED` step — one the approval layer refused, therefore one
+that never ran — counted as an execution: a plan whose only step was refused reported
+`executed=True` while its own summary said it did not run. That is in *shared Phase 4
+code*, and the fix is one property. (2) The fresh-state gate's first version kept the
+set of facts produced so far in the closure and assigned to it from the nested handler
+without `nonlocal` — a real `UnboundLocalError` on the first step, which would have
+failed every gated run; it now reads the executor's own `StepContext.outputs` plus each
+finished step's declared effects. (3) A step refused by the gate was reported
+`needs_observation` ("go and look") because `_status_for` fell through to the completion
+check; the gate's verdict now outranks it and the run is `blocked` with the gate's
+reason leading. (4) `restore()` recorded whole stored payloads — the user's request
+text included — into the map `GoalManager.status()` publishes, while that method's
+Docstring promises a *bounded, content-light* summary; it is now a bounded row
+(`goal_id`, status, whether a decomposition came back, condition count, and
+`previously_selected`), which also makes the previously chosen candidate id readable
+instead of written and ignored. (5) A run that finished past its stated seconds budget
+reported `completed`: the clock was only asked before each step, so a single-step plan
+could overrun its entire budget and still read as “inside its limits”. `execute()` now
+asks once more after the last step and labels the breach
+`budget_exhausted`/`deadline_exceeded`, leaving `verified` to the completion check.
+(6) Every non-proceed revalidation was stamped `kind: "state"`, so a precondition the
+state could not *settle* was reported `blocked` (a refusal) rather than
+`needs_observation` (go and look); the stop now carries the gate's own verdict. Both
+were found by a final verification pass that re-read the phase against its own
+objectives, and both are pinned by `RunLimitTests` in `tests/test_goal_planning.py`
+(90 tests now, up from 87) plus benchmark scenario M.
+
+**Measured on this machine.** `scripts/benchmark_planning.py` — 13 deterministic
+scenarios (A–M, 14 legs; the approval scenario is played both ways), each checking its
+own expectation, all passing with exit 0: **28 candidates compared, 64 search
+expansions, 7 step revalidations, planning mean 0.25 ms / max 0.625 ms**, and **20 of
+20 estimates labelled `rule_based`** — with no predictor and no learned rule wired, every
+estimate is a declaration, which is what the estimator is supposed to say. The benchmark
+was mutation-tested before it was trusted, and again on the audit's fixes: restoring the
+old refusal branch of `_status_for` made scenario G fail (`a contradicted precondition
+must block the run, got completed`) and disabling the post-run clock check made scenario
+M fail (`a run past its stated budget must say so, got completed`); each made the script
+exit 1 and each revert was verified byte-identical (the last by sha256).
+
+**Gates.** `tests/test_goal_planning.py` **90 passed** (contracts plus workflows A–L
+through the real `create_app()` surface, plus the audit's 3 run-limit pins);
+planning/reliability/persistence/world **372 passed + 50 subtests**;
+application/API/reference-sync **40 passed + 250 subtests**;
+config/events/route-shape/web **133 passed + 124 subtests**; benchmark **14/14 with
+exit 0**; full regression in four disjoint slices measured during the phase build, **3,789 passed, 0 failed, 12 skipped, 2,192
+subtests, all four exit 0** — the 12 skips are all `playwright not installed`,
+confirmed with `-rs`; `mypy src` and
+`mypy src --platform win32` clean over 390 files; `generate_api_reference.py --check` →
+`docs/API.md: in sync`; `dead_code_hunt.py planning` finds nothing from this phase.
+**238 routes = 238 consumers** (7 planning routes added in all five contract places),
+8 new `goal.*` event types with declared payload fields, and a `goal_planning:` config
+section with 13 settings (`allow_destructive` defaults to false).
+
+**Live, not asserted.** A real uvicorn server on `127.0.0.1:8001`, started from an
+isolated working directory so its `data/` never touches the repo, passed a **30/30**
+scripted HTTP workflow: plan (which ran nothing) → a run that refused to claim
+completion while nothing had observed the condition → `POST /world/observe` →
+`completed` and verified with no unverified step → reassessment showing
+`should_replan: false`. Stopping and restarting the server restored **3 goals with 0
+skipped**, keeping each goal's status, request, conditions and decomposition while
+correctly restoring **no plan** — a plan is a decision made against state a new process
+never observed, so the record reports what was chosen (`previously_selected`) without
+adopting it.
+
+**Deferred, on purpose** — Phases 25–26 (declared as the two `future` capability rows
+`planning.game_agent` and `planning.generalization`), a learned predictive model
+(`planning.prediction` is provider-dependent), a web panel and a CLI command for goal
+planning, and any claim that a plan is a success. CI is the one acceptance item reported
+as unverified rather than passed: the verification above is local, and this repository
+has been broken before by a defect only Linux CI could see.
+
+## 55. Phase 25 — Embodied / Game Agent
+
+Phase 25 is the phase where NovaControl stops only acting *on* this machine and starts
+acting *inside* something that answers back. The loop is the point:
+
+observe → interpret → update the world model → identify the objective → select an action
+through Phase 24 → check preconditions and safety → execute through the ONE input door →
+observe the result → verify → update memory and trajectory → recover or replan →
+`completed | budget_exhausted | environment_failed | agent_error | denied | stuck |
+cancelled | interrupted`.
+
+**Nine modules, no second anything.** `embodied/` gained `models` (the contracts),
+`environment` (the adapter protocol and a registry that refuses by NAME), `simulation`
+(the owned grid world, seven named scenarios, four named faults), `perception` (facts
+with provenance, `effect_observed`), `tactical` (the choice and the Phase 24 tasks it
+becomes), `agent` (the loop), `manager` (the session registry and the ONE door),
+`capabilities` (18 declared rows) and `__init__` (`overview()`, the lifecycle tables).
+An environment input is an `environment_input` plan action: Phase 24's `GoalManager`
+chooses and authorizes it, the application's own executor runs it, Phase 22's world model
+receives each reading as an observed fact, the SAME `self.risk` layer decides what it may
+do, the SAME `AutomationAuditLog` the device controllers write to records it, the ONE bus
+carries 13 typed events, and the shared `JsonStateStore` holds the sessions.
+
+**A simulation was the right environment, and the faults are the proof.** The grid world
+is small on purpose: every failure the loop must handle can be produced on demand.
+`drifting` makes a move land somewhere it was not told to go, `refusing` makes the
+controller refuse the first two inputs, `frozen` stops the environment answering,
+`timing-out` makes an input never report back, and `fogged` returns unlabeled regions and
+no state at all. The agent completes the first two by noticing, recovers from the third
+without sending anything, and reports `stuck` on the last rather than navigating a guess.
+
+**Eleven defects, seven of them found by driving rather than reading.** (1)
+`pause`/`resume`/`cancel` built a new session state and returned it **without recording
+it**, so a pause was cosmetic — the door still saw a live session and would send an input
+— a cancelled session kept its live slot, and the status was lost on restart. (2) Fixing
+that exposed the deeper one: the loop *does* revalidate a resumed session, but only in its
+own copy, while the input door reads the registry — so every input of a resumed session was
+refused and the session reported `stuck` with "a required action was not authorized". An
+`on_state` seam now mirrors the loop's transitions into the registry, keeping the door's
+own counters authoritative. (3) `Evaluation.actions_rejected` was a permanent zero while
+two refused inputs were counted as *failures* — the same action described wrongly, with
+the retry path invisible; the door now tells the loop how many inputs the environment
+refused. (4) The audit seam asked the injected object for `append`, which the
+application's `AuditLogger` does not have, so it silently no-opped **while `overview()`
+claimed every input was written to the shared automation audit trail** — the manager now
+takes an `AutomationAuditLog` (in memory by default, exactly like the device controllers)
+and appends one `EmbodiedActionResult` per input, whatever the ending. (5) The action
+budget was checked against a count synced inside the previous cycle, so a **2-input budget
+sent three inputs and then reported two**; the count now comes from the door before each
+decision — and the benchmark, not a code review, is what caught it. (6) Two declarations
+contradicted reality: a second, never-called 7-row capability table in the manager
+(deleted), and Phase 24's `planning.game_agent` "FUTURE" row still saying "Phase 25 owns
+it" while Phase 25 now ships `embodied.*` rows on the same registry — one thing reported
+as both "not built" and "available". (7) A two-boot restart run found the one an in-process
+test structurally cannot: the record stores the **configured** environment
+(`gridworld:open-east`), a new process has only minted the default one, and nothing rebuilt
+the world — so `run` after the restart died with `EnvironmentRefused: environment
+'gridworld:open-east' is no longer registered`, a 500 for a session the boot report had just
+called *restored*. The existing restore pins asserted the record (status, reason, flags) and
+never that the session could still be driven: **a restored thing must be usable, or
+"restored" is a lie in the summary**. `_restore_environment` reads the scenario and the
+fault budget back off the id this module itself minted (family, scenario, faults), registers
+the same world, and returns `None` — with the reason on the record — when the build cannot
+rebuild it rather than pointing the session at some other world. (8) The endpoint sweep's
+body-leak scan caught `GET /embodied/sessions` publishing `SessionState.to_dict()` per row,
+embedding `last_observation.structured` and the whole `trajectory` for every session, while
+the documented contract is "lifecycle state and a summary" with the record on the
+single-session view — and the status surface beside it is already pinned content-free. A row
+now carries the lifecycle fields only. Both fixes are pinned, and both pins were
+mutation-tested (re-introduce the defect, watch exactly that test fail, restore the file
+byte-for-byte).
+
+**Three more found by the closing verification audit, reading the package against its own
+claims.** (9) A policy refusal — Phase 24's planning raising `PermissionError` for a
+CRITICAL input nobody approved — finished the session as **`budget_exhausted`**, "the budget
+ran out" for a session whose budget was untouched, and counted the refusal under
+`invalid_actions`. A refusal is an answered request: the loop now reads the run's `denied`
+status, records the attempt as `actions_rejected`, writes the refusal into the trajectory
+with its reason, and ends `DENIED` with **0 inputs sent** — and it is pinned end to end
+(`WorkflowMDenialTests`, CRITICAL declared on the input's own scope: `denied`, 1 rejection,
+0 invalid, 0 failures, second `run` refused 422). Before that, the ending, the counters and
+the reason for a policy refusal had **no test at all**. (10) `test_a_duration_is_clamped_to_
+the_ceiling` asserted `result.duration_ms <= 2000` for a ten-million-millisecond input, but
+`duration_ms` is the elapsed time the environment **measured** (0.12 ms here) — the
+assertion passed with the clamp deleted, proven by deleting it. Replaced by two pins that
+can fail and were mutation-tested: the environment reports a measurement, never the number
+it was handed, and the bound on a *request* is enforced at the door, read back off the
+session's `last_action`. (11) `simulation.py` carried its own `HARD_MAX_INPUT_MS` — a second
+definition of the same 2000 ms ceiling, exported from a second module — and a `_clamp` whose
+result was discarded on every path, which is exactly why (10) could not see it; both are
+gone, and the read-through removed three dead variables (including a `verified` read of a run
+whose status the loop deliberately does not consult) and six unused imports. `ruff check
+src/novacontrol/embodied/ --select F401,F841,F811` is clean and both mypy views stay clean;
+the audit re-ran the affected suites (122 + 265 + 65 passed) and the benchmark (9/9).
+
+**Measured, and self-checked.** `scripts/benchmark_embodied.py` drives nine workflows
+through a REAL application and asserts its own expectations (ending, verdict, input
+bounds, refusals, failures, stale readings, and "the audit trail holds exactly what was
+sent"); a scenario that stops behaving exits non-zero. 9/9 matched: the baseline completes
+in 4 inputs / 182 ms, the 20-cell corridor in 21 inputs / 1,052 ms — with the configured
+50 ms pace subtracted, **≈2.5 ms of loop work per input** — `frozen` and `fogged` send
+**0 inputs**, and the baseline repeated 10× is min 193.1 / median 195.8 / max 198.6 ms
+with a 1.5 ms stdev. A session record is ~10 KB after 4 inputs and ~31 KB after 21, at
+0.8–2.0 ms to persist. A real `uvicorn` server passed a 16/16 scripted HTTP workflow,
+including pause → run refused (422) → resume (`needs_revalidation: true`) → run completed,
+and a two-boot restart run over one `data/` directory passed **13/13** restore checks
+(restored as `interrupted`, listed with a reason, `needs_revalidation`, holding nothing,
+having sent nothing, then runnable to `completed`) plus a **161-check** sweep of all ten
+routes. One measurement caveat worth keeping: the full-suite slice run first reported five
+failures in `test_rlhf.py::ApplicationRLHFTests`, all of them the Phase 14 resource governor
+**correctly refusing** on a memory-starved host (a background uvicorn plus the parallel
+pytest run left <500 MB free: "the estimate needs 135818342 bytes but only 0 bytes are
+usable"); with the server stopped the class is 12 passed. A refusal that depends on the
+machine's free memory is not a flaky test — it is the governor working, and the honest
+report says which of the two it was.
+
+**Honest scope.** No real game or window adapter ships (`embodied.screen_environment` is
+UNAVAILABLE with that reason), no object identity is ever invented (with no vision
+provider, a region stays a region), nothing is learned from the sessions and nothing
+generalizes — that is Phase 26, and `embodied.generalization` reports it. There is no web
+panel and no CLI command, and `route_consumers.py` says so rather than putting a control in
+the contract the frontend does not have. CI is again the one acceptance item reported as
+**unverified**: everything above is local to this machine, and this repository has been
+broken before by a defect only Linux CI could see.
+
+## 56. Phase 26 — Generalization, ARC-style Reasoning & Intelligence Evaluation
+
+**The last phase of the roadmap, and the first one whose whole job is to measure.**
+`generalization/` (13 Python files including `__init__.py`, 7,670 lines in the current tree) answers one question — does a rule inferred
+from examples still work on an example that was never shown? — and refuses to call
+anything else generalization. The cycle the phase names is implemented arrow by arrow
+(define → baseline → unseen example → observe → structure → hypothesis → candidate →
+verify → measure → compare → classify → record → re-evaluate), as records rather than
+narration: a task carries a request, a success condition, a verifier, examples, an unseen
+input and a **hand-written answer key**, and `validate_task` refuses one without a success
+condition or an answer key, naming which rule refused it.
+
+**What makes the numbers mean something.** A rule is believed only after reproducing
+**every** example exactly; two rules that both fit and disagree are reported `ambiguous`
+and anything the library cannot express is `unsupported` — neither is folded into
+a "success rate". Held-out means held out: three leakage checks (a task id in both
+splits, a held-out answer already among the fitting examples, an example flagged `seen`
+while tuning) run before every evaluation, and a dirty split is **refused with 422**
+rather than measured. Every run carries an outcome fingerprint over what decides its
+numbers and nothing else — durations, timestamps and result order are excluded — so two
+identical evaluations reproduce it under different run ids. There is deliberately **no
+aggregate score**: the families are measured in different units, so a blended number
+would hide a family failing behind a mean. Six families (`grid_transform`,
+`spatial_relation`, `state_transition`, `small_planning`, `tool_selection`,
+`multi_step_reasoning`), seven verifiers, 22 pure operators composed to depth 2, three
+baselines, twelve failure categories with non-executing advice, and 22 capability rows on
+the ONE registry (16 implemented; `arc_general_solver` partial,
+`model_proposed_rules` provider-dependent, `single_intelligence_score` and
+`synthetic_results` unavailable, `training_from_findings` and `gameplaying` future).
+`overview()` publishes thirteen honesty flags, all false.
+
+**Measured.** Candidate `infer` over the 20 held-out tasks: **16 solved, 2 ambiguous,
+2 unsupported, 0 failed, 22.5 ms** (grid family 8/10 at 0.89 cell accuracy after
+examining 1,018 candidates). Baseline `identity`: 1 solved, 10 unsupported, 9 failed.
+`compare`: 16 improved, **1 regressed** — the ambiguity probe whose answer equals its
+input, which the identity baseline echoes and the candidate honestly refuses to guess —
+3 unchanged, `baseline_preserved: true`. `scripts/benchmark_generalization.py` drives ten
+scenarios through the REAL HTTP API and checks its own expectations: **10/10 matched**,
+including the leakage refusal and a reproducibility scenario whose two runs fingerprint
+identically. A real `uvicorn` server passed a **90/90** scripted HTTP workflow and a
+two-boot restart run of **7/7** (the runs came back — `restored: 4, skipped: 0` — the
+registered tasks correctly did **not**, and the leakage verdict was clean again).
+
+**Defects found and fixed.** Three in the corpus/operator layer, found because the corpus
+recomputes every hand-written answer key from the operators instead of trusting it: a
+background heuristic that miscounted on grids whose background is not the most frequent
+colour, a hole-filling operator that treated diagonally-adjacent regions as enclosed, and
+two mistyped literals in the corpus itself. Two more in the final verification pass: the
+evaluate route and the generated API reference promised the run view carries "a fingerprint
+over outcomes only" while only the export had one (the fingerprint is now computed on the
+view, derived from results already in hand, never stored), and
+`benchmark_generalization.py --json` crashed with
+`AttributeError: 'Check' object has no attribute '__dict__'` because `Check` is a
+`slots=True` dataclass — the machine-readable form of the phase's own benchmark could not
+run at all. Six of the seven failures in the first live smoke were the smoke's own wrong
+key names and one was correct behaviour (the single regression above), which is recorded
+here because a verification pass that only counts passes is not a verification pass.
+
+**Honest limits, and one measurement caveat.** No general ARC solver ships (a named
+library of 22 operators), no model takes part by default, nothing trains, nothing is
+downloaded, no candidate is promoted, and **no gameplay is claimed**: the nine
+post-Phase-26 game-evaluation contracts ship as definitions plus an adapter over Phase
+25's session record. 17 routes in all five contract places — **265 routes = 265
+consumers**, `docs/API.md` in sync — all `no-render`, because the phase has no panel and
+the consumer contract says so rather than inventing a control. The final tree's phase
+suite is **86 passed / 838 subtests / exit 0** (82 before the audit's four new pins), both
+mypy views are clean over 412 files,
+and every file touched by the final edits was re-run. The **whole suite in one run was not
+completed here**: this host is shared with other agents running their own pytest against
+the same repository, and under that contention `test_application.py` (~30 full-app-boot
+tests) exceeded the tool window twice after appearing as a hang. That full-suite total —
+like everything else — is left to CI, which is the one acceptance item this build still
+reports as local-only.
+
+### 56a. The Phase 26 verification audit — four more defects, and one claim corrected
+
+**A probe that asks the phase's own questions found what a green suite cannot.** 59 probes
+were written against the shipped API (36 engine-level, 23 through the real application and
+HTTP surface) and run on the final tree; the first pass failed 8 of them. Two were the
+probe's own wrong expectations, two were design facts the probe had misread — and **four
+were real defects**, each one a claim a reader makes from a record:
+
+1. **The refusal announced nothing.** `generalization.leakage_detected` fired only on the
+   advisory path, so the caller whose measurement was refused — the one case the event
+exists for — saw nothing on the bus. The refusal now announces (with `refused: true`, the
+   reason and the specific finding) *before* it raises, and a test drives the real
+   application relay to prove it.
+2. **A stored run claimed the check it was gated on never happened.** `_make_run` left
+   `EvaluationRun.leakage` at its model default, so every run view read
+   `checked: false, clean: None`. The verdict that GATED the run now travels with it; a
+   restored run reports `checked: true, clean: true, fitting_tasks: 19, held_out_tasks: 20`,
+   and an advisory run reports `clean: false` plus the violation it proceeded with.
+3. **The frozen configuration could not say which tasks it measured.**
+   `evaluate_held_out_only` decides WHICH tasks a run measures (20 of 39 here) and was
+   missing from the settings block, so the record could not be reproduced from itself. It
+   is frozen now, alongside the effective split the policy chose.
+4. **A docstring claimed an integration the code does not have.** The package said the
+   Phase 15 trajectory/recorder layer is where a run's evidence lands; the recorder
+   subscribes to the core task lifecycle only, so a generalization evaluation is not
+   recorded as a trajectory. Wiring them in would create partial trajectories with no
+   terminal event — a second lifecycle wearing an observer's name — so the claim was
+   rewritten to what is true, and the same correction went into the phase report.
+
+The audit also proved the leg no fresh installation can reach: a **REAL Phase 25 embodied
+session** was created and run over HTTP, and `/generalization/game-eval` measured it
+(`sessions_measured >= 1`, per-environment rows, a measured figure, `gameplay_claimed:
+false`) — the contracts read the session record instead of merely declaring that they
+would. Four tests (`VerificationAuditTests`) now pin all of the above, so the next pass
+cannot rediscover them; the phase suite, `test_web_api.py`, both mypy views and the
+generated reference were re-run after every fix, and the two probe scripts live outside the
+tree as the audit's evidence, with their results recorded in the report's §12.

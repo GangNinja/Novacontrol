@@ -1105,6 +1105,739 @@ def create_app() -> Any:
         """
         return nova.world.predict(payload).to_dict()
 
+    # ── Phase 23: interactive learning and exploration ───────────────────
+    @app.get("/learning/status")
+    async def learning_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """What interactive learning can do here, and what it refuses to claim.
+
+        The environments and their live capability probe, the policy and ceilings in
+        force, the learned rules, the metrics so far and the honest provider posture
+        (normally "no predictive model is wired; a declared or learned rule is what
+        makes an expectation possible"). This is an operator surface: it carries
+        statuses, counts and references, never an observation body or a reasoning
+        trace.
+        """
+        return nova.learning_status()
+
+    @app.get("/learning/environments")
+    async def learning_environments(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Every environment this build can experiment in, and what each exposes.
+
+        Actions are DECLARED, so this is what a caller may plan against; the
+        simulator flag says whether a result here is evidence about a simulator
+        rather than about the real world.
+        """
+        return nova.learning_environments()
+
+    @app.post("/learning/environments")
+    async def learning_add_environment(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Register a deterministic SIMULATOR declared as data.
+
+        'rules' maps an action name to the state patch it applies; 'hidden' names
+        the actions whose real rule the learner is not told; 'candidates' declares
+        the possible outcomes for an action, which is the space a hypothesis may be
+        drawn from. A failed action, a slow one, a misleading value and an omitted
+        key are all declarable, because those are the cases a learner must survive.
+        Only simulators can be registered here: a real environment appears when a
+        caller injects one in code, and it never acts without an executor, a
+        permission layer and approval.
+        """
+        try:
+            return nova.learning_register_environment(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/learning/objectives")
+    async def learning_create_objective(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Create a bounded learning objective (a question, an environment, ceilings).
+
+        Creating an objective runs NOTHING. A blank question, an unknown environment
+        or a strategy this build does not have is a 422 naming the field.
+        """
+        try:
+            return nova.learning_create_objective(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/learning/objectives")
+    async def learning_objectives(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """The objectives this session holds, and which are still open."""
+        return nova.learning_objectives()
+
+    @app.get("/learning/objectives/{objective_id}")
+    async def learning_objective(
+        objective_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """One objective with everything recorded about it.
+
+        The cycle's steps in order, every hypothesis with its evidence counts and
+        version history, every experiment with its status and the reason it got it,
+        every run with its prediction and its comparison, the evidence references
+        (so a conclusion can be traced to the observations behind it), and the rules
+        learned in this scope. 404 when the id is unknown.
+        """
+        try:
+            return nova.learning_objective(objective_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/learning/objectives/{objective_id}/preview")
+    async def learning_preview(
+        objective_id: str,
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """The candidate experiments, ranked, with the reason for every refusal.
+
+        Nothing is executed: this is what WOULD happen, including which candidates
+        the safety policy and the budget refuse and why.
+        """
+        body = payload or {}
+        try:
+            return nova.learning_preview(objective_id, strategy=str(body.get("strategy", "")))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/learning/objectives/{objective_id}/run")
+    async def learning_run(
+        objective_id: str,
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Run the bounded cycle: observe, hypothesize, select, gate, act, compare, update.
+
+        Body (all optional): {'approval': true} authorizes ONE real (non-simulator)
+        experiment, {'max_experiments': n} lowers the cycle's own bound, and
+        {'strategy': name} picks the selection strategy. Every ceiling and permission
+        requirement is checked BEFORE an action, and a refused or interrupted
+        experiment is never reported as a success.
+        """
+        body = payload or {}
+        try:
+            return await nova.learning_run(objective_id, body)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/learning/objectives/{objective_id}/approve")
+    async def learning_approve(
+        objective_id: str,
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Approve ONE real experiment for this objective. The approval is single use."""
+        body = payload or {}
+        try:
+            return nova.learning_approve(objective_id, reason=str(body.get("reason", "")))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/learning/objectives/{objective_id}/reject")
+    async def learning_reject(
+        objective_id: str,
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Refuse an objective; the refusal becomes the reason it stopped."""
+        body = payload or {}
+        try:
+            return nova.learning_reject(objective_id, reason=str(body.get("reason", "")))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/learning/objectives/{objective_id}/cancel")
+    async def learning_cancel(
+        objective_id: str,
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Ask the objective's cycle to stop at its next checkpoint."""
+        body = payload or {}
+        try:
+            return nova.learning_cancel(objective_id, reason=str(body.get("reason", "")))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/learning/objectives/{objective_id}/resumable")
+    async def learning_resumable(
+        objective_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Whether an interrupted objective may be resumed, and why not when it may not.
+
+        Resuming is allowed only when the environment's state still matches what the
+        interrupted run started from; anything else stays interrupted and needs a
+        person, which is the honest answer for an action taken on the real world.
+        """
+        try:
+            return nova.learning_resume_capability(objective_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/learning/objectives/{objective_id}/resume")
+    async def learning_resume(
+        objective_id: str,
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Re-run an interrupted objective when the safety preconditions can be verified."""
+        body = payload or {}
+        try:
+            return await nova.learning_resume(objective_id, body)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/learning/metrics")
+    async def learning_metrics(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """What the experiments actually produced, inconclusive results included.
+
+        A completed experiment is counted as completed; a hypothesis moves only when
+        evidence moved it; agreement is over EVALUABLE predictions only, with the
+        unevaluable count beside it; and a rate nobody measured is null rather than
+        zero.
+        """
+        return nova.learning_metrics()
+
+    @app.get("/learning/evidence/{evidence_id}")
+    async def learning_evidence(
+        evidence_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """One evidence reference: what it supports or contradicts, and from where.
+
+        This is the provenance door: an observation, an inference and a prediction
+        are different kinds and are kept distinguishable, so a conclusion can be
+        traced back to the experiments and observations behind it.
+        """
+        try:
+            return nova.learning_evidence(evidence_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/learning/transfer")
+    async def learning_transfer(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Check a learned rule against cases the caller held out.
+
+        Body: {'rule_id': id, 'held_out': [{'action': ..., 'expected': {...}}, ...]}. The
+        rule predicts each case and the agreements are counted, with the limitation
+        stated plainly: this build cannot verify that the cases were held out, so the
+        result is a check on the caller's cases and not a claim of generalization.
+        """
+        try:
+            return nova.learning_transfer(payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # ── Phase 24: planning, reasoning and action policy ───────────────────
+    @app.get("/planning/status")
+    async def planning_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """What goal-level planning can do here, and what it refuses to claim.
+
+        The goals this session holds, how many were planned and how many runs
+        verified, the replans spent, the ceilings a new goal inherits, the boot
+        restore report, and the capability table with its LIVE availability —
+        normally reporting explicitly that no world model means every grounded
+        fact is an assertion. An operator surface: statuses, counts and
+        references only, never a plan body or an observation.
+        """
+        return nova.goal_planning_status()
+
+    @app.get("/planning/goals")
+    async def planning_goals(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Every goal this session holds, and which of them have a selected plan."""
+        return nova.goal_planning_goals()
+
+    @app.post("/planning/goals")
+    async def planning_create_goal(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Record a goal, decompose it into tasks, and produce CANDIDATE plans.
+
+        Body: the ``request``, the ``tasks`` to run (each with an ``id`` and a
+        ``title``), the ``success_conditions`` that define done, optional
+        ``initial_state``, ``constraints``, ``exclusions``,
+        ``required_permissions``, budget ceilings and ``correlation_id``.
+
+        Creating and planning run NOTHING: the response is the grounding, the
+        decomposition with its issues, every candidate with its comparison, the
+        selected candidate, the per-step policy verdicts and the estimates with
+        their basis. A missing or unmeasurable condition is reported as an issue
+        rather than filled in, and a goal whose preconditions no state supports
+        yields a refusal naming them. Execute it with POST
+        /planning/goals/{goal_id}/run.
+        """
+        try:
+            return nova.plan_goal(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/planning/goals/{goal_id}")
+    async def planning_goal(
+        goal_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """One goal: its stated conditions and budget, the decomposition with every
+        issue, the candidate plans with the comparison that ranked them, the
+        selected plan, the last run with its revalidations and completion verdict,
+        and the replan ceiling left. 404 when the id is unknown."""
+        try:
+            return nova.goal_planning_view(goal_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/planning/goals/{goal_id}/run")
+    async def planning_run_goal(
+        goal_id: str,
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Execute the goal's SELECTED plan through the existing Phase 4 executor.
+
+        Body (all optional): {'approved': [step_id, ...]} approves exactly those
+        steps (a step the policy says needs a person and that was not approved is
+        DENIED, not attempted), and {'keys': [fact, ...]} names the facts to read
+        after the run for the completion check.
+
+        Each step is re-checked against fresh state immediately before it runs; a
+        step whose preconditions no longer hold is refused by the gate and never
+        retried. The status is ``completed`` only when the goal's required success
+        conditions were VERIFIED against an observation — the end of the steps is
+        never completion, and an unobservable condition reports ``unknown``.
+        """
+        try:
+            return await nova.execute_goal(goal_id, payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/planning/goals/{goal_id}/reassess")
+    async def planning_reassess_goal(
+        goal_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Whether this goal should be replanned — and whether its ceiling is spent.
+
+        A deviation alone is not a reason to replan. The decision names the
+        deviations it saw, the replans already used and whether the goal's own
+        ceiling is exhausted, so "try again" can never become an unbounded loop.
+        """
+        try:
+            return nova.reassess_goal(goal_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/planning/goals/{goal_id}/cancel")
+    async def planning_cancel_goal(
+        goal_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Cancel a goal. Cancelling is not deleting: the record stays readable."""
+        try:
+            return nova.cancel_goal(goal_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    # ── Phase 25: embodied sessions and controlled environments ──────────
+    @app.get("/embodied/status")
+    async def embodied_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """What embodied sessions can do here, and what they refuse to claim.
+
+        The allowlisted environments with their LIVE availability, the scenarios
+        each offers, session counts, the ceilings in force, the input door's
+        action and scope, the boot restore report and the capability table —
+        including the honest absences (no real game or window adapter ships; a
+        semantic reading needs a vision provider). An operator surface: statuses,
+        counts and references only, never an observation body or a frame.
+        """
+        return nova.embodied_status()
+
+    @app.get("/embodied/overview")
+    async def embodied_overview(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """The phase's own statement of what it ships and what it refuses to do.
+
+        The loop it runs, the lifecycle vocabularies, the scenarios, the event
+        types, the capabilities and the honesty flags — each flag a thing this
+        build does NOT do (no real environment, no invented object identity, no
+        acting on a stale reading, no retrying through a refusal).
+        """
+        return nova.embodied_overview()
+
+    @app.get("/embodied/environments")
+    async def embodied_environments(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """The environments this build may drive, and the scenarios on offer.
+
+        Each adapter reports its status, the actions and observations it
+        answers for, and its capabilities with whether each was VERIFIED end to
+        end — an adapter may declare a capability it has never run, and this is
+        where the difference is visible.
+        """
+        return nova.embodied_environments()
+
+    @app.get("/embodied/sessions")
+    async def embodied_sessions(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Every embodied session this process holds, with its lifecycle state."""
+        return nova.embodied_sessions()
+
+    @app.post("/embodied/sessions")
+    async def embodied_create_session(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Record a session. Runs NOTHING — creating is not starting.
+
+        Body: an ``objective`` mapping (``request`` plus the
+        ``success_conditions`` that define done, written as ``key=value``
+        strings), an optional ``environment_id``, an optional ``scenario`` and an
+        optional ``faults`` mapping. Budget ceilings are clamped by configuration
+        and never raised above it, and an objective whose conditions cannot be
+        checked is refused with 422 rather than run until its budget dies. Drive
+        it with POST /embodied/sessions/{session_id}/run.
+        """
+        try:
+            return nova.embodied_create_session(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/embodied/sessions/{session_id}")
+    async def embodied_session(
+        session_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """One session: its objective, status and reason, the completion verdict
+        with the conditions that were and were not observed, the bounded
+        trajectory and the evaluation. 404 when the id is unknown."""
+        try:
+            return nova.embodied_view(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/embodied/sessions/{session_id}/run")
+    async def embodied_run_session(
+        session_id: str,
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Drive one session's bounded loop: observe, decide through the goal
+        planner, send an authorized input through the ONE door, verify the result
+        from a fresh reading, recover or replan, then report the ending.
+
+        Body (optional): {'max_actions': n} caps this run below the session's own
+        budget. The status is ``completed`` only when every success condition was
+        OBSERVED holding; a refusal, a stale reading and an exhausted budget are
+        their own endings with their own reasons. A timed-out input is never
+        blindly re-sent — the state is re-read first.
+        """
+        try:
+            return await nova.embodied_run_session(session_id, payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/embodied/sessions/{session_id}/pause")
+    async def embodied_pause_session(
+        session_id: str,
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Pause a session. What it holds is released BEFORE the status moves, so
+        a paused session is never holding an input."""
+        try:
+            return nova.embodied_pause_session(session_id, payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/embodied/sessions/{session_id}/resume")
+    async def embodied_resume_session(
+        session_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Resume a paused session — as NOT revalidated. The environment and the
+        session must both be re-established before another input is sent, because
+        a pause may have been long enough for the reading to be worthless."""
+        try:
+            return nova.embodied_resume_session(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/embodied/sessions/{session_id}/cancel")
+    async def embodied_cancel_session(
+        session_id: str,
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Cancel a session. Cancelling is not deleting: the record stays readable,
+        and whatever the session held is released first."""
+        try:
+            return nova.embodied_cancel_session(session_id, payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    # ── Phase 26: generalization, ARC-style reasoning and evaluation ─────
+    # Every route here is a THIN door onto the application method of the same
+    # name. Nothing on this surface trains anything, changes a weight or reports
+    # a number the per-family metrics did not measure: a run's answer key is
+    # never in a list, and a refused request says which rule refused it.
+    @app.get("/generalization/status")
+    async def generalization_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """What this build can measure about its own generalization — and what it
+        will not claim.
+
+        The corpus and its split counts with the three-way leakage verdict, the
+        six families with their success conditions and verifiers, the solver and
+        baseline names, the transformation vocabulary, the search ceilings in
+        force, the run counters, the provider posture, the boot restore report
+        and the capability table with its honest states. No score appears here
+        unless a run actually produced one.
+        """
+        return nova.generalization_status()
+
+    @app.get("/generalization/overview")
+    async def generalization_overview(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """The phase's own statement of what it ships and what it refuses to do.
+
+        The evaluation cycle it runs, the lifecycle vocabularies, the families,
+        the operator library, the verifiers, the failure categories and the
+        honesty flags — each flag a thing this build does NOT do (no general ARC
+        solver, no hardcoded answers, no answer key during search, no single
+        intelligence score, no training, no fabricated scores, no gameplay).
+        """
+        return nova.generalization_overview()
+
+    @app.get("/generalization/families")
+    async def generalization_families(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """The task families, each with its own success condition and verifier.
+
+        Deliberately a list rather than one blended score: the families are
+        measured in different units, so per-family metrics are what a reader
+        compares, and an aggregate would hide a family failing behind a mean.
+        """
+        return nova.generalization_families()
+
+    @app.get("/generalization/operators")
+    async def generalization_operators(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """The transformation library the search may use, and its depth ceiling.
+
+        Each operator is a pure function with no task id and no answer inside it.
+        The search proposes parameters from the examples and believes nothing
+        until EVERY example is reproduced exactly; anything the library cannot
+        express is reported UNSUPPORTED rather than guessed at.
+        """
+        return nova.generalization_operators()
+
+    @app.get("/generalization/tasks")
+    async def generalization_tasks(
+        family: str = "",
+        split: str = "",
+        difficulty: str = "",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """The registered tasks matching a filter — WITHOUT their answer keys.
+
+        A task list is a browsing surface, so the expected outputs are withheld
+        and the single-task endpoint is where a key lives. 422 when the split or
+        difficulty names something this build does not have.
+        """
+        try:
+            return nova.generalization_tasks(
+                {"family": family, "split": split, "difficulty": difficulty}
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/generalization/tasks/{task_id}")
+    async def generalization_task(
+        task_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """One task, whole — request, success condition, verifier, split, examples
+        and the expected output the evaluator holds. 404 when the id is unknown."""
+        try:
+            return nova.generalization_task(task_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/generalization/splits")
+    async def generalization_splits(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """How the corpus is split, with the leakage verdict attached.
+
+        Three checks are reported separately because they fail differently: a
+        task in both splits, a held-out answer already present in the fitting
+        set, and an example flagged as already used while tuning. ``clean`` is
+        ``None`` only when the check could not run — never when it merely found
+        nothing.
+        """
+        return nova.generalization_splits()
+
+    @app.post("/generalization/tasks")
+    async def generalization_register_task(
+        payload: dict[str, Any],
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Register one task on this process's corpus. Runs NOTHING — a task is a
+        definition, not an evaluation.
+
+        The body is the task itself: ``task_id``, ``kind``, ``split``,
+        ``difficulty``, ``request``, ``success_condition``, ``examples``,
+        ``test_input`` and ``expected_output``. Refused with 422, and the reason
+        says which rule refused it: a missing success condition (a task nobody
+        can verify), a missing answer key (a held-out task whose answer is
+        unknown cannot be scored), a verifier this build does not implement, an
+
+        unreadable grid, and an id already in use — a corpus that can be
+        overwritten cannot be cited as evidence.
+
+        Registration is in-memory for the life of the process; the RUNS are what
+        persists. Drive it with POST /generalization/evaluate.
+        """
+        try:
+            return nova.generalization_register_task(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/generalization/evaluate")
+    async def generalization_evaluate(
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Run one bounded evaluation over the SAME tasks for candidate and baseline.
+
+        Body (all optional): ``family``, ``split`` (defaults to held-out),
+        ``solver`` (default ``infer``), ``baseline`` (default ``identity``),
+        ``seed``, ``task_ids``, ``max_tasks``, ``max_candidates``, ``max_depth``
+        and ``max_seconds`` — each clamped by configuration, never raised above
+        it. Returns the run: per-family metrics, classified failures, the frozen
+        settings, the leakage verdict and a fingerprint over outcomes only.
+
+        422 when the request names a solver, family or split this build does not
+        have, when no task matches, or when the held-out split is NOT clean — a
+        number measured over leaked examples is refused rather than reported.
+        """
+        try:
+            return nova.generalization_evaluate(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/generalization/runs")
+    async def generalization_runs(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """The stored runs as trimmed rows: lifecycle fields and counts only.
+
+        The per-task results live on the single-run view — a list that embedded
+        whole records would make the lightest surface the heaviest one, and a
+        summary is all a list is for.
+        """
+        return nova.generalization_runs()
+
+    @app.get("/generalization/runs/{run_id}")
+    async def generalization_run(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """One run, whole: settings, seed, per-family metrics, classified failures
+        with their evidence, the recommendations those failures produced, and the
+        per-task results. 404 when the id is unknown."""
+        try:
+            return nova.generalization_view(run_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/generalization/runs/{run_id}/export")
+    async def generalization_export(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """A report payload for review: the run, the corpus and its splits, the
+        operator library, the supported rules, the reproduce block (solver,
+        baseline, seed, frozen settings, task ids) and the outcome fingerprint.
+
+        It is data for a person to read. Nothing here schedules work, writes a
+        dataset or promotes the candidate — the decision to act on a result stays
+        outside the benchmark. 404 when the id is unknown.
+        """
+        try:
+            return nova.generalization_export(run_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/generalization/compare")
+    async def generalization_compare(
+        baseline: str,
+        candidate: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Two stored runs compared task by task, with neither record modified.
+
+        ``regressed`` names the tasks solved before and unsolved now; a task only
+        one run evaluated is reported as appeared/disappeared rather than counted
+        as a movement, and differing seeds are called out because a movement could
+        then come from the seed rather than from the change. 404 on an unknown id.
+        """
+        try:
+            return nova.generalization_compare(baseline, candidate)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/generalization/failures")
+    async def generalization_failures(
+        run: str = "",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Classified failures, grouped by category — one run with ``?run=``, or
+        every stored run without it.
+
+        The categories separate the causes a solver's ending cannot: no rule
+        found is not a rule that fit and missed, ambiguity is not failure, a
+        defective transformation is not a wrong answer, and a broken evaluation
+        SETUP is reported as itself rather than counted as a model miss. 404 for
+        an unknown run id.
+        """
+        try:
+            return nova.generalization_failures(run)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/generalization/recommendations")
+    async def generalization_recommendations(
+        run: str = "",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Structured, NON-EXECUTING improvement recommendations from real failures.
+
+        One per recurring category, naming the tasks and families that produced it
+        and the advice that belongs to it. Nothing is executed: no training run is
+        started, no dataset is written and no model is touched. 404 for an unknown
+        run id.
+        """
+        try:
+            return nova.generalization_recommendations(run)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/generalization/game-eval/contracts")
+    async def generalization_game_eval_contracts(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """The nine evaluation contracts the post-Phase-26 game milestone will be
+        measured on: objective completion, action efficiency, observation
+        freshness, recovery success, constraint violations, time to completion,
+        initial-condition spread, reproducibility and resource use.
+
+        Definitions and their sources — an adapter over the Phase 25 session
+        record, NOT a game, and no gameplay capability is claimed.
+        """
+        return nova.generalization_game_eval_contracts()
+
+    @app.get("/generalization/game-eval")
+    async def generalization_game_eval(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Those contracts measured over the embodied sessions this build actually
+        ran, per environment and never pooled.
+
+        Every row names the environment it summarised, so a simulated session is
+        never presented as gameplay; a figure the records did not measure comes
+        back ``null`` rather than as a zero; and with no sessions yet the report
+        says so instead of returning an empty scorecard that reads as perfect.
+        """
+        return nova.generalization_game_eval()
+
     @app.get("/intelligence")
     async def intelligence_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
         """Global Intelligence Layer health: interpretation telemetry (including

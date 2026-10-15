@@ -10,6 +10,7 @@ the ./data state store.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -731,7 +732,7 @@ class BrainModeAndTaskApiTests(_IsolatedApiTestCase):
                 [t["text"] for t in turns],
             )
         finally:
-            rebuilt.stop() if hasattr(rebuilt, "stop") else None
+            asyncio.run(rebuilt.stop())
 
     def test_chat_history_append_and_idempotent_migration(self) -> None:
         # A client-reported turn (voice input, CLI, …) lands in the thread.
@@ -806,7 +807,7 @@ class BrainModeAndTaskApiTests(_IsolatedApiTestCase):
                 rebuilt._cloud_llm_store.read("cloud_llm").get("local_model"), "qwen3:30b"
             )
         finally:
-            rebuilt.stop() if hasattr(rebuilt, "stop") else None
+            asyncio.run(rebuilt.stop())
 
     def test_task_delete_and_clear_over_http(self) -> None:
         # A real /ask creates a tracked task record.

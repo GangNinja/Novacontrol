@@ -405,8 +405,19 @@ class StepOutcome:
 
     @property
     def executed(self) -> bool:
-        """Whether an executor was actually behind this step."""
-        return self.status not in (PlanStepStatus.SKIPPED, PlanStepStatus.BLOCKED)
+        """Whether this step was actually attempted.
+
+        A DENIED step never ran — the approval layer refused it — so it is not an
+        execution. Counting it as one let a plan whose only step was refused read
+        as ``executed=True`` while its own summary said the plan did not run, which
+        is exactly the confusion between "a plan exists" and "work happened" this
+        field exists to prevent.
+        """
+        return self.status not in (
+            PlanStepStatus.SKIPPED,
+            PlanStepStatus.BLOCKED,
+            PlanStepStatus.DENIED,
+        )
 
     @property
     def verification_result(self) -> str:

@@ -252,6 +252,377 @@ class ApiSurface:
                     "predictive model is wired and never fabricates a prediction.",
                     authenticated=True,
                 ),
+                ApiRoute(
+                    "GET",
+                    "/learning/status",
+                    "Interactive learning report: environments, policy and ceilings, "
+                    "learned rules, metrics and the honest provider posture.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/learning/environments",
+                    "Every environment experiments may run in, with the actions each "
+                    "declares and whether it is a simulator.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "POST",
+                    "/learning/environments",
+                    "Register a deterministic SIMULATOR declared as data (rules, hidden "
+                    "actions, candidate outcomes, failures, delays, partial observations).",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "POST",
+                    "/learning/objectives",
+                    "Create a bounded learning objective (a question, an environment, "
+                    "ceilings). Creating one runs nothing.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/learning/objectives",
+                    "The learning objectives this session holds, and which are open.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/learning/objectives/{objective_id}",
+                    "One objective: cycle steps, hypotheses with their evidence, "
+                    "experiments with their statuses, runs, evidence references and rules.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "POST",
+                    "/learning/objectives/{objective_id}/preview",
+                    "Ranked candidate experiments for an objective, with the reason each "
+                    "other candidate was refused. Nothing is executed.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "POST",
+                    "/learning/objectives/{objective_id}/run",
+                    "Run the bounded learning cycle: observe, hypothesize, select, gate, "
+                    "act, compare, update. Refused and interrupted experiments are never "
+                    "reported as successes.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "POST",
+                    "/learning/objectives/{objective_id}/approve",
+                    "Approve ONE real (non-simulator) experiment. The approval is single use.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "POST",
+                    "/learning/objectives/{objective_id}/reject",
+                    "Refuse an objective; the refusal becomes the recorded reason it stopped.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "POST",
+                    "/learning/objectives/{objective_id}/cancel",
+                    "Ask the objective's cycle to stop at its next checkpoint.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/learning/objectives/{objective_id}/resumable",
+                    "Whether an interrupted objective may be resumed, and why not when it may not.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "POST",
+                    "/learning/objectives/{objective_id}/resume",
+                    "Re-run an interrupted objective when the safety preconditions can be "
+                    "verified; otherwise it stays interrupted.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/learning/metrics",
+                    "Learning metrics: hypotheses moved, agreement over evaluable "
+                    "predictions, duplicates avoided, refusals and costs.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/learning/evidence/{evidence_id}",
+                    "One evidence reference and the experiment behind it - the "
+                    "provenance door for tracing a conclusion.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "POST",
+                    "/learning/transfer",
+                    "Check a learned rule against cases the caller held out, with the "
+                    "limits of that check stated plainly.",
+                    authenticated=True,
+                ),
+                # Phase 24: goal-level planning. Creating and planning run
+                # NOTHING; only /run touches the machine, and only through the
+                # existing Phase 4 executor with a fresh-state gate in front of
+                # every step.
+                ApiRoute(
+                    "GET",
+                    "/planning/status",
+                    "Goal-planning report: goals, planned and verified counts, replan "
+                    "budgets, the boot restore report and the capability table with live "
+                    "availability (including the honest provider posture).",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/planning/goals",
+                    "Every goal this session holds, and which have a selected plan.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "POST",
+                    "/planning/goals",
+                    "Record a goal, decompose it into validated tasks and produce CANDIDATE "
+                    "plans with their comparison and the selected one. Runs nothing.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/planning/goals/{goal_id}",
+                    "One goal: decomposition issues, candidate plans, the selected plan, "
+                    "the last run's revalidations and completion verdict.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "POST",
+                    "/planning/goals/{goal_id}/run",
+                    "Execute the selected plan through the existing executor, re-checking "
+                    "each step's preconditions against fresh state and verifying the "
+                    "goal's success conditions before reporting completion.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "POST",
+                    "/planning/goals/{goal_id}/reassess",
+                    "Whether a goal should be replanned, the deviations seen and whether "
+                    "its replan ceiling is exhausted.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "POST",
+                    "/planning/goals/{goal_id}/cancel",
+                    "Cancel a goal. Cancelling is not deleting: the record stays readable.",
+                    authenticated=True,
+                ),
+                # Phase 25: embodied sessions and controlled environments.
+                # Creating a session runs NOTHING; only /run drives the loop, and
+                # only through the ONE input door (session live, environment
+                # allowlisted and connected, duration clamped, permission layer
+                # asked, result audited). The shipped environment is a simulation
+                # this build owns — a real game or window adapter is not shipped.
+                ApiRoute(
+                    "GET",
+                    "/embodied/status",
+                    "Embodied sessions: allowlisted environments with live availability, "
+                    "scenarios, session counts, ceilings, the input door's scope and the "
+                    "capability table with the honest absences.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/embodied/overview",
+                    "What Phase 25 ships and what it refuses to claim: the loop, the "
+                    "lifecycle vocabularies, the scenarios, the event types and the "
+                    "honesty flags.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/embodied/environments",
+                    "The environments this build may drive, with their status and the "
+                    "capabilities each declares as verified or merely declared.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/embodied/sessions",
+                    "Every embodied session this process holds, with its lifecycle state.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "POST",
+                    "/embodied/sessions",
+                    "Record a session from an objective and its environments. Runs "
+                    "nothing: creating is not starting.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/embodied/sessions/{session_id}",
+                    "One session: objective, status and reason, the completion verdict "
+                    "with the conditions observed and missing, the bounded trajectory and "
+                    "the evaluation.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "POST",
+                    "/embodied/sessions/{session_id}/run",
+                    "Drive the bounded loop: observe, decide through the goal planner, "
+                    "send ONE authorized input, verify it from a fresh reading, then "
+                    "recover or replan and report the ending.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "POST",
+                    "/embodied/sessions/{session_id}/pause",
+                    "Pause a session; what it holds is released before the status moves.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "POST",
+                    "/embodied/sessions/{session_id}/resume",
+                    "Resume a paused session, which returns it as needing revalidation "
+                    "before any further input.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "POST",
+                    "/embodied/sessions/{session_id}/cancel",
+                    "Cancel a session and release what it holds. Cancelling is not "
+                    "deleting: the record stays readable.",
+                    authenticated=True,
+                ),
+                # Phase 26: generalization, ARC-style reasoning and intelligence
+                # evaluation. The corpus, the split and the numbers: a run is
+                # bounded, a dirty held-out split REFUSES the run, a task list
+                # never carries an answer key, and nothing here trains anything
+                # or reports a score the per-family metrics did not measure.
+                ApiRoute(
+                    "GET",
+                    "/generalization/status",
+                    "What this build can measure about its own generalization: corpus "
+                    "and split counts with the leakage verdict, families with their "
+                    "verifiers, solvers, baselines, operators, search ceilings, run "
+                    "counters, provider posture and the capability table.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/generalization/overview",
+                    "What Phase 26 ships and refuses to claim: the evaluation cycle, the "
+                    "lifecycle vocabularies, the families, the operator library, the "
+                    "verifiers, the failure categories and the honesty flags.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/generalization/families",
+                    "The task families, each with its own success condition and "
+                    "verifier. No aggregate score: the families are measured in "
+                    "different units.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/generalization/operators",
+                    "The bounded grid transformation library the search may use, with "
+                    "its composition depth ceiling and the rule families it covers.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/generalization/tasks",
+                    "The registered tasks matching a filter, WITHOUT their answer keys. "
+                    "Query parameters: `family`, `split`, `difficulty`.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/generalization/tasks/{task_id}",
+                    "One task whole: request, success condition, verifier, split, "
+                    "examples and the expected output the evaluator holds.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/generalization/splits",
+                    "How the corpus is split, with the three-way leakage verdict: "
+                    "overlapping ids, shared answers and examples already used while "
+                    "tuning.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "POST",
+                    "/generalization/tasks",
+                    "Register one task on this process's corpus. Runs nothing: a task is "
+                    "a definition with a success condition and an answer key, not an "
+                    "evaluation. 422 when the task is unverifiable or its id is taken.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "POST",
+                    "/generalization/evaluate",
+                    "Run one bounded evaluation over the same tasks for candidate and "
+                    "baseline, and return the run with its per-family metrics, "
+                    "classified failures, frozen settings and outcome fingerprint.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/generalization/runs",
+                    "The stored runs as trimmed rows: lifecycle fields and counts only, "
+                    "never the per-task result bodies.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/generalization/runs/{run_id}",
+                    "One run whole: settings, seed, per-family metrics, classified "
+                    "failures with evidence, recommendations and the per-task results.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/generalization/runs/{run_id}/export",
+                    "A review payload: the run, the corpus and splits, the operator "
+                    "library, the reproduce block and the outcome fingerprint. Schedules "
+                    "nothing and promotes nothing.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/generalization/compare",
+                    "Two stored runs compared task by task, with neither record "
+                    "modified. Query parameters: `baseline`, `candidate`.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/generalization/failures",
+                    "Classified failures grouped by category. Query parameter: `run` "
+                    "(one run, or every stored run without it).",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/generalization/recommendations",
+                    "Structured, non-executing improvement recommendations from real "
+                    "failures. Query parameter: `run`.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/generalization/game-eval/contracts",
+                    "The nine evaluation contracts the post-Phase-26 game milestone will "
+                    "be measured on. Definitions and sources, not a game.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/generalization/game-eval",
+                    "Those contracts measured over the embodied sessions this build "
+                    "actually ran, per environment, with unmeasured figures as null.",
+                    authenticated=True,
+                ),
                 ApiRoute("GET", "/intelligence", "Global Intelligence Layer: telemetry, findings, and capabilities.", authenticated=True),
                 ApiRoute(
                     "GET",

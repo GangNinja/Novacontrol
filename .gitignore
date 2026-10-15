@@ -35,3 +35,4 @@ ROADMAP.md
 token.txt
 # Generated Build artifacts (Build tab "Save to disk")
 build_workspace/
+/.codex-audit-temp/

@@ -449,6 +449,293 @@ MAX_WORLD_ID = 64
 MAX_WORLD_ENTITIES = 4096
 
 
+#: Ceilings for the interactive-learning knobs (Phase 23). A learning session
+#: that grows without bound is one that never stops, so every knob that can spend
+#: something has a hard maximum here as well as a policy default.
+MAX_LEARNING_EXPERIMENTS = 64
+MAX_LEARNING_EVIDENCE_THRESHOLD = 16
+MAX_LEARNING_UNINFORMATIVE = 10
+MAX_LEARNING_SECONDS = 3600.0
+MAX_LEARNING_COST_UNITS = 1000.0
+MAX_LEARNING_STRATEGY = 64
+
+
+@dataclass(frozen=True, slots=True)
+class LearningSettings:
+    """What interactive learning may do on this machine, stated once. Phase 23.
+
+    Every field is a POLICY the manager reads rather than a capability it has:
+    which experiments may run without a person, what a hypothesis must show before
+    it becomes a scoped rule, how many unproductive experiments in a row justify
+    stopping, and the ceilings a bounded objective runs under. The defaults are the
+    careful ones — nothing destructive, a real action needs approval AND a
+    permission layer, and a rule needs several INDEPENDENT observations.
+
+    ``enabled`` is the phase's own switch. A deployment that wants no interactive
+    learning at all sets exactly this to false: no manager is constructed, no
+    environment is registered, and the status surface says so instead of offering a
+    surface that would refuse every call.
+    """
+
+    enabled: bool = True
+    persist: bool = True
+    register_builtin_environments: bool = True
+    world_environment: bool = True
+    allow_destructive: bool = False
+    require_approval_for_real: bool = True
+    auto_approve_simulator: bool = True
+    require_permission_layer_for_real: bool = True
+    allow_unpredicted_experiments: bool = True
+    max_uninformative_in_a_row: int = 2
+    support_threshold: int = 3
+    contradiction_threshold: int = 2
+    default_strategy: str = "uncertainty_first"
+    evidence_per_hypothesis: int = 64
+    rules_in_scope: int = 64
+    max_experiments: int = 6
+    max_actions_per_experiment: int = 1
+    max_seconds_total: float = 60.0
+    max_seconds_per_experiment: float = 10.0
+    max_retries: int = 1
+    max_cost_units: float = 6.0
+    numeric_tolerance: float = 0.000001
+    require_complete_observations: bool = True
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "persist": self.persist,
+            "register_builtin_environments": self.register_builtin_environments,
+            "world_environment": self.world_environment,
+            "allow_destructive": self.allow_destructive,
+            "require_approval_for_real": self.require_approval_for_real,
+            "auto_approve_simulator": self.auto_approve_simulator,
+            "require_permission_layer_for_real": self.require_permission_layer_for_real,
+            "allow_unpredicted_experiments": self.allow_unpredicted_experiments,
+            "max_uninformative_in_a_row": self.max_uninformative_in_a_row,
+            "support_threshold": self.support_threshold,
+            "contradiction_threshold": self.contradiction_threshold,
+            "default_strategy": self.default_strategy,
+            "evidence_per_hypothesis": self.evidence_per_hypothesis,
+            "rules_in_scope": self.rules_in_scope,
+            "max_experiments": self.max_experiments,
+            "max_actions_per_experiment": self.max_actions_per_experiment,
+            "max_seconds_total": self.max_seconds_total,
+            "max_seconds_per_experiment": self.max_seconds_per_experiment,
+            "max_retries": self.max_retries,
+            "max_cost_units": self.max_cost_units,
+            "numeric_tolerance": self.numeric_tolerance,
+            "require_complete_observations": self.require_complete_observations,
+        }
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> LearningSettings:
+        """Settings from a mapping, with every number clamped to its ceiling."""
+        defaults = cls()
+        strategy = str(data.get("default_strategy", defaults.default_strategy) or "").strip()
+        return cls(
+            enabled=_bool_setting(data, "enabled", defaults.enabled),
+            persist=_bool_setting(data, "persist", defaults.persist),
+            register_builtin_environments=_bool_setting(
+                data, "register_builtin_environments", defaults.register_builtin_environments
+            ),
+            world_environment=_bool_setting(
+                data, "world_environment", defaults.world_environment
+            ),
+            allow_destructive=_bool_setting(
+                data, "allow_destructive", defaults.allow_destructive
+            ),
+            require_approval_for_real=_bool_setting(
+                data, "require_approval_for_real", defaults.require_approval_for_real
+            ),
+            auto_approve_simulator=_bool_setting(
+                data, "auto_approve_simulator", defaults.auto_approve_simulator
+            ),
+            require_permission_layer_for_real=_bool_setting(
+                data,
+                "require_permission_layer_for_real",
+                defaults.require_permission_layer_for_real,
+            ),
+            allow_unpredicted_experiments=_bool_setting(
+                data,
+                "allow_unpredicted_experiments",
+                defaults.allow_unpredicted_experiments,
+            ),
+            max_uninformative_in_a_row=_count_setting(
+                data,
+                "max_uninformative_in_a_row",
+                defaults.max_uninformative_in_a_row,
+                maximum=MAX_LEARNING_UNINFORMATIVE,
+            ),
+            support_threshold=_count_setting(
+                data,
+                "support_threshold",
+                defaults.support_threshold,
+                maximum=MAX_LEARNING_EVIDENCE_THRESHOLD,
+            ),
+            contradiction_threshold=_count_setting(
+                data,
+                "contradiction_threshold",
+                defaults.contradiction_threshold,
+                maximum=MAX_LEARNING_EVIDENCE_THRESHOLD,
+            ),
+            default_strategy=(strategy[:MAX_LEARNING_STRATEGY] or defaults.default_strategy),
+            evidence_per_hypothesis=_count_setting(
+                data,
+                "evidence_per_hypothesis",
+                defaults.evidence_per_hypothesis,
+                maximum=1024,
+            ),
+            rules_in_scope=_count_setting(
+                data, "rules_in_scope", defaults.rules_in_scope, maximum=1024
+            ),
+            max_experiments=_count_setting(
+                data, "max_experiments", defaults.max_experiments, maximum=MAX_LEARNING_EXPERIMENTS
+            ),
+            max_actions_per_experiment=_count_setting(
+                data,
+                "max_actions_per_experiment",
+                defaults.max_actions_per_experiment,
+                maximum=16,
+            ),
+            max_seconds_total=min(
+                max(0.5, _float_setting(data, "max_seconds_total", defaults.max_seconds_total)),
+                MAX_LEARNING_SECONDS,
+            ),
+            max_seconds_per_experiment=min(
+                max(
+                    0.1,
+                    _float_setting(
+                        data, "max_seconds_per_experiment", defaults.max_seconds_per_experiment
+                    ),
+                ),
+                MAX_LEARNING_SECONDS,
+            ),
+            max_retries=_count_setting(data, "max_retries", defaults.max_retries, maximum=10),
+            max_cost_units=min(
+                max(1.0, _float_setting(data, "max_cost_units", defaults.max_cost_units)),
+                MAX_LEARNING_COST_UNITS,
+            ),
+            numeric_tolerance=max(
+                0.0, _float_setting(data, "numeric_tolerance", defaults.numeric_tolerance)
+            ),
+            require_complete_observations=_bool_setting(
+                data, "require_complete_observations", defaults.require_complete_observations
+            ),
+        )
+
+
+#: Ceilings for the goal-planning section. The search ceiling is generous for a
+#: bounded beam and still finite; the goal ceilings are what a single goal's own
+#: budget may ask for, and a goal that asks for more is clamped rather than
+#: allowed to run unbounded.
+MAX_GOAL_EXPANSIONS = 4096
+MAX_GOAL_CANDIDATES = 32
+MAX_GOAL_STEPS = 256
+MAX_GOAL_REPLANS = 16
+MAX_GOAL_SECONDS = 3600.0
+MAX_GOAL_STALE_SECONDS = 86400.0
+
+
+@dataclass(frozen=True, slots=True)
+class GoalPlanningSettings:
+    """How a goal becomes a plan, a run and a verdict. Phase 24.
+
+    Every field is a POLICY the goal manager reads rather than a capability it
+    has: the search ceilings candidate generation runs under, the defaults a new
+    goal's own budget inherits, how old a state reading may be before it is
+    reported STALE, and which of the optional providers are consulted at all.
+
+    ``enabled`` is the phase's own switch. A deployment that wants no
+    goal-level planning sets exactly this to false: no manager is constructed,
+    and the status surface says so instead of offering a surface that would
+    refuse every call.
+
+    ``use_world_model`` and ``use_learned_rules`` are separate because they are
+    separate claims: a world model makes a state reading possible, a learned rule
+    makes an expectation possible, and a build may honestly have one and not the
+    other. Turning either off does not fabricate its substitute — the estimate
+    simply drops to the task's own declared effect and says so.
+    """
+
+    enabled: bool = True
+    persist: bool = True
+    use_world_model: bool = True
+    use_learned_rules: bool = True
+    allow_destructive: bool = False
+    stale_after_seconds: float = 900.0
+    max_expansions: int = 256
+    max_candidates: int = 4
+    search_seconds: float = 2.0
+    max_depth: int = 16
+    max_steps: int = 24
+    max_replans: int = 2
+    max_seconds: float = 300.0
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "persist": self.persist,
+            "use_world_model": self.use_world_model,
+            "use_learned_rules": self.use_learned_rules,
+            "allow_destructive": self.allow_destructive,
+            "stale_after_seconds": self.stale_after_seconds,
+            "max_expansions": self.max_expansions,
+            "max_candidates": self.max_candidates,
+            "search_seconds": self.search_seconds,
+            "max_depth": self.max_depth,
+            "max_steps": self.max_steps,
+            "max_replans": self.max_replans,
+            "max_seconds": self.max_seconds,
+        }
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> GoalPlanningSettings:
+        """Settings from a mapping, with every number clamped to its ceiling."""
+        defaults = cls()
+        return cls(
+            enabled=_bool_setting(data, "enabled", defaults.enabled),
+            persist=_bool_setting(data, "persist", defaults.persist),
+            use_world_model=_bool_setting(data, "use_world_model", defaults.use_world_model),
+            use_learned_rules=_bool_setting(
+                data, "use_learned_rules", defaults.use_learned_rules
+            ),
+            allow_destructive=_bool_setting(
+                data, "allow_destructive", defaults.allow_destructive
+            ),
+            # Seconds and counts are read with the UNCONSTRAINED float helper and
+            # then clamped: ``_float_setting`` is the 0..1 RATIO setter and would
+            # silently substitute the default for anything larger, which is how a
+            # configured 30-minute ceiling came back as 300 seconds.
+            stale_after_seconds=min(
+                max(
+                    0.0,
+                    _float_value(data.get("stale_after_seconds"), defaults.stale_after_seconds),
+                ),
+                MAX_GOAL_STALE_SECONDS,
+            ),
+            max_expansions=_count_setting(
+                data, "max_expansions", defaults.max_expansions, maximum=MAX_GOAL_EXPANSIONS
+            ),
+            max_candidates=_count_setting(
+                data, "max_candidates", defaults.max_candidates, maximum=MAX_GOAL_CANDIDATES
+            ),
+            search_seconds=min(
+                max(0.05, _float_value(data.get("search_seconds"), defaults.search_seconds)),
+                MAX_GOAL_SECONDS,
+            ),
+            max_depth=_count_setting(data, "max_depth", defaults.max_depth, maximum=MAX_GOAL_STEPS),
+            max_steps=_count_setting(data, "max_steps", defaults.max_steps, maximum=MAX_GOAL_STEPS),
+            max_replans=_count_setting(
+                data, "max_replans", defaults.max_replans, maximum=MAX_GOAL_REPLANS
+            ),
+            max_seconds=min(
+                max(0.1, _float_value(data.get("max_seconds"), defaults.max_seconds)),
+                MAX_GOAL_SECONDS,
+            ),
+        )
+
+
 def _ratio_setting(data: Mapping[str, Any], key: str, default: float) -> float:
     """A 0..1 ratio from a mapping — out-of-range input clamps, never raises."""
     try:
@@ -466,6 +753,241 @@ MAX_MODEL_HEADROOM_MB = 8192
 #: hour: past that the model has been idle long enough that the reload is the
 #: smaller cost, on a machine whose whole problem is memory pressure.
 MAX_MODEL_KEEP_WARM_SECONDS = 3600
+
+#: Phase 25 ceilings. A configured number may ask for less than these and can
+#: never ask for more, because an embodied session spends real time in a
+#: controller it does not own and an unbounded one is a runaway, not a feature.
+MAX_EMBODIED_SESSIONS = 4
+MAX_EMBODIED_ACTIONS = 400
+MAX_EMBODIED_PLANS = 400
+MAX_EMBODIED_REPLANS = 20
+MAX_EMBODIED_INPUT_MS = 2000
+MAX_EMBODIED_SECONDS = 1800.0
+
+#: Phase 26 ceilings. The benchmark is a MEASUREMENT, so its own bounds are part
+#: of what makes a number comparable: a run that may spend an hour is not the
+#: same experiment as one that may spend a minute, and a configuration cannot
+#: quietly widen either after a result has been reported.
+MAX_GENERALIZATION_TASKS = 200
+MAX_GENERALIZATION_CANDIDATES = 4000
+MAX_GENERALIZATION_SECONDS = 300.0
+MAX_GENERALIZATION_RESULTS = 400
+MAX_GENERALIZATION_RUNS = 50
+MAX_GENERALIZATION_REGISTERED_TASKS = 500
+
+
+@dataclass(frozen=True, slots=True)
+class EmbodiedSettings:
+    """What an embodied session may do, and in which environments. Phase 25.
+
+    Its own section because it answers a question no other section does: which
+    environments this build may send INPUT to, and how much of it. ``learning``
+    says what may be done inside a registered experiment; this says which
+    controller may be driven at all.
+
+    ``environments`` is the ALLOWLIST and it is the load-bearing field: an empty
+    list means nothing may be driven, and an environment that is not named here
+    is refused by name rather than by an accident of whether an adapter happens
+    to be registered. A scenario is a CONFIGURATION of an allowed environment
+    (``gridworld:drifting``), so the entry names the family (``gridworld``) and
+    the scenarios are covered by it.
+
+    ``persist`` is separate from ``enabled``: a deployment may run sessions and
+    choose not to remember them across restarts, and the restore report says
+    exactly that instead of the surface looking empty for no reason.
+    """
+
+    enabled: bool = True
+    persist: bool = True
+    max_sessions: int = 1
+    max_actions: int = 40
+    max_seconds: float = 120.0
+    max_replans: int = 3
+    max_plans: int = 40
+    max_input_ms: int = 500
+    action_interval_ms: int = 50
+    refresh_attempts: int = 2
+    max_trajectory: int = 200
+    environments: tuple[str, ...] = ("gridworld",)
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "persist": self.persist,
+            "max_sessions": self.max_sessions,
+            "max_actions": self.max_actions,
+            "max_seconds": self.max_seconds,
+            "max_replans": self.max_replans,
+            "max_plans": self.max_plans,
+            "max_input_ms": self.max_input_ms,
+            "action_interval_ms": self.action_interval_ms,
+            "refresh_attempts": self.refresh_attempts,
+            "max_trajectory": self.max_trajectory,
+            "environments": list(self.environments),
+        }
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> EmbodiedSettings:
+        """Settings from a mapping, with every number clamped to its ceiling."""
+        defaults = cls()
+        raw_environments = data.get("environments")
+        environments: tuple[str, ...]
+        if raw_environments is None:
+            environments = defaults.environments
+        elif isinstance(raw_environments, str):
+            environments = (raw_environments.strip(),) if raw_environments.strip() else ()
+        else:
+            environments = tuple(
+                str(item).strip() for item in raw_environments if str(item).strip()
+            )
+        return cls(
+            enabled=_bool_setting(data, "enabled", defaults.enabled),
+            persist=_bool_setting(data, "persist", defaults.persist),
+            max_sessions=_count_setting(
+                data, "max_sessions", defaults.max_sessions, maximum=MAX_EMBODIED_SESSIONS
+            ),
+            max_actions=_count_setting(
+                data, "max_actions", defaults.max_actions, maximum=MAX_EMBODIED_ACTIONS
+            ),
+            max_seconds=min(
+                max(0.1, _float_value(data.get("max_seconds"), defaults.max_seconds)),
+                MAX_EMBODIED_SECONDS,
+            ),
+            max_replans=_count_setting(
+                data, "max_replans", defaults.max_replans, maximum=MAX_EMBODIED_REPLANS
+            ),
+            max_plans=_count_setting(
+                data, "max_plans", defaults.max_plans, maximum=MAX_EMBODIED_PLANS
+            ),
+            max_input_ms=_count_setting(
+                data, "max_input_ms", defaults.max_input_ms, maximum=MAX_EMBODIED_INPUT_MS
+            ),
+            action_interval_ms=_count_setting(
+                data,
+                "action_interval_ms",
+                defaults.action_interval_ms,
+                maximum=MAX_EMBODIED_INPUT_MS,
+            ),
+            refresh_attempts=_count_setting(
+                data, "refresh_attempts", defaults.refresh_attempts, maximum=5
+            ),
+            max_trajectory=_count_setting(
+                data, "max_trajectory", defaults.max_trajectory, maximum=1000
+            ),
+            environments=environments,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class GeneralizationSettings:
+    """What a generalization benchmark run may do. Phase 26.
+
+    Its own section because it answers a question no other section does: which
+    split the evaluation is allowed to read, how far a search may go before it
+    reports an exhausted budget instead of an answer, and whether a run whose
+    held-out split is dirty is REFUSED.
+
+    ``require_clean_splits`` is the load-bearing field — the same way
+    ``EmbodiedSettings.environments`` is the load-bearing field of its section.
+    A run over answers that were already available measures memorization, not
+    generalization, so the default refuses it rather than annotating the result.
+    ``evaluate_held_out_only`` is separate: it decides WHAT is measured (the
+    unseen examples), while ``require_clean_splits`` decides whether the
+    measurement is allowed to be called clean.
+
+    Every ceiling here is clamped to a ``MAX_GENERALIZATION_*`` constant: a
+    configured number may ask for less and can never ask for more, so the same
+    corpus under a widened configuration cannot be presented as the same
+    experiment.
+    """
+
+    enabled: bool = True
+    persist: bool = True
+    default_family: str = ""
+    default_solver: str = "infer"
+    default_baseline: str = "identity"
+    evaluate_held_out_only: bool = True
+    require_clean_splits: bool = True
+    max_tasks_per_run: int = 60
+    max_candidates: int = 400
+    max_depth: int = 2
+    max_seconds: float = 60.0
+    max_results_kept: int = 200
+    max_model_calls: int = 0
+    keep_runs: int = 20
+    max_registered_tasks: int = 100
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "persist": self.persist,
+            "default_family": self.default_family,
+            "default_solver": self.default_solver,
+            "default_baseline": self.default_baseline,
+            "evaluate_held_out_only": self.evaluate_held_out_only,
+            "require_clean_splits": self.require_clean_splits,
+            "max_tasks_per_run": self.max_tasks_per_run,
+            "max_candidates": self.max_candidates,
+            "max_depth": self.max_depth,
+            "max_seconds": self.max_seconds,
+            "max_results_kept": self.max_results_kept,
+            "max_model_calls": self.max_model_calls,
+            "keep_runs": self.keep_runs,
+            "max_registered_tasks": self.max_registered_tasks,
+        }
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> GeneralizationSettings:
+        """Settings from a mapping, with every number clamped to its ceiling."""
+        defaults = cls()
+        return cls(
+            enabled=_bool_setting(data, "enabled", defaults.enabled),
+            persist=_bool_setting(data, "persist", defaults.persist),
+            default_family=str(data.get("default_family") or defaults.default_family),
+            default_solver=str(data.get("default_solver") or defaults.default_solver),
+            default_baseline=str(data.get("default_baseline") or defaults.default_baseline),
+            evaluate_held_out_only=_bool_setting(
+                data, "evaluate_held_out_only", defaults.evaluate_held_out_only
+            ),
+            require_clean_splits=_bool_setting(
+                data, "require_clean_splits", defaults.require_clean_splits
+            ),
+            max_tasks_per_run=_count_setting(
+                data,
+                "max_tasks_per_run",
+                defaults.max_tasks_per_run,
+                maximum=MAX_GENERALIZATION_TASKS,
+            ),
+            max_candidates=_count_setting(
+                data,
+                "max_candidates",
+                defaults.max_candidates,
+                maximum=MAX_GENERALIZATION_CANDIDATES,
+            ),
+            max_depth=_count_setting(data, "max_depth", defaults.max_depth, maximum=4),
+            max_seconds=min(
+                max(0.05, _float_value(data.get("max_seconds"), defaults.max_seconds)),
+                MAX_GENERALIZATION_SECONDS,
+            ),
+            max_results_kept=_count_setting(
+                data,
+                "max_results_kept",
+                defaults.max_results_kept,
+                maximum=MAX_GENERALIZATION_RESULTS,
+            ),
+            max_model_calls=_count_setting(
+                data, "max_model_calls", defaults.max_model_calls, maximum=64
+            ),
+            keep_runs=_count_setting(
+                data, "keep_runs", defaults.keep_runs, maximum=MAX_GENERALIZATION_RUNS
+            ),
+            max_registered_tasks=_count_setting(
+                data,
+                "max_registered_tasks",
+                defaults.max_registered_tasks,
+                maximum=MAX_GENERALIZATION_REGISTERED_TASKS,
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1026,6 +1548,30 @@ class NovaControlConfig:
     # because it answers a different question from perception's — that one is about
     # how much attention a frame gets, this one about what is kept afterwards.
     world: WorldModelSettings = field(default_factory=WorldModelSettings)
+    # Phase 23: what interactive learning may do, and the ceilings a bounded
+    # objective runs under. Its own section because it answers a different question
+    # from the world model's — that one is about what is REMEMBERED, this one is
+    # about what may be DONE to find something out.
+    learning: LearningSettings = field(default_factory=LearningSettings)
+    # Phase 24: how a goal becomes a plan, a run and a verdict — the search
+    # ceilings candidates are generated under, the defaults a goal's own budget
+    # inherits, and which optional providers (world model, learned rules) are
+    # consulted. Its own section for the same reason the others are: a build may
+    # record and learn and still refuse to plan, or plan against assertions alone.
+    goal_planning: GoalPlanningSettings = field(default_factory=GoalPlanningSettings)
+    # Phase 25: which environments an embodied session may drive, and the
+    # ceilings it runs under. Its own section because it is the only one that
+    # grants INPUT to a controller outside this process, and a grant is not a
+    # preference a neighbouring section should be able to hand out.
+    embodied: EmbodiedSettings = field(default_factory=EmbodiedSettings)
+    # Phase 26: what a generalization benchmark run may do. Its own section
+    # because it is the only one that decides whether a number MEASURED over a
+    # split can be called a generalization measurement at all — a neighbour
+    # section widening a search ceiling changes the experiment, and a section
+    # turning off the leakage refusal changes what the number means.
+    generalization: GeneralizationSettings = field(
+        default_factory=GeneralizationSettings
+    )
     models: ModelSettings = field(default_factory=ModelSettings)
     modules: Mapping[str, ModuleSettings] = field(default_factory=dict)
 
@@ -1065,6 +1611,14 @@ class NovaControlConfig:
             vision=VisionSettings.from_mapping(_mapping(data.get("vision", {}))),
             perception=PerceptionSettings.from_mapping(_mapping(data.get("perception", {}))),
             world=WorldModelSettings.from_mapping(_mapping(data.get("world", {}))),
+            learning=LearningSettings.from_mapping(_mapping(data.get("learning", {}))),
+            goal_planning=GoalPlanningSettings.from_mapping(
+                _mapping(data.get("goal_planning", {}))
+            ),
+            embodied=EmbodiedSettings.from_mapping(_mapping(data.get("embodied", {}))),
+            generalization=GeneralizationSettings.from_mapping(
+                _mapping(data.get("generalization", {}))
+            ),
             models=ModelSettings.from_mapping(_mapping(data.get("models", {}))),
             modules=modules,
         )

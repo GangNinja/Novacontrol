@@ -281,6 +281,21 @@ def as_dry_run(root: str | Path, **overrides: Any) -> TrainingManager:
     return make_manager(root, default_config=config, **overrides)
 
 
+def _pin_training_machine_reading(app: NovaControlApplication) -> None:
+    """Pin the live application's training estimate to a fixed machine reading.
+
+    Without this the estimator reads THIS machine's free memory, so a suite run
+    alongside other work — or late in one long-lived full sweep, when the process's
+    own footprint has grown — can flip a start from safe to unsafe and fail a test
+    that is not about resources at all. The resource verdict has its own tests with
+    explicit hardware readings; a test that simply starts a run must not make the
+    host the variable.
+    """
+    app.training.estimator = ResourceEstimator(
+        hardware=HardwareCapabilities(cpu_count=8, available_ram_bytes=32_000_000_000)
+    )
+
+
 # ── the schema ──────────────────────────────────────────────────────────────
 
 
@@ -3407,6 +3422,7 @@ class ApplicationTrainingTests(unittest.IsolatedAsyncioTestCase):
         self.app = NovaControlApplication(data_dir=self._tmp.name)
         await self.app.start()
         self.addCleanup(self._stop)
+        _pin_training_machine_reading(self.app)
 
     async def _stop(self) -> None:
         await self.app.stop()
@@ -3702,6 +3718,7 @@ class TrainingApiTests(unittest.TestCase):
         kwargs["data_dir"] = self._tmp.name
         app = NovaControlApplication(**kwargs)
         self._nova = app
+        _pin_training_machine_reading(app)
         return app
 
     def _dataset_with_examples(self) -> str:

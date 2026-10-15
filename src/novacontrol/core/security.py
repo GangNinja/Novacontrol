@@ -17,6 +17,11 @@ class PermissionScope(StrEnum):
     BROWSER_CONTROL = "browser:control"
     DESKTOP_CONTROL = "desktop:control"
     PHONE_CONTROL = "phone:control"
+    #: Driving an environment's own controls — a simulation, a game, a window.
+    #: Its own scope rather than a reuse of desktop/browser control, because
+    #: "send input to this environment" is a different grant from "press keys on
+    #: this machine", and a build may allow one and refuse the other.
+    ENVIRONMENT_CONTROL = "environment:control"
     SECRET_READ = "secret:read"
     MICROPHONE_ACCESS = "microphone:access"
     CAMERA_ACCESS = "camera:access"

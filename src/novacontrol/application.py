@@ -87,7 +87,10 @@ from novacontrol.core.chat_transcript import ChatTranscriptStore
 from novacontrol.core.config import NovaControlConfig
 from novacontrol.core.events import Event, EventBus, EventType, task_event_name
 from novacontrol.core.runtime import EventDrivenRuntime
-from novacontrol.core.security import ApprovalDecision, ApprovalRequest, DenyByDefaultApprovalGateway
+from novacontrol.core.security import (
+    DenyByDefaultApprovalGateway,
+    PermissionScope,
+)
 from novacontrol.desktop import DesktopAutomationController, DesktopAutomationModule, LocalDesktopRunner
 from novacontrol.desktop.vision import VisionController
 from novacontrol.evaluation import (
@@ -212,6 +215,58 @@ from novacontrol.planning import (
     WorkflowResult,
 )
 from novacontrol.planning.engine import steps_id
+# ── Phase 24: planning, reasoning and action policy ─────────────────────
+# Imported here rather than beside the Phase 4 planner because it CONSUMES the
+# layers that come later in this file's build order: a grounded fact is read
+# from Phase 22's world model, an outcome estimate may cite a Phase 23 learned
+# rule, and authorization is the SAME permission layer the tool executor gates
+# on. The planner itself is the Phase 4 plan vocabulary — this phase adds the
+# goal, the candidate comparison and the pre-step revalidation, not a second
+# executor and not a second approval check.
+from novacontrol.planning.capabilities import (
+    capability_rows as planning_capability_rows,
+    register_planning_capabilities,
+)
+from novacontrol.planning.candidates import PlanningBudget
+from novacontrol.planning.estimation import OutcomeEstimator
+from novacontrol.planning.goal_manager import GoalManager, JsonGoalRepository
+from novacontrol.planning.goals import SuccessCondition, Task
+from novacontrol.planning.grounding import StateGroundingService
+from novacontrol.planning.policy import ActionPolicy
+from novacontrol.planning.ranking import PlanRanker
+# ── Phase 25: embodied agents and controlled environments ───────────────
+# Imported here because it COMPOSES the layers above rather than adding its own:
+# an action is selected by Phase 24's goal planner, planned and authorized by
+# its action policy, executed by this application's ONE step runner, verified by
+# the same verification engine, remembered as a Phase 22 world fact, announced on
+# the SAME bus and recorded on the SAME audit trail. This package owns the
+# session, the environment adapter and the input door — nothing else.
+from novacontrol.embodied import (
+    ENVIRONMENT_INPUT,
+    EmbodiedManager,
+    capability_table_rows as embodied_capability_rows,
+    register_embodied_capabilities,
+)
+# ── Phase 26: generalization, ARC-style reasoning and intelligence evaluation ─
+# Imported here because it MEASURES the layers above rather than adding a
+# capability beside them: a task is solved by the bounded operator library, the
+# answer is checked by the same deterministic-verifier shape Phase 8 established,
+# the runs are announced on the SAME bus and registered on the SAME capability
+# registry, and the game-evaluation contracts read Phase 25's own session
+# records. This package owns the corpus, the splits and the numbers — nothing
+# else, and it never trains anything.
+from novacontrol.generalization import (
+    OPERATORS,
+    Difficulty,
+    GeneralizationManager,
+    GRID_RULES_SUPPORTED,
+    MAX_DEPTH,
+    Split,
+    capability_table_rows as generalization_capability_rows,
+    contracts_payload as generalization_game_contracts,
+    evaluate_embodied_sessions,
+    register_generalization_capabilities,
+)
 from novacontrol.reliability import (
     PermissionManager,
     TaskController,
@@ -294,6 +349,24 @@ from novacontrol.vision import (
 )
 from novacontrol.vision.providers import build_vision_provider as build_vision_pipeline_provider
 from novacontrol.voice import VoiceModule
+# ── Phase 23: interactive learning and exploration ──────────────────────
+# Imported beside the world model because it CONSUMES it: the read-only world
+# environment is a window onto Phase 22's state, and the phase's whole point is
+# that it OBSERVES that state and never writes it.
+from novacontrol.interactive import (
+    EnvironmentRegistry,
+    InteractiveLearningManager,
+    JsonLearningRepository,
+    LearningPolicy,
+    MatchingPolicy,
+    SafetyGate,
+    WorldStateEnvironment,
+    available_strategies as learning_strategies,
+    builtin_environments,
+    environment_from_spec,
+    strategy_by_name,
+)
+from novacontrol.interactive.capabilities import register_learning_capabilities
 # ── Phase 22: world model, memory and state reasoning ────────────────────
 # Imported beside the perception layer because it CONSUMES it: a Phase 21
 # result becomes a normalized observation, Phase 21's spatial arithmetic is
@@ -313,6 +386,30 @@ from novacontrol.world.prediction import (
 )
 
 _APPROVAL_TTL_SECONDS = 300.0  # A planned desktop action must be approved within 5 minutes.
+
+#: The lifecycle fields a session LIST row carries. The record — the objective's
+#: outcome, the observation, the trajectory, the evaluation — stays on the
+#: single-session view: a list is an operator surface, so it publishes no
+#: session content.
+_EMBODIED_SESSION_ROW_FIELDS: tuple[str, ...] = (
+    "session_id",
+    "environment_id",
+    "scenario",
+    "status",
+    "reason",
+    "goal_id",
+    "actions_taken",
+    "observations_taken",
+    "replans_used",
+    "recoveries",
+    "needs_revalidation",
+    "released",
+    "created_at",
+    "updated_at",
+    "started_at",
+    "finished_at",
+    "terminal",
+)
 
 # "Look at the screen" with no question in it. These phrases are the
 # INSTRUCTION to capture, not a question about the capture, so passing them to
@@ -1047,6 +1144,12 @@ def _nlu_payload(
     }
 
 
+def _embodied_session_row(session: Any) -> dict[str, Any]:
+    """One EMBODIED session list row: the lifecycle state, and nothing heavier."""
+    payload = session.to_dict()
+    return {key: payload[key] for key in _EMBODIED_SESSION_ROW_FIELDS}
+
+
 @dataclass(frozen=True, slots=True)
 class ApplicationResponse:
     route: str
@@ -1122,6 +1225,63 @@ def _summarize_search_results(execution_results: list[dict[str, Any]]) -> str:
         url = str(item.get("url") or "").strip()
         lines.append(f"{index}. {title}" + (f" — {url}" if url else ""))
     return "\n".join(lines)
+
+
+def _learning_summary_text(report: Mapping[str, Any]) -> str:
+    """The words a user reads after a cycle, built only from what was recorded.
+
+    Every line comes from the cycle's own steps, status and limitations: the text
+    cannot claim a result the record does not show, which is the same rule the report
+    and the metrics follow. No reasoning and no model narration is added here.
+    """
+    status = str(report.get("status", "") or "unknown")
+    environment = str(report.get("environment_id", "") or "")
+    simulated = bool(report.get("simulated", False))
+    lines = [
+        f"Learning objective {status}: {report.get('stop_reason', '')}".strip(),
+    ]
+    if environment:
+        kind = "a simulator" if simulated else "a real environment"
+        lines.append(f"Environment: {environment} ({kind}).")
+    cycles = report.get("steps") or []
+    if cycles:
+        lines.append("What happened, in order:")
+        for step in cycles:
+            kind = str(step.get("kind", ""))
+            detail = str(step.get("detail", ""))
+            lines.append(f"- {kind}: {detail}")
+    rules = report.get("rules") or []
+    if rules:
+        lines.append("Learned (scoped) rules: " + ", ".join(str(item) for item in rules))
+    for limitation in report.get("limitations") or []:
+        lines.append(f"Limitation: {limitation}")
+    return "\n".join(lines)
+
+
+def _world_learning_view(world: Any) -> dict[str, Any]:
+    """A bounded, content-light summary of the world for the learning environment.
+
+    Counts, a version and an id — never attribute values, entity labels or
+    observation content. That is the honest shape for this seam for two reasons: an
+    experiment about the world must not end up comparing against somebody's screen
+    contents, and a summary is what makes a world-shaped question checkable without
+    exporting the world. An unreadable world reports nothing rather than an empty
+    dict pretending to be state (the environment turns that into an incomplete
+    observation, which is not the same as an empty room).
+    """
+    try:
+        state = world.state()
+    except Exception:  # noqa: BLE001 - an unreadable world is not an empty one
+        return {}
+    try:
+        return {
+            "entities": len(state.entities),
+            "relationships": len(state.relationships),
+            "version": state.version,
+            "state_id": state.state_id,
+        }
+    except AttributeError:
+        return {}
 
 
 class NovaControlApplication:
@@ -1578,6 +1738,32 @@ class NovaControlApplication:
             risk=self.risk,
             events=self._tool_event,
         )
+        # ── Phase 23: interactive learning and exploration ────────────────
+        # Built HERE, after the risk/permission layer exists, because that layer is
+        # what stands in front of a real action: the safety gate is handed the SAME
+        # ``self.risk`` the tool executor gates on, so "may this experiment act?" is
+        # decided by the layer that already decides what may run rather than by a
+        # bespoke check that could drift from it. The manager proposes candidate
+        # explanations only from a space an environment declares, makes an
+        # expectation only when a rule justifies one, checks every ceiling BEFORE an
+        # action, and keeps a learned rule scoped, versioned and reversible. Its
+        # events go on the SAME bus, its objectives into the SAME state store, and
+        # its capabilities on the SAME registry.
+        self.learning = self._build_interactive_learning()
+        register_learning_capabilities(self.intelligence.capabilities, self.learning)
+        # ── Phase 24: planning, reasoning and action policy ────────────────
+        # Built HERE, after the world model, the permission layer and the
+        # learning manager all exist, because it is composed FROM them: grounding
+        # reads Phase 22's state, the estimator may cite a Phase 23 learned rule,
+        # and the action policy asks the SAME ``self.risk`` the tool executor
+        # gates on. Execution runs through the application's own
+        # ``self.workflow_executor`` with a fresh-state gate in front of it, so a
+        # planned step is re-checked immediately before it runs and refused
+        # (DENIED, never retried) when the state no longer supports it. Its events
+        # go on the SAME bus, its goals into the SAME state store, and its
+        # capabilities on the SAME registry.
+        self.goals = self._build_goal_planning()
+        register_planning_capabilities(self.intelligence.capabilities, self.goals)
         # ── Phase 13: scheduled automations and the operational audit trail ──
         # The engine stores requests plus schedules and executes NOTHING itself:
         # its runner is this application's request path (see
@@ -1601,6 +1787,34 @@ class NovaControlApplication:
             sink=JsonlAuditSink(self.data_dir / AUDIT_DIRECTORY / AUDIT_FILENAME),
             retention=self._audit_retention(),
         )
+        # ── Phase 25: embodied sessions and their ONE input door ─────────────
+        # Built here rather than beside the goal planner because it needs the
+        # audit trail that was just constructed: every environment input is a
+        # consequential action and is recorded on the SAME trail as a desktop or
+        # browser command. The permission declaration is registered beside the
+        # code that sends the input, so "what may drive an environment" has one
+        # answer — and it is explicit rather than derived from the name, because
+        # a verb-derived reading of "environment_input" is a guess about a
+        # grant.
+        self.risk.declare(
+            ENVIRONMENT_INPUT,
+            risk_level=RiskLevel.LOW,
+            required_permission=PermissionScope.ENVIRONMENT_CONTROL,
+            requires_confirmation=False,
+            reversible=True,
+            destructive=False,
+            external_side_effect=False,
+        )
+        self.embodied = self._build_embodied()
+        register_embodied_capabilities(self.intelligence.capabilities, self.embodied)
+        # ── Phase 26: the generalization benchmark ────────────────────────────
+        # Built last of the measurement layers because it only READS: it takes
+        # the corpus, runs a bounded solver over it and stores its own runs. The
+        # capability rows are registered beside it for the same reason the
+        # embodied ones are — a capability that is declared away from the code
+        # that proves it drifts into claiming things this build does not do.
+        self.generalization = self._build_generalization()
+        register_generalization_capabilities(self.intelligence.capabilities, self.generalization)
         self.automation_engine = AutomationEngine.from_dict(
             (
                 self.state_store.read("automation_tasks")
@@ -2399,6 +2613,14 @@ class NovaControlApplication:
         # (its tools stop being callable) before shutdown runs, so nothing a
         # plugin holds is released while the system still advertises it.
         await self.plugins.unload_all()
+        # Phase 25: release every held environment input and shut the adapters
+        # down BEFORE the runtime stops. A held input outliving the process is
+        # the one leak an embodied session must not leave behind.
+        self.embodied.close()
+        # Phase 26: flush the stored evaluation runs before the store goes away.
+        # A run that finished but was never written is a result nobody can
+        # reproduce tomorrow.
+        self.generalization.close()
         await self.browser.close()
         await self.runtime.stop()
 
@@ -2421,6 +2643,30 @@ class NovaControlApplication:
         # Phase 22: the world survives a restart — versions, transitions and
         # observation REFERENCES (never contents), one key per world id.
         self.world.save()
+        # Phase 23: the learning objectives survive too — hypotheses, experiment
+        # specs and statuses, run comparisons, evidence REFERENCES, budget usage and
+        # learned rules. One key per objective, so a corrupt record costs only the
+        # objective it belongs to.
+        self.learning.save()
+        # Phase 24: the goals survive too — their stated conditions, asserted
+        # initial state, budgets and the decomposition each was planned from. One
+        # key per goal, so a corrupt record costs only the goal it belongs to. A
+        # restored goal comes back UNPLANNED: a plan is selected by planning, and
+        # restoring one would claim a decision this process never made.
+        for _goal in self.goals.goals():
+            self.goals.save(_goal.goal_id)
+        # Phase 25: the sessions survive too — their objective, status, verdict,
+        # trajectory and evaluation, one key for all of them. What comes back is
+        # INTERRUPTED with ``needs_revalidation`` set, because a session whose
+        # environment was never reconnected must not send an input.
+        for _session in self.embodied.sessions():
+            self.embodied.save(_session.session_id)
+        # Phase 26: the runs survive too — their settings, seed, results,
+        # failure classifications and leakage verdict, one key for all of them.
+        # The manager writes on every run and flushes again here, so an
+        # evaluation that completed but had not yet been flushed is not lost to
+        # a restart.
+        self.generalization.close()
 
     # -- Global Intelligence Layer --------------------------------------------
 
@@ -3304,6 +3550,304 @@ class NovaControlApplication:
             engine.restore()
         return engine
 
+    # ── Phase 23: the interactive-learning builder and its one seam ─────
+
+    def _build_interactive_learning(self) -> InteractiveLearningManager:
+        """The learning manager, wired to the collaborators this application owns.
+
+        Every collaborator is one the rest of the build already uses: the shared
+        JSON state store for persistence (one key per objective), the shared event
+        bus (through ``_learning_event``), and the shared permission/risk layer for
+        real actions — passed to the safety gate, which refuses a real action when
+        no permission layer is wired rather than assuming one.
+
+        The read-only world environment is registered only when the world model is
+        enabled AND has a store: an environment that could act on the world would be
+        the thing the phase forbids, so this one exposes no action at all.
+
+        A disabled section returns a manager with NO environments registered, so
+        every objective is refused with a reason instead of a surface that silently
+        pretends to learn.
+        """
+        settings = self.config.learning
+        self._learning_restore_report: dict[str, Any] = {}
+        if not settings.enabled:
+            return InteractiveLearningManager(
+                environments=EnvironmentRegistry(),
+                observer=self._learning_event,
+                policy=LearningPolicy.from_mapping(settings.to_mapping()),
+            )
+        registry = (
+            builtin_environments()
+            if settings.register_builtin_environments
+            else EnvironmentRegistry()
+        )
+        if settings.world_environment and self.world is not None:
+            registry.register(
+                WorldStateEnvironment(
+                    lambda: _world_learning_view(self.world),
+                    environment_id="world.readonly",
+                    scope=self.config.world.world_id,
+                )
+            )
+        repository = (
+            JsonLearningRepository(self.state_store)
+            if self.state_store is not None and settings.persist
+            else None
+        )
+        manager = InteractiveLearningManager(
+            environments=registry,
+            repository=repository,
+            policy=LearningPolicy.from_mapping(settings.to_mapping()),
+            gate=SafetyGate(
+                policy=LearningPolicy.from_mapping(settings.to_mapping()),
+                permissions=self.risk,
+            ),
+            matching=MatchingPolicy.from_mapping(settings.to_mapping()),
+            support_threshold=settings.support_threshold,
+            contradiction_threshold=settings.contradiction_threshold,
+            observer=self._learning_event,
+        )
+        if repository is not None:
+            # Boot restore, reported and never raised: a corrupt or absent store is
+            # the same state a first run has, and an experiment that was in flight
+            # when the process stopped is marked INTERRUPTED rather than completed.
+            self._learning_restore_report = manager.restore()
+        return manager
+
+    def _learning_event(self, event_type: str, payload: Mapping[str, Any]) -> None:
+        """Relay one learning event onto the application's ONE event bus.
+
+        The manager announces through an injected seam, and this is that seam. An
+        unknown type is dropped rather than guessed at — silence is honest,
+        inventing an event type is not.
+        """
+        try:
+            type_ = EventType(event_type)
+        except ValueError:  # a vocabulary this build does not have
+            return
+        fields = dict(payload)
+        correlation = str(fields.pop("correlation_id", "") or "")
+        self._announce_soon(type_, correlation_id=correlation, **fields)
+
+    # -- Phase 23: interactive learning's application surface ----------------
+
+    # Every method here is a THIN door onto the manager: it validates what a
+    # caller can get wrong (a blank question, an unknown environment, a strategy
+    # this build does not have, a rule that does not exist) and returns records
+    # the manager produced. No method here runs an action of its own, and none of
+    # them invents a summary: the words a user reads are built from the cycle's own
+    # recorded steps.
+
+    def learning_status(self) -> dict[str, Any]:
+        """What interactive learning can do here, and what it refuses to claim.
+
+        ``restored`` is the boot report — how many objectives came back, what was
+        skipped as unreadable, and how many experiments were interrupted — because
+        "this restarted and could not verify an experiment" is something a caller has
+        to be able to see rather than infer from silence.
+        """
+        return {
+            **dict(self.learning.status()),
+            "restored": dict(getattr(self, "_learning_restore_report", {})),
+        }
+
+    def learning_environments(self) -> dict[str, Any]:
+        """Every environment this build can experiment in, and what it exposes."""
+        return dict(self.learning.environments.status())
+
+    def learning_register_environment(self, spec: Mapping[str, Any]) -> dict[str, Any]:
+        """Register a deterministic simulator declared as DATA. Simulators only."""
+        if not isinstance(spec, Mapping) or not spec:
+            raise ValueError(
+                "an environment specification needs at least 'rules' (an action name "
+                "mapped to the state patch it applies)"
+            )
+        environment = environment_from_spec(spec, self.learning.environments)
+        if environment is None:
+            raise ValueError(
+                "the specification declares no readable action, so no environment was "
+                "created; 'rules' maps an action name to the state patch it applies"
+            )
+        return dict(environment.status())
+
+    def learning_create_objective(self, body: Mapping[str, Any]) -> dict[str, Any]:
+        """A bounded question, with its scope and its ceilings."""
+        question = str(body.get("question", "") or "").strip()
+        if not question:
+            raise ValueError("a learning objective needs a 'question'")
+        strategy = str(body.get("strategy", "") or "").strip()
+        if strategy and strategy_by_name(strategy, seed=0) is None:
+            raise ValueError(
+                f"unknown selection strategy {strategy!r}; this build has: "
+                f"{', '.join(learning_strategies())}"
+            )
+        budget = body.get("budget")
+        objective = self.learning.create_objective(
+            question,
+            environment_id=str(body.get("environment_id", "") or ""),
+            scope=str(body.get("scope", "") or ""),
+            budget=budget if isinstance(budget, Mapping) else None,
+            correlation_id=str(body.get("correlation_id", "") or ""),
+        )
+        return dict(objective.to_dict())
+
+    def learning_objectives(self) -> dict[str, Any]:
+        return {
+            "objectives": [item.to_dict() for item in self.learning.objectives()],
+            "open": [item.objective_id for item in self.learning.open_objectives()],
+        }
+
+    def learning_objective(self, objective_id: str) -> dict[str, Any]:
+        """One objective with its hypotheses, experiments, runs, steps and evidence."""
+        try:
+            return dict(self.learning.objective_view(objective_id))
+        except ValueError as exc:
+            raise KeyError(str(exc)) from exc
+
+    def learning_preview(self, objective_id: str, *, strategy: str = "") -> dict[str, Any]:
+        """The candidate experiments, ranked. Nothing is executed."""
+        if strategy and strategy_by_name(strategy, seed=0) is None:
+            raise ValueError(f"unknown selection strategy {strategy!r}")
+        try:
+            return dict(self.learning.preview(objective_id, strategy=strategy))
+        except ValueError as exc:
+            raise KeyError(str(exc)) from exc
+
+    def learning_compare_strategies(self, objective_id: str) -> dict[str, Any]:
+        """What each shipped strategy would choose for the same candidates."""
+        try:
+            return dict(self.learning.compare_strategies(objective_id))
+        except ValueError as exc:
+            raise KeyError(str(exc)) from exc
+
+    async def learning_run(self, objective_id: str, body: Mapping[str, Any]) -> dict[str, Any]:
+        """Run the bounded cycle and report what it did. Nothing is fabricated."""
+        strategy = str(body.get("strategy", "") or "").strip()
+        if strategy and strategy_by_name(strategy, seed=0) is None:
+            raise ValueError(f"unknown selection strategy {strategy!r}")
+        raw_max = body.get("max_experiments")
+        max_experiments = int(raw_max) if isinstance(raw_max, (int, float)) else None
+        try:
+            report = await self.learning.run_cycle(
+                objective_id,
+                approval=bool(body.get("approval", False)),
+                max_experiments=max_experiments,
+                strategy=strategy,
+            )
+        except ValueError as exc:
+            raise KeyError(str(exc)) from exc
+        view = self.learning.objective_view(objective_id)
+        return {
+            "cycle": report.to_dict(),
+            "summary": _learning_summary_text(report.to_dict()),
+            "objective": view["objective"],
+            "runs": view["runs"],
+            "hypotheses": view["hypotheses"],
+            # Refused and blocked experiments are part of what happened, so they
+            # travel with the report rather than only in the preview.
+            "experiments": view["experiments"],
+            "rules": view["rules"],
+            "evidence": view["evidence"],
+            "steps": view["steps"],
+        }
+
+    def learning_approve(self, objective_id: str, *, reason: str = "") -> dict[str, Any]:
+        """Approve a REAL action for one experiment. Single use."""
+        try:
+            return dict(self.learning.approve(objective_id, reason=reason))
+        except ValueError as exc:
+            raise KeyError(str(exc)) from exc
+
+    def learning_reject(self, objective_id: str, *, reason: str = "") -> dict[str, Any]:
+        """Refuse an objective; the refusal is recorded as the reason it stopped."""
+        try:
+            return dict(self.learning.reject(objective_id, reason=reason).to_dict())
+        except ValueError as exc:
+            raise KeyError(str(exc)) from exc
+
+    def learning_cancel(self, objective_id: str, *, reason: str = "") -> dict[str, Any]:
+        """Ask a running cycle to stop at its next checkpoint."""
+        try:
+            return dict(self.learning.cancel(objective_id, reason=reason).to_dict())
+        except ValueError as exc:
+            raise KeyError(str(exc)) from exc
+
+    def learning_resume_capability(self, objective_id: str) -> dict[str, Any]:
+        """Whether an interrupted objective may be resumed, and why not when it may not."""
+        try:
+            allowed, reason = self.learning.can_resume(objective_id)
+        except ValueError as exc:
+            raise KeyError(str(exc)) from exc
+        return {"objective_id": objective_id, "resumable": allowed, "reason": reason}
+
+    async def learning_resume(self, objective_id: str, body: Mapping[str, Any]) -> dict[str, Any]:
+        """Re-run an interrupted objective when, and only when, that is verifiable."""
+        try:
+            report = await self.learning.resume(
+                objective_id,
+                approval=bool(body.get("approval", False)),
+                strategy=str(body.get("strategy", "") or ""),
+            )
+        except ValueError as exc:
+            raise KeyError(str(exc)) from exc
+        view = self.learning.objective_view(objective_id)
+        return {
+            "cycle": report.to_dict(),
+            "summary": _learning_summary_text(report.to_dict()),
+            "objective": view["objective"],
+            "runs": view["runs"],
+            "hypotheses": view["hypotheses"],
+            "experiments": view["experiments"],
+            "rules": view["rules"],
+        }
+
+    def learning_metrics(self) -> dict[str, Any]:
+        """What actually happened, including the inconclusive and refused results."""
+        return dict(self.learning.metrics().to_dict())
+
+    def learning_evidence(self, evidence_id: str) -> dict[str, Any]:
+        """One evidence reference with its role, kind and the experiment behind it."""
+        reference = self.learning.evidence(evidence_id)
+        if reference is None:
+            raise KeyError(f"no evidence reference {evidence_id!r} in this session")
+        hypothesis = self.learning.hypotheses.get(reference.hypothesis_id)
+        experiment = self.learning.ledger.get(reference.experiment_id)
+        return {
+            "evidence": reference.to_dict(),
+            "hypothesis": hypothesis.to_dict() if hypothesis is not None else None,
+            "experiment": experiment.to_dict() if experiment is not None else None,
+            "limitations": [
+                "an observation is what the environment reported; a prediction is what was "
+                "expected before it ran, and the two are never counted as one thing",
+            ],
+        }
+
+    def learning_transfer(self, body: Mapping[str, Any]) -> dict[str, Any]:
+        """Check one learned rule against cases the caller held out."""
+        rule_id = str(body.get("rule_id", "") or "").strip()
+        if not rule_id:
+            raise ValueError("a transfer check needs a 'rule_id'")
+        cases = body.get("held_out")
+        if not isinstance(cases, Sequence) or isinstance(cases, (str, bytes)) or not cases:
+            raise ValueError(
+                "a transfer check needs 'held_out': a list of {action, expected} cases whose "
+                "outcomes were observed outside this learning session"
+            )
+        before = body.get("experiments_before")
+        after = body.get("experiments_after")
+        try:
+            return dict(
+                self.learning.transfer_check(
+                    rule_id=rule_id,
+                    held_out=[item for item in cases if isinstance(item, Mapping)],
+                    experiments_before=int(before) if isinstance(before, (int, float)) else 0,
+                    experiments_after=int(after) if isinstance(after, (int, float)) else 0,
+                )
+            )
+        except ValueError as exc:
+            raise KeyError(str(exc)) from exc
+
     def _world_event(self, event_type: str, payload: Mapping[str, Any]) -> None:
         """Relay one world-model event onto the application's ONE event bus.
 
@@ -3333,6 +3877,805 @@ class NovaControlApplication:
         """
         captured = await self.vision.capture_screen()
         return str(captured.get("screenshot", "") or "")
+
+    # ── Phase 24: the goal-planning builder and its one seam ─────────────
+
+    def _build_goal_planning(self) -> GoalManager:
+        """The goal manager, wired to the collaborators this application owns.
+
+        Every collaborator is one the rest of the build already uses: Phase 22's
+        world model for grounding (read-only), the SAME JSON state store for
+        persistence (one key per goal), Phase 23's rule book for an outcome
+        estimate that can cite a learned rule, the SAME ``self.risk`` permission
+        layer the tool executor gates on, the SAME event bus (through
+        ``_planning_event``), and the application's own ``workflow_executor`` as
+        the ONLY thing that runs a step.
+
+        Every optional provider is wired only when a deployment asked for it AND
+        the collaborator exists: with no world model the grounding service reports
+        every fact as an assertion, with no learned rule the estimator falls back
+        to the task's own declared effect, and neither substitution is dressed up
+        as the thing it replaced. A disabled section still builds a manager, so
+        the status surface answers honestly instead of raising.
+        """
+        settings = self.config.goal_planning
+        world = self.world if (settings.use_world_model and self.world is not None) else None
+        grounding = StateGroundingService(
+            world=world,
+            stale_after_seconds=settings.stale_after_seconds,
+        )
+        rules = (
+            getattr(self.learning, "book", None)
+            if settings.use_learned_rules
+            else None
+        )
+        estimator = OutcomeEstimator(
+            world_predictor=self._planning_world_predictor if world is not None else None,
+            learned_rules=rules,
+        )
+        budget = PlanningBudget(
+            max_expansions=settings.max_expansions,
+            max_candidates=settings.max_candidates,
+            max_seconds=settings.search_seconds,
+            max_depth=settings.max_depth,
+        )
+        repository = (
+            JsonGoalRepository(self.state_store)
+            if self.state_store is not None and settings.persist
+            else None
+        )
+        manager = GoalManager(
+            executor=self.workflow_executor,
+            grounding=grounding,
+            estimator=estimator,
+            ranker=PlanRanker(),
+            policy=ActionPolicy(permissions=self.risk),
+            permissions=self.risk,
+            repository=repository,
+            observer=self._planning_event,
+            budget=budget,
+            stale_after_seconds=settings.stale_after_seconds,
+        )
+        self._goal_defaults: dict[str, Any] = {
+            "max_steps": settings.max_steps,
+            "max_replans": settings.max_replans,
+            "max_seconds": settings.max_seconds,
+            "max_candidates": settings.max_candidates,
+        }
+        self._goal_restore_report: dict[str, Any] = {}
+        self._goal_planning_enabled = bool(settings.enabled)
+        if repository is not None and settings.enabled:
+            # Boot restore, reported and never raised: a corrupt or absent store is
+            # the same state a first run has.
+            self._goal_restore_report = manager.restore()
+        return manager
+
+    # ── Phase 25: the embodied builder and its one seam ──────────────────
+
+    def _build_embodied(self) -> EmbodiedManager:
+        """The session manager, wired to the collaborators this application owns.
+
+        Every collaborator is one the rest of the build already uses: Phase 24's
+        goal manager selects and authorizes every input, Phase 22's world model
+        takes the observations as observed facts (and is what the plan's
+        fresh-state gate reads back, which is how "observe → decide → act" closes
+        on itself), the SAME ``self.risk`` permission layer decides what an input
+        may do, every input is appended to the SAME shared automation audit trail
+        the device controllers write to (the manager owns its instance, exactly
+        as those controllers do), the SAME event bus carries the announcements,
+        and the SAME JSON state store holds the sessions.
+
+        An environment the operator has not allowed is refused by NAME rather
+        than by whether an adapter happens to be registered, and being switched
+        off still builds a manager so the status surface answers honestly
+        instead of raising.
+        """
+        settings = self.config.embodied
+        store = self.state_store if settings.persist else None
+        manager = EmbodiedManager(
+            world=self.world,
+            goals=self.goals,
+            permissions=self.risk,
+            observer=self._embodied_event,
+            store=store,
+            settings=settings.to_mapping(),
+        )
+        self._embodied_enabled = bool(settings.enabled)
+        self._embodied_restore_report: dict[str, Any] = {}
+        if store is not None and settings.enabled:
+            # Boot restore, reported and never raised. A restored session comes
+            # back INTERRUPTED with ``needs_revalidation`` set: no input reaches
+            # an environment until the session has been revalidated against a
+            # fresh reading, and that rule is enforced by the input door rather
+            # than remembered by a caller.
+            self._embodied_restore_report = manager.restore()
+        return manager
+
+    def _embodied_event(self, kind: str, payload: Mapping[str, Any]) -> None:
+        """Relay one embodied-session event onto the application's ONE bus."""
+        try:
+            type_ = EventType(kind)
+        except ValueError:  # a vocabulary this build does not have
+            return
+        fields = dict(payload)
+        correlation = str(fields.pop("correlation_id", "") or "") or str(
+            fields.get("session_id", "") or ""
+        )
+        self._announce_soon(type_, correlation_id=correlation, **fields)
+
+    def embodied_status(self) -> dict[str, Any]:
+        """What embodied sessions can do here, and what they refuse to claim.
+
+        Counts, statuses, the environment table with its live availability, the
+        ceilings in force, the input door's name and scope, the boot restore
+        report and the capability table. An operator surface: no observation
+        body, no frame and no trajectory.
+        """
+        status = dict(self.embodied.status())
+        status["enabled"] = bool(getattr(self, "_embodied_enabled", True))
+        status["restored"] = dict(getattr(self, "_embodied_restore_report", {}))
+        status["capabilities"] = list(embodied_capability_rows(self.embodied))
+        return status
+
+    def embodied_overview(self) -> dict[str, Any]:
+        """The phase's own statement of what it ships and what it refuses."""
+        from novacontrol.embodied import overview
+
+        return dict(overview())
+
+    def embodied_environments(self) -> dict[str, Any]:
+        """The environments this build may drive, and the scenarios each offers."""
+        return {
+            "environments": [item.to_dict() for item in self.embodied.environments()],
+            "allowed": list(self.embodied.settings.environments),
+            "scenarios": list(self.embodied.scenarios()),
+        }
+
+    def embodied_sessions(self) -> dict[str, Any]:
+        """Every session this process holds, with its lifecycle state.
+
+        Each row carries the LIFECYCLE only — id, environment, status, the
+        counters — because a list is an operator surface. The record itself
+        (objective outcome, observation, trajectory, evaluation) lives on the
+        single-session view; a list that embedded whole records would make the
+        lightest surface the heaviest one.
+        """
+        return {
+            "sessions": [
+                _embodied_session_row(session) for session in self.embodied.sessions()
+            ],
+            "summary": self.embodied.summary(),
+        }
+
+    def embodied_view(self, session_id: str) -> dict[str, Any]:
+        """One session's record: objective, verdict, trajectory and evaluation."""
+        try:
+            return dict(self.embodied.view(session_id))
+        except KeyError as exc:
+            raise KeyError(str(exc)) from exc
+
+    def embodied_create_session(self, body: Mapping[str, Any]) -> dict[str, Any]:
+        """Record a session. Runs NOTHING — creating is not starting.
+
+        The body carries the ``objective`` (its ``request`` and the
+        ``success_conditions`` that define done, as ``key=value`` strings), the
+        optional ``environment_id``, ``scenario`` and ``faults``, plus whatever
+        budget the caller wants (clamped by configuration, never raised above
+        it). An unmeasurable objective is refused here rather than run until the
+        budget dies.
+        """
+        if not isinstance(body.get("objective"), Mapping):
+            raise ValueError("a session needs an 'objective' mapping")
+        scenario = str(body.get("scenario", "") or "").strip() or None
+        faults = body.get("faults")
+        if faults is not None and not isinstance(faults, Mapping):
+            raise ValueError("'faults' must be a mapping of fault names to counts")
+        session = self.embodied.create_session(
+            environment_id=str(body.get("environment_id", "gridworld") or "gridworld"),
+            objective=dict(body["objective"]),
+            scenario=scenario,
+            faults=dict(faults) if isinstance(faults, Mapping) else None,
+        )
+        return self.embodied.view(session.session_id)
+
+    async def embodied_run_session(
+        self, session_id: str, body: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Drive one session's bounded loop to an ending, and report it."""
+        payload = dict(body or {})
+        requested = payload.get("max_actions")
+        try:
+            max_actions = int(requested) if requested is not None else None
+        except (TypeError, ValueError) as exc:
+            raise ValueError("'max_actions' must be a whole number") from exc
+        try:
+            state = await self.embodied.run_session(session_id, max_actions=max_actions)
+        except KeyError as exc:
+            raise KeyError(str(exc)) from exc
+        return dict(state.to_dict())
+
+    def embodied_pause_session(
+        self, session_id: str, body: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Pause a session: its held inputs are released before the status moves."""
+        reason = str(dict(body or {}).get("reason", "") or "")
+        try:
+            return dict(self.embodied.pause(session_id, reason).to_dict())
+        except KeyError as exc:
+            raise KeyError(str(exc)) from exc
+
+    def embodied_resume_session(self, session_id: str) -> dict[str, Any]:
+        """Resume a paused session — as NOT revalidated."""
+        try:
+            return dict(self.embodied.resume(session_id).to_dict())
+        except KeyError as exc:
+            raise KeyError(str(exc)) from exc
+
+    def embodied_cancel_session(
+        self, session_id: str, body: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Cancel a session. Cancelling is not deleting: the record stays readable."""
+        reason = str(dict(body or {}).get("reason", "") or "")
+        try:
+            return dict(self.embodied.cancel(session_id, reason).to_dict())
+        except KeyError as exc:
+            raise KeyError(str(exc)) from exc
+
+    # ── Phase 26: generalization evaluation's application surface ────────────
+
+    # Every method here is a THIN door onto the manager: it validates what a
+    # caller can get wrong (an unknown run id, a family this build does not
+    # have) and returns records the manager produced. No method here trains
+    # anything, writes a dataset, promotes a candidate or produces a score the
+    # per-family metrics did not measure.
+
+    def _build_generalization(self) -> GeneralizationManager:
+        """The evaluation manager, wired to the collaborators this application owns.
+
+        Every collaborator is one the rest of the build already uses: the SAME
+        JSON state store holds the runs (one key, bounded by ``keep_runs``), the
+        SAME event bus carries the announcements through the injected seam, and
+        the brain is passed only so the provider posture can be reported HONESTLY
+        — this build's deterministic path answers without a model, and a wired
+        model may only ever propose candidates that the evaluator then verifies.
+
+        Being switched off still builds a manager, so the status surface answers
+        honestly instead of raising on a deployment that disabled the benchmark.
+        """
+        settings = self.config.generalization
+        store = self.state_store if settings.persist else None
+        manager = GeneralizationManager(
+            settings=settings.to_mapping(),
+            store=store,
+            observer=self._generalization_event,
+            provider=getattr(self, "brain", None),
+            provider_detail="the local brain may propose candidates; every proposal is "
+            "verified by the evaluator before it counts",
+        )
+        self._generalization_enabled = bool(settings.enabled)
+        self._generalization_restore_report: dict[str, Any] = {}
+        if store is not None and settings.enabled:
+            # Boot restore, reported and never raised: an unreadable run record
+            # is skipped with the reason, which is the honest ending for a file
+            # this build cannot parse.
+            self._generalization_restore_report = manager.restore()
+        return manager
+
+    def _generalization_event(self, kind: str, payload: Mapping[str, Any]) -> None:
+        """Relay one evaluation event onto the application's ONE bus.
+
+        The manager announces through an injected seam, and this is that seam. An
+        unknown kind is dropped rather than guessed at — silence is honest,
+        inventing an event type is not.
+        """
+        try:
+            type_ = EventType(kind)
+        except ValueError:  # a vocabulary this build does not have
+            return
+        fields = dict(payload)
+        correlation = str(fields.pop("correlation_id", "") or "") or str(
+            fields.get("run_id", "") or ""
+        )
+        self._announce_soon(type_, correlation_id=correlation, **fields)
+
+    def generalization_status(self) -> dict[str, Any]:
+        """What this build can measure about its own generalization, and what it will not.
+
+        The corpus and its split counts, the leakage verdict, the six families,
+        the solvers and baselines, the operator vocabulary, the ceilings in
+        force, the run counters, the provider posture, the boot restore report
+        and the capability table with its honest states. No score appears here
+        unless a run actually produced one.
+        """
+        status = dict(self.generalization.status())
+        status["enabled"] = bool(getattr(self, "_generalization_enabled", True))
+        status["restored"] = dict(getattr(self, "_generalization_restore_report", {}))
+        status["capabilities"] = list(generalization_capability_rows(self.generalization))
+        return status
+
+    def generalization_overview(self) -> dict[str, Any]:
+        """The phase's own statement of what it ships and what it refuses."""
+        from novacontrol.generalization import overview
+
+        return dict(overview())
+
+    def generalization_tasks(self, query: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """The registered tasks, filtered by family/split/difficulty.
+
+        Answers WITHOUT the expected outputs: a task list is a surface a person
+        browses, and printing the answer key next to every held-out input would
+        put the key where the next experiment can see it. The answers live on a
+        single task view, which says so explicitly.
+        """
+        params = dict(query or {})
+        split: Any | None = None
+        requested_split = str(params.get("split") or "").strip()
+        if requested_split and requested_split.lower() != "any":
+            try:
+                split = Split(requested_split)
+            except ValueError as exc:
+                raise ValueError(
+                    f"split {requested_split!r} is not one this build has: "
+                    + ", ".join(item.value for item in Split)
+                ) from exc
+        difficulty: Any | None = None
+        requested_difficulty = str(params.get("difficulty") or "").strip()
+        if requested_difficulty and requested_difficulty.lower() != "any":
+            try:
+                difficulty = Difficulty(requested_difficulty)
+            except ValueError as exc:
+                raise ValueError(
+                    f"difficulty {requested_difficulty!r} is not one this build has: "
+                    + ", ".join(item.value for item in Difficulty)
+                ) from exc
+        tasks = self.generalization.tasks(
+            family_id=str(params.get("family") or ""),
+            split=split,
+            difficulty=difficulty,
+        )
+        return {
+            "tasks": [
+                task.to_dict(include_answer=False)
+                for task in tasks
+            ],
+            "count": len(tasks),
+            "answers_withheld": True,
+            "why": (
+                "a task list never carries the expected outputs: the answers live on the "
+                "single-task view so a browsing surface cannot leak a held-out key"
+            ),
+            "families": [item.to_dict() for item in self.generalization.families()],
+        }
+
+    def generalization_task(self, task_id: str) -> dict[str, Any]:
+        """One task, whole — including its answer key, which is what it is for."""
+        try:
+            return self.generalization.task(task_id).to_dict(include_answer=True)
+        except KeyError as exc:
+            raise KeyError(str(exc)) from exc
+
+    def generalization_families(self) -> dict[str, Any]:
+        """The task families, each with its own success condition and verifier.
+
+        Deliberately a list rather than one blended score: the families are
+        measured in different units, so per-family metrics are what a reader
+        compares, and an aggregate would hide a family failing behind a mean.
+        """
+        return {
+            "families": [item.to_dict() for item in self.generalization.families()],
+            "aggregate_score": None,
+            "why": (
+                "no single score is reported: grid exact-matches, planning outcomes "
+                "and tool choices are not the same unit"
+            ),
+        }
+
+    def generalization_splits(self) -> dict[str, Any]:
+        """How the corpus is split, with the three-way leakage verdict attached."""
+        return dict(self.generalization.splits())
+
+    def generalization_operators(self) -> dict[str, Any]:
+        """The transformation library as rows — what the search may say out loud."""
+        return {
+            "operators": [item.to_dict() for item in OPERATORS],
+            "supported_rules": list(GRID_RULES_SUPPORTED),
+            "max_depth": MAX_DEPTH,
+            "note": (
+                "an operator is a pure function with no task id and no answer in it; the "
+                "search proposes parameters from the examples and believes nothing until "
+                "every example is reproduced exactly"
+            ),
+        }
+
+    def generalization_register_task(self, body: Mapping[str, Any]) -> dict[str, Any]:
+        """Register one task on this process's corpus. Runs NOTHING.
+
+        A task is a definition with a success condition and an answer key, not an
+        evaluation. Refusals are specific (the reason is the value of a refusal):
+        an id already in use, an unverifiable task, a verifier this build does not
+        implement. Registration is in-memory; the RUNS are what persists.
+        """
+        if not isinstance(body, Mapping):
+            raise ValueError("a task must be a mapping")
+        try:
+            task = self.generalization.register_task(body)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        return task.to_dict(include_answer=True)
+
+    def generalization_evaluate(self, body: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """Run one bounded evaluation and return the run it produced.
+
+        A baseline and the candidate run over the SAME tasks with the SAME
+        budget, the leakage check runs first, and a dirty split REFUSES the run.
+        The returned payload is the run itself: the per-family metrics, the
+        classified failures, the settings the run was frozen with and the
+        fingerprint that makes a repeat reproducible.
+        """
+        try:
+            run = self.generalization.evaluate(body)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        return dict(self.generalization.view(run.run_id))
+
+    def generalization_runs(self) -> dict[str, Any]:
+        """The stored runs as TRIMMED rows — summaries, never the result bodies."""
+        return {
+            "runs": self.generalization.run_rows(),
+            "count": len(self.generalization.runs()),
+        }
+
+    def generalization_view(self, run_id: str) -> dict[str, Any]:
+        """One run, whole: settings, metrics per family, failures and results."""
+        try:
+            return dict(self.generalization.view(run_id))
+        except KeyError as exc:
+            raise KeyError(str(exc)) from exc
+
+    def generalization_compare(self, baseline_run_id: str, candidate_run_id: str) -> dict[str, Any]:
+        """Two stored runs compared task by task; neither run is modified."""
+        try:
+            return dict(self.generalization.compare(baseline_run_id, candidate_run_id).to_dict())
+        except KeyError as exc:
+            raise KeyError(str(exc)) from exc
+
+    def generalization_failures(self, run_id: str = "") -> dict[str, Any]:
+        """Classified failures grouped by category, with the advice that belongs to each."""
+        try:
+            records = self.generalization.failures(run_id)
+            groups = self.generalization.failure_groups(run_id)
+        except KeyError as exc:
+            raise KeyError(str(exc)) from exc
+        return {
+            "run_id": run_id,
+            "failures": [record.to_dict() for record in records],
+            "groups": {key: list(value) for key, value in groups.items()},
+            "count": len(records),
+        }
+
+    def generalization_recommendations(self, run_id: str = "") -> dict[str, Any]:
+        """Structured, NON-EXECUTING improvement recommendations from real failures.
+
+        Nothing here schedules a training run, writes a dataset or changes a
+        weight: a recommendation names the recurring category, the tasks that
+        produced it and the advice that belongs to it, and running a training
+        phase from it is a different, explicitly authorized act.
+        """
+        try:
+            items = self.generalization.recommendations(run_id)
+        except KeyError as exc:
+            raise KeyError(str(exc)) from exc
+        return {
+            "run_id": run_id,
+            "recommendations": [item.to_dict() for item in items],
+            "count": len(items),
+            "executes_anything": False,
+        }
+
+    def generalization_export(self, run_id: str) -> dict[str, Any]:
+        """A report payload for review: the run, the corpus, the library, the cost."""
+        try:
+            return dict(self.generalization.export(run_id))
+        except KeyError as exc:
+            raise KeyError(str(exc)) from exc
+
+    # -- Phase 26 §13: the game-evaluation contracts, read from real sessions ──
+
+    def generalization_game_eval_contracts(self) -> dict[str, Any]:
+        """The nine contracts the post-Phase-26 game evaluation will be measured on.
+
+        Definitions and their sources — nothing more. A contract with no session
+        behind it reports no figure, and no gameplay capability is claimed: these
+        are the measurements, not a game.
+        """
+        return {
+            "contracts": generalization_game_contracts(),
+            "environment": "the Phase 25 embodied session record",
+            "gameplay_claimed": False,
+            "next_milestone": "the dedicated post-Phase-26 game-playing evaluation",
+        }
+
+    def generalization_game_eval(self) -> dict[str, Any]:
+        """The contracts measured over the embodied sessions this build actually ran.
+
+        Every row names the environment it summarised, so a simulated session is
+        never presented as gameplay, and any figure the records did not measure
+        comes back ``None`` rather than as a zero. When there are no sessions yet
+        the report says so instead of returning an empty scorecard that reads as
+        a perfect one.
+        """
+        sessions = list(self.embodied.sessions())
+        reports = [
+            dict(self.embodied.view(session.session_id))
+            for session in sessions
+        ]
+        payload = evaluate_embodied_sessions(reports)
+        payload["sessions_measured"] = len(reports)
+        payload["gameplay_claimed"] = False
+        if not reports:
+            payload["note"] = (
+                "no embodied session has been run in this installation yet, so there is "
+                "nothing to measure — which is an empty report, not a zero score"
+            )
+        return payload
+
+    def _planning_event(self, kind: str, payload: Mapping[str, Any]) -> None:
+        """Relay one planning event onto the application's ONE event bus.
+
+        The manager announces through an injected seam, and this is that seam. An
+        unknown kind is dropped rather than guessed at — silence is honest,
+        inventing an event type is not.
+        """
+        try:
+            type_ = EventType(kind)
+        except ValueError:  # a vocabulary this build does not have
+            return
+        fields = dict(payload)
+        correlation = str(fields.pop("correlation_id", "") or "")
+        self._announce_soon(type_, correlation_id=correlation, **fields)
+
+    def _planning_world_predictor(self, action: str) -> Mapping[str, Any] | None:
+        """Phase 22's projection for an action, or None when it cannot say.
+
+        This is an ADAPTER, not a predictor: it asks the world model's own
+        prediction service and returns the projected state only when that service
+        actually answered. ``model_unavailable``/``unsupported``/``failed`` and a
+        resource block are all None, which the estimator reports as UNAVAILABLE
+        rather than as a plausible-looking default.
+        """
+        world = getattr(self, "world", None)
+        if world is None or not action:
+            return None
+        try:
+            result = world.predict({"action": action, "horizon": 1})
+        except Exception:  # noqa: BLE001 - a predictor that raises is unavailable
+            return None
+        status = getattr(getattr(result, "status", None), "value", "")
+        if status != "predicted":
+            return None
+        predicted = getattr(result, "predicted", None)
+        return dict(predicted) if isinstance(predicted, Mapping) and predicted else None
+
+    # -- Phase 24: goal planning's application surface ------------------------
+
+    # Every method here is a THIN door onto the manager: it validates what a
+    # caller can get wrong (a blank request, an unknown goal id, a task that is
+    # not a mapping) and returns records the manager produced. No method here
+    # runs an action of its own, none of them turns a plan into a claim of
+    # success, and none of them invents a summary.
+
+    def goal_planning_status(self) -> dict[str, Any]:
+        """What goal-level planning can do here, and what it refuses to claim.
+
+        ``restored`` is the boot report — how many goals came back and what was
+        skipped as unreadable — because "this restarted and could not read a goal"
+        is something a caller has to be able to see rather than infer from silence.
+        """
+        status = dict(self.goals.status())
+        status["enabled"] = bool(getattr(self, "_goal_planning_enabled", True))
+        status["restored"] = dict(getattr(self, "_goal_restore_report", {}))
+        status["defaults"] = dict(getattr(self, "_goal_defaults", {}))
+        status["capabilities"] = [
+            row.to_dict() for row in planning_capability_rows(self.goals)
+        ]
+        return status
+
+    def goal_planning_goals(self) -> dict[str, Any]:
+        """Every goal this session holds, and which have a selected plan."""
+        return {
+            "goals": [goal.to_dict() for goal in self.goals.goals()],
+            "planned": [
+                goal.goal_id
+                for goal in self.goals.goals()
+                if self.goals.selected(goal.goal_id) is not None
+            ],
+        }
+
+    def goal_planning_view(self, goal_id: str) -> dict[str, Any]:
+        """One goal with its decomposition, candidates, selected plan and run."""
+        try:
+            return dict(self.goals.view(goal_id))
+        except KeyError as exc:
+            raise KeyError(str(exc)) from exc
+
+    def plan_goal(self, body: Mapping[str, Any]) -> dict[str, Any]:
+        """Record a goal, decompose it, and plan it — without running anything.
+
+        The body carries the request plus whatever the caller actually knows:
+        ``success_conditions`` (each a ``{key, expected, description, required}``
+        mapping — a condition with no ``expected`` is unmeasurable and is reported
+        as such), ``initial_state``, ``constraints``, ``exclusions``,
+        ``required_permissions``, the ``tasks`` to run (anything else is a 422),
+        the budget ceilings, ``provenance`` and ``correlation_id``.
+
+        An absent field stays absent: this method never invents a success
+        condition, a constraint or a dependency the caller did not state, because a
+        goal that silently gained a requirement would be planned against something
+        nobody asked for.
+        """
+        request = str(body.get("request", "") or "").strip()
+        if not request:
+            raise ValueError("a goal needs a 'request'")
+        raw_tasks = body.get("tasks")
+        if (
+            raw_tasks is None
+            or not isinstance(raw_tasks, Sequence)
+            or isinstance(raw_tasks, (str, bytes))
+        ):
+            raise ValueError(
+                "a goal needs 'tasks': a list of task mappings, each with an 'id' "
+                "and a 'title'"
+            )
+        tasks: list[Task] = []
+        for item in raw_tasks:
+            if not isinstance(item, Mapping):
+                raise ValueError("every entry in 'tasks' must be a mapping")
+            try:
+                tasks.append(Task.from_mapping(item))
+            except ValueError as exc:
+                raise ValueError(f"task {item.get('id', '?')!r}: {exc}") from exc
+        if not tasks:
+            raise ValueError("a goal needs at least one task")
+
+        defaults = dict(getattr(self, "_goal_defaults", {}))
+        goal = self.goals.create(
+            request,
+            success_conditions=self._success_conditions(body),
+            initial_state=self._mapping_field(body, "initial_state"),
+            constraints=self._text_list(body, "constraints"),
+            exclusions=self._text_list(body, "exclusions"),
+            required_permissions=self._text_list(body, "required_permissions"),
+            approval_conditions=self._text_list(body, "approval_conditions"),
+            failure_conditions=self._text_list(body, "failure_conditions"),
+            cancellation_conditions=self._text_list(body, "cancellation_conditions"),
+            deadline_seconds=self._number_field(body, "deadline_seconds"),
+            provenance=str(body.get("provenance", "") or ""),
+            correlation_id=str(body.get("correlation_id", "") or ""),
+            max_steps=self._int_field(body, "max_steps", defaults.get("max_steps")),
+            max_replans=self._int_field(body, "max_replans", defaults.get("max_replans")),
+            max_seconds=self._number_field(body, "max_seconds", defaults.get("max_seconds")),
+        )
+        report = self.goals.plan(goal.goal_id, tasks=tasks)
+        payload = report.to_dict()
+        payload["goal_id"] = goal.goal_id
+        return payload
+
+    async def execute_goal(
+        self, goal_id: str, body: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Run a goal's SELECTED plan through the existing executor, gated per step.
+
+        ``approved`` names the step ids a caller approved; nothing else runs a step
+        that the action policy says needs a person. The response is the run record:
+        the status, the per-step revalidations, the executor's own unverified steps,
+        and the completion verdict — which is derived from the goal's success
+        conditions against an observation, never from the steps simply ending.
+        """
+        payload = dict(body or {})
+        approved = payload.get("approved")
+        approved_ids = (
+            tuple(str(item) for item in approved)
+            if isinstance(approved, Sequence) and not isinstance(approved, (str, bytes))
+            else ()
+        )
+        keys = payload.get("keys")
+        observed_keys = (
+            tuple(str(item) for item in keys)
+            if isinstance(keys, Sequence) and not isinstance(keys, (str, bytes))
+            else ()
+        )
+        # One approval set, two readers: the action policy asks it "may this run?"
+        # and the executor's own confirmation callback asks it "is this step
+        # authorized?". Registering the ids here for the duration of the run is
+        # what keeps a step the caller approved from being refused a second time
+        # by the executor — exactly the shape ``run_plan`` uses.
+        previous = set(self.approved_plan_steps)
+        self.approved_plan_steps = set(approved_ids)
+        try:
+            run = await self.goals.execute(goal_id, approved=approved_ids, keys=observed_keys)
+        except KeyError as exc:
+            raise KeyError(str(exc)) from exc
+        finally:
+            self.approved_plan_steps = previous
+        return run.to_dict()
+
+    def reassess_goal(self, goal_id: str) -> dict[str, Any]:
+        """Whether a goal should be replanned, under its own ceiling."""
+        try:
+            decision = self.goals.reassess(goal_id)
+        except KeyError as exc:
+            raise KeyError(str(exc)) from exc
+        return decision.to_dict()
+
+    def cancel_goal(self, goal_id: str) -> dict[str, Any]:
+        """Cancel a goal. Cancelling is not deleting: the record stays readable."""
+        goal = self.goals.cancel(goal_id)
+        if goal is None:
+            raise KeyError(f"no goal with id {goal_id!r}")
+        return goal.to_dict()
+
+    # -- Phase 24: body readers (tolerant, and never inventing a value) -------
+
+    def _success_conditions(self, body: Mapping[str, Any]) -> tuple[SuccessCondition, ...]:
+        raw = body.get("success_conditions")
+        if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+            return ()
+        out: list[SuccessCondition] = []
+        for item in raw:
+            if not isinstance(item, Mapping):
+                continue
+            key = str(item.get("key", "") or "").strip()
+            if not key:
+                continue
+            # ``expected`` is the canonical field; ``equals`` is accepted as the
+            # same statement, and a condition with neither stays UNMEASURABLE
+            # rather than defaulting to True.
+            expected = item["expected"] if "expected" in item else item.get("equals")
+            out.append(
+                SuccessCondition(
+                    key=key,
+                    expected=expected,
+                    description=str(item.get("description", "") or ""),
+                    required=bool(item.get("required", True)),
+                )
+            )
+        return tuple(out)
+
+    @staticmethod
+    def _text_list(body: Mapping[str, Any], key: str) -> tuple[str, ...]:
+        raw = body.get(key)
+        if isinstance(raw, str):
+            return (raw,) if raw.strip() else ()
+        if isinstance(raw, Sequence):
+            return tuple(str(item) for item in raw if str(item).strip())
+        return ()
+
+    @staticmethod
+    def _mapping_field(body: Mapping[str, Any], key: str) -> dict[str, Any]:
+        raw = body.get(key)
+        return dict(raw) if isinstance(raw, Mapping) else {}
+
+    @staticmethod
+    def _number_field(
+        body: Mapping[str, Any], key: str, default: float | None = None
+    ) -> float | None:
+        if key not in body:
+            return default
+        value = body.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return default
+        return float(value)
+
+    @staticmethod
+    def _int_field(
+        body: Mapping[str, Any], key: str, default: int | None = None
+    ) -> int | None:
+        if key not in body:
+            return default
+        value = body.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return default
+        return int(value)
 
     # ── Phase 4: planning, executing and escalating ──────────────────────
 
@@ -3659,6 +5002,13 @@ class NovaControlApplication:
             return await self._schedule_automation_step(step)
         if action == "run_automation":
             return await self._run_automation_step(step)
+        # Phase 25: an environment input goes to the ONE door that may send one.
+        # It is deliberately LAST in this table rather than early: every check
+        # above it (the privacy gate on an external tool, the approval gate on a
+        # command) still runs first, and this branch only decides that the input
+        # is the manager's to send.
+        if action == ENVIRONMENT_INPUT:
+            return dict(await self.embodied.execute_step(step, context))
         if action == "reason":
             raise RuntimeError(
                 f"No executor carries reasoning locally, so step {step.id!r} "
@@ -8518,6 +9868,29 @@ class NovaControlApplication:
             # Read from objects the engine already owns, so this costs nothing on
             # a polled path and never probes a model or a disk.
             "world_model": dict(self.world.status()),
+            # Phase 23: what interactive learning can do on this machine — the
+            # environments and their live capabilities, the policy and ceilings in
+            # force, the learned rules, and the honest provider posture. Read from
+            # the manager's own records; nothing here probes a model or a disk.
+            "interactive_learning": self.learning_status(),
+            # Phase 24: what goal-level planning can do on this machine — the
+            # goals this session holds, how many were planned and how many runs
+            # verified, and the honest provider posture (normally "no world model
+            # means every fact is an assertion"). Read from the manager's own
+            # records; nothing here probes a model or a disk.
+            "goal_planning": self.goal_planning_status(),
+            # Phase 25: what embodied sessions can do on this machine — the
+            # allowlisted environments and their live availability, the session
+            # counts, the ceilings in force, the input door's scope and the honest
+            # posture (a real game/window adapter is NOT shipped). Read from the
+            # manager's own records; nothing here probes a device or a disk.
+            "embodied": self.embodied_status(),
+            # Phase 26: what this build can and cannot measure about its own
+            # generalization — the corpus and its split counts, the families,
+            # the bounded search ceilings, the leak verdict and the capability
+            # table with its honest states. Read from the manager's own records;
+            # nothing here probes a model or invents a score.
+            "generalization": self.generalization_status(),
             "phone_bridge": self.phone.status().to_dict(),
             "settings": self.settings.to_dict(),
             # Global Intelligence Layer: interpretation health + the capability

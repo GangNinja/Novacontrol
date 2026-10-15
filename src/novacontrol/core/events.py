@@ -118,6 +118,79 @@ class EventType(StrEnum):
     WORLD_PREDICTION_COMPLETED = "world.prediction_completed"
     WORLD_PREDICTION_FAILED = "world.prediction_failed"
 
+    # -- interactive learning (Phase 23) --------------------------------------
+    # A learning event is an ANNOUNCEMENT of a lifecycle step: ids, statuses and
+    # counts travel, never a hypothesis body, an observation body or a reasoning
+    # trace. ``objective_id`` is the STABLE id of the bounded question, so a
+    # watcher that wants one objective's whole story keys on it alone.
+    LEARNING_OBJECTIVE_CREATED = "learning.objective_created"
+    LEARNING_HYPOTHESIS_PROPOSED = "learning.hypothesis_proposed"
+    LEARNING_HYPOTHESIS_UPDATED = "learning.hypothesis_updated"
+    LEARNING_EXPERIMENT_PROPOSED = "learning.experiment_proposed"
+    LEARNING_EXPERIMENT_APPROVED = "learning.experiment_approved"
+    LEARNING_EXPERIMENT_REJECTED = "learning.experiment_rejected"
+    LEARNING_EXPERIMENT_STARTED = "learning.experiment_started"
+    LEARNING_OBSERVATION_COLLECTED = "learning.observation_collected"
+    LEARNING_PREDICTION_EVALUATED = "learning.prediction_evaluated"
+    LEARNING_KNOWLEDGE_UPDATED = "learning.knowledge_updated"
+    LEARNING_EXPERIMENT_COMPLETED = "learning.experiment_completed"
+    LEARNING_EXPERIMENT_FAILED = "learning.experiment_failed"
+    LEARNING_EXPERIMENT_INTERRUPTED = "learning.experiment_interrupted"
+    LEARNING_EXPERIMENT_CANCELLED = "learning.experiment_cancelled"
+    # A ceiling reached before an action is an event of its own rather than a
+    # failure: nothing went wrong, and the objective is not finished either.
+    LEARNING_BUDGET_EXHAUSTED = "learning.budget_exhausted"
+
+    # -- planning a goal (Phase 24) -------------------------------------------
+    # The payloads name the goal and, where it applies, the candidate plan or the
+    # step the fact is about. ``steps``/``tasks``/``issues`` are COUNTS of what a
+    # plan holds and ``status`` is a category (``completed``, ``blocked``,
+    # ``denied``, ``needs_observation``, ``failed``, ``partial``) — never a plan
+    # body, a step output or an observation. A refusal and a blocked step are
+    # events OF THEIR OWN rather than failures with a note, because neither is a
+    # failure of the work: nothing ran in both cases.
+    GOAL_CREATED = "goal.created"
+    GOAL_DECOMPOSED = "goal.decomposed"
+    GOAL_PLAN_SELECTED = "goal.plan_selected"
+    GOAL_PLAN_REFUSED = "goal.plan_refused"
+    GOAL_STEP_BLOCKED = "goal.step_blocked"
+    GOAL_EXECUTED = "goal.executed"
+    GOAL_REASSESSED = "goal.reassessed"
+    GOAL_CANCELLED = "goal.cancelled"
+
+    # -- an embodied session (Phase 25) ---------------------------------------
+    # The payloads name the session, the environment and — where it applies —
+    # the input or the objective the fact is about. ``actions``/``entities`` are
+    # COUNTS, and ``status`` is a category, never an observation body, a frame or
+    # a trajectory. A blocked session and a denied input are events OF THEIR OWN
+    # rather than failures with a note, because neither is a failure of the work.
+    EMBODIED_SESSION_STARTED = "embodied.session_started"
+    EMBODIED_SESSION_PAUSED = "embodied.session_paused"
+    EMBODIED_SESSION_RESUMED = "embodied.session_resumed"
+    EMBODIED_SESSION_CANCELLED = "embodied.session_cancelled"
+    EMBODIED_SESSION_ENDED = "embodied.session_ended"
+    EMBODIED_OBSERVATION = "embodied.observation"
+    EMBODIED_ACTION_SELECTED = "embodied.action_selected"
+    EMBODIED_ACTION_EXECUTED = "embodied.action_executed"
+    EMBODIED_ACTION_FAILED = "embodied.action_failed"
+    EMBODIED_RECOVERY = "embodied.recovery"
+    EMBODIED_BLOCKED = "embodied.blocked"
+    EMBODIED_OBJECTIVE_VERIFIED = "embodied.objective_verified"
+    EMBODIED_OBJECTIVE_FAILED = "embodied.objective_failed"
+
+    # -- a generalization evaluation (Phase 26) -------------------------------
+    # ``run_id`` is the STABLE id of one evaluation run, which is also its
+    # correlation id: a watcher that wants a run's whole story keys on it alone.
+    # Counts are counts, a status is a category and ``reason``/``category`` are
+    # human-readable text — never a task's expected output, a predicted answer
+    # or a solver's raw content, because an event channel is not a place to
+    # carry a benchmark's answers around.
+    GENERALIZATION_TASK_REGISTERED = "generalization.task_registered"
+    GENERALIZATION_EVALUATION_STARTED = "generalization.evaluation_started"
+    GENERALIZATION_EVALUATION_COMPLETED = "generalization.evaluation_completed"
+    GENERALIZATION_FAILURE_CLASSIFIED = "generalization.failure_classified"
+    GENERALIZATION_LEAKAGE_DETECTED = "generalization.leakage_detected"
+
     # -- scheduled work (Phase 13) --------------------------------------------
     # ``automation_id`` is the STABLE id of the scheduled request, and ``run_id``
     # names one execution of it: a watcher that wants the schedule keys on the
@@ -193,6 +266,65 @@ EVENT_PAYLOAD_FIELDS: Mapping[EventType, tuple[str, ...]] = {
     EventType.OBJECT_APPEARED: ("object_id", "label"),
     EventType.OBJECT_DISAPPEARED: ("object_id", "label"),
     EventType.OBJECT_MOVED: ("object_id", "label", "distance"),
+    # Phase 23: the payloads name the objective, the hypothesis or the experiment
+    # the step was about. An outcome is a category (``confirmed``, ``contradicted``,
+    # ``unable_to_evaluate``) and never the observation itself.
+    EventType.LEARNING_OBJECTIVE_CREATED: ("objective_id", "environment_id"),
+    EventType.LEARNING_HYPOTHESIS_PROPOSED: ("objective_id", "hypothesis_id", "hypotheses"),
+    EventType.LEARNING_HYPOTHESIS_UPDATED: ("objective_id", "hypothesis_id", "status"),
+    EventType.LEARNING_EXPERIMENT_PROPOSED: ("objective_id", "experiment_id", "action"),
+    EventType.LEARNING_EXPERIMENT_APPROVED: ("objective_id", "experiment_id"),
+    EventType.LEARNING_EXPERIMENT_REJECTED: ("objective_id", "experiment_id", "reason"),
+    EventType.LEARNING_EXPERIMENT_STARTED: ("objective_id", "experiment_id"),
+    EventType.LEARNING_OBSERVATION_COLLECTED: ("objective_id", "experiment_id", "complete"),
+    EventType.LEARNING_PREDICTION_EVALUATED: (
+        "objective_id",
+        "experiment_id",
+        "outcome",
+        "basis",
+    ),
+    EventType.LEARNING_KNOWLEDGE_UPDATED: ("objective_id", "change"),
+    EventType.LEARNING_EXPERIMENT_COMPLETED: ("objective_id", "experiment_id", "status"),
+    EventType.LEARNING_EXPERIMENT_FAILED: ("objective_id", "experiment_id", "status", "error"),
+    EventType.LEARNING_EXPERIMENT_INTERRUPTED: ("objective_id", "experiment_id", "reason"),
+    EventType.LEARNING_EXPERIMENT_CANCELLED: ("objective_id", "reason"),
+    EventType.LEARNING_BUDGET_EXHAUSTED: ("objective_id", "reason"),
+    # Phase 24: the planned-goal vocabulary. ``candidate_id`` names the plan a
+    # comparison picked and ``planner`` names which algorithm produced it, so a
+    # watcher can see WHICH planner won rather than only that one did.
+    EventType.GOAL_CREATED: ("goal_id",),
+    EventType.GOAL_DECOMPOSED: ("goal_id", "tasks", "issues"),
+    EventType.GOAL_PLAN_SELECTED: ("goal_id", "candidate_id", "planner"),
+    EventType.GOAL_PLAN_REFUSED: ("goal_id",),
+    EventType.GOAL_STEP_BLOCKED: ("goal_id", "step_id", "verdict"),
+    EventType.GOAL_EXECUTED: ("goal_id", "status"),
+    EventType.GOAL_REASSESSED: ("goal_id", "should_replan"),
+    EventType.GOAL_CANCELLED: ("goal_id",),
+    # Phase 25: the embodied-session vocabulary. ``session_id`` is the STABLE id
+    # of one session, which is also its correlation id: a watcher that wants a
+    # session's whole story keys on it alone. ``basis``/``freshness`` describe the
+    # reading the step was taken from — never the reading itself.
+    EventType.EMBODIED_SESSION_STARTED: ("session_id", "environment_id", "status"),
+    EventType.EMBODIED_SESSION_PAUSED: ("session_id", "reason"),
+    EventType.EMBODIED_SESSION_RESUMED: ("session_id", "reason"),
+    EventType.EMBODIED_SESSION_CANCELLED: ("session_id", "reason"),
+    EventType.EMBODIED_SESSION_ENDED: ("session_id", "status", "reason"),
+    EventType.EMBODIED_OBSERVATION: ("session_id", "basis", "freshness"),
+    EventType.EMBODIED_ACTION_SELECTED: ("session_id", "kind", "direction"),
+    EventType.EMBODIED_ACTION_EXECUTED: ("session_id", "kind", "verified"),
+    EventType.EMBODIED_ACTION_FAILED: ("session_id", "status"),
+    EventType.EMBODIED_RECOVERY: ("session_id", "attempt", "ceiling"),
+    EventType.EMBODIED_BLOCKED: ("session_id", "reason"),
+    EventType.EMBODIED_OBJECTIVE_VERIFIED: ("session_id", "conditions"),
+    EventType.EMBODIED_OBJECTIVE_FAILED: ("session_id", "reason"),
+    # Phase 26: the run's identity and the counts it ended with. ``status`` is a
+    # run category (``completed``/``budget_exhausted``/...) and ``category`` is a
+    # failure category — both vocabularies live in ``generalization.models``.
+    EventType.GENERALIZATION_TASK_REGISTERED: ("task_id", "family_id", "split"),
+    EventType.GENERALIZATION_EVALUATION_STARTED: ("run_id", "solver", "tasks"),
+    EventType.GENERALIZATION_EVALUATION_COMPLETED: ("run_id", "status", "solved"),
+    EventType.GENERALIZATION_FAILURE_CLASSIFIED: ("run_id", "task_id", "category"),
+    EventType.GENERALIZATION_LEAKAGE_DETECTED: ("run_id", "reason"),
     # ``sources``/``chunks`` are counts of what one ingest did (an ingest may
     # cover a whole directory); ``source_id`` names the single source it was
     # about. ``status`` carries the IngestReport outcome, so a watcher sees

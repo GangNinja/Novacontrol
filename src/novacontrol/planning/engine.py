@@ -33,8 +33,15 @@ class PlanningEngine:
         steps: tuple[PlanStep, ...]
         if len(tasks) == 1:
             steps = (
-                PlanStep(title="Understand request", description=f"Clarify constraints for: {goal}"),
-                PlanStep(title="Execute task", description=goal, depends_on=("understand-request",)),
+                PlanStep(
+                    title="Understand request",
+                    description=f"Clarify constraints for: {goal}",
+                ),
+                PlanStep(
+                    title="Execute task",
+                    description=goal,
+                    depends_on=("understand-request",),
+                ),
                 PlanStep(
                     title="Verify result",
                     description="Run checks and summarize the outcome.",

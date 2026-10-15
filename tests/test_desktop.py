@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import ast
+import asyncio
+import shlex
 import shutil
 import sys
 import tempfile
@@ -24,6 +25,10 @@ from novacontrol.desktop import (
     NoopDesktopRunner,
 )
 from novacontrol.desktop.controller import parse_desktop_command
+
+
+def _python_command(code: str, *args: str) -> str:
+    return " ".join(shlex.quote(item) for item in (sys.executable, "-c", code, *args))
 
 
 class RecordingRunner:
@@ -105,7 +110,8 @@ class DesktopApprovalTests(unittest.IsolatedAsyncioTestCase):
             approval_gateway=AllowGateway(),
             runner=LocalDesktopRunner(command_timeout_seconds=5),
         )
-        results = await controller.execute_workflow(controller.plan_execute_script("echo phase21"))
+        command = _python_command("print('phase21')")
+        results = await controller.execute_workflow(controller.plan_execute_script(command))
         self.assertEqual(results[0].status, DesktopActionStatus.COMPLETED)
         self.assertEqual(results[0].output["adapter"], "local-desktop")
         self.assertEqual(results[0].output["exit_code"], 0)
@@ -139,31 +145,39 @@ class DesktopCommandSafetyTests(unittest.IsolatedAsyncioTestCase):
     async def test_redirection_never_creates_files(self) -> None:
         """> / >> / 2> are literal argv, so no file is ever created."""
         marker = self.tmpdir / "marker.txt"
-        for command in ("echo safe > marker.txt", "echo safe >> marker.txt", "echo safe 2> marker.txt"):
-            with self.subTest(command=command):
-                output = await self._execute(command)
+        command = _python_command("print('safe')")
+        for redirect in ("> marker.txt", ">> marker.txt", "2> marker.txt"):
+            with self.subTest(redirect=redirect):
+                output = await self._execute(f"{command} {redirect}")
                 self.assertEqual(output["exit_code"], 0)
-                self.assertFalse(marker.exists(), f"redirection created file: {command}")
+                self.assertFalse(marker.exists(), f"redirection created file: {redirect}")
 
     async def test_command_chaining_never_runs_second_program(self) -> None:
         """A second program after ; / && / | must not execute without a shell."""
         marker = self.tmpdir / "PWNED.txt"
-        second = (
-            "python -c \"import pathlib; pathlib.Path('PWNED.txt').write_text('pwned')\""
+        second = _python_command(
+            "import pathlib; pathlib.Path('PWNED.txt').write_text('pwned')"
         )
+        first = _python_command("print('safe')")
         for separator in (" ; ", " && ", " | "):
             with self.subTest(separator=separator.strip()):
-                output = await self._execute(f"echo safe{separator}{second}")
+                output = await self._execute(f"{first}{separator}{second}")
                 self.assertEqual(output["exit_code"], 0)
                 self.assertFalse(marker.exists(), f"second program ran via: {separator}")
 
     async def test_legitimate_commands_with_metacharacters_still_run(self) -> None:
         """Text that merely contains shell metacharacters is safe and must not be rejected."""
         cases = [
-            ("echo \"price is $5 and {fine}\"", "price is $5 and {fine}"),
-            ("echo \"a | b & c > d\"", "a | b & c > d"),
-            ("python -c \"print('semi;colon ok')\"", "semi;colon ok"),
-            ("python -c \"print('brackets () [] {} ok')\"", "brackets () [] {} ok"),
+            (
+                _python_command("import sys; print(sys.argv[1])", "price is $5 and {fine}"),
+                "price is $5 and {fine}",
+            ),
+            (
+                _python_command("import sys; print(sys.argv[1])", "a | b & c > d"),
+                "a | b & c > d",
+            ),
+            (_python_command("print('semi;colon ok')"), "semi;colon ok"),
+            (_python_command("print('brackets () [] {} ok')"), "brackets () [] {} ok"),
         ]
         for command, expected in cases:
             with self.subTest(command=command):
@@ -559,7 +573,10 @@ class JarvisDesktopCommandTests(unittest.TestCase):
     targets instead of falling into `cmd /c start <name>`."""
 
     def test_open_then_search_plans_a_web_search_in_that_browser(self) -> None:
-        from novacontrol.desktop.controller import DesktopAutomationController, parse_desktop_command
+        from novacontrol.desktop.controller import (
+            DesktopAutomationController,
+            parse_desktop_command,
+        )
         from novacontrol.desktop.models import DesktopActionType
 
         controller = DesktopAutomationController(runner=RecordingRunner())
@@ -772,8 +789,8 @@ class JarvisDesktopCommandTests(unittest.TestCase):
         self.assertEqual(captured["args"][1], "shell:AppsFolder\\App_abc!App")
 
     def test_web_search_plan_carries_query(self) -> None:
-        from novacontrol.desktop.models import DesktopAction, DesktopActionType
         from novacontrol.desktop.controller import DesktopAutomationController
+        from novacontrol.desktop.models import DesktopAction, DesktopActionType
 
         # Planner-level contract: one WEB_SEARCH action carrying the query.
         # (The runner's URL construction shells out and is exercised live.)

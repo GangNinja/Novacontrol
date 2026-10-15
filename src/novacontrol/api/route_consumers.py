@@ -98,6 +98,72 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("POST", "/world/observe"): "no-render",  # ingest for API callers; recording only
     ("POST", "/world/query"): "no-render",  # structured state query for API callers
     ("POST", "/world/predict"): "no-render",  # prediction boundary; often unavailable
+    # Phase 23 has no panel of its own yet: these are the API/CLI surfaces for
+    # interactive learning, and claiming a renderer here would put a control in the
+    # contract that the frontend does not have (the same reasoning as POST /plan/run).
+    ("GET", "/learning/status"): "no-render",  # operator surface; surfaced via /status
+    ("GET", "/learning/environments"): "no-render",  # environment inventory
+    ("POST", "/learning/environments"): "no-render",  # register a simulator
+    ("POST", "/learning/objectives"): "no-render",  # create; runs nothing
+    ("GET", "/learning/objectives"): "no-render",  # objective list
+    ("GET", "/learning/objectives/{objective_id}"): "no-render",  # the record
+    ("POST", "/learning/objectives/{objective_id}/preview"): "no-render",  # dry run
+    ("POST", "/learning/objectives/{objective_id}/run"): "no-render",  # the cycle
+    ("POST", "/learning/objectives/{objective_id}/approve"): "no-render",  # approval
+    ("POST", "/learning/objectives/{objective_id}/reject"): "no-render",  # refusal
+    ("POST", "/learning/objectives/{objective_id}/cancel"): "no-render",  # cancellation
+    ("GET", "/learning/objectives/{objective_id}/resumable"): "no-render",  # resume gate
+    ("POST", "/learning/objectives/{objective_id}/resume"): "no-render",  # resume
+    ("GET", "/learning/metrics"): "no-render",  # learning metrics
+    ("GET", "/learning/evidence/{evidence_id}"): "no-render",  # provenance lookup
+    ("POST", "/learning/transfer"): "no-render",  # held-out check
+    # Phase 24 has no panel of its own yet: these are the API/CLI surfaces for
+    # goal-level planning, and claiming a renderer here would put a control in the
+    # contract that the frontend does not have (the same reasoning as POST
+    # /plan/run). A goal is created and planned over the API, executed over the
+    # API, and reported through /status for the operator surfaces.
+    ("GET", "/planning/status"): "no-render",  # operator surface; surfaced via /status
+    ("GET", "/planning/goals"): "no-render",  # goal list
+    ("POST", "/planning/goals"): "no-render",  # create + plan; runs nothing
+    ("GET", "/planning/goals/{goal_id}"): "no-render",  # the record
+    ("POST", "/planning/goals/{goal_id}/run"): "no-render",  # the gated execution
+    ("POST", "/planning/goals/{goal_id}/reassess"): "no-render",  # replan decision
+    ("POST", "/planning/goals/{goal_id}/cancel"): "no-render",  # cancellation
+    # Phase 25 has no panel of its own yet: an embodied session is created and
+    # driven over the API/CLI and reported through /status, exactly like the
+    # Phase 23 learning and Phase 24 planning surfaces. Claiming a renderer here
+    # would put a control in the contract that the frontend does not have.
+    ("GET", "/embodied/status"): "no-render",  # operator surface; also in /status
+    ("GET", "/embodied/overview"): "no-render",  # the phase's own statement
+    ("GET", "/embodied/environments"): "no-render",  # allowlist + scenarios
+    ("GET", "/embodied/sessions"): "no-render",  # session list
+    ("POST", "/embodied/sessions"): "no-render",  # create; runs nothing
+    ("GET", "/embodied/sessions/{session_id}"): "no-render",  # the record
+    ("POST", "/embodied/sessions/{session_id}/run"): "no-render",  # the loop
+    ("POST", "/embodied/sessions/{session_id}/pause"): "no-render",  # pause
+    ("POST", "/embodied/sessions/{session_id}/resume"): "no-render",  # resume
+    ("POST", "/embodied/sessions/{session_id}/cancel"): "no-render",  # cancellation
+    # Phase 26 has no panel of its own yet: the benchmark is run over the API/CLI
+    # and reported through /status, exactly like the Phase 23 learning, Phase 24
+    # planning and Phase 25 embodied surfaces. Claiming a renderer here would put
+    # a control in the contract that the frontend does not have.
+    ("GET", "/generalization/status"): "no-render",  # operator surface; also in /status
+    ("GET", "/generalization/overview"): "no-render",  # the phase's own statement
+    ("GET", "/generalization/families"): "no-render",  # families + the no-aggregate rule
+    ("GET", "/generalization/operators"): "no-render",  # the transformation library
+    ("GET", "/generalization/tasks"): "no-render",  # task list, answers withheld
+    ("GET", "/generalization/tasks/{task_id}"): "no-render",  # one task with its key
+    ("GET", "/generalization/splits"): "no-render",  # split counts + leakage verdict
+    ("POST", "/generalization/tasks"): "no-render",  # register a definition; runs nothing
+    ("POST", "/generalization/evaluate"): "no-render",  # the bounded evaluation run
+    ("GET", "/generalization/runs"): "no-render",  # trimmed run rows
+    ("GET", "/generalization/runs/{run_id}"): "no-render",  # one run, whole
+    ("GET", "/generalization/runs/{run_id}/export"): "no-render",  # review payload
+    ("GET", "/generalization/compare"): "no-render",  # baseline vs candidate
+    ("GET", "/generalization/failures"): "no-render",  # classified failures
+    ("GET", "/generalization/recommendations"): "no-render",  # non-executing advice
+    ("GET", "/generalization/game-eval/contracts"): "no-render",  # §13 definitions
+    ("GET", "/generalization/game-eval"): "no-render",  # contracts over real sessions
     ("GET", "/intelligence"): "no-render",  # GIL telemetry (API/CLI surface; surfaced via /status)
     ("GET", "/capabilities"): "no-render",  # capability browser for API/CLI callers
     ("GET", "/capabilities/discover"): "no-render",  # 9.3: answers a question, runs nothing
