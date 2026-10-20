@@ -22,13 +22,12 @@ function submitChat(options = {}) {
   state.lastQuery = request;
   state.pendingSpeak = Boolean(options.speak);
   byId("chatInput").value = "";
+  // No onSuccess recording: the server already appends this turn to the shared
+  // transcript inside the request path (handle_request), for every client — the
+  // browser posting it too stored each message twice.
   run("chatStream", "chat", () => requestJson("/ask", { request }), "askButton", {
     loadingText: "Thinking through your question...",
     successToast: "Response ready",
-    onSuccess: (data) => {
-      recordChatTurn(request, "user");
-      recordChatTurn(chatTextForHistory(data), "assistant", data.route || data.intent || "");
-    },
     onError: () => {
       state.pendingSpeak = false;
       if (state.voiceMode === "conversation") setVoiceStatus("Voice ready");
@@ -543,21 +542,12 @@ function setupActions() {
 // tab, browser, or client (CLI) sees the same conversation. A browser's old
 // localStorage copy is migrated into the server thread exactly once.
 const CHAT_MIGRATION_KEY = "novacontrol.chatHistoryMigrated";
-const CHAT_TEXT_LIMIT = 1500;
 
-// Extract the assistant's plain-text answer from any response shape.
-function chatTextForHistory(data) {
-  return extractAnswerText(data).slice(0, CHAT_TEXT_LIMIT);
-}
-
-// Append one turn to the shared server thread (fire-and-forget: the turn is
-// already visible in this tab via the normal render path).
-function recordChatTurn(text, role, route) {
-  const clean = String(text || "").trim();
-  if (!clean) return;
-  requestJson("/chat/history", { role, text: clean.slice(0, CHAT_TEXT_LIMIT), route: route || "" })
-    .catch(() => { /* transcript write is best-effort; the answer still renders */ });
-}
+// APPENDING a turn has exactly ONE owner: the server, which records the pair
+// inside handle_request — the path the UI, the CLI and the GUI all take. The
+// browser used to POST /chat/history as well, so every message was stored twice
+// and rendered twice after a reload. The client only READS the thread (below)
+// and migrates a pre-server localStorage copy into it, once per browser.
 
 // Seed the chat panel from the SERVER thread, then (once per browser) merge in
 // this browser's old localStorage copy so an upgrade does not lose history.
@@ -1142,6 +1132,7 @@ setupActions();
 setupVision();
 watchForStaleBuild(); // a tab left open across an edit is rendering an old build
 setupRoutingExplorer();
+setupNovaForge(); // Forge Mission Control: session polling + real frames
 setupVoice();
 restoreActivePanel(); // must run after setupTabs binds the nav clicks
 renderChatHistory();

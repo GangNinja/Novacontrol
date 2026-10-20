@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import unittest
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from novacontrol.audit import (
     AUDIT_DIRECTORY,
@@ -349,6 +351,45 @@ class JsonSafeTests(unittest.TestCase):
         self.assertEqual(restored.decision, {"route": "chat"})
         self.assertEqual(restored.plan[0]["step_id"], "s1")
         self.assertEqual(restored.permission_decisions[0]["allow"], True)
+
+
+class ConcurrentAuditWriteTests(unittest.TestCase):
+    """The audit sink stages rewrites under a unique name, never a shared one.
+
+    A fixed ``<name>.tmp`` let two writers share a stage: one truncated the other's
+    file and, on Windows, ``os.replace`` raised ``WinError 32`` while the handle was
+    open. Retention rewrites and ``clear`` must work beside another writer.
+    """
+
+    def test_a_rewrite_never_touches_another_writer_s_staged_file(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = f"{temp_dir}/audit/audit.jsonl"
+            sink = JsonlAuditSink(path)
+            sink.append({"id": "1", "task_id": "kept"})
+            legacy_stage = Path(path).with_suffix(Path(path).suffix + ".tmp")
+            legacy_stage.write_text("held by another writer\n", encoding="utf-8")
+
+            with legacy_stage.open("r+", encoding="utf-8") as held:
+                sink.replace([{"id": "2", "task_id": "new"}])
+                held.seek(0)
+                self.assertEqual(held.read(), "held by another writer\n")
+
+            self.assertEqual([row["task_id"] for row in sink.read()], ["new"])
+
+    def test_a_failed_rewrite_leaves_no_staged_file_behind(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = f"{temp_dir}/audit/audit.jsonl"
+            sink = JsonlAuditSink(path)
+
+            with mock.patch(
+                "novacontrol.audit.logger.os.replace",
+                side_effect=OSError("the trail is read-only"),
+            ):
+                with self.assertRaises(OSError):
+                    sink.replace([{"id": "1"}])
+
+            leftovers = [p.name for p in Path(path).parent.iterdir()]
+            self.assertEqual(leftovers, [])
 
 
 if __name__ == "__main__":

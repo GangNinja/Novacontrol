@@ -92,6 +92,7 @@ from novacontrol.core.security import (
     PermissionScope,
 )
 from novacontrol.desktop import DesktopAutomationController, DesktopAutomationModule, LocalDesktopRunner
+from novacontrol.desktop.capture import capture_supported_here
 from novacontrol.desktop.vision import VisionController
 from novacontrol.evaluation import (
     AgentTrajectory,
@@ -196,8 +197,17 @@ from novacontrol.models import (
     ModelCapability,
     ModelLoadOutcome,
     ModelManager,
+    ModelProbeSnapshot,
     ModelProfile,
     ModelRegistry,
+)
+from novacontrol.novaforge.actions import ScreenInput
+from novacontrol.novaforge import (
+    NovaForgeBenchmarkLab,
+    NovaForgeCoach,
+    NovaForgeEvaluationLab,
+    NovaForgeExperimentLab,
+    NovaForgeManager,
 )
 from novacontrol.persistence import JsonStateStore
 from novacontrol.phone import PhoneControlController, PhoneControlModule
@@ -1730,6 +1740,97 @@ class NovaControlApplication:
         # a tool that declares no permission scopes but is destructive or
         # external is still put to a person instead of running unannounced.
         self.risk = PermissionManager(catalog=self.tool_catalog)
+        # ── NovaForge NF-01: the gaming workspace and session foundation ────
+        # Built HERE, after the permission layer exists, because a session is a
+        # consequential desktop action: it is declared (not inferred from its
+        # name), assessed before it starts, and its decision is stored in the
+        # session record. It composes the SAME desktop runner and state store as
+        # every other feature — it is a subsystem, not a second brain — and its
+        # frame loop only OBSERVES: NF-01 attaches no decision or input pipeline.
+        self.risk.declare(
+            "novaforge.session",
+            risk_level=RiskLevel.MEDIUM,
+            required_permission=PermissionScope.ENVIRONMENT_CONTROL,
+            requires_confirmation=False,
+            reversible=True,
+            destructive=False,
+            external_side_effect=False,
+        )
+        # The runner is typed as the desktop COMMAND protocol, which a test
+        # double may satisfy without the capture/geometry seams. Resolve them
+        # structurally and fall back to honest "unavailable" answers rather than
+        # failing construction — a machine where capture cannot run should show
+        # that in the workspace, not refuse to start the application.
+        desktop_runner = self.desktop.runner
+        novaforge_capture = getattr(desktop_runner, "capture_screen", None)
+        novaforge_geometry = getattr(desktop_runner, "window_geometry", None)
+        novaforge_windows = getattr(desktop_runner, "window_lines", None)
+        # Remediation R1/R2: the gameplay injector and the verifier's evidence
+        # probe, both built from the SAME DPI-aware worker that captures frames.
+        # NovaForge gets its own ActionRunner (and therefore its own InputGuard)
+        # so a game session's held keys can never be cleared by — or clear — a
+        # JARVIS workflow's presses. A host without a worker leaves both None,
+        # and the session then reports no input path instead of claiming one.
+        novaforge_input = None
+        novaforge_probe = None
+        input_worker_factory = getattr(desktop_runner, "input_worker", None)
+        handle_probe = getattr(desktop_runner, "window_by_handle", None)
+        if callable(input_worker_factory) and callable(handle_probe) and capture_supported_here():
+            try:
+                novaforge_input = ScreenInput(send=input_worker_factory().send_input)
+                novaforge_probe = handle_probe
+            except Exception:  # noqa: BLE001 - an unwired worker is a capability gap
+                novaforge_input = None
+                novaforge_probe = None
+        self.novaforge = NovaForgeManager(
+            data_dir=self.data_dir,
+            capture=novaforge_capture or self._novaforge_no_capture,
+            geometry=novaforge_geometry or self._novaforge_no_geometry,
+            window_lines=novaforge_windows or self._novaforge_no_windows,
+            release_inputs=getattr(desktop_runner, "release_all_inputs", None),
+            action_input=novaforge_input,
+            objective_probe=novaforge_probe,
+            permissions=self.risk,
+            publish=self._novaforge_publish,
+            capture_supported=bool(
+                capture_supported_here() and novaforge_capture is not None and novaforge_geometry is not None
+            ),
+        )
+        # NF-04 composes the session manager: it starts ONE real observation
+        # session per run and reads that session's own telemetry, timeline and
+        # record. It gets the same store and event seam, so benchmark history is
+        # persisted and observable without a second store or bus.
+        self.novaforge_benchmarks = NovaForgeBenchmarkLab(
+            manager=self.novaforge,
+            publish=self._novaforge_publish,
+        )
+        # NF-05 has no runner of its own: an evaluation is a game/scenario/baseline
+        # record around one NF-04 benchmark run. It gets the same store and event
+        # seam, so an evaluation can never start a second session or timeline.
+        self.novaforge_evaluations = NovaForgeEvaluationLab(
+            benchmark=self.novaforge_benchmarks,
+            publish=self._novaforge_publish,
+        )
+        # NF-06 Forge Coach: a READ-ONLY analyst over the records NF-01…NF-05
+        # already own. It persists one thing — a recommendation's status, because
+        # that is the operator's decision and must survive a restart — and it
+        # recomputes every finding from the evidence on each read, so a diagnosis
+        # can never outlive the records it describes.
+        self.novaforge_coach = NovaForgeCoach(
+            manager=self.novaforge,
+            benchmark=self.novaforge_benchmarks,
+            evaluations=self.novaforge_evaluations,
+            publish=self._novaforge_publish,
+        )
+        # NF-06 experiments SEQUENCE two NF-05 evaluations; they are not a third
+        # runner. The permission gate is the SAME risk layer the tool executor
+        # uses, asked with an explicit read verb so a category id cannot be
+        # verb-derived into a refusal.
+        self.novaforge_experiments = NovaForgeExperimentLab(
+            evaluations=self.novaforge_evaluations,
+            publish=self._novaforge_publish,
+            permission=self._novaforge_experiment_permission,
+        )
         self.tool_executor = ToolExecutor(
             self.tools,
             catalog=self.tool_catalog,
@@ -1955,6 +2056,15 @@ class NovaControlApplication:
                 vision_processor=self._build_vision_processor(),
                 browser_runner=self.browser.runner,
                 completion_provider=self.brain.completion_provider,
+                # The three seams that make an agentic observation REAL: the
+                # window probe (the OS's own list of visible windows), the
+                # approval-gated screen capture, and the OCR reader that turns a
+                # frame into text. Wiring none of them is what the game-control
+                # audit measured — a loop that observed nothing, six times per
+                # run, while reporting honestly that it could not verify.
+                window_probe=self._perception_window_probe,
+                screenshot_provider=self._perception_screen_capture,
+                screen_text_reader=self._perception_screen_text,
             ),
             actions=ActionEngine(browser_runner=self.browser.runner, desktop_runner=self.desktop.runner),
             planner=AdaptivePlanner(),
@@ -2608,6 +2718,22 @@ class NovaControlApplication:
 
     async def stop(self) -> None:
         self._stop_automation_ticker()
+        # NovaForge sessions go first: stopping one releases held input through
+        # the verified path while the desktop worker is still alive, and writes
+        # the final record before the store's owner shuts down. The call is
+        # best-effort, so a session that cannot close never blocks shutdown. The
+        # BENCHMARK LAB goes before the manager: it owns the active session and
+        # must finalize its run record (as ABORTED) before the manager closes the
+        # session underneath it.
+        # An experiment orchestrates evaluations, so it stops FIRST: cancelling
+        # the arms before the records they poll are closed is the only order that
+        # leaves a truthful experiment record behind.
+        await self.novaforge_experiments.shutdown()
+        await self.novaforge_benchmarks.shutdown()
+        # The evaluation reads the benchmark's terminal state, so it is closed
+        # AFTER the benchmark and before the manager releases the session.
+        await self.novaforge_evaluations.shutdown()
+        await self.novaforge.shutdown()
         self.persist()
         # Plugins go first, and in the safe order: an enabled one is disabled
         # (its tools stop being callable) before shutdown runs, so nothing a
@@ -2621,6 +2747,10 @@ class NovaControlApplication:
         # A run that finished but was never written is a result nobody can
         # reproduce tomorrow.
         self.generalization.close()
+        # The desktop capture worker is a long-lived process: closing it here is
+        # what keeps "a reusable capture resource" from becoming "a stray
+        # PowerShell nobody remembers starting".
+        await self.desktop.close()
         await self.browser.close()
         await self.runtime.stop()
 
@@ -2707,12 +2837,17 @@ class NovaControlApplication:
         a worker thread — a status call must never stall the event loop.
         """
         manager = self.intelligence.model_manager
+        # ONE snapshot for this whole read: the health block and the routing
+        # report below it need the same two runtime facts, and asking each of
+        # them separately costs two more bounded probes on a machine with no
+        # runtime. Same defect as D4, so the same fix.
+        probes = ModelProbeSnapshot()
         status = await asyncio.to_thread(manager.get_model_status)
         # Phase 7's readout, measured off the event loop: what is resident, what
         # the machine has, and which model the capability registry would choose
         # for each kind of work. The lifecycle layer above still reports the
         # runtime's own view, so the two can be compared rather than trusted.
-        health = await asyncio.to_thread(self.model_manager.health)
+        health = await asyncio.to_thread(self.model_manager.health, snapshot=probes)
         # The keep-alive sweep runs HERE, in a worker thread, on the status read
         # every client already polls — there is no timer thread in this process,
         # and inventing one would be a second policy nobody asked for. Under the
@@ -2730,7 +2865,9 @@ class NovaControlApplication:
             "local_models": list(await asyncio.to_thread(manager.get_models)),
             "pipeline": await asyncio.to_thread(self._vision_pipeline_report),
             "manager": health,
-            "selections": await asyncio.to_thread(self._model_routing_report),
+            "selections": await asyncio.to_thread(
+                self._model_routing_report, snapshot=probes
+            ),
         }
 
     def _vision_pipeline_report(self) -> dict[str, Any]:
@@ -2753,15 +2890,30 @@ class NovaControlApplication:
             "prefer_ocr": self.config.vision.prefer_ocr,
         }
 
-    def _model_routing_report(self) -> dict[str, Any]:
+    def _model_routing_report(
+        self, *, snapshot: ModelProbeSnapshot | None = None
+    ) -> dict[str, Any]:
         """What the manager would choose for each kind of work, right now.
 
-        The four questions the specification's example flows ask, answered from
-        capabilities and measured resources: nothing, plain reasoning, vision,
-        and the strongest local model. ``route`` says whether the answer is a
-        local model, the cloud, or nothing — the three outcomes a caller has to
-        distinguish.
+        The five questions the specification's example flows ask, answered from
+        capabilities and measured resources: plain reasoning, coding, vision,
+        vision with tools, and the strongest local model. ``route`` says whether
+        the answer is a local model, the cloud, or nothing — the three outcomes
+        a caller has to distinguish.
+
+        ONE :class:`ModelProbeSnapshot` is shared by all five questions, because
+        they need the same two runtime facts (what exists, what is resident) and
+        asking per question cost ten bounded HTTP probes on a machine with no
+        runtime — each waiting out its own socket timeout, measured at 22.1 s
+        for this endpoint. A caller that also reads the runtime block beside
+        this report may SUPPLY the snapshot, so the whole request shares one
+        budget; otherwise one is created and owned here. Either way it is scoped
+        to this single call and never outlives it, so the next report probes the
+        runtime again and a model pulled later is still found without a restart.
+        Two concurrent reports each hold their own, so neither can serve the
+        other a stale answer.
         """
+        probes = snapshot if snapshot is not None else ModelProbeSnapshot()
         report: dict[str, Any] = {}
         for label, kwargs in (
             ("reasoning", {"needs_reasoning": True}),
@@ -2771,10 +2923,42 @@ class NovaControlApplication:
             ("strongest", {"needs_reasoning": True, "latency_preference": "quality"}),
         ):
             try:
-                report[label] = self.model_manager.select_for_request(**kwargs).to_dict()
+                report[label] = self.model_manager.select_for_request(
+                    snapshot=probes, **kwargs
+                ).to_dict()
             except Exception:  # pragma: no cover - a readout must never throw
                 report[label] = {}
         return report
+
+    async def intelligence_model_report(self) -> dict[str, Any]:
+        """The model half of ``GET /intelligence``, on ONE probe budget.
+
+        The runtime block and the routing report beside it need the same two
+        runtime facts, so they share one :class:`ModelProbeSnapshot` and the
+        whole read asks the runtime once per fact. On a machine with no local
+        runtime that is the difference between eleven bounded probes (~22.1 s —
+        the figure audit defect D4 measured) and two (~4.0 s), and it is the
+        reason this is built here rather than assembled in the route: the probe
+        budget is a property of the read, not of the HTTP layer.
+
+        The snapshot is created and dropped inside this call. Nothing is
+        remembered across requests, so a model pulled later is still discovered
+        by the next one, and two concurrent reads each hold their own.
+
+        Sequential on purpose: the snapshot is single-owner and not thread-safe,
+        and after deduplication there is nothing left for concurrency to win —
+        the two remaining probes are inherently serial against one socket.
+        """
+        probes = ModelProbeSnapshot()
+        hardware = await asyncio.to_thread(self.model_manager.monitor.headroom_report)
+        health = await asyncio.to_thread(self.model_manager.health, snapshot=probes)
+        selections = await asyncio.to_thread(self._model_routing_report, snapshot=probes)
+        return {
+            **self.models_status(),
+            "runtime": health,
+            "hardware": hardware,
+            "selection": selections,
+        }
 
     async def load_model(self, model: str) -> dict[str, Any]:
         """Load one model, freeing room FIRST when the measurement requires it.
@@ -3877,6 +4061,86 @@ class NovaControlApplication:
         """
         captured = await self.vision.capture_screen()
         return str(captured.get("screenshot", "") or "")
+
+    async def _novaforge_no_capture(self, _path: str) -> dict[str, Any]:
+        """Capture seam for a runner that has none: an honest, non-fresh result."""
+        return {
+            "fresh": False,
+            "verification": "The configured desktop runner has no capture capability.",
+        }
+
+    async def _novaforge_no_geometry(self, _title: str) -> None:
+        """Geometry seam for a runner that has none: the window is unresolvable."""
+        return None
+
+    async def _novaforge_no_windows(self) -> None:
+        """Window-list seam for a runner that has none: the probe is unavailable."""
+        return None
+
+    def _novaforge_experiment_permission(self) -> dict[str, Any]:
+        """Revalidate an experiment against the SAME permission layer tools use.
+
+        ``action="observe"`` is passed explicitly because a declaration is what
+        decides the level: an id read as a verb is how an innocent name once
+        became CRITICAL. ``approved=True`` is the operator approval this lab
+        recorded against the exact configuration, so ``check`` is being asked
+        the one question left: may this run at all?
+        """
+        try:
+            decision = self.risk.check(
+                "novaforge_experiment", action="observe", approved=True
+            )
+        except Exception as exc:  # noqa: BLE001 - a broken gate refuses, never crashes
+            return {
+                "checked": True,
+                "allowed": False,
+                "reason": f"The permission check raised {type(exc).__name__}: {exc}",
+            }
+        return {
+            "checked": True,
+            "allowed": bool(getattr(decision, "allow", False)),
+            "risk": str(getattr(getattr(decision, "risk", ""), "value", "")),
+            "source": str(getattr(decision, "source", "")),
+            "reason": str(getattr(decision, "reason", "")),
+        }
+
+    async def _novaforge_publish(self, event_type: str, payload: dict[str, Any]) -> None:
+        """Publish a NovaForge event on the application's ONE bus.
+
+        The dashboard's SSE channel relays every event on this bus, so a gaming
+        session's state changes are observable without a NovaForge-specific
+        stream. The payload names its session and never carries the frame
+        bytes — a frame is fetched from its own route, not pushed through an
+        event that every connected client would receive.
+        """
+        await self.event_bus.emit(event_type, source="novaforge", **payload)
+
+    async def _perception_window_probe(self) -> list[str] | None:
+        """Visible windows, for the agentic perception engine's probe seam.
+
+        Reads the OS through the desktop runner, which is the only component
+        that enumerates windows. A runner that cannot do it answers None —
+        which the engine records as "the probe could not read windows", never
+        as "there are no windows", because those two facts lead to opposite
+        conclusions about an observation.
+        """
+        probe = getattr(self.desktop.runner, "window_lines", None)
+        if probe is None:
+            return None
+        lines = await probe()
+        return [str(line) for line in lines] if lines is not None else None
+
+    async def _perception_screen_text(self, screenshot_path: str) -> list[dict[str, Any]] | None:
+        """Real text read off a screenshot, for agentic observation.
+
+        The same Windows OCR engine the vision-guided click matches labels
+        with, so an observation can carry text that was genuinely recognized on
+        screen without any vision model installed. None means the OCR engine is
+        unavailable — deliberately distinct from "the screen had no text".
+        """
+        from novacontrol.desktop.vision_guide import screen_text
+
+        return await screen_text(screenshot_path)
 
     # ── Phase 24: the goal-planning builder and its one seam ─────────────
 
@@ -9461,6 +9725,35 @@ class NovaControlApplication:
                         first_target = clause_target
                 combined = _DW(name=command[:40] or "Command", actions=tuple(merged_actions))
                 actions_descriptions = descriptions
+        # PHASE D SAFETY: an unmatched phrase must be refused, not re-aimed at a
+        # shell. The native parser marks "I don't understand" with an
+        # EXECUTE_SCRIPT step (which also triggers the GIL fallback above); if,
+        # after every fallback, the plan STILL contains no real action, the
+        # whole command is unmatched. Running it as a script would turn "turn
+        # the volume down" into a shell invocation — gated, but the wrong target.
+        real_actions = [
+            action for action in combined.actions if action.type is not _DAT.EXECUTE_SCRIPT
+        ]
+        if not real_actions:
+            return {
+                "route": "desktop_automation",
+                "family": "desktop",
+                "status": "not_an_action",
+                "command": command,
+                "target": first_target or "desktop",
+                "steps": [],
+                "summary": (
+                    "I couldn't map that to a desktop action, so nothing was run. "
+                    "Try phrasing it as an action I control, e.g. 'open <app>', "
+                    "'close <app>', 'take a screenshot', 'type <text>', 'press enter', "
+                    "'click <label>', 'search for <query>', or 'go to <folder>'."
+                ),
+                "approval": {
+                    "required": False, "approved": False,
+                    "message": "No desktop action was detected, so there is nothing to approve.",
+                },
+                "workflow": {"id": "", "name": "No action", "actions": []},
+            }
         plan: dict[str, Any] = {
             "route": "desktop_automation",
             "family": "desktop",

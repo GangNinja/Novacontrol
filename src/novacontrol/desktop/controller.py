@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 import os
 from pathlib import Path, PureWindowsPath
 import re
@@ -22,6 +23,21 @@ from novacontrol.core.security import (
     PermissionScope,
     RiskLevel,
 )
+from novacontrol.desktop.capture import (
+    PersistentScreenCapture,
+    capture_supported_here,
+    looks_like_png,
+    oneshot_capture_script,
+)
+from novacontrol.desktop.input import (
+    InputGuard,
+    InputStop,
+    MouseButton,
+    WindowGeometry,
+    mouse_flags,
+    validate_input_target,
+    vk_for_key,
+)
 from novacontrol.desktop.models import (
     DesktopAction,
     DesktopActionResult,
@@ -29,6 +45,36 @@ from novacontrol.desktop.models import (
     DesktopActionType,
     DesktopWorkflow,
 )
+
+
+#: Wall-clock slack for the freshness window. A filesystem may record a write a
+#: fraction of a millisecond BEHIND the clock the request was stamped with
+#: (measured: -0.1 ms on NTFS), so this is a clock-skew allowance — not a licence
+#: to accept an old frame, because `file_written` independently requires the
+#: mtime to ADVANCE past the state before the request.
+_FRESHNESS_SLACK_SECONDS = 0.05
+
+
+def _freshness_reason(
+    error: str, exists: bool, advanced: bool, recent: bool, valid_png: bool
+) -> str:
+    """Why a capture counts as fresh — or exactly which condition it failed.
+
+    A verification string that only says "failed" teaches the next reader
+    nothing; naming the failed condition is what makes a capture that cannot be
+    trusted diagnosable instead of mysterious.
+    """
+    if exists and advanced and recent and valid_png:
+        return "fresh capture written during this call"
+    if not exists:
+        return error or "no file was written for this capture"
+    if not advanced:
+        return "the file was not written by this capture (an older file is on disk)"
+    if not valid_png:
+        return "the file written is not a PNG image"
+    if not recent:
+        return "the file on disk is older than this capture"
+    return error or "no fresh PNG was written for this capture"
 
 
 @dataclass(frozen=True, slots=True)
@@ -597,21 +643,147 @@ class LocalDesktopRunner:
         command_timeout_seconds: float = 60,
         vision_provider: object | None = None,
         windows_type_paste: bool | None = None,
+        screen_capture: object | None = None,
     ) -> None:
         self.command_timeout_seconds = command_timeout_seconds
         # Multimodal LLM for vision-guided element location (None = OCR/landmarks only).
         self.vision_provider = vision_provider
+        # The capture RESOURCE (one PowerShell worker serving many frames).
+        # Injectable so the capture path can be tested without a real screen;
+        # None means "create the persistent worker on first use".
+        self._screen_capture = screen_capture
         # Whether typed text goes through the Windows clipboard-paste path.
         # Defaults to the real platform; an override lets the verification
         # logic (staging + focus checks) be tested on any OS without spawning
         # PowerShell. Keep the default None distinct from False so tests can
         # also pin "the default really follows the platform".
         self._windows_type_paste = windows_type_paste
+        # The ONE input guard for this runner. Held buttons/keys are recorded
+        # here so a KEY_DOWN's press is matched by its KEY_UP's release, and
+        # close()/stop_input() release whatever is still held. A separate guard
+        # per action could not hold a key ACROSS a workflow's steps.
+        self._input_guard: InputGuard | None = None
 
     def _uses_windows_type_paste(self) -> bool:
         if self._windows_type_paste is not None:
             return self._windows_type_paste
         return sys.platform.startswith("win")
+
+    def _capture_worker(self) -> PersistentScreenCapture:
+        """The persistent capture worker, created lazily on first use.
+
+        The same object as :meth:`input_worker`: capture and injection share one
+        DPI-aware process, which is what keeps a screenshot coordinate and a
+        click coordinate in the same space.
+
+        Lazy on purpose: nothing spawns a PowerShell host merely because the
+        runner exists — only a capture that actually needs a frame does.
+        """
+        if self._screen_capture is None:
+            self._screen_capture = PersistentScreenCapture()
+        return self._screen_capture  # type: ignore[return-value]
+
+    def _input_worker(self) -> PersistentScreenCapture:
+        """The worker input is injected through.
+
+        Input runs in the SAME DPI-aware worker that captures frames, so a
+        coordinate read off a screenshot and a click injected here are in one
+        physical-pixel space — no off-by-DPI drift between what was seen and
+        where input lands.
+        """
+        return self._capture_worker()
+
+    def input_worker(self) -> PersistentScreenCapture:
+        """The DPI-aware worker, exposed for a subsystem that injects its own input.
+
+        NovaForge builds its OWN :class:`~novacontrol.desktop.input.InputGuard`
+        from this worker rather than sharing the runner's guard: a game session's
+        held keys and a JARVIS workflow's held keys are two independent scopes,
+        and one release path must not clear the other's presses. What is shared
+        is the process and therefore the coordinate space.
+        """
+        return self._input_worker()
+
+    async def window_by_handle(self, handle: int) -> WindowGeometry | None:
+        """Read a window's current geometry by handle (identity-checkable probe).
+
+        This is the verifier's evidence source: it reads the WINDOW, not any
+        session record, so it cannot be satisfied by an action's own report.
+        """
+        return await self._input_worker().window_geometry(handle=handle)
+
+    def _guard(self) -> InputGuard:
+        """The runner's input guard, created lazily with worker-backed edges."""
+        if self._input_guard is None:
+            worker = self._input_worker()
+
+            async def _press(kind: str, name: str) -> None:
+                await self._send_edge(kind, name, down=True, worker=worker)
+
+            async def _release(kind: str, name: str) -> None:
+                await self._send_edge(kind, name, down=False, worker=worker)
+
+            self._input_guard = InputGuard(press=_press, release=_release)
+        return self._input_guard
+
+    async def _send_edge(
+        self, kind: str, name: str, *, down: bool, worker: PersistentScreenCapture
+    ) -> None:
+        """Translate one press/release edge into a worker command."""
+        if kind == "button":
+            command = f"button {mouse_flags(MouseButton(name), down=down)}"
+        else:
+            vk = vk_for_key(name)
+            if vk is None:
+                raise ValueError(f"Unknown key: {name!r}")
+            command = f"key {vk} {1 if down else 0}"
+        result = await worker.send_input(command)
+        if not result.ok:
+            raise VerificationError(f"Could not {'press' if down else 'release'} {kind} {name}: {result.error}")
+
+    async def release_all_inputs(self) -> tuple[int, int]:
+        """Release every held button/key. Returns (presses, releases) counts.
+
+        Called on stop, on workflow end, and from close(). It is the escape
+        hatch that guarantees nothing is left held even if a workflow died
+        between a KEY_DOWN and its KEY_UP.
+        """
+        guard = self._input_guard
+        if guard is None:
+            return (0, 0)
+        await guard.release_all()
+        return (guard.presses, guard.releases)
+
+    async def stop_input(self) -> dict[str, Any]:
+        """Abort in-flight input and release everything held.
+
+        Sets the guard's stop flag (so any in-flight sequence raises InputAbort
+        and unwinds) and then releases whatever was already held. This is the
+        mechanism a "stop" request uses.
+        """
+        guard = self._input_guard
+        if guard is None:
+            return {"aborted": False, "presses": 0, "releases": 0}
+        guard.abort.stop()
+        await guard.release_all()
+        presses, releases = guard.presses, guard.releases
+        # A stop is a one-shot: clear the flag so the next task can run.
+        guard.abort = InputStop()
+        return {"aborted": True, "presses": presses, "releases": releases}
+
+    async def close(self) -> None:
+        """Release the capture worker (idempotent; called from app shutdown)."""
+        # Held input first: a stopped worker cannot release a stuck key, so the
+        # keys go up while the worker is still alive.
+        await self.release_all_inputs()
+        worker = self._screen_capture
+        closer = getattr(worker, "aclose", None)
+        if closer is None:
+            return
+        try:
+            await closer()
+        except Exception:  # shutdown must never raise out of cleanup
+            return
 
     async def run(self, action: DesktopAction) -> Mapping[str, Any]:
         if action.type is DesktopActionType.OPEN_APPLICATION:
@@ -646,6 +818,31 @@ class LocalDesktopRunner:
             return await self._take_screenshot(
                 save_path=_optional_str(action.parameters.get("save_path")) or "screenshot.png",
             )
+        if action.type is DesktopActionType.WINDOW_GEOMETRY:
+            geometry = await self._window_geometry(action.parameters)
+            if geometry is None:
+                raise VerificationError("No matching window could be found for its geometry.")
+            return {"adapter": "local-desktop", "action": "window_geometry", **geometry.to_dict()}
+        if action.type is DesktopActionType.MOUSE_MOVE:
+            x, y = _coordinate_pair(action.parameters)
+            return await self._mouse_move(x, y, action.parameters)
+        if action.type is DesktopActionType.MOUSE_CLICK:
+            x, y = _coordinate_pair(action.parameters)
+            return await self._mouse_click(
+                x, y, str(action.parameters.get("button", "left")), action.parameters
+            )
+        if action.type is DesktopActionType.MOUSE_BUTTON_DOWN:
+            return await self._mouse_button(
+                str(action.parameters.get("button", "left")), down=True, parameters=action.parameters
+            )
+        if action.type is DesktopActionType.MOUSE_BUTTON_UP:
+            return await self._mouse_button(
+                str(action.parameters.get("button", "left")), down=False, parameters=action.parameters
+            )
+        if action.type is DesktopActionType.KEY_DOWN:
+            return await self._key(action.target, down=True, parameters=action.parameters)
+        if action.type is DesktopActionType.KEY_UP:
+            return await self._key(action.target, down=False, parameters=action.parameters)
         if action.type is DesktopActionType.LIST_PROCESSES:
             return await self._list_processes(
                 filter_name=_optional_str(action.parameters.get("filter_name")),
@@ -806,6 +1003,35 @@ class LocalDesktopRunner:
             return [line for line in out.splitlines() if "|" in line]
         except Exception:
             return None
+
+    async def capture_screen(self, save_path: str = "screenshot.png") -> Mapping[str, Any]:
+        """Public capture seam for callers outside this module (NovaForge, perception).
+
+        Same verified path as every other screenshot — the persistent worker, the
+        one-shot fallback, and the freshness check — so there is ONE answer to
+        "was this frame captured now?". ``_take_screenshot`` stays private; this
+        wrapper exists so a subsystem never reaches into it by name.
+        """
+        return await self._take_screenshot(save_path)
+
+    async def window_geometry(self, title: str) -> WindowGeometry | None:
+        """Public geometry seam: resolve the window whose title contains ``title``.
+
+        The same DPI-aware worker read the input layer validates against, so a
+        caller gets physical-pixel bounds in the space input and capture share.
+        """
+        return await self._window_geometry({"window_title": title})
+
+    async def window_lines(self) -> list[str] | None:
+        """Visible top-level windows, as the perception engine's probe seam.
+
+        The same enumeration ``_wait_for_window`` matches against, exposed so
+        the agentic perception engine can be wired to REAL window evidence
+        without reaching into a private name. ``None`` means the probe is
+        unavailable — which is not the same fact as "no windows are open", and
+        the distinction is preserved rather than flattened to an empty list.
+        """
+        return await self._window_lines()
 
     async def _wait_for_window(
         self, target: str, *, resolved: str | None = None, timeout_seconds: float = 8.0
@@ -1401,29 +1627,90 @@ class LocalDesktopRunner:
             }
 
     async def _take_screenshot(self, save_path: str = "screenshot.png") -> Mapping[str, Any]:
-        """Capture a screenshot using platform-native tools."""
+        """Capture a FRESH screenshot and report whether the frame is real.
+
+        Two process models, one capture program (``desktop/capture.py``). The
+        persistent worker serves every frame from ONE PowerShell host; when it
+        cannot start (or dies twice) the historical one-process-per-frame path
+        runs instead, so an exotic shell setup degrades in speed, not in
+        function. Both arms are stamped and verified the same way.
+
+        Verification is deliberately about the FRAME, not the path: a screenshot
+        task that reports success because *a file exists* proves nothing — an
+        old file from an earlier run would satisfy it. ``fresh`` therefore
+        requires a non-empty PNG whose mtime is after this call's request stamp.
+        """
+        requested_wall = datetime.now(UTC)
+        requested_monotonic = time.monotonic()
+        saved_path = Path(save_path)
+        # The state BEFORE the request. Comparing the file's mtime against this
+        # is what makes "a frame was written" deterministic: a filesystem can
+        # record a write a fraction of a millisecond BEHIND the wall clock the
+        # request was stamped with (measured on NTFS: -0.1 ms), so a bare
+        # "mtime >= now" rule reports a real capture as stale.
+        previous_mtime = saved_path.stat().st_mtime if saved_path.exists() else None
+        capture_error = ""
+        persistent = False
+
+        # A capture resource the caller SUPPLIED is authoritative wherever it
+        # runs: it is the seam tests and alternate backends inject, and the
+        # platform gate only decides whether a DEFAULT worker can be started
+        # here. Gating the injected one made every fake-capture screenshot test
+        # fail on Linux for a reason that had nothing to do with screenshots.
+        if self._screen_capture is not None or capture_supported_here():
+            worker = self._capture_worker()
+            result = await worker.capture(str(saved_path))
+            if result.ok:
+                # Only the arm that ACTUALLY produced the frame is reported.
+                persistent = bool(result.persistent)
+            else:
+                # The worker is unavailable or unwell: fall back rather than
+                # fail a screenshot. The reason travels with the result.
+                capture_error = result.error
+                await self._capture_screenshot_oneshot(str(saved_path))
+        else:
+            await self._capture_screenshot_oneshot(str(saved_path))
+
+        saved_path = saved_path.resolve()
+        exists = saved_path.exists()
+        size_bytes = saved_path.stat().st_size if exists else 0
+        mtime_seconds = saved_path.stat().st_mtime if exists else None
+        # A weak "the file exists" check is the audit's finding: an old file
+        # from an earlier run satisfies it. These three conditions are what make
+        # `fresh` mean THIS call produced THIS frame.
+        advanced = previous_mtime is None or (
+            mtime_seconds is not None and mtime_seconds > previous_mtime
+        )
+        recent = mtime_seconds is not None and (
+            mtime_seconds >= requested_wall.timestamp() - _FRESHNESS_SLACK_SECONDS
+        )
+        valid_png = looks_like_png(str(saved_path))
+        fresh = bool(exists and size_bytes > 0 and advanced and recent and valid_png)
+        output: dict[str, Any] = {
+            "adapter": "local-desktop",
+            "action": "take_screenshot",
+            "path": str(saved_path),
+            "exists": exists,
+            "size_bytes": size_bytes,
+            # Frame provenance: what produced it, when it was requested, and
+            # whether the bytes on disk are that frame.
+            "captured_at": requested_wall.isoformat(),
+            "capture_ms": round((time.monotonic() - requested_monotonic) * 1000, 1),
+            "capture_mode": "persistent" if persistent else "oneshot",
+            "fresh": fresh,
+            "freshness": {
+                "file_written": bool(exists and advanced),
+                "recent": bool(recent),
+                "valid_png": bool(valid_png),
+            },
+            "verification": _freshness_reason(capture_error, exists, advanced, recent, valid_png),
+        }
+        return output
+
+    async def _capture_screenshot_oneshot(self, save_path: str) -> None:
+        """The one-process-per-frame capture, kept as the fallback arm."""
         if sys.platform.startswith("win"):
-            # Use PowerShell to take screenshot. The shell is DPI-unaware by
-            # default, so Screen.PrimaryScreen.Bounds reports the virtualized
-            # (logical) size — on a high-DPI display that is HALF the physical
-            # resolution, and Windows OCR then reads far less text (a real bug
-            # this caught: 66 words vs 171, missing small labels like "Vision").
-            # SetProcessDPIAware() makes the bounds report PHYSICAL pixels so
-            # the captured image carries the same detail the eye sees.
-            script = (
-                "Add-Type -AssemblyName System.Windows.Forms; "
-                "Add-Type -AssemblyName System.Drawing; "
-                "$sig = '[DllImport(\"user32.dll\")] public static extern bool SetProcessDPIAware();'; "
-                "$t = Add-Type -MemberDefinition $sig -Name Dpi -Namespace W -PassThru; "
-                "$t::SetProcessDPIAware() | Out-Null; "
-                "$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; "
-                "$bmp = [System.Drawing.Bitmap]::new($bounds.Width, $bounds.Height); "
-                "$g = [System.Drawing.Graphics]::FromImage($bmp); "
-                "$g.CopyFromScreen(0, 0, 0, 0, $bmp.Size); "
-                f"$bmp.Save('{save_path}'); "
-                "Write-Output 'screenshot_saved'"
-            )
-            await self._powershell(script, timeout=15)
+            await self._powershell(oneshot_capture_script(save_path), timeout=15)
         elif sys.platform == "darwin":
             process = await asyncio.create_subprocess_exec(
                 "screencapture", "-x", save_path,
@@ -1439,13 +1726,142 @@ class LocalDesktopRunner:
             )
             await asyncio.wait_for(process.communicate(), timeout=15)
 
-        saved_path = Path(save_path).resolve()
+    # -- coordinate-addressed input (Phase C) -------------------------------
+
+    async def _window_geometry(self, parameters: Mapping[str, Any]) -> WindowGeometry | None:
+        """The target window's geometry, read from the DPI-aware worker.
+
+        Addressed by ``window_title`` (substring), ``foreground=True``, or a
+        probe point ``at``. Returns None when the window cannot be found, so a
+        caller can refuse rather than click into the void.
+        """
+        if self._screen_capture is None and not capture_supported_here():
+            # No worker was supplied and this platform has no capture backend,
+            # so the only thing a default worker could do is fail to start. An
+            # INJECTED worker is asked regardless of platform: it is the seam a
+            # test or an alternate backend uses, and refusing to ask it made a
+            # fake-window test report "the target no longer exists" on Linux.
+            return None
+        worker = self._input_worker()
+        title = _optional_str(parameters.get("window_title")) or ""
+        if title:
+            return await worker.window_geometry(title=title)
+        if parameters.get("foreground"):
+            return await worker.window_geometry(foreground=True)
+        point = parameters.get("at")
+        if isinstance(point, (list, tuple)) and len(point) == 2:
+            return await worker.window_geometry(at=(int(point[0]), int(point[1])))
+        handle = _optional_int(parameters.get("window_handle"))
+        if handle is not None:
+            return await worker.window_geometry(handle=handle)
+        return None
+
+    async def _validate_target(
+        self, parameters: Mapping[str, Any], x: int, y: int
+    ) -> WindowGeometry | None:
+        """Resolve and validate the target window for a coordinate action.
+
+        Identity (handle/pid/title) and foreground ownership are checked BEFORE
+        any input is sent, so a click addressed to "the game window" cannot
+        land in whatever window happens to be under that point now. Returns the
+        geometry, or None when no target window was named (the caller may then
+        address the raw desktop coordinate).
+        """
+        geometry = await self._window_geometry(parameters)
+        if geometry is None:
+            if any(parameters.get(key) for key in ("window_title", "foreground", "at", "window_handle")):
+                raise VerificationError(
+                    "The target window for this input no longer exists — refusing to send input."
+                )
+            return None
+        validate_input_target(
+            geometry,
+            x,
+            y,
+            expected_handle=_optional_int(parameters.get("window_handle")),
+            expected_pid=_optional_int(parameters.get("window_pid")),
+            expected_title=_optional_str(parameters.get("window_title")),
+            require_foreground=bool(parameters.get("require_foreground")),
+            in_client=bool(parameters.get("in_client", True)),
+        )
+        return geometry
+
+    async def _mouse_move(self, x: int, y: int, parameters: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Move the cursor to an exact physical-pixel coordinate."""
+        geometry = await self._validate_target(parameters, x, y)
+        worker = self._input_worker()
+        result = await worker.send_input(f"move {x} {y}")
+        if not result.ok:
+            raise VerificationError(f"Could not move the cursor to ({x}, {y}): {result.error}")
         return {
             "adapter": "local-desktop",
-            "action": "take_screenshot",
-            "path": str(saved_path),
-            "exists": saved_path.exists(),
-            "size_bytes": saved_path.stat().st_size if saved_path.exists() else 0,
+            "action": "mouse_move",
+            "coordinates": [x, y],
+            "window": geometry.title if geometry else "",
+            "scale": geometry.scale if geometry else 1.0,
+        }
+
+    async def _mouse_click(
+        self, x: int, y: int, button: str, parameters: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        """Move to a coordinate and click it — press and release, always paired.
+
+        The press and release travel through the SAME guard, so a click can
+        never leave a button held: even if the release edge failed, the guard's
+        ``release_all`` (on close/stop) would free it.
+        """
+        geometry = await self._validate_target(parameters, x, y)
+        worker = self._input_worker()
+        move = await worker.send_input(f"move {x} {y}")
+        if not move.ok:
+            raise VerificationError(f"Could not move the cursor to ({x}, {y}): {move.error}")
+        guard = self._guard()
+        async with guard:
+            await guard.press_button(button)
+            await guard.release_button(button)
+        return {
+            "adapter": "local-desktop",
+            "action": "mouse_click",
+            "coordinates": [x, y],
+            "button": MouseButton(button).value,
+            "window": geometry.title if geometry else "",
+        }
+
+    async def _mouse_button(
+        self, button: str, *, down: bool, parameters: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        """Hold or release a mouse button at the current cursor position.
+
+        DOWN leaves the button held (recorded in the guard); UP releases it.
+        The matching edge is guaranteed by the guard, so a DOWN whose UP never
+        comes is still freed on close/stop.
+        """
+        guard = self._guard()
+        if down:
+            await guard.press_button(button)
+        else:
+            await guard.release_button(button)
+        return {
+            "adapter": "local-desktop",
+            "action": "mouse_button_down" if down else "mouse_button_up",
+            "button": MouseButton(button).value,
+            "held": guard.held,
+        }
+
+    async def _key(self, key: str, *, down: bool, parameters: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Press or release a single key (bounded: one key per action)."""
+        guard = self._guard()
+        if down:
+            await guard.press_key(key)
+        else:
+            await guard.release_key(key)
+        return {
+            "adapter": "local-desktop",
+            "action": "key_down" if down else "key_up",
+            "key": key,
+            "held": guard.held,
+            "presses": guard.presses,
+            "releases": guard.releases,
         }
 
     async def _list_processes(self, filter_name: str | None = None) -> Mapping[str, Any]:
@@ -1858,6 +2274,21 @@ class DesktopAutomationController:
         self.runner = runner or NoopDesktopRunner()
         self.audit_log = audit_log or InMemoryAutomationAuditLog()
 
+    async def close(self) -> None:
+        """Release anything the runner holds open (the capture worker).
+
+        The capture worker is a long-lived process; leaving it behind after
+        shutdown is the one leak this resource could introduce, so cleanup is
+        part of the controller's own lifecycle rather than a caller's chore.
+        """
+        closer = getattr(self.runner, "close", None)
+        if closer is None:
+            return
+        try:
+            await closer()
+        except Exception:  # shutdown must never raise out of cleanup
+            return
+
     def plan_open_application(self, application: str) -> DesktopWorkflow:
         return _single_action_workflow(
             f"Open {application}", DesktopActionType.OPEN_APPLICATION, application, f"Open application {application}",
@@ -1927,6 +2358,64 @@ class DesktopAutomationController:
         return _single_action_workflow(
             "Take screenshot", DesktopActionType.TAKE_SCREENSHOT, "screenshot",
             "Capture the current screen.", {"save_path": save_path},
+        )
+
+    # -- coordinate-addressed input planning (Phase C) ----------------------
+
+    def plan_mouse_move(
+        self, x: int, y: int, *, window: str | None = None, foreground: bool = False
+    ) -> DesktopWorkflow:
+        """Plan moving the cursor to an exact physical-pixel coordinate."""
+        return _single_action_workflow(
+            f"Move cursor to ({x}, {y})", DesktopActionType.MOUSE_MOVE, f"{x},{y}",
+            f"Move the cursor to ({x}, {y})" + (f" in {window}" if window else ""),
+            {"x": x, "y": y, **({"window_title": window} if window else {}),
+             **({"foreground": True} if foreground else {})},
+        )
+
+    def plan_mouse_click(
+        self, x: int, y: int, *, button: str = "left", window: str | None = None,
+        foreground: bool = False,
+    ) -> DesktopWorkflow:
+        """Plan a coordinate-addressed click, validated against a target window."""
+        return _single_action_workflow(
+            f"Click ({x}, {y})", DesktopActionType.MOUSE_CLICK, f"{x},{y}",
+            f"Click the {button} button at ({x}, {y})"
+            + (f" in {window}" if window else ""),
+            {"x": x, "y": y, "button": button,
+             **({"window_title": window} if window else {}),
+             **({"foreground": True} if foreground else {})},
+        )
+
+    def plan_mouse_button(
+        self, button: str, *, down: bool, window: str | None = None
+    ) -> DesktopWorkflow:
+        """Plan holding or releasing a mouse button (e.g. hold to aim)."""
+        kind = DesktopActionType.MOUSE_BUTTON_DOWN if down else DesktopActionType.MOUSE_BUTTON_UP
+        verb = "Press" if down else "Release"
+        return _single_action_workflow(
+            f"{verb} {button} button", kind, button,
+            f"{verb} the {button} mouse button." + (f" (target: {window})" if window else ""),
+            {"button": button, **({"window_title": window} if window else {})},
+        )
+
+    def plan_key(self, key: str, *, down: bool) -> DesktopWorkflow:
+        """Plan pressing or releasing ONE key (bounded: one key per action)."""
+        kind = DesktopActionType.KEY_DOWN if down else DesktopActionType.KEY_UP
+        verb = "Press" if down else "Release"
+        return _single_action_workflow(
+            f"{verb} {key}", kind, key, f"{verb} the {key} key.",
+            {},
+        )
+
+    def plan_window_geometry(self, *, window: str | None = None, foreground: bool = False) -> DesktopWorkflow:
+        """Plan reading a target window's bounds/client geometry/DPI/foreground."""
+        return _single_action_workflow(
+            "Window geometry", DesktopActionType.WINDOW_GEOMETRY,
+            window or "foreground",
+            f"Read the geometry of {window or 'the foreground window'}.",
+            {**({"window_title": window} if window else {}),
+             **({"foreground": True} if foreground else {})},
         )
 
     def plan_system_info(self) -> DesktopWorkflow:
@@ -2084,6 +2573,20 @@ def _permissions_for(action_type: DesktopActionType) -> tuple[PermissionScope, .
         return (PermissionScope.DESKTOP_CONTROL,)
     if action_type is DesktopActionType.WEB_SEARCH:
         return (PermissionScope.DESKTOP_CONTROL,)
+    # Coordinate-addressed input (Phase C): real input injected into whatever
+    # window is under the cursor / focused. Held buttons and keys carry the
+    # widest reach (a stuck key affects every app), so they are declared here
+    # by name rather than left to the fallback — risk is stated, never inferred.
+    if action_type in (
+        DesktopActionType.MOUSE_MOVE,
+        DesktopActionType.MOUSE_CLICK,
+        DesktopActionType.MOUSE_BUTTON_DOWN,
+        DesktopActionType.MOUSE_BUTTON_UP,
+        DesktopActionType.KEY_DOWN,
+        DesktopActionType.KEY_UP,
+        DesktopActionType.WINDOW_GEOMETRY,
+    ):
+        return (PermissionScope.DESKTOP_CONTROL,)
     return (PermissionScope.DESKTOP_CONTROL,)
 
 
@@ -2091,3 +2594,27 @@ def _optional_str(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _optional_int(value: Any) -> int | None:
+    """An optional integer parameter; blank stays None (never coerced to 0)."""
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coordinate_pair(parameters: Mapping[str, Any]) -> tuple[int, int]:
+    """The (x, y) of a coordinate-addressed action, refused when malformed.
+
+    A coordinate action with a missing or non-numeric coordinate must be
+    refused, never defaulted to (0, 0) — the top-left corner is a real place,
+    and a silent default would click it.
+    """
+    x = _optional_int(parameters.get("x"))
+    y = _optional_int(parameters.get("y"))
+    if x is None or y is None:
+        raise ValueError("A coordinate action needs integer x and y parameters.")
+    return x, y

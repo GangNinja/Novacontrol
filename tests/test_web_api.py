@@ -1205,3 +1205,156 @@ class Phase14ApiTests(_IsolatedApiTestCase):
             self._client.post("/benchmark", json={"model": "echo", "tasks": []}).status_code,
             422,
         )
+
+
+class AutomationIdSpellingTests(_IsolatedApiTestCase):
+    """`/automation` reports a task as `id`; its actions must accept that name.
+
+    Reading the report and posting the id back — the obvious round trip — used
+    to be refused with "automation_id is required.", because the actions only
+    read the longer key. Both spellings address the same task.
+    """
+
+    def _schedule(self) -> str:
+        response = self._client.post(
+            "/automation/schedule",
+            json={"request": "what is 2 plus 2 every day at 9am"},
+        )
+        self.assertEqual(response.status_code, 200)
+        return self._client.get("/automation").json()["tasks"][0]["id"]
+
+    def test_the_id_from_the_report_is_accepted_by_the_actions(self) -> None:
+        task_id = self._schedule()
+
+        approved = self._client.post("/automation/approve", json={"id": task_id})
+
+        self.assertEqual(approved.status_code, 200)
+        self.assertTrue(self._client.get("/automation").json()["tasks"][0]["approved"])
+
+    def test_the_long_spelling_still_works(self) -> None:
+        task_id = self._schedule()
+
+        approved = self._client.post("/automation/approve", json={"automation_id": task_id})
+
+        self.assertEqual(approved.status_code, 200)
+
+    def test_an_unnamed_task_is_still_refused_with_a_named_422(self) -> None:
+        response = self._client.post("/automation/approve", json={})
+
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("automation_id", str(response.json().get("detail", "")))
+
+
+class ChatTurnRecordedOnceTests(_IsolatedApiTestCase):
+    """One chat request records exactly ONE user turn and ONE answer turn.
+
+    The turn used to be recorded twice — the server appended it inside
+    ``handle_request`` (the path every client takes, the CLI included) and the
+    browser ALSO posted it to ``/chat/history`` — so every message appeared twice
+    in the shared thread, and twice in the panel after a reload. The server is
+    the single writer; this pins the count.
+    """
+
+    def test_one_ask_records_exactly_one_pair(self) -> None:
+        self.assertEqual(self._client.get("/chat/history").json()["turns"], [])
+
+        response = self._client.post("/ask", json={"request": "what is 2 plus 2"})
+        self.assertEqual(response.status_code, 200)
+
+        turns = self._client.get("/chat/history").json()["turns"]
+        self.assertEqual([turn["role"] for turn in turns], ["user", "assistant"])
+        self.assertEqual(turns[0]["text"], "what is 2 plus 2")
+        self.assertTrue(turns[1]["text"].strip())
+        self.assertTrue(turns[1]["route"].strip())  # the route that answered it
+
+    def test_two_asks_record_two_pairs_in_order(self) -> None:
+        self._client.post("/ask", json={"request": "hello there"})
+        self._client.post("/ask", json={"request": "what is 2 plus 2"})
+
+        turns = self._client.get("/chat/history").json()["turns"]
+
+        self.assertEqual(len(turns), 4)
+        self.assertEqual([t["role"] for t in turns], ["user", "assistant"] * 2)
+        self.assertEqual(turns[0]["text"], "hello there")
+        self.assertEqual(turns[2]["text"], "what is 2 plus 2")
+
+    def test_the_panel_renders_each_stored_turn_once(self) -> None:
+        # A reload seeds the panel straight from the thread, so one stored pair
+        # must be one pair of bubbles — the duplication was visible here.
+        self._client.post("/ask", json={"request": "what is 2 plus 2"})
+
+        turns = self._client.get("/chat/history").json()["turns"]
+        self.assertEqual(len(turns), 2)
+        self.assertNotEqual(turns[0]["at"], turns[1]["at"])
+
+
+class RequiredFieldValidationTests(_IsolatedApiTestCase):
+    """A body missing a required field is a named 422, never a 500.
+
+    Every one of these handlers indexed its required field with ``payload[key]``,
+    so a body that omitted it raised a KeyError out of the endpoint and answered
+    ``500 Internal Server Error`` with a traceback naming an internal field. A
+    malformed request is the caller's mistake: the answer is the field name, and
+    the rest of this API (``/plan/run``, ``/audit/delete``, ``/benchmark``) already
+    returns 422 for it. This pins that contract on the whole surface at once, so a
+    new handler cannot quietly reintroduce the raw read.
+    """
+
+    # (route, the field the route cannot work without).
+    REQUIRED = [
+        ("/improve", "goal"),
+        ("/improve/workflow", "goal"),
+        ("/improve/preview", "goal"),
+        ("/improve/approve", "goal"),
+        ("/learn", "goal"),
+        ("/train", "goal"),
+        ("/knowledge/teach", "fact"),
+        ("/plan", "goal"),
+        ("/plan/code", "goal"),
+        ("/build/project", "goal"),
+        ("/command/execute", "command"),
+        ("/desktop/plan", "command"),
+        ("/desktop/execute", "command"),
+        ("/browser/plan", "command"),
+        ("/browser/execute", "command"),
+        ("/phone/plan", "command"),
+        ("/phone/execute", "command"),
+        ("/agent/run", "request"),
+        ("/automation/schedule", "request"),
+    ]
+
+    def test_an_empty_body_is_refused_with_the_field_name(self) -> None:
+        for route, field in self.REQUIRED:
+            with self.subTest(route=route):
+                response = self._client.post(route, json={})
+                self.assertEqual(
+                    response.status_code,
+                    422,
+                    f"{route} answered {response.status_code} for an empty body",
+                )
+                self.assertIn(field, str(response.json().get("detail", "")))
+
+    def test_a_blank_field_is_refused_the_same_way(self) -> None:
+        for route, field in self.REQUIRED:
+            with self.subTest(route=route):
+                response = self._client.post(route, json={field: "   "})
+                self.assertEqual(response.status_code, 422)
+
+    def test_a_null_field_is_refused_rather_than_stringified(self) -> None:
+        # str(None) == "None" would have gone through as a real value.
+        response = self._client.post("/plan", json={"goal": None})
+
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("goal", str(response.json().get("detail", "")))
+
+    def test_a_complete_body_still_works(self) -> None:
+        self.assertEqual(
+            self._client.post("/improve/workflow", json={"goal": "make answers shorter"}).status_code,
+            200,
+        )
+        self.assertEqual(
+            self._client.post("/plan", json={"goal": "organize my downloads"}).status_code, 200
+        )
+        self.assertEqual(
+            self._client.post("/command/plan", json={"command": "open notepad"}).status_code, 200
+        )

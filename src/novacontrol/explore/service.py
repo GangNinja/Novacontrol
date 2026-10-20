@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from collections.abc import Callable
 from dataclasses import replace
@@ -30,6 +31,15 @@ from novacontrol.explore.web_search import WikipediaSearchProvider
 from novacontrol.performance import TtlCache
 
 
+# The ceiling on ONE concurrent wave of independent search queries. It sits
+# generously above a preferred-provider timeout (10s) plus a fallback answer, so
+# a legitimately slow but working search is never truncated - while a degraded
+# search surface (every provider hanging or returning nothing) cannot multiply
+# into minutes. The old sequential walk of three providers across three queries,
+# doubled by the retry, was 22 network calls of up to 10s each.
+_DEFAULT_SEARCH_BUDGET_SECONDS = 20.0
+
+
 class ExploreService:
     """Runs online research, explanation, and related video discovery."""
 
@@ -47,6 +57,7 @@ class ExploreService:
         cache_ttl_seconds: float = 900,
         event_bus: EventBus | None = None,
         external_allowed: Callable[[], bool] | None = None,
+        search_budget_seconds: float = _DEFAULT_SEARCH_BUDGET_SECONDS,
     ) -> None:
         # Phase 14.3: the ONE predicate that says whether this machine's
         # execution mode and privacy controls permit reaching outside it. It is
@@ -62,6 +73,7 @@ class ExploreService:
         # offline runs can skip the network.
         self.page_reader = page_reader or PageReader()
         self.read_pages = read_pages
+        self.search_budget_seconds = search_budget_seconds
         self.explainer = explainer or ResearchExplainer(completion_provider=completion_provider)
         self.cache = cache or TtlCache()
         self.cache_ttl_seconds = cache_ttl_seconds
@@ -296,18 +308,42 @@ class ExploreService:
             queries = build_search_queries(topic, request.max_sources)
             relevance_reference = topic
         limit_each = max(4, min(request.max_sources + 2, 6))
+        if not queries:
+            return ()
+
+        async def _one(query: str) -> tuple[ResearchSource, ...]:
+            try:
+                return await self.search_provider.search(query, limit=limit_each)
+            except Exception:
+                return ()
+
+        # The queries are INDEPENDENT, so they run as ONE concurrent wave under
+        # a shared deadline. Sequentially, each query walks the whole provider
+        # stack and every attempt may burn its full socket timeout, so the cost
+        # multiplied by the query count and again by the retry. Concurrently the
+        # wave costs one query's worth of waiting and is bounded by the budget,
+        # however many queries the planner produced or which providers hang.
+        tasks = [asyncio.create_task(_one(query)) for query, _kind in queries]
+        done, pending = await asyncio.wait(tasks, timeout=self.search_budget_seconds)
+        for task in pending:
+            task.cancel()
+        if pending:
+            # A cancelled attempt's worker thread finishes its own fetch; here
+            # the run simply stops waiting for it.
+            await asyncio.gather(*pending, return_exceptions=True)
         # Collect a candidate POOL across queries, then keep the best-scoring
         # ones. First-pass-wins let a generic match (a Wikipedia page sharing
         # one keyword with the topic) take a slot a genuinely on-topic news
-        # story earned later in the list.
+        # story earned later in the list. Results are folded in QUERY ORDER so
+        # the pool is the same one the sequential implementation built.
+        position = {task: index for index, task in enumerate(tasks)}
         candidates: list[tuple[float, str, ResearchSource]] = []
         seen: set[str] = set()
-        for query, source_type in queries:
-            try:
-                raw_results = await self.search_provider.search(query, limit=limit_each)
-            except Exception:
+        for task in sorted(done, key=lambda item: position[item]):
+            if task.cancelled():
                 continue
-            for source in raw_results:
+            source_type = queries[position[task]][1]
+            for source in task.result():
                 key = _source_key(source.url)
                 if not key or key in seen:
                     continue
@@ -316,6 +352,8 @@ class ExploreService:
                 seen.add(key)
                 score = relevance_score(source.title, source.snippet, source.url, relevance_reference)
                 candidates.append((score, source_type, source))
+        if not candidates:
+            return ()
         candidates.sort(key=lambda item: item[0], reverse=True)
         # Relevance cutoff: keep sources scoring at least half of the best
         # candidate (absolute floor 1.0). A page that merely shares one keyword

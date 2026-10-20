@@ -20,6 +20,23 @@ from novacontrol.application import NovaControlApplication
 from novacontrol.core.events import Event
 from novacontrol.explore import ExploreRequest
 from novacontrol.explore.trending import TrendingTopicsProvider
+from novacontrol.novaforge import (
+    BenchmarkConflictError,
+    BenchmarkNotFoundError,
+    BenchmarkValidationError,
+    CoachError,
+    CoachNotFoundError,
+    EvaluationConflictError,
+    EvaluationError,
+    ExperimentConflictError,
+    ExperimentError,
+    ExperimentNotFoundError,
+    GameNotFoundError,
+    MissionValidationError,
+    SessionConflictError,
+    SessionTransitionError,
+    TimelineQueryError,
+)
 from novacontrol.optimization.models import PrivacyAction
 from novacontrol.perception import DEFERRED_PHASES, PERCEPTION_SCHEMA_VERSION
 from novacontrol.planning import PlanningEngine
@@ -185,14 +202,24 @@ def create_app() -> Any:
     try:
         from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
         from fastapi.middleware.gzip import GZipMiddleware
-        from fastapi.responses import HTMLResponse
+        from fastapi.responses import FileResponse, HTMLResponse
         from fastapi.staticfiles import StaticFiles
     except ModuleNotFoundError as exc:  # pragma: no cover - depends on optional install
         raise RuntimeError("FastAPI is not installed. Run `pip install -e .` first.") from exc
 
-    def _training_id(payload: dict[str, Any], key: str = "run_id") -> str:
-        """The identifier a training action needs, or a 422 that names the field."""
-        value = str(payload.get(key, "")).strip()
+    def _required_field(payload: dict[str, Any], key: str = "run_id") -> str:
+        """A field the handler cannot work without, or a 422 that names it.
+
+        A missing required field is the caller's mistake, not a server fault:
+        reading it with ``payload[key]`` raised a KeyError and answered 500 with
+        a traceback naming an internal field. Every handler that needs a field
+        to do anything now gets 422 + that field's name, which is the contract
+        the rest of this API already uses (``/plan/run``, ``/audit/delete``).
+        """
+        # A key present with a JSON null is as absent as a missing one:
+        # str(None) is "None", which would travel on as a real value.
+        raw = payload.get(key)
+        value = "" if raw is None else str(raw).strip()
         if not value:
             raise HTTPException(status_code=422, detail=f"{key} is required.")
         return value
@@ -698,27 +725,27 @@ def create_app() -> Any:
 
     @app.post("/improve")
     async def improve(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
-        return nova.self_improvement.plan(str(payload["goal"])).to_dict()
+        return nova.self_improvement.plan(_required_field(payload, "goal")).to_dict()
 
     @app.post("/improve/workflow")
     async def improve_workflow(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
-        return nova.improvement_workflow(str(payload["goal"]))
+        return nova.improvement_workflow(_required_field(payload, "goal"))
 
     @app.post("/improve/preview")
     async def improve_preview(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
-        return nova.preview_improvement_workflow(str(payload["goal"]))
+        return nova.preview_improvement_workflow(_required_field(payload, "goal"))
 
     @app.post("/improve/approve")
     async def improve_approve(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
         return await nova.approve_improvement_workflow(
-            str(payload["goal"]),
+            _required_field(payload, "goal"),
             preview_id=str(payload.get("preview_id") or "") or None,
         )
 
     @app.post("/learn")
     async def learn(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
         return await nova.learning_cycle(
-            str(payload["goal"]),
+            _required_field(payload, "goal"),
             feedback=str(payload.get("feedback", "")),
         )
 
@@ -726,7 +753,7 @@ def create_app() -> Any:
     async def knowledge_teach(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
         """Teach: persist a typed fact as durable, recallable knowledge."""
         try:
-            return await nova.teach_knowledge(str(payload["fact"]))
+            return await nova.teach_knowledge(_required_field(payload, "fact"))
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -741,7 +768,7 @@ def create_app() -> Any:
     @app.post("/train")
     async def train(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
         return await nova.autonomous_learning_loop(
-            str(payload["goal"]),
+            _required_field(payload, "goal"),
             iterations=int(payload.get("iterations", 3)),
             feedback=str(payload.get("feedback", "")),
         )
@@ -755,7 +782,7 @@ def create_app() -> Any:
         it; steps that change something still need confirmation, and this
         endpoint cannot grant it — use ``/plan/run`` to approve steps explicitly.
         """
-        workflow_plan = nova.plan_for(str(payload["goal"]))
+        workflow_plan = nova.plan_for(_required_field(payload, "goal"))
         response: dict[str, Any] = {"plan": workflow_plan.to_dict()}
         if payload.get("execute"):
             workflow = await nova.workflow_executor.execute(workflow_plan)
@@ -792,7 +819,7 @@ def create_app() -> Any:
         """
         try:
             return await nova.build_code_plan(
-                str(payload["goal"]), language=str(payload.get("language", "python"))
+                _required_field(payload, "goal"), language=str(payload.get("language", "python"))
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -808,7 +835,7 @@ def create_app() -> Any:
         """
         try:
             return await nova.build_code_project(
-                str(payload["goal"]), language=str(payload.get("language", "python"))
+                _required_field(payload, "goal"), language=str(payload.get("language", "python"))
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -852,21 +879,21 @@ def create_app() -> Any:
         token = str(payload.get("approval_token", "") or "") or None
         try:
             return await nova.execute_command(
-                str(payload["command"]), approval_token=token, correlation_id=str(payload.get("correlation_id", "") or "")
+                _required_field(payload, "command"), approval_token=token, correlation_id=str(payload.get("correlation_id", "") or "")
             )
         except ValueError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     @app.post("/desktop/plan")
     async def desktop_plan(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
-        return nova.plan_desktop_command(str(payload["command"]))
+        return nova.plan_desktop_command(_required_field(payload, "command"))
 
     @app.post("/desktop/execute")
     async def desktop_execute(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
         token = str(payload.get("approval_token", "") or "") or None
         try:
             return await nova.execute_desktop_command(
-                str(payload["command"]), approval_token=token, correlation_id=str(payload.get("correlation_id", "") or "")
+                _required_field(payload, "command"), approval_token=token, correlation_id=str(payload.get("correlation_id", "") or "")
             )
         except ValueError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -879,14 +906,14 @@ def create_app() -> Any:
         an approval token, so a browser phrase can never land on the desktop
         controller (and vice versa) regardless of intent classification.
         """
-        return nova.plan_browser_command(str(payload["command"]))
+        return nova.plan_browser_command(_required_field(payload, "command"))
 
     @app.post("/browser/execute")
     async def browser_execute(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
         token = str(payload.get("approval_token", "") or "") or None
         try:
             return await nova.execute_browser_command(
-                str(payload["command"]), approval_token=token, correlation_id=str(payload.get("correlation_id", "") or "")
+                _required_field(payload, "command"), approval_token=token, correlation_id=str(payload.get("correlation_id", "") or "")
             )
         except ValueError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -946,6 +973,693 @@ def create_app() -> Any:
         except ValueError as exc:
             # Command-shaped labels and empty plans are user-fixable errors.
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # ── NovaForge: gaming workspace, session foundation, telemetry, Guardian ──
+    # Every route here reads or drives the SESSION MANAGER, which is the only
+    # source of session state. Nothing in this block decides anything about a
+    # game: NF-02 observes one validated window and measures the run, and the
+    # routes say that plainly rather than dressing an observation up as gameplay.
+    @app.get("/novaforge/status")
+    async def novaforge_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Readiness, the saved mission draft, and the active session if any."""
+        manager = nova.novaforge
+        active = manager.active()
+        return {
+            "status": manager.status().to_dict(),
+            "mission": manager.saved_mission(),
+            "active": manager.describe(active) if active is not None else None,
+        }
+
+    @app.get("/novaforge/windows")
+    async def novaforge_windows(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Open windows for the target picker.
+
+        ``available=False`` is a real answer here: it means the OS probe could
+        not read windows (or capture is unsupported), which is a different fact
+        from "no windows are open".
+        """
+        return await nova.novaforge.windows()
+
+    @app.get("/novaforge/mission")
+    async def novaforge_mission(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return nova.novaforge.saved_mission()
+
+    @app.post("/novaforge/mission")
+    async def novaforge_save_mission(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Persist the mission draft and report its field-level validation.
+
+        A draft may be incomplete: saving one does not require it to be
+        runnable, because losing what a person typed is worse than storing a
+        blank objective. Starting a session is where validation is enforced.
+        """
+        return nova.novaforge.save_mission(payload)
+
+    @app.post("/novaforge/validate")
+    async def novaforge_validate(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Validate fields AND the live target window, starting nothing."""
+        return await nova.novaforge.validate(payload)
+
+    @app.get("/novaforge/sessions")
+    async def novaforge_sessions(
+        limit: int = 20, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Stored session history, newest first (bounded by ``limit``)."""
+        sessions = nova.novaforge.history(limit=max(1, min(limit, 100)))
+        return {"sessions": sessions, "count": len(sessions)}
+
+    @app.post("/novaforge/sessions")
+    async def novaforge_start(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Validate the mission and start its real observation session."""
+        try:
+            return await nova.novaforge.start(payload)
+        except MissionValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except SessionConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except SessionTransitionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/novaforge/sessions/{session_id}")
+    async def novaforge_session(
+        session_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        record = nova.novaforge.get(session_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}")
+        return nova.novaforge.describe(record)
+
+    async def _novaforge_control(session_id: str, action: str) -> dict[str, Any]:
+        """Drive one lifecycle move; a refused move is a 409, a missing id 404."""
+        try:
+            if action == "pause":
+                return await nova.novaforge.pause(session_id)
+            if action == "resume":
+                return await nova.novaforge.resume(session_id)
+            if action == "cancel":
+                return await nova.novaforge.cancel(session_id)
+            if action == "emergency-stop":
+                return await nova.novaforge.emergency_stop(session_id)
+            return await nova.novaforge.stop(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+        except MissionValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except SessionTransitionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/novaforge/sessions/{session_id}/pause")
+    async def novaforge_pause(
+        session_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        return await _novaforge_control(session_id, "pause")
+
+    @app.post("/novaforge/sessions/{session_id}/resume")
+    async def novaforge_resume(
+        session_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        return await _novaforge_control(session_id, "resume")
+
+    @app.post("/novaforge/sessions/{session_id}/stop")
+    async def novaforge_stop(
+        session_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        return await _novaforge_control(session_id, "stop")
+
+    @app.post("/novaforge/sessions/{session_id}/cancel")
+    async def novaforge_cancel(
+        session_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Abort the loop now and release input; idempotent once terminal."""
+        return await _novaforge_control(session_id, "cancel")
+
+    @app.post("/novaforge/sessions/{session_id}/emergency-stop")
+    async def novaforge_emergency_stop(
+        session_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Guardian emergency stop: bounded abort, cleanup, confirmed outcome."""
+        return await _novaforge_control(session_id, "emergency-stop")
+
+    @app.get("/novaforge/capabilities")
+    async def novaforge_capabilities(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """What this build can actually do, per capability, with the blocker named.
+
+        Availability is a property of the machine and the wiring, not a request:
+        a host without a capture worker reports no capture, and a build without
+        an injector reports no action path, rather than claiming either because
+        the class exists.
+        """
+        capabilities = nova.novaforge.capabilities()
+        return {"capabilities": capabilities, "policy": capabilities["action_policy"]}
+
+    @app.post("/novaforge/sessions/{session_id}/objective")
+    async def novaforge_set_objective(
+        session_id: str, payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Attach a checkable objective to a live session (nothing is executed)."""
+        try:
+            return nova.novaforge.set_objective(session_id, payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+        except MissionValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except SessionTransitionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/novaforge/sessions/{session_id}/actions/plan")
+    async def novaforge_plan_action(
+        session_id: str, payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Validate and digest-bind one gameplay action. Sends NOTHING.
+
+        A denied plan is a 200 with `status: denied` and the Guardian's reason:
+        the refusal is the answer the UI has to show, not an error to swallow.
+        """
+        try:
+            return nova.novaforge.plan_action(session_id, payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+        except MissionValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except SessionTransitionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/novaforge/sessions/{session_id}/actions/execute")
+    async def novaforge_execute_action(
+        session_id: str, payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Execute ONE digest-bound proposal, after revalidating target and policy."""
+        try:
+            return await nova.novaforge.execute_action(session_id, payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+        except MissionValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/novaforge/sessions/{session_id}/verify")
+    async def novaforge_verify(
+        session_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Ask the independent verifier for the objective's current verdict."""
+        try:
+            return await nova.novaforge.verify_objective(session_id, reason="api")
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+
+    @app.get("/novaforge/sessions/{session_id}/verification")
+    async def novaforge_verification(
+        session_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """The verdict, its evidence references and what this session could check."""
+        try:
+            return nova.novaforge.verification_payload(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+
+    @app.get("/novaforge/sessions/{session_id}/telemetry")
+    async def novaforge_telemetry(
+        session_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Measured telemetry and Guardian status for one session."""
+        try:
+            return nova.novaforge.telemetry_payload(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+
+    def _novaforge_filters(value: str | None) -> list[str] | None:
+        """A comma-separated filter parameter, or None when nothing was asked."""
+        if not value:
+            return None
+        items = [item.strip() for item in value.split(",") if item.strip()]
+        return items or None
+
+    @app.get("/novaforge/sessions/{session_id}/timeline")
+    async def novaforge_timeline(
+        session_id: str,
+        limit: int = 100,
+        after_seq: int = 0,
+        types: str | None = None,
+        categories: str | None = None,
+        sources: str | None = None,
+        severities: str | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """One page of a session's evidence timeline. READ-ONLY.
+
+        This route inspects persisted evidence only: it cannot start, resume,
+        stop, or drive a session, and NF-03 has no input path. An unknown filter
+        value is a 422 naming the allowed values rather than a silently empty
+        page that looks like "nothing happened".
+        """
+        try:
+            return nova.novaforge.timeline_payload(
+                session_id,
+                limit=limit,
+                after_seq=after_seq,
+                types=_novaforge_filters(types),
+                categories=_novaforge_filters(categories),
+                sources=_novaforge_filters(sources),
+                severities=_novaforge_filters(severities),
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+        except TimelineQueryError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/novaforge/sessions/{session_id}/timeline/{seq}")
+    async def novaforge_timeline_event(
+        session_id: str, seq: int, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """One timeline event with its evidence resolved; read-only."""
+        try:
+            return nova.novaforge.timeline_event(session_id, seq)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404, detail=f"Unknown session or timeline event: {session_id} #{seq}"
+            ) from exc
+
+    @app.get("/novaforge/timeline/compare")
+    async def novaforge_timeline_compare(
+        left: str, right: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Compare two persisted sessions from their recorded evidence."""
+        try:
+            return nova.novaforge.compare_sessions(left, right)
+        except KeyError as exc:
+            missing = left if nova.novaforge.get(left) is None else right
+            raise HTTPException(status_code=404, detail=f"Unknown session: {missing}") from exc
+
+    @app.get("/novaforge/frames/{session_id}")
+    async def novaforge_frame(
+        session_id: str,
+        seq: int | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> Any:
+        """Serve one captured frame (PNG), never cached and never guessed.
+
+        ``seq`` selects a recorded frame; without it the newest one is served.
+        The path comes from the session record and is confined to the session's
+        own frame directory by the manager, so this route cannot be used to read
+        an arbitrary file. A missing frame is a 404, not an empty image: a broken
+        image looks like a rendering bug, a 404 is the truth.
+        """
+        path = nova.novaforge.frame_path(session_id, seq=seq)
+        if path is None or not path.is_file():
+            raise HTTPException(status_code=404, detail="No such frame for this session.")
+        return FileResponse(
+            path,
+            media_type="image/png",
+            headers={
+                **_never_cache_headers(),
+                "Content-Disposition": "inline",
+            },
+        )
+
+    # ── NovaForge NF-04: Forge Benchmark Lab ──────────────────────────────
+    # A benchmark run is ONE real observation session plus a persisted result.
+    # These routes never decide a success: the lab reads the session's own
+    # telemetry and timeline, and a completed run says "data complete", never
+    # "objective achieved".
+    @app.get("/novaforge/benchmarks/scenarios")
+    async def novaforge_benchmark_scenarios(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """The scenario catalog, with supported/unsupported status and metrics."""
+        return nova.novaforge_benchmarks.scenarios()
+
+    @app.get("/novaforge/benchmarks/scenarios/{scenario_id}")
+    async def novaforge_benchmark_scenario(
+        scenario_id: str,
+        version: int | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """One scenario's requirements, verifier availability and metric definitions."""
+        try:
+            return nova.novaforge_benchmarks.scenario(scenario_id, version)
+        except BenchmarkNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/novaforge/benchmarks/preflight")
+    async def novaforge_benchmark_preflight(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Validate a scenario, its budget and the live target window. Starts nothing."""
+        return await nova.novaforge_benchmarks.preflight(payload)
+
+    @app.get("/novaforge/benchmarks/runs")
+    async def novaforge_benchmark_runs(
+        limit: int = 20,
+        scenario: str = "",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Persisted benchmark runs, newest first (every attempt is listed)."""
+        return nova.novaforge_benchmarks.history(limit=limit, scenario_id=scenario)
+
+    @app.post("/novaforge/benchmarks/runs")
+    async def novaforge_benchmark_start(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Validate and start one bounded observation run."""
+        try:
+            return await nova.novaforge_benchmarks.start(payload)
+        except BenchmarkValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except BenchmarkConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/novaforge/benchmarks/runs/{run_id}")
+    async def novaforge_benchmark_run(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """One benchmark run: configuration, metrics, evidence and limitations."""
+        run = nova.novaforge_benchmarks.get(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"Unknown benchmark run: {run_id}")
+        return run
+
+    @app.post("/novaforge/benchmarks/runs/{run_id}/cancel")
+    async def novaforge_benchmark_cancel(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Abort the run's session through its stop path; idempotent once terminal."""
+        try:
+            return await nova.novaforge_benchmarks.cancel(run_id)
+        except BenchmarkNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    def _benchmark_ids(value: str) -> list[str]:
+        ids = [item.strip() for item in str(value or "").split(",") if item.strip()]
+        # Bounded: a comparison is a reading of a few runs, not a bulk export.
+        return list(dict.fromkeys(ids))[:10]
+
+    @app.get("/novaforge/benchmarks/compare")
+    async def novaforge_benchmark_compare(
+        left: str,
+        right: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Compare compatible runs; query params accept comma-separated run ids."""
+        try:
+            return nova.novaforge_benchmarks.compare(
+                _benchmark_ids(left), _benchmark_ids(right)
+            )
+        except BenchmarkValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except BenchmarkNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/novaforge/benchmarks/aggregate")
+    async def novaforge_benchmark_aggregate(
+        scenario: str,
+        version: int | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Per-scenario aggregates over eligible runs, with every exclusion counted."""
+        try:
+            return nova.novaforge_benchmarks.aggregate(scenario, version)
+        except BenchmarkNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    # ── NF-05: controlled game evaluation ───────────────────────────────
+    @app.get("/novaforge/games")
+    async def novaforge_games(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """The game/environment compatibility registry and its honest counts."""
+        return nova.novaforge_evaluations.games()
+
+    @app.get("/novaforge/games/{game_id}")
+    async def novaforge_game(
+        game_id: str,
+        version: int | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """One environment's compatibility, capabilities, scenarios and limitations."""
+        try:
+            return nova.novaforge_evaluations.game(game_id, version)
+        except GameNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/novaforge/evaluations")
+    async def novaforge_evaluations(
+        limit: int = 20,
+        game: str = "",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Every retained evaluation attempt, newest first, with its exclusion reason."""
+        return nova.novaforge_evaluations.history(limit=limit, game_id=game)
+
+    @app.get("/novaforge/evaluations/baseline")
+    async def novaforge_evaluation_baseline(
+        game: str,
+        scenario: str = "observation-baseline",
+        version: int | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """The current baseline for one environment/scenario/version, or why none exists."""
+        try:
+            return nova.novaforge_evaluations.baseline(game, scenario, version)
+        except GameNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/novaforge/evaluations/preflight")
+    async def novaforge_evaluation_preflight(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Judge every readiness check against the live window. Starts nothing."""
+        return await nova.novaforge_evaluations.preflight(payload)
+
+    @app.post("/novaforge/evaluations")
+    async def novaforge_evaluation_start(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Start one confirmed observation-only evaluation through the benchmark lab."""
+        try:
+            return await nova.novaforge_evaluations.start(payload)
+        except GameNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except EvaluationConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except EvaluationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except BenchmarkConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except BenchmarkValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/novaforge/evaluations/{evaluation_id}")
+    async def novaforge_evaluation(
+        evaluation_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """One evaluation: its readiness, benchmark run, baseline and current status."""
+        record = nova.novaforge_evaluations.get(evaluation_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"Unknown evaluation: {evaluation_id}")
+        return record
+
+    @app.post("/novaforge/evaluations/{evaluation_id}/cancel")
+    async def novaforge_evaluation_cancel(
+        evaluation_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Cancel through the benchmark/session stop path; idempotent once terminal."""
+        try:
+            return await nova.novaforge_evaluations.cancel(evaluation_id)
+        except GameNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/novaforge/evaluations/{evaluation_id}/report")
+    async def novaforge_evaluation_report(
+        evaluation_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """The per-game evaluation report, including missing evidence and limitations."""
+        try:
+            return nova.novaforge_evaluations.report(evaluation_id)
+        except GameNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    # ── NF-06: Forge Coach and controlled experiments ───────────────────
+    @app.get("/novaforge/coach")
+    async def novaforge_coach(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """What the Coach can analyse, what it refuses, and how experiments run."""
+        return nova.novaforge_coach.status()
+
+    @app.post("/novaforge/coach/analyse")
+    async def novaforge_coach_analyse(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Evidence-backed analysis of one recorded session or evaluation.
+
+        READ ONLY: findings are recomputed from the records on every call, no
+        record is modified, and a subject with no recorded evidence answers
+        ``insufficient_evidence`` instead of a diagnosis.
+        """
+        try:
+            return nova.novaforge_coach.analyse(
+                session_id=str(payload.get("session_id") or ""),
+                evaluation_id=str(payload.get("evaluation_id") or ""),
+                limit=int(payload.get("limit") or 100),
+            )
+        except CoachNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except CoachError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/novaforge/coach/recommendations")
+    async def novaforge_coach_recommendations(
+        limit: int = 50,
+        status: str = "",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Persisted recommendation statuses (operator decisions), newest first."""
+        try:
+            return nova.novaforge_coach.recommendations(limit=limit, status=status)
+        except CoachError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/novaforge/coach/recommendations/{recommendation_id}")
+    async def novaforge_coach_recommendation_status(
+        recommendation_id: str,
+        payload: dict[str, Any],
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Record an operator decision about one recommendation (it is not evidence)."""
+        try:
+            return nova.novaforge_coach.set_recommendation_status(
+                recommendation_id,
+                str(payload.get("status") or ""),
+                note=str(payload.get("note") or ""),
+            )
+        except CoachNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except CoachError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/novaforge/experiments")
+    async def novaforge_experiments(
+        limit: int = 20,
+        status: str = "",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Retained experiments, newest first, with their proposal/approval state."""
+        try:
+            return nova.novaforge_experiments.history(limit=limit, status=status)
+        except ExperimentError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/novaforge/experiments")
+    async def novaforge_experiment_propose(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Propose an experiment from a recommendation, or from an explicit spec.
+
+        Starts nothing. An unsupported spec is retained as ``blocked`` with its
+        reasons, which is a decision record rather than an error page.
+        """
+        try:
+            return nova.novaforge_experiments.propose(
+                payload, coach=nova.novaforge_coach
+            )
+        except ExperimentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ExperimentError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except CoachNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except CoachError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/novaforge/experiments/{experiment_id}")
+    async def novaforge_experiment(
+        experiment_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """One experiment: spec, approval, arms, results and history."""
+        record = nova.novaforge_experiments.get(experiment_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"Unknown experiment: {experiment_id}")
+        return record
+
+    @app.post("/novaforge/experiments/{experiment_id}/approve")
+    async def novaforge_experiment_approve(
+        experiment_id: str,
+        payload: dict[str, Any],
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Bind an approval to THIS configuration (its digest is recorded)."""
+        try:
+            return await nova.novaforge_experiments.approve(
+                experiment_id, note=str(payload.get("note") or "")
+            )
+        except ExperimentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ExperimentError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/novaforge/experiments/{experiment_id}/reject")
+    async def novaforge_experiment_reject(
+        experiment_id: str,
+        payload: dict[str, Any],
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Reject a proposal; the rejection is retained with its note."""
+        try:
+            return await nova.novaforge_experiments.reject(
+                experiment_id, note=str(payload.get("note") or "")
+            )
+        except ExperimentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ExperimentError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/novaforge/experiments/{experiment_id}/run")
+    async def novaforge_experiment_run(
+        experiment_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Run both arms through the evaluation lab; the arms run in the background."""
+        try:
+            return await nova.novaforge_experiments.run(experiment_id)
+        except ExperimentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ExperimentConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ExperimentError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/novaforge/experiments/{experiment_id}/cancel")
+    async def novaforge_experiment_cancel(
+        experiment_id: str,
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Cancel the experiment (idempotent once terminal)."""
+        try:
+            return await nova.novaforge_experiments.cancel(
+                experiment_id, reason=str((payload or {}).get("reason") or "")
+            )
+        except ExperimentNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/novaforge/experiments/{experiment_id}/results")
+    async def novaforge_experiment_results(
+        experiment_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """The comparison and verdict, or an explicit \"not available yet\"."""
+        record = nova.novaforge_experiments.get(experiment_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"Unknown experiment: {experiment_id}")
+        results = record.get("results")
+        return {
+            "version": record.get("version"),
+            "experiment_id": experiment_id,
+            "status": record.get("status"),
+            "available": results is not None,
+            "reason": ""
+            if results is not None
+            else "The experiment has not finished, so there is no result to compare yet.",
+            "results": results,
+        }
 
     # ── Phase 21: real-time perception and abstraction ────────────────
     @app.get("/perception/status")
@@ -1849,22 +2563,16 @@ def create_app() -> Any:
         The MODEL half joins them here (Phase 7): the capability table with the
         provenance of every claim, the lifecycle policy in force, and what the
         manager has actually done — loads, evictions, refusals, switching
-        latency. The runtime probe runs in a worker thread, because this endpoint
-        is reachable from the UI and a status call must never stall the loop.
+        latency. It runs in a worker thread and on ONE runtime-probe budget shared
+        by the whole block (audit defect D4), because this endpoint is
+        reachable from the UI and a status call must never stall the loop.
         """
         return {
             "telemetry": nova.intelligence.telemetry.to_dict(),
             "findings": nova.intelligence.telemetry.improvement_findings(),
             "capabilities": nova.intelligence.capabilities.to_dict(),
             "thresholds": nova.intelligence.thresholds.to_dict(),
-            "models": {
-                **nova.models_status(),
-                "runtime": await asyncio.to_thread(nova.model_manager.health),
-                "hardware": await asyncio.to_thread(
-                    nova.model_manager.monitor.headroom_report
-                ),
-                "selection": await asyncio.to_thread(nova._model_routing_report),
-            },
+            "models": await nova.intelligence_model_report(),
             "lexical": {"exemplars": nova.intelligence.lexical.size},
             # What the optional embedding layer is (a backend, an index size) and
             # how it has actually been used (cache hits), so "semantic matching"
@@ -1942,14 +2650,14 @@ def create_app() -> Any:
 
     @app.post("/phone/plan")
     async def phone_plan(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
-        return nova.plan_phone_command(str(payload["command"]))
+        return nova.plan_phone_command(_required_field(payload, "command"))
 
     @app.post("/phone/execute")
     async def phone_execute(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
         token = str(payload.get("approval_token", "") or "") or None
         try:
             return await nova.execute_phone_command(
-                str(payload["command"]), approval_token=token, correlation_id=str(payload.get("correlation_id", "") or "")
+                _required_field(payload, "command"), approval_token=token, correlation_id=str(payload.get("correlation_id", "") or "")
             )
         except ValueError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -1957,7 +2665,7 @@ def create_app() -> Any:
     @app.post("/agent/run")
     async def agent_run(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
         """Run the full agentic loop (interpret → plan → perceive → act → verify → recover)."""
-        return await nova.run_agentic_task(str(payload["request"]))
+        return await nova.run_agentic_task(_required_field(payload, "request"))
 
     @app.get("/agent/metrics")
     async def agent_metrics(_principal: str = Depends(require_auth)) -> dict[str, Any]:
@@ -1976,7 +2684,15 @@ def create_app() -> Any:
     # trail — they never reach a model or the network.
 
     def _automation_id(payload: dict[str, Any]) -> str:
-        automation_id = str(payload.get("automation_id", "")).strip()
+        """The automation a task action targets, or a 422 that names the field.
+
+        ``/automation`` reports each task under ``id`` and the actions used to
+        demand ``automation_id``, so the obvious round trip — read the report,
+        post the id back — was refused for using the name the report itself
+        printed. Both spellings are accepted; ``automation_id`` wins when a body
+        carries both.
+        """
+        automation_id = str(payload.get("automation_id") or payload.get("id") or "").strip()
         if not automation_id:
             raise HTTPException(status_code=422, detail="automation_id is required.")
         return automation_id
@@ -1996,7 +2712,7 @@ def create_app() -> Any:
         """
         try:
             return nova.schedule_automation(
-                str(payload["request"]),
+                _required_field(payload, "request"),
                 name=str(payload.get("name", "")),
                 authorize=bool(payload.get("authorize", False)),
             )
@@ -2328,7 +3044,7 @@ def create_app() -> Any:
         payload: dict[str, Any], _principal: str = Depends(require_auth)
     ) -> dict[str, Any]:
         """Ask a live run to stop at its next step; it stays resumable."""
-        return _training_refused(nova.pause_training_run(_training_id(payload)), "pause")
+        return _training_refused(nova.pause_training_run(_required_field(payload)), "pause")
 
     @app.post("/training/runs/cancel")
     async def cancel_training_run(
@@ -2336,7 +3052,7 @@ def create_app() -> Any:
     ) -> dict[str, Any]:
         """End a run: a live one at its next step, a stored one immediately."""
         return _training_refused(
-            nova.cancel_training_run(_training_id(payload)), "cancellation"
+            nova.cancel_training_run(_required_field(payload)), "cancellation"
         )
 
     @app.post("/training/runs/resume")
@@ -2363,7 +3079,7 @@ def create_app() -> Any:
     ) -> dict[str, Any]:
         """Re-estimate a stored run against the machine as it is NOW."""
         return _training_refused(
-            nova.estimate_training_run(_training_id(payload)), "estimate", status_code=404
+            nova.estimate_training_run(_required_field(payload)), "estimate", status_code=404
         )
 
     @app.post("/training/runs/evaluate")
@@ -2441,7 +3157,7 @@ def create_app() -> Any:
     ) -> dict[str, Any]:
         """Approve from recorded evidence only — never from training loss."""
         result = nova.approve_training_model(
-            _training_id(payload, "model_id"),
+            _required_field(payload, "model_id"),
             approved_by=str(payload.get("approved_by", "")),
             note=str(payload.get("note", "")),
         )
@@ -2453,7 +3169,7 @@ def create_app() -> Any:
     ) -> dict[str, Any]:
         """Make an APPROVED model the production one; explicit, never automatic."""
         result = nova.promote_training_model(
-            _training_id(payload, "model_id"), note=str(payload.get("note", ""))
+            _required_field(payload, "model_id"), note=str(payload.get("note", ""))
         )
         return _training_refused(result, "promotion")
 
@@ -2463,7 +3179,7 @@ def create_app() -> Any:
     ) -> dict[str, Any]:
         """Reject a candidate; a rejected model is never promoted by accident."""
         result = nova.reject_training_model(
-            _training_id(payload, "model_id"), reason=str(payload.get("reason", ""))
+            _required_field(payload, "model_id"), reason=str(payload.get("reason", ""))
         )
         return _training_refused(result, "rejection")
 
@@ -2473,7 +3189,7 @@ def create_app() -> Any:
     ) -> dict[str, Any]:
         """Retire a production or approved model without deleting its record."""
         result = nova.deprecate_training_model(
-            _training_id(payload, "model_id"), reason=str(payload.get("reason", ""))
+            _required_field(payload, "model_id"), reason=str(payload.get("reason", ""))
         )
         return _training_refused(result, "deprecation")
 
@@ -2483,7 +3199,7 @@ def create_app() -> Any:
     ) -> dict[str, Any]:
         """Return production to the model this one replaced."""
         result = nova.rollback_training_model(
-            _training_id(payload, "model_id"), reason=str(payload.get("reason", ""))
+            _required_field(payload, "model_id"), reason=str(payload.get("reason", ""))
         )
         return _training_refused(result, "rollback")
 
@@ -2683,7 +3399,7 @@ def create_app() -> Any:
     ) -> dict[str, Any]:
         """Settle a queued pair: choose A, choose B, mark a tie, or reject it."""
         result = nova.decide_preference_review(
-            _training_id(payload, "preference_id"),
+            _required_field(payload, "preference_id"),
             str(payload.get("decision", "")),
             reviewer=str(payload.get("reviewer", "")),
             reason=str(payload.get("reason", "")),
@@ -2739,7 +3455,7 @@ def create_app() -> Any:
     ) -> dict[str, Any]:
         """Start a preference run (dry-run by default) in a worker thread."""
         result = await nova.start_preference_run(
-            _training_id(payload),
+            _required_field(payload),
             override=bool(payload.get("override", False)),
             confirm=bool(payload.get("confirm", False)),
         )
@@ -2755,7 +3471,7 @@ def create_app() -> Any:
         payload: dict[str, Any], _principal: str = Depends(require_auth)
     ) -> dict[str, Any]:
         """Pause a running preference run at its next step boundary."""
-        return _training_refused(nova.pause_preference_run(_training_id(payload)), "pause")
+        return _training_refused(nova.pause_preference_run(_required_field(payload)), "pause")
 
     @app.post("/preference/runs/cancel")
     async def cancel_preference_run(
@@ -2763,7 +3479,7 @@ def create_app() -> Any:
     ) -> dict[str, Any]:
         """End a run: a live one at its next step, a stored one immediately."""
         return _training_refused(
-            nova.cancel_preference_run(_training_id(payload)), "cancellation"
+            nova.cancel_preference_run(_required_field(payload)), "cancellation"
         )
 
     @app.post("/preference/runs/resume")
@@ -2772,7 +3488,7 @@ def create_app() -> Any:
     ) -> dict[str, Any]:
         """Resume an interrupted run from its newest valid checkpoint."""
         result = await nova.resume_preference_run(
-            _training_id(payload), checkpoint_id=str(payload.get("checkpoint_id", ""))
+            _required_field(payload), checkpoint_id=str(payload.get("checkpoint_id", ""))
         )
         if not result.get("ok"):
             raise HTTPException(
@@ -2787,7 +3503,7 @@ def create_app() -> Any:
     ) -> dict[str, Any]:
         """Re-price a stored run against the current machine reading."""
         return _training_refused(
-            nova.estimate_preference_run(_training_id(payload)), "estimate", status_code=404
+            nova.estimate_preference_run(_required_field(payload)), "estimate", status_code=404
         )
 
     @app.post("/preference/runs/evaluate")
@@ -2796,7 +3512,7 @@ def create_app() -> Any:
     ) -> dict[str, Any]:
         """Compare base, SFT and candidate on the held-out pairs."""
         result = await nova.evaluate_preference_run(
-            _training_id(payload),
+            _required_field(payload),
             base=payload.get("base"),
             candidate=payload.get("candidate"),
             sft=payload.get("sft"),
@@ -3124,7 +3840,7 @@ def create_app() -> Any:
     ) -> dict[str, Any]:
         """Start an RL run in a worker thread (simulated/dry-run by default)."""
         result = await nova.start_rlhf_run(
-            _training_id(payload),
+            _required_field(payload),
             override=bool(payload.get("override", False)),
             confirm=bool(payload.get("confirm", False)),
         )
@@ -3140,7 +3856,7 @@ def create_app() -> Any:
         payload: dict[str, Any], _principal: str = Depends(require_auth)
     ) -> dict[str, Any]:
         """Pause a running RL run at its next step boundary."""
-        return _training_refused(nova.pause_rlhf_run(_training_id(payload)), "pause")
+        return _training_refused(nova.pause_rlhf_run(_required_field(payload)), "pause")
 
     @app.post("/rlhf/runs/cancel")
     async def cancel_rlhf_run(
@@ -3148,7 +3864,7 @@ def create_app() -> Any:
     ) -> dict[str, Any]:
         """End an RL run: a live one at its next step, a stored one now."""
         return _training_refused(
-            nova.cancel_rlhf_run(_training_id(payload)), "cancellation"
+            nova.cancel_rlhf_run(_required_field(payload)), "cancellation"
         )
 
     @app.post("/rlhf/runs/resume")
@@ -3157,7 +3873,7 @@ def create_app() -> Any:
     ) -> dict[str, Any]:
         """Resume an interrupted RL run from its newest valid checkpoint."""
         result = await nova.resume_rlhf_run(
-            _training_id(payload),
+            _required_field(payload),
             checkpoint_id=str(payload.get("checkpoint_id") or ""),
         )
         if not result.get("ok"):
@@ -3173,7 +3889,7 @@ def create_app() -> Any:
     ) -> dict[str, Any]:
         """Re-price a stored RL run against the current machine reading."""
         return _training_refused(
-            nova.estimate_rlhf_run(_training_id(payload)), "estimate", status_code=404
+            nova.estimate_rlhf_run(_required_field(payload)), "estimate", status_code=404
         )
 
     @app.post("/rlhf/runs/evaluate")
@@ -3182,7 +3898,7 @@ def create_app() -> Any:
     ) -> dict[str, Any]:
         """Compare base, SFT, preference and RL candidate on held-out data."""
         result = await nova.evaluate_rlhf_run(
-            _training_id(payload),
+            _required_field(payload),
             base=payload.get("base"),
             candidate=payload.get("candidate"),
             sft=payload.get("sft"),

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -147,11 +148,23 @@ class JsonlAuditSink:
 
     def replace(self, records: Sequence[Mapping[str, Any]]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-        with temporary.open("w", encoding="utf-8") as handle:
-            for row in records:
-                handle.write(json.dumps(json_safe(row), ensure_ascii=False) + "\n")
-        os.replace(temporary, self.path)
+        # A FIXED ``<name>.tmp`` name collides across processes: two writers make
+        # the second ``os.replace`` fail on Windows with WinError 32. Stage a
+        # uniquely named file in the same directory instead.
+        descriptor, temporary = tempfile.mkstemp(
+            dir=str(self.path.parent), prefix=f"{self.path.name}-", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                for row in records:
+                    handle.write(json.dumps(json_safe(row), ensure_ascii=False) + "\n")
+            os.replace(temporary, self.path)
+        except BaseException:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise
 
 
 @dataclass(frozen=True, slots=True)

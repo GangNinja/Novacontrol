@@ -141,6 +141,67 @@ class ModelProvider(Protocol):
         """
 
 
+@dataclass(slots=True)
+class ModelProbeSnapshot:
+    """One caller's shared runtime probes, so repeated questions ask once.
+
+    A routing report answers several selection questions in ONE request, and
+    every one of those questions needs the same two runtime facts: which models
+    exist, and which are resident. Asking the runtime once per question is what
+    made a single status read cost ten bounded HTTP probes on a machine with no
+    runtime at all — each probe waiting out its own socket timeout, measured at
+    22.1 s end to end.
+
+    This object memoizes exactly those two probes for the lifetime of ONE
+    caller. It is created and dropped by that caller and holds nothing across
+    requests: no TTL, no invalidation, no global, no lock. A runtime that
+    becomes reachable after a request is therefore discovered by the NEXT
+    request, which is the property the deliberately-uncached miss exists to
+    keep.
+
+    A probe that FAILS is remembered as that failure for the duration of the
+    call — models ``()``, resident ``None`` — exactly as the direct call
+    behaves. So a second question cannot read a partial answer as a real one,
+    and a runtime that is down is not asked ten times to learn it once.
+    """
+
+    #: ``None`` until asked. ``()`` is a real answer meaning "nothing exists".
+    _models: tuple[str, ...] | None = None
+    _models_asked: bool = False
+    #: ``None`` means "could not ask" — distinct from ``()``, "nothing resident".
+    _resident: tuple[tuple[str, int], ...] | None = None
+    _resident_asked: bool = False
+    #: How many runtime probes this snapshot has actually performed. Counted
+    #: rather than estimated: it is the figure the deduplication is judged by.
+    probes: int = 0
+
+    # NOT thread-safe, and deliberately so: one instance is owned by one caller
+    # for the duration of one call, and must not be handed to two threads at
+    # once (two concurrent probes would each see "not asked yet" and both run,
+    # which is a duplicate rather than an error). Concurrent REQUESTS never
+    # share one — each builds its own — so the property that matters holds
+    # without a lock. A caller that wants to probe in parallel wants a snapshot
+    # per probe, not a shared one.
+
+    def models(self, probe: Callable[[], tuple[str, ...]]) -> tuple[str, ...]:
+        """The model list, probed at most once through this snapshot."""
+        if not self._models_asked:
+            self._models_asked = True
+            self.probes += 1
+            self._models = probe()
+        return self._models or ()
+
+    def resident(
+        self, probe: Callable[[], tuple[tuple[str, int], ...] | None]
+    ) -> tuple[tuple[str, int], ...] | None:
+        """The resident list, probed at most once through this snapshot."""
+        if not self._resident_asked:
+            self._resident_asked = True
+            self.probes += 1
+            self._resident = probe()
+        return self._resident
+
+
 class KeepAlivePolicy(StrEnum):
     """When the manager releases a model on its own initiative.
 
@@ -473,7 +534,18 @@ class ModelManager:
     def provider_name(self) -> str:
         return str(getattr(self._provider, "name", "") or "none")
 
-    def _resident(self) -> tuple[tuple[str, int], ...] | None:
+    # -- the two runtime probes, and one caller's shared memo of them -------
+    def _models_probe(self) -> tuple[str, ...]:
+        """The provider's model list; a failed probe is ``()``, never a raise."""
+        if self._provider is None:
+            return ()
+        try:
+            return tuple(self._provider.list_models())
+        except Exception:  # pragma: no cover - defensive
+            return ()
+
+    def _resident_probe(self) -> tuple[tuple[str, int], ...] | None:
+        """What the provider holds in memory; ``None`` = it could not be asked."""
         if self._provider is None:
             return None
         try:
@@ -481,11 +553,31 @@ class ModelManager:
         except Exception:  # pragma: no cover - a probe must never throw
             return None
 
+    def _provider_models(self, snapshot: ModelProbeSnapshot | None) -> tuple[str, ...]:
+        """The model list, shared through ``snapshot`` when the caller gave one.
+
+        Without a snapshot this is the direct probe it always was, so every
+        existing caller keeps its cost and its freshness unchanged.
+        """
+        if snapshot is None:
+            return self._models_probe()
+        return snapshot.models(self._models_probe)
+
+    def _resident(
+        self, snapshot: ModelProbeSnapshot | None = None
+    ) -> tuple[tuple[str, int], ...] | None:
+        """What is resident, shared through ``snapshot`` when one was supplied."""
+        if snapshot is None:
+            return self._resident_probe()
+        return snapshot.resident(self._resident_probe)
+
     def _resident_names(self) -> tuple[str, ...]:
         resident = self._resident()
         return tuple(name for name, _size in resident) if resident else ()
 
-    def discover(self) -> tuple[ModelProfile, ...]:
+    def discover(
+        self, *, snapshot: ModelProbeSnapshot | None = None
+    ) -> tuple[ModelProfile, ...]:
         """Every model the provider offers, merged into the registry.
 
         The runtime is the authority on what EXISTS; the registry is the
@@ -494,13 +586,13 @@ class ModelManager:
         runtime has already reported (see :meth:`refresh_capabilities`) are
         applied on the way through, so a later discovery does not lose what an
         earlier measurement established.
+
+        ``snapshot`` lets one caller ask several times and reach the runtime
+        once; see :class:`ModelProbeSnapshot`.
         """
         if self._provider is None:
             return ()
-        try:
-            names = self._provider.list_models()
-        except Exception:  # pragma: no cover - defensive
-            return ()
+        names = self._provider_models(snapshot)
         return self.registry.discover(
             names, provider=self.provider_name(), reported=self._reported
         )
@@ -574,9 +666,11 @@ class ModelManager:
             return None
         return int(size) if isinstance(size, (int, float)) and size else None
 
-    def runtime_status(self) -> ModelRuntimeStatus:
+    def runtime_status(
+        self, *, snapshot: ModelProbeSnapshot | None = None
+    ) -> ModelRuntimeStatus:
         """The provider's state right now, with the active model's profile."""
-        resident = self._resident()
+        resident = self._resident(snapshot)
         available = None
         if self._provider is not None:
             try:
@@ -600,9 +694,15 @@ class ModelManager:
             keep_alive=self.keep_alive.to_dict(),
         )
 
-    def health(self) -> dict[str, Any]:
-        """One block for a status surface: runtime, hardware, policy, telemetry."""
-        status = self.runtime_status()
+    def health(
+        self, *, snapshot: ModelProbeSnapshot | None = None
+    ) -> dict[str, Any]:
+        """One block for a status surface: runtime, hardware, policy, telemetry.
+
+        ``snapshot`` lets a caller that reads the routing report beside this
+        block share ONE probe budget with it; see :class:`ModelProbeSnapshot`.
+        """
+        status = self.runtime_status(snapshot=snapshot)
         return {
             "runtime": status.to_dict(),
             "hardware": self.monitor.headroom_report(),
@@ -640,6 +740,7 @@ class ModelManager:
         latency_preference: str = "balanced",
         candidates: Sequence[str] | None = None,
         preferred: str = "",
+        snapshot: ModelProbeSnapshot | None = None,
     ) -> ModelSelection:
         """The model that should serve a request needing ``required``.
 
@@ -649,11 +750,17 @@ class ModelManager:
         the latency preference. Intent, decision and complexity reach this as
         *capabilities* — which is the point: those layers decide what work the
         request is, and capabilities are how that work is asked for.
+
+        ``snapshot`` is the optional request-scoped memo (see
+        :class:`ModelProbeSnapshot`): a caller answering several selection
+        questions in one request passes the same one and the runtime is probed
+        once rather than once per question. Selection semantics are identical
+        either way — only the number of probes changes.
         """
         wanted = as_capabilities(required)
         available_names = candidates if candidates is not None else None
-        pool = self._pool(available_names)
-        resident = self.runtime_status().active_model
+        pool = self._pool(available_names, snapshot=snapshot)
+        resident = self.runtime_status(snapshot=snapshot).active_model
         match = select_profile(
             wanted,
             pool,
@@ -704,6 +811,7 @@ class ModelManager:
         cloud_model: str = "",
         latency_preference: str = "balanced",
         preferred: str = "",
+        snapshot: ModelProbeSnapshot | None = None,
     ) -> ModelSelection:
         """``select`` for the flags the request layers actually produce.
 
@@ -727,9 +835,12 @@ class ModelManager:
             cloud_model=cloud_model,
             latency_preference=latency_preference,
             preferred=preferred,
+            snapshot=snapshot,
         )
 
-    def _pool(self, names: Sequence[str] | None) -> tuple[ModelProfile, ...]:
+    def _pool(
+        self, names: Sequence[str] | None, *, snapshot: ModelProbeSnapshot | None = None
+    ) -> tuple[ModelProfile, ...]:
         """The profiles a selection may choose from.
 
         Discovery first when a provider can answer, so a model that is installed
@@ -739,7 +850,7 @@ class ModelManager:
         """
         if names is not None:
             return self.registry.discover(names, provider=self.provider_name())
-        discovered = self.discover()
+        discovered = self.discover(snapshot=snapshot)
         return discovered or self.registry.all()
 
     # ── activities: what must NOT be evicted ─────────────────────────────

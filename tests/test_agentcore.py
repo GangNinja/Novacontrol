@@ -344,6 +344,169 @@ class PerceptionEngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("account", state.elements[0].attributes["purpose"].lower())
 
 
+class AgenticObservationWiringTests(unittest.IsolatedAsyncioTestCase):
+    """Phase A of the game-control audit: observations carry real evidence.
+
+    The audit measured a desktop task producing six observations, every one of
+    them `browser |  | elements=0`: `UiPerceptionEngine` was built without a
+    window probe and `_observe` passed no screenshot path, so the visual and
+    structured-desktop layers could not run and the loop verified the goal
+    against nothing. These tests pin the wiring AND the honesty that has to come
+    with it — a loop that passes on incidental screen text would be worse than
+    the blind one it replaced.
+    """
+
+    WINDOWS = ("chrome|NovaMarket UI Decision - Google Chrome", "explorer|Downloads")
+    WORDS = (
+        {"text": "Calculator", "line": 0, "x": 1, "y": 2, "w": 3, "h": 4},
+        {"text": "History", "line": 1, "x": 1, "y": 20, "w": 3, "h": 4},
+    )
+
+    def _wired(self, *, shots: list[str] | None = None) -> UiPerceptionEngine:
+        async def probe() -> list[str]:
+            return list(self.WINDOWS)
+
+        async def capture() -> str:
+            if shots is not None:
+                shots.append("capture")
+            return "shot-1234.png"
+
+        async def read_text(path: str) -> list[dict[str, Any]]:
+            return list(self.WORDS)
+
+        return UiPerceptionEngine(
+            window_probe=probe, screenshot_provider=capture, screen_text_reader=read_text
+        )
+
+    async def test_desktop_observation_carries_real_evidence(self) -> None:
+        state = await self._wired().observe(include_desktop=True)
+        self.assertIn("window_probe", state.source)
+        self.assertIn("screen_text", state.source)
+        self.assertEqual(len(state.elements), 2)
+        self.assertIn("Calculator", state.raw_text)
+        self.assertEqual(state.window, "NovaMarket UI Decision - Google Chrome")
+        self.assertTrue(state.metadata["evidence"])
+        self.assertIn("captured now", state.metadata["screenshot"])
+
+    async def test_browser_observation_is_untouched_by_desktop_wiring(self) -> None:
+        """A page observation must not pay for a capture or a window probe."""
+        shots: list[str] = []
+        engine = self._wired(shots=shots)
+        state = await engine.observe(url="https://example.com", include_dom=False)
+        self.assertEqual(state.source, "none")
+        self.assertEqual(shots, [])
+        self.assertEqual(state.metadata["window_probe"], "not requested for this observation")
+
+    async def test_unwired_engine_reports_no_evidence_instead_of_guessing(self) -> None:
+        """The construction the audit measured is now honest about observing nothing."""
+        state = await UiPerceptionEngine().observe(include_desktop=True)
+        self.assertEqual(state.source, "none")
+        self.assertFalse(state.metadata["evidence"])
+        self.assertIn("evidence_gap", state.metadata)
+
+    async def test_failed_probe_and_capture_are_reported_not_fabricated(self) -> None:
+        async def boom() -> list[str]:
+            raise RuntimeError("probe exploded")
+
+        async def empty() -> str:
+            return ""
+
+        async def no_words(path: str) -> list[dict[str, Any]]:
+            return []
+
+        engine = UiPerceptionEngine(
+            window_probe=boom, screenshot_provider=empty, screen_text_reader=no_words
+        )
+        state = await engine.observe(include_desktop=True)
+        self.assertEqual(state.source, "none")
+        self.assertFalse(state.metadata["evidence"])
+        self.assertIn("unavailable", state.metadata["window_probe"])
+        self.assertIn("no image", state.metadata["screenshot"])
+
+    async def test_the_audited_run_now_observes_the_desktop(self) -> None:
+        """Six empty observations, reproduced against the fix."""
+        orchestrator = AgenticOrchestrator(
+            perception=self._wired(),
+            actions=ActionEngine(browser_runner=FakeBrowserRunner()),
+            knowledge=ApplicationKnowledgeGraph(),
+            evaluation=EvaluationLedger(),
+        )
+        state = await orchestrator.run_task("open the calculator application on the desktop")
+        self.assertTrue(state.observations, "the loop must observe")
+        for observation in state.observations:
+            payload = observation.ui_state or {}
+            self.assertTrue(
+                payload.get("metadata", {}).get("evidence"),
+                f"observation {observation.source} carried no evidence: {payload.get('source')}",
+            )
+            self.assertNotEqual(payload.get("source"), "none")
+
+    async def test_a_generic_word_cannot_complete_a_goal(self) -> None:
+        """The false pass this change would otherwise introduce.
+
+        A real screen is covered in the words "application", "desktop" and
+        "window" (window titles, menu bars, ApplicationFrameHost), and the goal
+        of opening the calculator contains all three. Matching one of them must
+        never stand in for the calculator actually being there.
+        """
+        generic = UiState(
+            application="ApplicationFrameHost",
+            window="Realtek Audio Console",
+            elements=(UiElement(id="w0", type="window", text="ApplicationFrameHost"),),
+            raw_text="ApplicationFrameHost Realtek Audio Console desktop window application",
+            source="window_probe+screen_text",
+            metadata={"evidence": True},
+        )
+        state = await _orchestrator_over(generic).run_task(
+            "open the calculator application on the desktop"
+        )
+        self.assertEqual(state.status.value, "failed")
+        self.assertEqual(state.verification["final"]["status"], "fail")
+
+    async def test_a_goal_subject_on_screen_still_completes(self) -> None:
+        """The same loop must pass when the evidence really is there."""
+        calculator = UiState(
+            application="calc",
+            window="Calculator",
+            elements=(UiElement(id="w0", type="window", text="Calculator"),),
+            raw_text="Calculator\nStandard\n7 8 9",
+            source="window_probe+screen_text",
+            metadata={"evidence": True},
+        )
+        state = await _orchestrator_over(calculator).run_task(
+            "open the calculator application on the desktop"
+        )
+        self.assertEqual(state.status.value, "completed")
+        self.assertEqual(state.verification["final"]["status"], "pass")
+
+    def test_generic_words_are_never_goal_needles(self) -> None:
+        from novacontrol.agentcore.orchestrator import _needles
+
+        self.assertEqual(_needles("open the calculator application on the desktop"), ("calculator",))
+        self.assertEqual(_needles("close the downloads folder window"), ("downloads",))
+        # a category noun is not a subject: "folder" is in every file browser
+        self.assertNotIn("folder", _needles("open the downloads folder"))
+
+
+class _StaticPerception:
+    """Observes the same screen every time — a controlled test double."""
+
+    def __init__(self, state: UiState) -> None:
+        self._state = state
+
+    async def observe(self, **kwargs: Any) -> UiState:
+        return self._state
+
+
+def _orchestrator_over(state: UiState) -> AgenticOrchestrator:
+    return AgenticOrchestrator(
+        perception=_StaticPerception(state),
+        actions=ActionEngine(browser_runner=FakeBrowserRunner()),
+        knowledge=ApplicationKnowledgeGraph(),
+        evaluation=EvaluationLedger(),
+    )
+
+
 class TaskStateTests(unittest.TestCase):
     def test_state_roundtrip(self) -> None:
         state = AgentTaskState(goal="do a thing")

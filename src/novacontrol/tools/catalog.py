@@ -125,7 +125,10 @@ DEFAULT_TOOL_DECLARATIONS: tuple[ToolMetadata, ...] = (
         name="desktop_controller",
         description=(
             "Control applications and windows on this computer: open and close "
-            "programs, open folders, type text, press keys."
+            "programs, open folders, type text, press keys, and address the "
+            "mouse and keyboard by exact screen coordinate — move the cursor, "
+            "click a point, hold/release a mouse button or a key, and read a "
+            "target window's bounds, client area and DPI scale."
         ),
         category=ToolCategory.DESKTOP,
         risk=RiskLevel.MEDIUM,
@@ -138,11 +141,15 @@ DEFAULT_TOOL_DECLARATIONS: tuple[ToolMetadata, ...] = (
             ("action", "string"),
             ("changed", "boolean"),
         ),
-        tags=("application", "program", "window", "launch", "open", "close", "desktop", "folder"),
+        tags=(
+            "application", "program", "window", "launch", "open", "close", "desktop",
+            "folder", "click", "mouse", "cursor", "coordinate", "key", "geometry",
+        ),
         examples=(
             "Open Chrome.",
             "Close Notepad.",
             "Open my Downloads folder.",
+            "Click the button at (400, 300) in the game window.",
         ),
     ),
     ToolMetadata(

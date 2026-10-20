@@ -12,6 +12,7 @@ explore package (the application composition root wires it).
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
@@ -267,6 +268,13 @@ class AgenticOrchestrator:
             state.verification = {"final": {"status": "inconclusive", "reason": "No observations to verify the goal against."}}
             self._mark_step(state, self._current_verify_step_id(state), "done")
             return
+        if not needles:
+            # The goal names nothing distinctive, so nothing on a screen could
+            # confirm it. Claiming completion here would be exactly the
+            # "we ran some actions" conflation this verifier exists to prevent.
+            state.verification = {"final": {"status": "inconclusive", "reason": "The goal names nothing observable, so completion cannot be claimed."}}
+            self._mark_step(state, self._current_verify_step_id(state), "done")
+            return
         # Evidence must actually mention the goal's substance. "We ran some
         # actions" is NOT completion — that conflation is exactly what the
         # Verifier exists to prevent.
@@ -301,8 +309,17 @@ class AgenticOrchestrator:
     # -- helpers -------------------------------------------------------------------
 
     async def _observe(self, state: AgentTaskState, tag: str) -> UiState:
+        # A browser task is already observed through the DOM layer that answers
+        # it, so paying for a window probe and a screen capture there buys
+        # pictures of nothing the step is about — and would change what a page
+        # observation contains. Every other kind of work (desktop, phone, or a
+        # goal whose tools are not yet known) must LOOK at the machine, or the
+        # observation it verifies against carries no evidence at all. That is
+        # the difference the game-control audit measured: before this, every
+        # observation in a desktop run came back empty.
+        include_desktop = self._application_hint(state) != "browser"
         try:
-            ui_state: UiState = await self.perception.observe()
+            ui_state: UiState = await self.perception.observe(include_desktop=include_desktop)
             state.observations.append(Observation(
                 source=f"step:{tag}",
                 summary=f"{ui_state.application} | {ui_state.window} | elements={len(ui_state.elements)}",
@@ -377,7 +394,42 @@ class AgenticOrchestrator:
             pass  # observability must never break execution
 
 
+# Words that appear in almost every plan sentence AND in ordinary screen text,
+# so matching one proves nothing about whether the goal was reached. They were
+# kept before because an observation was almost always empty; the moment
+# observations became real (game-control remediation Phase A) the word
+# "application" matched "ApplicationFrameHost" in a window title and a stubbed
+# action was reported as a completed goal. A needle has to name the thing the
+# goal is ABOUT.
+_NEEDLE_STOPWORDS = frozenset({
+    "that", "this", "with", "from", "then", "after", "and", "for", "was", "were", "verify",
+    # instruction verbs: they describe what to DO, not what success looks like
+    "open", "launch", "start", "close", "click", "type", "press", "scroll", "run", "use",
+    # description glue from the planner's own `expected` sentences
+    "state", "reflects", "reflect", "observable", "observed", "observe", "evidence",
+    "current", "environment", "carried", "shows", "documented", "procedure",
+    "alternative", "path", "reasoned", "answer", "grounded", "observations",
+    "interactive", "elements", "goal", "achieved", "reached", "success",
+    # domain nouns that name a CATEGORY: every screen has windows and apps
+    "desktop", "application", "app", "program", "window", "screen", "computer",
+    "ui", "page", "content", "results", "listing", "folder",
+})
+
+
 def _needles(text: str) -> tuple[str, ...]:
-    stop = {"the", "that", "this", "with", "from", "then", "after", "and", "for", "was", "were", "verify"}
-    words = [word.lower() for word in text.replace(":", " ").split() if len(word) >= 4 and word.lower() not in stop]
-    return tuple(words[:3])
+    """The DISTINCTIVE words of a goal or expectation: what it is about.
+
+    Deliberately not "every word of four letters or more". These words are
+    matched against screen text, window titles and page content, so a generic
+    word ("desktop", "application", "window") matches almost any screen and
+    turns verification into a formality — it would report a stubbed action as a
+    completed goal. What survives is the noun the request names: the calculator,
+    the folder, the repository. That is the only thing whose presence is
+    evidence the goal was reached.
+    """
+    words = [
+        word.lower()
+        for word in re.split(r"[^A-Za-z0-9]+", text)
+        if len(word) >= 4 and word.lower() not in _NEEDLE_STOPWORDS
+    ]
+    return tuple(dict.fromkeys(words))[:4]

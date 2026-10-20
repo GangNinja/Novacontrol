@@ -1039,13 +1039,21 @@ class BackendFrontendContractTests(unittest.TestCase):
 
     def test_chat_history_is_server_fed_not_localstorage_fed(self) -> None:
         """The chat thread is the SHARED server transcript: the panel seeds
-        from GET /chat/history, appends via POST /chat/history, and any
-        localStorage use is limited to the one-time migration marker — a
-        browser must never own the only copy of the conversation."""
-        # The seed and append paths both hit the server surface.
+        from GET /chat/history and any localStorage use is limited to the
+        one-time migration marker — a browser must never own the only copy of
+        the conversation.
+
+        APPENDING is the server's job: it records the turn pair inside
+        ``handle_request``, the path the UI, the CLI and the GUI all take. The
+        browser used to POST /chat/history too, which stored every message
+        twice and rendered each one twice after a reload, so the client-side
+        append must not come back."""
+        # The seed and the one-time migration both read the server surface.
         self.assertIn('requestJson("/chat/history")', self.js)
         self.assertIn('requestJson("/chat/history", { action: "migrate"', self.js)
-        self.assertIn('requestJson("/chat/history", { role', self.js)
+        # No client-side append: the server is the only writer of turns.
+        self.assertNotIn('requestJson("/chat/history", { role', self.js)
+        self.assertNotIn("recordChatTurn(", self.js)
         # The old per-browser WRITE path is gone (reads for migration only).
         self.assertNotIn('localStorage.setItem("novacontrol.chatHistory"', self.js)
         # The migration is once-per-browser and idempotent server-side.

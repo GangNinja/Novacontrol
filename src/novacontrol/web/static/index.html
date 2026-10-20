@@ -55,6 +55,12 @@
           <button class="nav-item" data-panel="visionPanel" type="button" aria-label="Vision">
             <span class="nav-icon" aria-hidden="true">&#9673;</span>Vision
           </button>
+          <span class="nav-section-label" aria-hidden="true">NovaForge</span>
+          <button class="nav-item" data-panel="novaforgePanel" type="button" aria-label="NovaForge mission control">
+            <span class="nav-icon" aria-hidden="true">&#9651;</span>NovaForge
+          </button>
+          <!-- One sidebar destination: every NovaForge phase is a tab inside
+               Mission Control, so no phase gets a second nav entry. -->
           <span class="nav-section-label" aria-hidden="true">Engineering</span>
           <button class="nav-item" data-panel="buildPanel" type="button" aria-label="Build">
             <span class="nav-icon" aria-hidden="true">&#9674;</span>Build
@@ -531,6 +537,754 @@
           </article>
         </section>
 
+        <section id="novaforgePanel" class="panel forge-shell" aria-labelledby="forgeTitle">
+          <header class="forge-head">
+            <div class="forge-brand">
+              <p class="eyebrow">NovaForge</p>
+              <h2 id="forgeTitle">Forge Mission Control</h2>
+              <p class="forge-tagline">Autonomous Gameplay Intelligence &amp; Evaluation</p>
+              <p class="forge-tagline-motto">Observe. Decide. Act. Verify. Evolve.</p>
+            </div>
+            <div class="forge-head-status">
+              <div class="forge-status-item">
+                <span class="forge-status-label">Session</span>
+                <span id="forgeState" class="forge-state" data-state="IDLE" aria-live="polite">IDLE</span>
+              </div>
+              <div class="forge-status-item">
+                <span class="forge-status-label">Target</span>
+                <span id="forgeTarget" class="forge-target" aria-live="polite">no session target</span>
+              </div>
+              <div class="forge-status-item">
+                <span class="forge-status-label">Capture</span>
+                <span id="forgeReady" class="forge-ready" aria-live="polite">checking…</span>
+              </div>
+            </div>
+          </header>
+
+          <div class="forge-controls" role="group" aria-label="Session controls">
+            <button id="forgeStartButton" type="button" class="cyber-btn primary">Start Session</button>
+            <button id="forgePauseButton" type="button" class="cyber-btn" disabled>Pause</button>
+            <button id="forgeResumeButton" type="button" class="cyber-btn" disabled>Resume</button>
+            <button id="forgeStopButton" type="button" class="cyber-btn danger" disabled>Stop</button>
+            <button id="forgeCancelButton" type="button" class="cyber-btn" disabled title="Abort the loop now; input cleanup still runs">Cancel</button>
+            <span id="forgeControlNote" class="forge-control-note" aria-live="polite">Start is enabled once the mission validates against an open window.</span>
+          </div>
+
+          <nav class="forge-tabs" role="tablist" aria-label="NovaForge workspace">
+            <button id="forgeTabMission" class="forge-tab active" type="button" role="tab" aria-selected="true" aria-controls="forgeMissionView" data-forge-tab="forgeMissionView">Mission Control</button>
+            <button id="forgeTabLive" class="forge-tab" type="button" role="tab" aria-selected="false" aria-controls="forgeLiveView" data-forge-tab="forgeLiveView">Live Session</button>
+            <button id="forgeTabTelemetry" class="forge-tab" type="button" role="tab" aria-selected="false" aria-controls="forgeTelemetryView" data-forge-tab="forgeTelemetryView">Telemetry</button>
+            <button id="forgeTabGuardian" class="forge-tab" type="button" role="tab" aria-selected="false" aria-controls="forgeGuardianView" data-forge-tab="forgeGuardianView">Guardian</button>
+            <button id="forgeTabHistory" class="forge-tab" type="button" role="tab" aria-selected="false" aria-controls="forgeHistoryView" data-forge-tab="forgeHistoryView">Session History</button>
+            <button id="forgeTabBenchmark" class="forge-tab" type="button" role="tab" aria-selected="false" aria-controls="forgeBenchmarkView" data-forge-tab="forgeBenchmarkView">Benchmark Lab</button>
+            <button id="forgeTabEvaluation" class="forge-tab" type="button" role="tab" aria-selected="false" aria-controls="forgeEvaluationView" data-forge-tab="forgeEvaluationView">Game Evaluation</button>
+            <button id="forgeTabTimeline" class="forge-tab" type="button" role="tab" aria-selected="false" aria-controls="forgeTimelineView" data-forge-tab="forgeTimelineView">Evidence Timeline</button>
+            <button id="forgeTabCoach" class="forge-tab" type="button" role="tab" aria-selected="false" aria-controls="forgeCoachView" data-forge-tab="forgeCoachView">Forge Coach</button>
+          </nav>
+
+          <div id="forgeNotice" class="forge-notice" role="status" aria-live="polite" hidden></div>
+
+          <div id="forgeMissionView" class="forge-view active" role="tabpanel" aria-labelledby="forgeTabMission">
+            <div class="forge-mission-grid">
+              <article class="surface forge-card">
+                <h3>Mission Brief</h3>
+                <label class="field">
+                  <span>Mission name</span>
+                  <input id="forgeMissionName" type="text" class="cyber-input" maxlength="80" placeholder="e.g. Disposable window watch" autocomplete="off">
+                </label>
+                <label class="field">
+                  <span>Objective</span>
+                  <textarea id="forgeMissionObjective" rows="3" class="cyber-input" maxlength="500" placeholder="What should this session observe?"></textarea>
+                </label>
+                <label class="field">
+                  <span>Target window</span>
+                  <select id="forgeMissionTarget" class="cyber-input">
+                    <option value="">Checking windows…</option>
+                  </select>
+                </label>
+                <div class="button-row">
+                  <button id="forgeRefreshWindowsButton" type="button" class="cyber-btn small">Refresh Windows</button>
+                  <button id="forgeSaveMissionButton" type="button" class="cyber-btn">Save Mission</button>
+                  <button id="forgeValidateButton" type="button" class="cyber-btn primary">Validate Mission</button>
+                </div>
+                <div id="forgeMissionErrors" class="forge-field-errors" aria-live="polite"></div>
+              </article>
+              <article class="surface forge-card">
+                <h3>Success &amp; Limits</h3>
+                <label class="field">
+                  <span>Success criteria</span>
+                  <textarea id="forgeMissionCriteria" rows="3" class="cyber-input" maxlength="500" placeholder="How would a person recognise success? Stored with the mission; only a checkable objective (window title) can be verified."></textarea>
+                </label>
+                <div class="forge-limit-row">
+                  <label class="field">
+                    <span>Time limit <span class="muted">(seconds, optional)</span></span>
+                    <input id="forgeTimeLimit" type="number" min="1" max="3600" step="1" class="cyber-input" placeholder="no limit">
+                  </label>
+                  <label class="field">
+                    <span>Action budget <span class="muted">(optional, enforced at execution)</span></span>
+                    <input id="forgeMaxActions" type="number" min="1" max="10000" step="1" class="cyber-input" placeholder="no budget">
+                  </label>
+                </div>
+                <p class="forge-limit-hint">The time limit ends a session — including a paused one. The action budget is enforced at execution: a refused action never consumes it, and the session ends when the executed actions reach it. Neither limit means the objective was achieved — only a verifier reading the target window can complete a session, and a session without a checkable objective never claims success.</p>
+                <div id="forgeValidation" class="forge-validation" aria-live="polite">
+                  <p class="muted">Validate a mission to measure its target window in physical pixels before starting.</p>
+                </div>
+              </article>
+            </div>
+            <article class="surface forge-card forge-readiness">
+              <h3>Readiness</h3>
+              <div id="forgeReadiness" class="forge-readiness-body" aria-live="polite">
+                <p class="muted">Reading capture capability…</p>
+              </div>
+            </article>
+            <article class="surface forge-card forge-roadmap">
+              <h3>Phase Roadmap</h3>
+              <ul class="forge-roadmap-list">
+                <li><strong>NF-02</strong> Telemetry &amp; Guardian — implemented in this panel (Telemetry and Guardian tabs).</li>
+                <li><strong>NF-03</strong> Evidence Timeline — implemented in this panel (Evidence Timeline tab: recorded events, frame evidence and read-only replay). It records the action and verification events this build produces, and its replay stays read-only: it never starts, resumes or sends input.</li>
+                <li><strong>NF-04</strong> Benchmark Lab — implemented in this panel (Benchmark Lab tab): validated scenarios, bounded observation runs, persisted results, evidence links and fair comparison. No model or policy is invoked, so model comparison is unavailable; gameplay scenarios are listed as unsupported.</li>
+                <li><strong>NF-05</strong> Controlled Game Evaluation — implemented in this panel (Game Evaluation tab): a validated compatibility registry, per-game readiness checks that refuse an unsafe start, baseline-first observation runs over the NF-04 benchmark lab, retained evidence and a per-game report. An evaluation run is observation-only — it sends no input and claims no objective — so no gameplay capability is claimed for a game.</li>
+                <li><strong>NF-06</strong> Forge Coach — implemented in this panel (Forge Coach tab): evidence-backed findings with provenance, an earliest-recoverable-error analysis, prioritized recommendations and controlled experiments that run through the NF-05 evaluation lab. Approval is bound to the exact configuration, and a result that cannot be compared honestly says so.</li>
+                <li><strong>NF-07</strong> Guarded action path &amp; objective verification — implemented in this panel (Guardian tab): a typed, policy-bounded action is PLANNED as a digest-bound proposal, EXECUTED only after that exact approval re-validates the pinned window, and VERIFIED by reading the window back. A refusal is not a failure, an execution is not a success, and only a verified objective completes a session.</li>
+              </ul>
+              <p class="muted">NF-04, NF-05 and NF-06 observe, capture and analyse only: a completed run means its data was recorded, never that an objective was achieved or a game was played. NF-06 invokes no model and trains nothing.</p>
+            </article>
+          </div>
+
+          <div id="forgeLiveView" class="forge-view" role="tabpanel" aria-labelledby="forgeTabLive" hidden>
+            <div id="forgeLiveError" class="forge-notice error" role="status" aria-live="polite" hidden></div>
+            <div class="forge-live-grid">
+              <article class="surface forge-card forge-vision">
+                <div class="forge-card-head">
+                  <h3>Forge Vision</h3>
+                  <span class="forge-badge" id="forgeFrameMode">no session</span>
+                </div>
+                <figure class="forge-viewport" id="forgeViewport">
+                  <img id="forgeFrame" alt="Live capture of the selected target window" hidden>
+                  <div id="forgeVisionEmpty" class="forge-viewport-empty">
+                    <span class="forge-viewport-icon" aria-hidden="true">&#9635;</span>
+                    <p>No session is active.</p>
+                    <p class="muted">Configure a mission and start a session to see genuine captured frames from the target window.</p>
+                  </div>
+                  <div class="forge-frame-stale" id="forgeFrameStale" hidden>STALE FRAME — not live</div>
+                  <div class="forge-frame-overlay" aria-hidden="true">
+                    <span class="forge-corner tl"></span><span class="forge-corner tr"></span>
+                    <span class="forge-corner bl"></span><span class="forge-corner br"></span>
+                  </div>
+                </figure>
+                <dl class="forge-frame-meta">
+                  <div><dt>Captured</dt><dd id="forgeFrameTime">—</dd></div>
+                  <div><dt>Age</dt><dd id="forgeFrameAge">—</dd></div>
+                  <div><dt>Resolution</dt><dd id="forgeFrameRes">—</dd></div>
+                  <div><dt>Source</dt><dd id="forgeFrameSource">—</dd></div>
+                </dl>
+                <p class="forge-frame-note" id="forgeFrameNote"></p>
+              </article>
+
+              <article class="surface forge-card forge-intel">
+                <div class="forge-card-head">
+                  <h3>Forge Intelligence</h3>
+                  <span class="forge-badge" id="forgeIntelStatus">waiting</span>
+                </div>
+                <ol class="forge-stages" id="forgeStages" aria-live="polite">
+                  <li class="forge-stage" data-stage="observed"><span class="forge-stage-name">Observed</span><span class="forge-stage-value" data-stage-value="observed">No session.</span></li>
+                  <li class="forge-stage" data-stage="proposed"><span class="forge-stage-name">Proposed</span><span class="forge-stage-value" data-stage-value="proposed">No proposal yet.</span></li>
+                  <li class="forge-stage" data-stage="executed"><span class="forge-stage-name">Executed</span><span class="forge-stage-value" data-stage-value="executed">No action yet.</span></li>
+                  <li class="forge-stage" data-stage="verified"><span class="forge-stage-name">Verified</span><span class="forge-stage-value" data-stage-value="verified">No verdict yet.</span></li>
+                </ol>
+                <p class="forge-stage-hint">Observed → Proposed → Executed → Verified are separate facts. A stage that has no record says so instead of borrowing its neighbour's status.</p>
+                <div class="forge-telemetry">
+                  <div><span>Session</span><strong id="forgeSessionId">—</strong></div>
+                  <div><span>Frames</span><strong id="forgeFrameCount">0</strong></div>
+                  <div><span>Capture</span><strong id="forgeCaptureMs">—</strong></div>
+                  <div><span>Duration</span><strong id="forgeDuration">—</strong></div>
+                  <div><span>Actions</span><strong id="forgeActionCount">0 attempted / 0 executed</strong></div>
+                </div>
+              </article>
+            </div>
+
+            <article class="surface forge-card forge-summary">
+              <h3>Session Summary</h3>
+              <div id="forgeSummary" class="forge-summary-body">
+                <p class="muted">Start a session to build a truthful summary: timestamps, duration, errors, cleanup and the verification limit.</p>
+              </div>
+            </article>
+          </div>
+
+          <div id="forgeTelemetryView" class="forge-view" role="tabpanel" aria-labelledby="forgeTabTelemetry" hidden>
+            <p class="forge-limit-hint">Every number below is measured by the running session or reported as unavailable with a reason. Zero is a real measurement; unavailable is not zero, and unsupported means the platform offers no source at all.</p>
+            <div class="forge-live-grid">
+              <article class="surface forge-card">
+                <div class="forge-card-head">
+                  <h3>Capture</h3>
+                  <span class="forge-badge" id="forgeTelemetryUpdated">no session</span>
+                </div>
+                <div id="forgeTelemetryCapture" class="forge-metric-grid" aria-live="polite">
+                  <p class="muted">No telemetry yet.</p>
+                </div>
+                <p class="forge-frame-note" id="forgeTelemetryLatencyNote"></p>
+              </article>
+              <article class="surface forge-card">
+                <div class="forge-card-head">
+                  <h3>Session Continuity</h3>
+                  <span class="forge-badge" id="forgeTelemetryState">—</span>
+                </div>
+                <div id="forgeTelemetrySession" class="forge-metric-grid" aria-live="polite">
+                  <p class="muted">No session record yet.</p>
+                </div>
+              </article>
+            </div>
+            <div class="forge-live-grid">
+              <article class="surface forge-card">
+                <h3>Target &amp; Loop</h3>
+                <div id="forgeTelemetryTarget" class="forge-metric-grid" aria-live="polite">
+                  <p class="muted">No target checks recorded.</p>
+                </div>
+              </article>
+              <article class="surface forge-card">
+                <h3>Resources &amp; Actions</h3>
+                <div id="forgeTelemetryResources" class="forge-metric-grid" aria-live="polite">
+                  <p class="muted">No resource readings recorded.</p>
+                </div>
+              </article>
+            </div>
+            <article class="surface forge-card">
+              <h3>Measurement Notes</h3>
+              <ul id="forgeTelemetryNotes" class="forge-note-list">
+                <li class="muted">Start a session to collect telemetry.</li>
+              </ul>
+            </article>
+          </div>
+
+          <div id="forgeGuardianView" class="forge-view" role="tabpanel" aria-labelledby="forgeTabGuardian" hidden>
+            <div class="forge-live-grid">
+              <article class="surface forge-card forge-guardian-card">
+                <div class="forge-card-head">
+                  <h3>Guardian</h3>
+                  <span class="forge-badge" id="forgeGuardianState">unarmed</span>
+                </div>
+                <p id="forgeGuardianReason" class="muted">No session is active, so nothing is being guarded.</p>
+                <div class="button-row">
+                  <button id="forgeEmergencyStopButton" type="button" class="cyber-btn danger" disabled>Emergency Stop</button>
+                </div>
+                <p class="forge-limit-hint">The emergency stop is enabled only for a live session and reports the backend's confirmed result. It is never shown as successful before the stop completes.</p>
+              </article>
+              <article class="surface forge-card">
+                <h3>Enforced Boundaries</h3>
+                <div id="forgeGuardianLimits" class="forge-metric-grid" aria-live="polite">
+                  <p class="muted">No limits to report.</p>
+                </div>
+              </article>
+            </div>
+            <div class="forge-live-grid">
+              <article class="surface forge-card">
+                <h3>Target &amp; Input</h3>
+                <div id="forgeGuardianTarget" class="forge-metric-grid" aria-live="polite">
+                  <p class="muted">No target validation recorded.</p>
+                </div>
+              </article>
+              <article class="surface forge-card">
+                <h3>Input Cleanup</h3>
+                <div id="forgeGuardianCleanup" class="forge-metric-grid" aria-live="polite">
+                  <p class="muted">No cleanup has run.</p>
+                </div>
+              </article>
+            </div>
+            <article class="surface forge-card">
+              <h3>Interventions</h3>
+              <ul id="forgeGuardianInterventions" class="forge-history-list">
+                <li class="muted">No Guardian intervention has been recorded.</li>
+              </ul>
+            </article>
+            <article class="surface forge-card">
+              <h3>Guarantees</h3>
+              <ul id="forgeGuardianGuarantees" class="forge-note-list"></ul>
+            </article>
+            <!-- Remediation R1/R2: the action and verification surface. The
+                 verdict shown here is the VERIFIER's, read from the target
+                 window; an executed action is never rendered as a success. -->
+            <article class="surface forge-card">
+              <div class="forge-card-head">
+                <h3>Gameplay Objective &amp; Actions</h3>
+                <span class="forge-badge" id="forgeVerificationBadge">unverified</span>
+              </div>
+              <p id="forgeVerificationReason" class="muted">No verdict yet. A stopped session is not a success; only an independent verification decides the objective.</p>
+              <div class="forge-mission-grid">
+                <label class="field">
+                  <span>Objective kind</span>
+                  <select id="forgeObjectiveKind" class="cyber-input">
+                    <option value="window_title">Target window title</option>
+                    <option value="unsupported">Other (recorded as unsupported)</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Expected title text</span>
+                  <input id="forgeObjectiveParameter" type="text" class="cyber-input" maxlength="200" placeholder="e.g. READY" autocomplete="off">
+                </label>
+              </div>
+              <div class="button-row">
+                <button id="forgeObjectiveSaveButton" type="button" class="cyber-btn" disabled>Set Objective</button>
+                <button id="forgeVerifyButton" type="button" class="cyber-btn" disabled>Verify Now</button>
+              </div>
+              <div class="forge-mission-grid">
+                <label class="field">
+                  <span>Action</span>
+                  <select id="forgeActionKind" class="cyber-input">
+                    <option value="key">Key tap</option>
+                    <option value="hold">Hold key</option>
+                    <option value="click">Click at point</option>
+                    <option value="move">Move cursor</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Key / hold ms</span>
+                  <input id="forgeActionKey" type="text" class="cyber-input" maxlength="40" placeholder="w" autocomplete="off">
+                </label>
+                <label class="field">
+                  <span>Point (x,y)</span>
+                  <input id="forgeActionPoint" type="text" class="cyber-input" maxlength="40" placeholder="500,300" autocomplete="off">
+                </label>
+              </div>
+              <div class="button-row">
+                <button id="forgeActionPlanButton" type="button" class="cyber-btn" disabled>Plan Action</button>
+                <button id="forgeActionRunButton" type="button" class="cyber-btn primary" disabled>Run Planned Action</button>
+              </div>
+              <p class="forge-limit-hint">Planning sends nothing. Running requires the plan's own digest and revalidates the target window, its focus, the policy and the remaining budget immediately before injecting.</p>
+              <ul id="forgeActionLog" class="forge-history-list">
+                <li class="muted">No action has been planned for this session.</li>
+              </ul>
+            </article>
+          </div>
+
+          <div id="forgeBenchmarkView" class="forge-view" role="tabpanel" aria-labelledby="forgeTabBenchmark" hidden>
+            <div class="forge-readonly-banner" role="note">
+              <strong>Measurement, not a score.</strong> A benchmark run is ONE real observation
+              session recorded by the session manager. <em>Completed</em> means the observation
+              recorded its required data; it never means an objective was achieved. No model or
+              policy is invoked in NF-04, so model selection and model comparison stay disabled
+              with that reason rather than showing invented results.
+            </div>
+            <div class="forge-benchmark-grid">
+              <article class="surface forge-card">
+                <div class="forge-card-head">
+                  <h3>Scenario Catalog</h3>
+                  <div class="forge-timeline-nav">
+                    <span id="forgeBenchmarkCatalogState" class="forge-badge">loading</span>
+                    <button id="forgeBenchmarkRefreshButton" type="button" class="cyber-btn small">Refresh</button>
+                  </div>
+                </div>
+                <label class="field">
+                  <span>Benchmark scenario</span>
+                  <select id="forgeBenchmarkScenario" class="cyber-input" aria-label="Benchmark scenario"></select>
+                </label>
+                <div id="forgeBenchmarkScenarioDetail" class="forge-benchmark-detail" aria-live="polite">
+                  <p class="muted">Reading the scenario catalog…</p>
+                </div>
+              </article>
+              <article class="surface forge-card">
+                <h3>Run Configuration</h3>
+                <label class="field">
+                  <span>Target window <span class="muted">(already open; never launched)</span></span>
+                  <select id="forgeBenchmarkTarget" class="cyber-input" aria-label="Benchmark target window"></select>
+                </label>
+                <div class="forge-limit-row">
+                  <label class="field">
+                    <span>Budget <span class="muted">(seconds)</span></span>
+                    <input id="forgeBenchmarkDuration" type="number" min="1" max="300" step="1" class="cyber-input">
+                  </label>
+                  <label class="field">
+                    <span>Observation interval <span class="muted">(seconds)</span></span>
+                    <input id="forgeBenchmarkInterval" type="number" min="0.05" max="5" step="0.05" class="cyber-input">
+                  </label>
+                </div>
+                <label class="field">
+                  <span>Notes <span class="muted">(recorded with the run)</span></span>
+                  <input id="forgeBenchmarkNotes" type="text" class="cyber-input" maxlength="500" autocomplete="off">
+                </label>
+                <p id="forgeBenchmarkModelNote" class="forge-limit-hint">Model / policy: unavailable — NF-04 invokes neither, so this run cannot compare them.</p>
+                <div class="button-row">
+                  <button id="forgeBenchmarkPreflightButton" type="button" class="cyber-btn">Validate</button>
+                  <button id="forgeBenchmarkStartButton" type="button" class="cyber-btn primary" disabled>Start Benchmark</button>
+                  <button id="forgeBenchmarkCancelButton" type="button" class="cyber-btn danger" disabled>Cancel Run</button>
+                </div>
+                <div id="forgeBenchmarkNotice" class="forge-notice" role="status" aria-live="polite" hidden></div>
+                <div id="forgeBenchmarkPreflight" class="forge-validation" aria-live="polite">
+                  <p class="muted">Validate the scenario against a live window before starting. Validation starts nothing.</p>
+                </div>
+              </article>
+            </div>
+            <article class="surface forge-card">
+              <div class="forge-card-head">
+                <h3>Active Run</h3>
+                <span id="forgeBenchmarkRunState" class="forge-badge">no run</span>
+              </div>
+              <div id="forgeBenchmarkRun" class="forge-benchmark-run" aria-live="polite">
+                <p class="muted">No benchmark run is active. A run uses the same one-session slot as Mission Control, so no other session can overlap it.</p>
+              </div>
+            </article>
+            <div class="forge-live-grid">
+              <article class="surface forge-card">
+                <div class="forge-card-head">
+                  <h3>Run History</h3>
+                  <div class="forge-timeline-nav">
+                    <button id="forgeBenchmarkHistoryRefreshButton" type="button" class="cyber-btn small">Refresh</button>
+                    <button id="forgeBenchmarkAggregateButton" type="button" class="cyber-btn small">Aggregate</button>
+                  </div>
+                </div>
+                <p class="muted">Persisted across restarts. Every attempt is listed; failed, aborted and invalid attempts never enter an aggregate.</p>
+                <div id="forgeBenchmarkHistoryList" class="forge-history-list" aria-live="polite"></div>
+              </article>
+              <article class="surface forge-card">
+                <div class="forge-card-head">
+                  <h3>Scenario Aggregate</h3>
+                  <span id="forgeBenchmarkAggregateState" class="forge-badge">not computed</span>
+                </div>
+                <div id="forgeBenchmarkAggregate" class="forge-benchmark-aggregate" aria-live="polite">
+                  <p class="muted">Aggregate this scenario's eligible runs to see sample size, variability and every excluded attempt.</p>
+                </div>
+              </article>
+            </div>
+            <article class="surface forge-card">
+              <div class="forge-card-head">
+                <h3>Run Detail</h3>
+                <button id="forgeBenchmarkExportButton" type="button" class="cyber-btn small" disabled title="Download the selected run's structured result exactly as the backend recorded it">Export Result (JSON)</button>
+              </div>
+              <div id="forgeBenchmarkRunDetail" class="forge-benchmark-detail" aria-live="polite">
+                <p class="muted">Select a run from the history to inspect its configuration, metrics and evidence.</p>
+              </div>
+            </article>
+            <article class="surface forge-card">
+              <h3>Compatible Comparison</h3>
+              <div class="forge-timeline-toolbar">
+                <label class="field">
+                  <span>Left run</span>
+                  <select id="forgeBenchmarkCompareLeft" class="cyber-input" aria-label="Left benchmark run"></select>
+                </label>
+                <label class="field">
+                  <span>Right run</span>
+                  <select id="forgeBenchmarkCompareRight" class="cyber-input" aria-label="Right benchmark run"></select>
+                </label>
+                <button id="forgeBenchmarkCompareButton" type="button" class="cyber-btn small">Compare</button>
+              </div>
+              <p class="forge-limit-hint">Only runs with the same scenario, version, budget, observation interval, window geometry and operating system produce deltas. A single run per side shows no variability, so no winner is claimed — and NF-04 runs no model to compare.</p>
+              <div id="forgeBenchmarkCompareOutput" class="forge-timeline-compare" aria-live="polite">
+                <p class="muted">Choose two runs to compare. Incompatible choices are refused with the reason instead of rendered as equivalent.</p>
+              </div>
+            </article>
+          </div>
+
+          <div id="forgeEvaluationView" class="forge-view" role="tabpanel" aria-labelledby="forgeTabEvaluation" hidden>
+            <div class="forge-readonly-banner" role="note">
+              <strong>Evaluation, not a win.</strong> A run is ONE bounded observation of an
+              already-open, already-validated window. <em>Completed</em> means the evidence is data
+              complete; it never means the game was played, won, or that NovaControl can play it.
+              No game is launched here and an evaluation run sends no input; a completed run is
+              data completeness, never a game objective — every report says so.
+            </div>
+            <div class="forge-benchmark-grid">
+              <article class="surface forge-card">
+                <div class="forge-card-head">
+                  <h3>Environment Registry</h3>
+                  <div class="forge-timeline-nav">
+                    <span id="forgeEvaluationRegistryState" class="forge-badge">loading</span>
+                    <button id="forgeEvaluationRefreshButton" type="button" class="cyber-btn small">Refresh</button>
+                  </div>
+                </div>
+                <label class="field">
+                  <span>Game or environment</span>
+                  <select id="forgeEvaluationGame" class="cyber-input" aria-label="Game or environment"></select>
+                </label>
+                <div id="forgeEvaluationGameDetail" class="forge-benchmark-detail" aria-live="polite">
+                  <p class="muted">Reading the compatibility registry…</p>
+                </div>
+              </article>
+              <article class="surface forge-card">
+                <h3>Evaluation Configuration</h3>
+                <label class="field">
+                  <span>Scenario <span class="muted">(compatible with this environment)</span></span>
+                  <select id="forgeEvaluationScenario" class="cyber-input" aria-label="Evaluation scenario"></select>
+                </label>
+                <label class="field">
+                  <span>Target window <span class="muted">(already open; never launched)</span></span>
+                  <select id="forgeEvaluationTarget" class="cyber-input" aria-label="Evaluation target window"></select>
+                </label>
+                <div class="forge-limit-row">
+                  <label class="field">
+                    <span>Budget <span class="muted">(seconds)</span></span>
+                    <input id="forgeEvaluationDuration" type="number" min="1" max="300" step="1" class="cyber-input">
+                  </label>
+                  <label class="field">
+                    <span>Observation interval <span class="muted">(seconds)</span></span>
+                    <input id="forgeEvaluationInterval" type="number" min="0.05" max="5" step="0.05" class="cyber-input">
+                  </label>
+                </div>
+                <label class="field">
+                  <span>Notes <span class="muted">(recorded with the evaluation)</span></span>
+                  <input id="forgeEvaluationNotes" type="text" class="cyber-input" maxlength="500" autocomplete="off">
+                </label>
+                <label class="field" id="forgeEvaluationOfflineRow" hidden>
+                  <span>Offline declaration</span>
+                  <label class="forge-check">
+                    <input id="forgeEvaluationOffline" type="checkbox">
+                    <span>This environment is a local, offline/single-player session — no online
+                    multiplayer and no anti-cheat or access-control circumvention.</span>
+                  </label>
+                </label>
+                <label class="field">
+                  <span>Baseline <span class="muted">(completed runs only; separate from runtime state)</span></span>
+                  <select id="forgeEvaluationBaseline" class="cyber-input" aria-label="Evaluation baseline"></select>
+                </label>
+                <p class="forge-limit-hint">Model / policy: unavailable — NF-05 evaluates current capability and invokes no model or policy. NF-06 plans experiments over these same runs; it trains nothing, changes no weights and applies no configuration on its own.</p>
+                <label class="forge-check">
+                  <input id="forgeEvaluationConfirm" type="checkbox">
+                  <span>I confirm this is an already-open, offline/single-player window and that this
+                  run only observes it.</span>
+                </label>
+                <div class="button-row">
+                  <button id="forgeEvaluationPreflightButton" type="button" class="cyber-btn">Validate Readiness</button>
+                  <button id="forgeEvaluationStartButton" type="button" class="cyber-btn primary" disabled>Start Evaluation</button>
+                  <button id="forgeEvaluationCancelButton" type="button" class="cyber-btn danger" disabled>Cancel Evaluation</button>
+                </div>
+                <div id="forgeEvaluationNotice" class="forge-notice" role="status" aria-live="polite" hidden></div>
+                <div id="forgeEvaluationPreflight" class="forge-validation" aria-live="polite">
+                  <p class="muted">Validate readiness against the live window before starting. Validation starts nothing and sends no input.</p>
+                </div>
+                <div id="forgeEvaluationBaselineCard" class="forge-benchmark-detail" aria-live="polite">
+                  <p class="muted">No baseline has been loaded yet.</p>
+                </div>
+              </article>
+            </div>
+            <article class="surface forge-card">
+              <div class="forge-card-head">
+                <h3>Active Evaluation</h3>
+                <span id="forgeEvaluationRunState" class="forge-badge">no evaluation</span>
+              </div>
+              <div id="forgeEvaluationRun" class="forge-benchmark-run" aria-live="polite">
+                <p class="muted">No evaluation is active. It uses the same one-session slot as Mission Control, so no other session can overlap it.</p>
+              </div>
+            </article>
+            <div class="forge-live-grid">
+              <article class="surface forge-card">
+                <div class="forge-card-head">
+                  <h3>Evaluation History</h3>
+                  <div class="forge-timeline-nav">
+                    <button id="forgeEvaluationHistoryRefreshButton" type="button" class="cyber-btn small">Refresh</button>
+                    <button id="forgeEvaluationReportButton" type="button" class="cyber-btn small" disabled>Open Report</button>
+                  </div>
+                </div>
+                <p class="muted">Every attempt is retained — failed, aborted, invalid and unsupported runs included — because hiding an unsuccessful evaluation would misrepresent the capability.</p>
+                <div id="forgeEvaluationHistoryList" class="forge-history-list" aria-live="polite"></div>
+              </article>
+              <article class="surface forge-card">
+                <div class="forge-card-head">
+                  <h3>Guardian &amp; Safety</h3>
+                  <span class="forge-badge">enforced by the session</span>
+                </div>
+                <p class="muted">Guardian limits, the emergency stop and input cleanup are the session manager's own — an evaluation never bypasses them. Cancellation travels the same stop path, so cleanup and the intervention record still happen.</p>
+                <p class="forge-limit-hint">If a required safety check fails, readiness refuses the evaluation. There is no override in the UI and no override in the API.</p>
+              </article>
+            </div>
+            <article class="surface forge-card">
+              <div class="forge-card-head">
+                <h3>Per-Game Report</h3>
+                <button id="forgeEvaluationExportButton" type="button" class="cyber-btn small" disabled title="Download the report exactly as the backend recorded it">Export Report (JSON)</button>
+              </div>
+              <div id="forgeEvaluationReport" class="forge-benchmark-detail" aria-live="polite">
+                <p class="muted">Select an evaluation from the history to inspect its compatibility, readiness, evidence and baseline comparison.</p>
+              </div>
+            </article>
+          </div>
+
+          <div id="forgeCoachView" class="forge-view" role="tabpanel" aria-labelledby="forgeTabCoach" hidden>
+            <div id="forgeCoachReadonly" class="forge-readonly-banner" role="note">
+              <strong>Read-only analysis.</strong> The Coach reads the evidence NF-01–NF-05 already
+              recorded. It cannot change a session, a benchmark run or an evaluation, it invokes no
+              model, and it trains nothing. Every finding names the events and metrics behind it;
+              a hypothesis is labelled as one.
+            </div>
+            <div class="forge-live-grid">
+              <article class="surface forge-card">
+                <div class="forge-card-head">
+                  <h3>Analyse a Recorded Run</h3>
+                  <span id="forgeCoachStatus" class="forge-badge">not loaded</span>
+                </div>
+                <label class="field">
+                  <span>Evaluation <span class="muted">(preferred: it carries its benchmark run)</span></span>
+                  <select id="forgeCoachEvaluation" class="cyber-input" aria-label="Evaluation to analyse"></select>
+                </label>
+                <label class="field">
+                  <span>Session <span class="muted">(used when no evaluation is selected)</span></span>
+                  <select id="forgeCoachSession" class="cyber-input" aria-label="Session to analyse"></select>
+                </label>
+                <div class="button-row">
+                  <button id="forgeCoachAnalyseButton" type="button" class="cyber-btn primary">Analyse Evidence</button>
+                  <button id="forgeCoachRefreshButton" type="button" class="cyber-btn small">Refresh Lists</button>
+                </div>
+                <div id="forgeCoachNotice" class="forge-notice" role="status" aria-live="polite" hidden></div>
+                <div id="forgeCoachSubject" class="forge-benchmark-detail">
+                  <p class="muted">Select a recorded evaluation or session and analyse it. A session with no recorded evidence answers "insufficient evidence" rather than inventing a diagnosis.</p>
+                </div>
+              </article>
+              <article class="surface forge-card">
+                <div class="forge-card-head">
+                  <h3>Earliest Recoverable Error</h3>
+                  <span id="forgeCoachEarliestBadge" class="forge-badge">no analysis</span>
+                </div>
+                <div id="forgeCoachEarliest" class="forge-benchmark-detail">
+                  <p class="muted">The earliest recorded failure signature, with the later symptoms that follow it and the counter-evidence that argues against treating it as the cause.</p>
+                </div>
+              </article>
+            </div>
+            <article class="surface forge-card">
+              <div class="forge-card-head">
+                <h3>Findings</h3>
+                <span id="forgeCoachFindingsCount" class="forge-badge">0</span>
+              </div>
+              <p class="muted">Each finding states its severity and evidence strength with the basis for both, whether it is an observed fact, a derived metric, a hypothesis or unknown, and the evidence it cites. Evidence links open the recorded event in the Evidence Timeline.</p>
+              <div id="forgeCoachFindings" class="forge-history-list" aria-live="polite">
+                <p class="muted">No analysis has been run yet.</p>
+              </div>
+            </article>
+            <article class="surface forge-card">
+              <div class="forge-card-head">
+                <h3>Recommendations</h3>
+                <span id="forgeCoachRecommendationCount" class="forge-badge">0</span>
+              </div>
+              <p class="muted">Ranked by severity, then evidence strength. A recommendation names the metric to observe and the criterion that would count; none of them promises a score improvement, because these recommendations come from observation runs, which carry no objective verdict.</p>
+              <div id="forgeCoachRecommendations" class="forge-history-list" aria-live="polite">
+                <p class="muted">Recommendations appear after an analysis.</p>
+              </div>
+            </article>
+            <article class="surface forge-card">
+              <div class="forge-card-head">
+                <h3>Experiment</h3>
+                <span id="forgeExperimentState" class="forge-badge">none selected</span>
+              </div>
+              <div id="forgeExperimentNotice" class="forge-notice" role="status" aria-live="polite" hidden></div>
+              <div id="forgeExperimentDetail" class="forge-benchmark-detail">
+                <p class="muted">Turn a recommendation into a proposal to review its configuration. Nothing runs until the exact configuration is approved, and both arms are ordinary NF-05 evaluations.</p>
+              </div>
+              <div class="button-row">
+                <button id="forgeExperimentApproveButton" type="button" class="cyber-btn" disabled>Approve Configuration</button>
+                <button id="forgeExperimentRejectButton" type="button" class="cyber-btn danger" disabled>Reject</button>
+                <button id="forgeExperimentRunButton" type="button" class="cyber-btn primary" disabled>Run Experiment</button>
+                <button id="forgeExperimentCancelButton" type="button" class="cyber-btn danger" disabled>Cancel</button>
+                <button id="forgeExperimentExportButton" type="button" class="cyber-btn small" disabled title="Download the experiment and its result exactly as recorded">Export Result (JSON)</button>
+              </div>
+              <div id="forgeExperimentResults" class="forge-benchmark-detail">
+                <p class="muted">The before/after comparison appears when both arms have finished. A refused comparison says why instead of showing a delta.</p>
+              </div>
+            </article>
+            <article class="surface forge-card">
+              <div class="forge-card-head">
+                <h3>Experiment History</h3>
+                <button id="forgeExperimentHistoryRefreshButton" type="button" class="cyber-btn small">Refresh</button>
+              </div>
+              <p class="muted">Every proposal, approval, rejection, run, cancellation and result is retained. A rejected or blocked experiment stays listed: it records a decision.</p>
+              <div id="forgeExperimentHistory" class="forge-history-list" aria-live="polite"></div>
+            </article>
+          </div>
+
+          <div id="forgeHistoryView" class="forge-view" role="tabpanel" aria-labelledby="forgeTabHistory" hidden>
+            <article class="surface forge-card">
+              <div class="forge-card-head">
+                <h3>Session History</h3>
+                <button id="forgeHistoryRefreshButton" type="button" class="cyber-btn small">Refresh</button>
+              </div>
+              <p class="muted">Persisted across restarts in the local state store. Expand a session to inspect its record; nothing is re-run.</p>
+              <div id="forgeHistoryList" class="forge-history-list" aria-live="polite"></div>
+            </article>
+          </div>
+
+          <div id="forgeTimelineView" class="forge-view" role="tabpanel" aria-labelledby="forgeTabTimeline" hidden>
+            <div id="forgeTimelineReadonly" class="forge-readonly-banner" role="note">
+              <strong>Read-only replay.</strong> This view inspects persisted evidence. It cannot start,
+              resume, stop or drive a session, and it cannot send input or execute a recorded action.
+            </div>
+            <div class="forge-timeline-toolbar">
+              <label class="field">
+                <span>Session</span>
+                <select id="forgeTimelineSession" class="cyber-input" aria-label="Session to replay"></select>
+              </label>
+              <button id="forgeTimelineRefreshButton" type="button" class="cyber-btn small">Refresh</button>
+              <label class="field">
+                <span>Compare with</span>
+                <select id="forgeTimelineCompareSelect" class="cyber-input" aria-label="Second session to compare">
+                  <option value="">no comparison</option>
+                </select>
+              </label>
+              <button id="forgeTimelineCompareButton" type="button" class="cyber-btn small">Compare</button>
+            </div>
+            <div class="forge-timeline-filters" role="group" aria-label="Timeline filters">
+              <label class="field">
+                <span>Category</span>
+                <select id="forgeTimelineCategory" class="cyber-input"></select>
+              </label>
+              <label class="field">
+                <span>Source</span>
+                <select id="forgeTimelineSource" class="cyber-input"></select>
+              </label>
+              <label class="field">
+                <span>Severity</span>
+                <select id="forgeTimelineSeverity" class="cyber-input"></select>
+              </label>
+            </div>
+            <div id="forgeTimelineNotice" class="forge-notice" role="status" aria-live="polite" hidden></div>
+            <div id="forgeTimelineMeta" class="forge-timeline-meta" aria-live="polite">
+              <p class="muted">Select a recorded session to inspect its evidence timeline.</p>
+            </div>
+            <div class="forge-timeline-grid">
+              <article class="surface forge-card forge-timeline-events">
+                <div class="forge-card-head">
+                  <h3>Chronological Timeline</h3>
+                  <span class="forge-badge" id="forgeTimelineCount">—</span>
+                </div>
+                <ol id="forgeTimelineList" class="forge-timeline-list" aria-live="polite"></ol>
+                <div class="button-row">
+                  <button id="forgeTimelineMoreButton" type="button" class="cyber-btn small" hidden>Load more events</button>
+                </div>
+              </article>
+              <article class="surface forge-card forge-timeline-inspect">
+                <div class="forge-card-head">
+                  <h3>Evidence Inspector</h3>
+                  <div class="forge-timeline-nav">
+                    <button id="forgeTimelinePrevButton" type="button" class="cyber-btn small" disabled>Prev</button>
+                    <span id="forgeTimelinePosition" class="forge-badge">no event</span>
+                    <button id="forgeTimelineNextButton" type="button" class="cyber-btn small" disabled>Next</button>
+                  </div>
+                </div>
+                <h4 id="forgeTimelineDetailTitle">Select an event</h4>
+                <div id="forgeTimelineDetail" class="forge-timeline-detail">
+                  <p class="muted">Choose an event from the timeline to inspect its recorded details and evidence.</p>
+                </div>
+                <figure class="forge-viewport forge-timeline-frame" id="forgeTimelineFrameWrap" hidden>
+                  <img id="forgeTimelineFrame" alt="Captured frame referenced by the selected event" hidden>
+                  <div id="forgeTimelineFrameEmpty" class="forge-viewport-empty">
+                    <span class="forge-viewport-icon" aria-hidden="true">&#9635;</span>
+                    <p>No frame evidence for this event.</p>
+                    <p class="muted">The event remains inspectable without an image.</p>
+                  </div>
+                </figure>
+                <p id="forgeTimelineFrameNote" class="forge-frame-note"></p>
+              </article>
+            </div>
+            <div class="forge-live-grid">
+              <article class="surface forge-card">
+                <h3>Failure Classification</h3>
+                <div id="forgeTimelineClassification" class="forge-timeline-classification" aria-live="polite">
+                  <p class="muted">Select a session to see which failure categories its evidence supports.</p>
+                </div>
+              </article>
+              <article class="surface forge-card">
+                <h3>Session Comparison</h3>
+                <div id="forgeTimelineCompareOutput" class="forge-timeline-compare" aria-live="polite">
+                  <p class="muted">Choose two recorded sessions to compare measured evidence. A figure that was not measured is reported as unavailable, never as zero.</p>
+                </div>
+              </article>
+            </div>
+          </div>
+        </section>
+
         <section id="routingPanel" class="panel">
           <div class="section-head">
             <div>
@@ -614,6 +1368,7 @@
     <script defer src="/static/js/telemetry.js?v=__NC_ASSET_VERSION__"></script>
     <script defer src="/static/js/activity.js?v=__NC_ASSET_VERSION__"></script>
     <script defer src="/static/js/routing-explorer.js?v=__NC_ASSET_VERSION__"></script>
+    <script defer src="/static/js/novaforge.js?v=__NC_ASSET_VERSION__"></script>
     <script defer src="/static/js/voice.js?v=__NC_ASSET_VERSION__"></script>
     <script defer src="/static/js/effects.js?v=__NC_ASSET_VERSION__"></script>
     <script defer src="/static/app.js?v=__NC_ASSET_VERSION__"></script>

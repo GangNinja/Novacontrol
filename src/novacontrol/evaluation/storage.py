@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -126,11 +127,24 @@ class JsonlRecordStore:
 
     def replace(self, records: Sequence[Mapping[str, Any]]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-        with temporary.open("w", encoding="utf-8") as handle:
-            for row in records:
-                handle.write(_dump(row) + "\n")
-        os.replace(temporary, self.path)
+        # A FIXED ``<name>.tmp`` name is a cross-process collision: two instances
+        # staging a write at the same moment make the second ``os.replace`` fail on
+        # Windows with WinError 32. Stage a uniquely named file in the same
+        # directory (the same fix ``persistence/json_store.py`` already carries).
+        descriptor, temporary = tempfile.mkstemp(
+            dir=str(self.path.parent), prefix=f"{self.path.name}-", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                for row in records:
+                    handle.write(_dump(row) + "\n")
+            os.replace(temporary, self.path)
+        except BaseException:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise
 
 
 def _dump(row: Mapping[str, Any]) -> str:

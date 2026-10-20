@@ -1788,7 +1788,660 @@ audit also proved the leg a fresh install cannot reach — the game-eval contrac
 REAL embodied session — and four `VerificationAuditTests` now pin all of it. Details in
 [docs/GENERALIZATION.md](GENERALIZATION.md) and [docs/PHASE26_REPORT.md](PHASE26_REPORT.md).
 
+## Integration & Performance Audit (Phases 1–26)
+
+Audited 2026-10-16 against commit `ec03e87` on `main` (clean tree, in sync with `origin/main`).
+Full report: [INTEGRATION_PERFORMANCE_AUDIT.md](INTEGRATION_PERFORMANCE_AUDIT.md).
+
+**Verdict: PASS WITH LIMITATIONS.** Every phase surface is reachable on the running application,
+and the Explore latency regression is reproduced, explained and fixed. Three confirmed defects
+were fixed, each with a mutation-verified regression test:
+
+- **Explore's search stage was an unbounded sequential cascade.** One query at a time across three
+  providers, each with a 10 s socket timeout, then the whole cascade retried when the result came
+  back empty — **22 network calls**, counted from the shipped control flow. The same simulation
+  measured **210.2 s (3.50 min) before and 70.1 s (1.17 min) after**. The independent queries a
+  research run issues now run as ONE concurrent wave bounded by
+  `ExploreService.search_budget_seconds`.
+- **The Explore network stack blocked the asyncio event loop** (`urlopen` called from `async def`
+  in `providers.py` and `web_search.py` — only `PageReader` used a worker thread). One research run
+  stalled every other task in the process for **3.654 s**; the same heartbeat measures **0.270 s**
+  now.
+- **`PageReader.read_many` documented a batch deadline it did not have.** It stops at
+  `batch_deadline_seconds`, so the property its docstring claimed is now true.
+
+One further confirmed defect was **fixed in a follow-up change on the same tree**:
+`GET /intelligence` took **22.1 s** because the routing report asked five selection questions,
+every one of them probing an unreachable local runtime twice, and the route's own runtime block
+probed it again — **eleven** bounded probes to answer one status read. A request-scoped probe
+memo (`ModelProbeSnapshot`) now gives the whole read **one probe budget, two probes**, measured
+live at **22.105 s → 4.026 s** (81.8% faster, 5.5×) with the selection results byte-identical.
+It is not a negative cache: the memo is created and dropped inside the call, so the invariant
+that "a miss is never cached, so pulling the model later is picked up without a restart" still
+holds — verified live in both directions on a running server (a runtime appearing after boot was
+discovered with no restart; one disappearing was not served from a stale answer). Pinned by
+`tests/test_model_probe_dedup.py` (18 tests, mutation-verified).
+
+Measured on the real API after the fixes: `POST /ask` *"What is 9 times 9?"* → 200 in **0.235 s**
+(route `chat`, answer 81); `POST /explore` *"why do cats purr"* → 200 in **5.59 s** with 3 sources,
+5 videos and a real answer. The historical 5–6 s baseline is **not reproducible** on this host —
+the baseline commit itself measured 9.2–10.7 s cold — so the honest statement is that the healthy
+path today is ~5.6 s over HTTP while the 3–4 minute path was real and is now ~1.2 min.
+
+The four CI checks: both mypy views (**PASS**, 412 files, 0 issues) and the API-reference sync
+(**PASS**, `docs/API.md: in sync`) are green. The test matrix is **FAIL as executed on this host** —
+3,999 passed, **5 failed**, 12 skipped across the whole suite (report §10) — and all five failures
+are the Phase-14 resource governor refusing a training run on a machine down to 337 MB free; both
+affected files pass 179/179 in isolation on the same tree, so none is attributable to this change.
+The Python 3.12 matrix leg and Linux CI are **UNAVAILABLE** here. Because the test matrix is not
+green, **nothing was committed or pushed**: the four Explore fixes and their tests stay in the
+working tree with the reason recorded in the report's §13. Playwright remains absent (12 skipped),
+and camera, VLM, model-backed prediction, cloud and real-gameplay capabilities remain UNAVAILABLE.
+
+## Full Application Real-User Acceptance Audit (Phases 1–26)
+
+Audited 2026-10-17 against `ec03e87` on `main`, working tree dirty with the preceding Integration &
+Performance Audit (preserved, not committed). Reports:
+[REAL_USER_APPLICATION_AUDIT.md](REAL_USER_APPLICATION_AUDIT.md) and
+[REAL_USER_FEATURE_INVENTORY.md](REAL_USER_FEATURE_INVENTORY.md).
+
+**Verdict: PASS WITH LIMITATIONS.** Every discovered user-facing feature was exercised through
+its real entry point: **265 HTTP routes** (124 GET, 141 POST) called over live HTTP against a real
+server, and **all eleven UI panels** driven in a real browser with genuine typed input and clicks.
+The API surface answered with **zero server errors** — 156 OK, 108 contract-correct refusals whose
+messages each named what was missing. Three defects were confirmed, fixed and pinned:
+
+- **Incomplete bodies returned HTTP 500 with a traceback.** Nineteen handlers indexed a required
+  field with `payload[key]`, so `POST /plan {}` answered `500 Internal Server Error` and logged
+  `KeyError: 'goal'`. The existing field guard was generalized to `_required_field` (refusing a
+  missing, blank **or JSON-null** value) and used at all 19 sites: **19/19 now return `422` naming
+  the field, 0 × 5xx**, verified live after a restart. `RequiredFieldValidationTests` (4 tests,
+  38 subtests) pins it, including the `str(None) == "None"` case that the first fix got wrong.
+- **Every chat turn was stored and rendered twice.** The turn was written by two owners: the server
+  appends the pair in `handle_request` (the path the UI, the CLI and the GUI all take) *and* the
+  browser posted the same two turns to `/chat/history`. One typed message produced four transcript
+  rows, and a reload rendered every message twice. The server is now the single writer (the client
+  only reads the thread and migrates a legacy localStorage copy once): verified live — clear, type,
+  send, reload → **exactly one pair**. `ChatTurnRecordedOnceTests` pins the count, and the
+  source-contract test was rewritten to forbid the client-side append from returning.
+- **`/automation` reported `id`, its actions demanded `automation_id`.** Posting the report's own id
+  back was refused. Both spellings are now accepted; `AutomationIdSpellingTests` pins it. Verified
+  live: the id read from `/automation` drove approve → run, leaving the task `scheduled` with
+  runs 1, failures 0, and an audit record carrying its `automation_id`.
+
+Verified end to end, live: Explore research with **8 ordered `explore.progress` frames** on the
+SSE channel; routing (six utterance families landing correctly, plus a live gate-by-gate trace
+from the Routing panel); planning and the agent loop returning a verification verdict; a code plan,
+scaffold, save and re-run; a scheduled automation through the permission gate; teach → recall; and
+**persistence across a real restart** (32 chat turns, the taught fact, a changed setting, the
+scheduled task with its parsed schedule, and the build artifacts all survived).
+
+Measured on this host: `/ask` local **252.6 ms median**; `/explore` **~3.3 s uncached** and
+**3.8 ms** on a 900 s cache hit (the cache key includes the synthesis provider, so a mode switch
+cannot serve a stale report); `/intelligence` **4.04 s** and `/diagnostics` **2.03 s** are whole-
+report reads; startup READY in 5–8 s. The build stayed honest throughout: no GPU, thermal sensor,
+vision model, prediction model or local LLM produced `Unavailable`/`model_unavailable` **with the
+reason**, never a fabricated figure.
+
+The four test files my changes can reach (`test_web_api.py`, `test_chat_transcript.py`,
+`test_web_platform.py`, `test_brain_mode_and_tasks.py`) were run in full and **passed: 147 tests,
+380 subtests, 0 failures, exit 0 (16:28)** — the pre-existing tests in those files pass alongside
+the new ones, so the 41-call-site guard rename and the single-owner chat change broke nothing they
+cover. Limitations, not passes: the **full 2,254-test suite** was not run in one go;
+**ruff is not installed here**, so `mypy` was the static check and is clean;
+real desktop/browser/phone execution, real model inference and GPU/NPU telemetry are unavailable on
+this machine. Documented follow-ups: a rate-limited page fails silently (two or three tabs exhaust
+120 req/min and the panels stay empty with only a console error); `docs/AGENTS.md` still describes
+chat history as localStorage-resident while the code moved it server-side; `docs/PHASES.md` stops
+at Phase 15 while the build is at Phase 26. Nothing was committed or pushed.
+
+## Game-Control Readiness Audit (Phases 1–26)
+
+A read-only audit of the interfaces a game would have to be driven through, measured on this host
+rather than inferred from capability names. Report: `docs/GAME_CONTROL_READINESS_AUDIT.md`.
+
+**Verdict: NOT READY for real-time gameplay. GO WITH LIMITATIONS for a slow or turn-based game,
+and only where every action is a label visible on screen.**
+
+What works, proven against a disposable window this audit created and owned: the full
+**observe → locate → act → verify** loop completed in **6148.5 ms** — real Windows OCR located the
+label at (1055, 269) in 618.4 ms, the cursor moved to the target exactly, the click was received
+as `M_PRESS`/`M_RELEASE`, and the before/after diff verified the change (8.35 %,
+`change_near_click: true`). A key press was received as `KEY_PRESS` **and** `KEY_RELEASE` in
+272.4 ms, and every run ended with presses equal to releases — input can never be left stuck down.
+
+What blocks play: one capture is **571.0 ms** → **1.75 Hz** observation (the frame sampler's own
+floor is 5 fps, so acquisition is 3.3× slower than the layer built to consume it); a minimal
+capture+keypress+capture loop is **0.71 Hz**; there is **no coordinate-addressed input action** and
+**no key hold** (`SendKeys('{a 5}')` is five taps, not a hold); a window can be named but not
+measured (no rect/client area); and the **agentic observe layer is not wired to the desktop** —
+`window_probe` is never passed and `observe()` runs without a `screenshot_path`, so it returns
+`source="none"` with 0 elements and a run verifies against nothing (honestly reporting failure).
+
+## Game-Control Readiness Remediation (Phases 1–26)
+
+All six essential blockers from the audit above were implemented and measured on this host
+(2026-10-17). Full evidence and before/after tables: `docs/GAME_CONTROL_READINESS_AUDIT.md` §10.
+
+**Capture (E1).** `desktop/capture.py` now owns a **persistent** PowerShell worker — one process
+serves every frame, started lazily, restarted once if it dies, with the old one-process-per-frame
+path kept as the fallback. Same-host comparison, both arms in one run: **1.70 → 8.23 fps**
+(median 587.6 → 121.3 ms, p95 607.5 → 129.0 ms; repeated 1.65 → 8.27 fps, 566.7 → 120.7 ms).
+12/12 frames distinct and fresh, 1 worker spawn, ~150 MB working set, cleanup verified. `fresh`
+now means *this call produced this frame* (previous mtime + recency + a real PNG), not "a file
+exists".
+
+**Input (E2–E5).** New actions `MOUSE_MOVE`, `MOUSE_CLICK`, `MOUSE_BUTTON_DOWN/UP`, `KEY_DOWN/UP`
+and `WINDOW_GEOMETRY`, planned, catalogued, permission-declared, and injected through the same
+DPI-aware worker that captures. Live, against a disposable window the probe owned: move **8.5–14.1
+ms** (cursor landed exactly), click **15.0–21.2 ms** (window received press+release), a genuine
+**0.46 s key hold** (one press during, one release after — not `SendKeys`' five taps), holds
+released on `stop_input()` (**presses == releases, 4/4**), and clicks outside the client area or
+on the title bar **refused**. `InputGuard` is the only path that sends input, so the release is
+structural. The live probe also found a real bug the existing tests could not: the worker reports
+the client rect as (offset, size), and containment read the size as an absolute edge — valid
+clicks on the right half of any window not at (0, 0) were refused. Fixed, with five tests against a
+non-zero-origin window.
+
+**Observation (E6).** The application now passes `window_probe`, an approval-gated capture, and
+the OCR reader into `UiPerceptionEngine`, and the orchestrator requests desktop layers for every
+non-browser task. Measured on the same engine: **`source="none"`, 0 elements, no evidence** became
+**`window_probe+browser_dom+screen_text`**, 7 window elements, 265 OCR words, 1,846 characters,
+`evidence=true`. Steady state **1.34–1.38 s** (first call 3.12 s); capture 250.7 ms, OCR 690.9 ms,
+window probe 349.5 ms. Browser observation is untouched (a desktop-less observation pays for neither
+a capture nor a probe). Verification needles no longer accept generic words like "application" —
+with real observations that matched `ApplicationFrameHost` and reported a stubbed action complete.
+
+**Safety fallback.** Unmatched desktop phrasing is now refused (`status: "not_an_action"`, no
+token) after the GIL fallback, instead of being aimed at `EXECUTE_SCRIPT`.
+
+**Verdict: real-time gameplay is still NOT ready** — 8.2 fps warm, ~1.35 s per rich observation,
+no frame timing, no DXGI duplication, primary display only, and keys are not window-validated. A
+**slow or turn-based offline** evaluation is now supportable **without** the old label-addressing
+restriction. Nothing was committed or pushed; no game evaluation was run.
+
+## NovaForge NF-01 — Gameplay Workspace & Session Foundation
+
+NovaForge has its first working surface: one sidebar panel, a backend-owned session that OBSERVES one
+validated window, and persisted history. Report: `docs/NOVAFORGE_NF01_REPORT.md`. Test and check
+results: 61 passed across `test_novaforge*.py`, `mypy src` clean (417 files), `docs/API.md` in sync,
+14 route-contract tests + 320 subtests.
+
+**What exists.** A validated mission (name, objective, target, success criteria, optional time limit
+and action budget), a nine-state lifecycle whose illegal moves RAISE, and an observation loop that
+pins the target's handle/pid (not just its title), captures through the existing persistent desktop
+worker, refuses to record a non-fresh frame, crops to the window, records provenance and latency,
+and publishes `novaforge.frame.captured`. Sessions persist in `JsonStateStore`; on boot a record left
+mid-run is closed as `STOPPED/application_restarted` instead of being restored as a state the UI
+would trust. Starting asks the one `PermissionManager` (`novaforge.session`, declared MEDIUM) and
+stores which source decided. 12 authenticated routes, all declared in the API surface, the consumer
+registry and `docs/API.md`.
+
+**Exercised live**, against a disposable window with a ticking counter: 79 frames captured (newest 30
+retained, sequence numbers prove the count), all fresh window crops at 1426 × 626, capture median
+135.6 ms / p95 144.3 ms; the counter advanced in Forge Vision, **froze** on pause (3 min 11 s),
+advanced again on resume, and killing the window auto-paused with `target_lost` instead of showing a
+frozen feed as live. Cleanup on stop reported `presses 0 / releases 0 / held_after 0`.
+
+**Found live and fixed.** The crop clipped a window extending past the captured display without
+saying so; the frame note now reports the clipping (two tests). Start also re-validated by title only;
+the validated handle/pid are now pinned through start and checked every tick and on resume.
+
+**Verification pass (2026-10-17).** Re-audited against the phase's objectives by probing the seams
+with raising doubles and reading the persisted state back. **Eleven defects found and fixed** (nine findings; two covered more than one symptom), each
+with a regression test: a raising window probe returned HTTP 500 instead of "unavailable, with a
+reason"; a raising geometry probe returned 500 on validate/start and FAILED a running session (now a
+validation reason, and a mid-session `target_unreadable` pause that resume refuses honestly); the
+window picker hid a second window with the same title while validation refused the mission as
+ambiguous; the time limit was ignored while paused; the action budget was offered as a limit that
+could never fire; a mission save claimed success when the store dropped the write; restart
+reconciliation existed only in memory; and the panel said "No session is active" while running,
+could let an older frame response replace a newer one, and leaked its object URL on session end. The
+phase now runs **72 tests** (up from 61), with the paused-limit test mutation-checked; `mypy src`
+clean, `docs/API.md` in sync, 18 route-shape tests / 90 subtests and 32 contract tests / 320 subtests
+passing. Remaining: the action budget is stored but cannot apply in NF-01, `windows_available` is a
+capability claim rather than a live probe, and the JS fixes were verified in Node and at HTTP, not
+by replaying a browser race.
+
+**Not in NF-01, and visibly not.** No decisions, gameplay input, objective verification, OCR, game
+launch, or benchmarking. `COMPLETED` is unreachable because nothing verifies an objective; limits end
+as `STOPPED` with a reason that says the objective was not verified. Proposed/Executed/Verified read
+"Not available in NF-01", and the later-phase sidebar entries were disabled and labelled NF-02… (NF-02
+is now implemented; see the NF-02 section below).
+
+## NovaForge NF-02 — Forge Telemetry & Guardian
+
+Telemetry and safety are now part of every NovaForge session, measured at the one place each fact
+occurs rather than inferred. Report: `docs/NOVAFORGE_NF02_REPORT.md`. **Verdict: PASS WITH
+LIMITATIONS.** Test and check results: `test_novaforge.py` 74 passed, `test_novaforge_ui.py` 25
+passed (Node logic + a DOM-shim renderer suite over the real Telemetry/Guardian renderers),
+`test_novaforge_api.py` 23 passed in 294.33 s; together with `test_route_shape_contract.py` 117
+passed / 90 subtests; backend/frontend contract 10 passed / 289 subtests; `mypy src` and `mypy src
+--platform win32` clean over 419 files; `docs/API.md` in sync.
+
+**Telemetry.** One bounded `TelemetrySnapshot` per session record: frames, stale captures, capture
+failures, measured capture latency (count, min, median, p95 only from 20 samples with the reason
+otherwise, max, mean, and the exact 120-sample window the percentiles use), last frame age, frame
+gaps against a cadence-derived threshold, monotonic active/paused seconds and pause count, state
+changes, end reason, target checks/losses/changes/unreadable probes, the configured interval, and an
+observed frame rate only when a second of active time and a frame exist. Zero is a measurement;
+an unmeasured figure is `null` with a reason — actions are `available: false` (no action path) and
+CPU/RAM/GPU/NPU report `unavailable` with their reasons, never an estimate. Tick persistence is
+throttled to 2 s while lifecycle moves write at once.
+
+**Guardian.** `guardian.py` derives safety state, target-validation state, limits, controls, cleanup
+and a guarantee table from the authoritative record. Cancel and emergency stop share one bounded
+abort: record the intervention, cancel the loop, wait at most `stop_timeout`, finalize through the
+single path that releases input, persist, confirm — and a repeated request does nothing twice
+(`already_stopped: true`). The time limit is checked while running and paused and is measured with
+`time.monotonic()`, so a clock change cannot extend it. `input_safety_decision()` is the boundary a
+future input phase must call: it refuses unless the session is RUNNING against its pinned target,
+and at NF-02 it refused because no gameplay input path existed (`INPUT_PATH_AVAILABLE = False`).
+*Superseded by NF-07 (below):* the boundary now admits a RUNNING session whose target identity was
+confirmed for this run **and** whose build wires a gameplay input path, and the action budget is
+enforced at execution.
+
+**API and UI.** `GET /novaforge/sessions/{id}/telemetry`, `POST …/cancel` and `POST
+…/emergency-stop` (authenticated, 404/409 as before, in all five registration places). The Forge
+panel gained Telemetry and Guardian tabs, a Cancel button, per-metric `unavailable` rendering, and
+an emergency stop that reports only the backend's confirmed result; a stale poll cannot overwrite a
+newer render (`responseStillCurrent`). NF-02's sidebar entry is no longer "planned"; only NF-03…NF-06
+remain disabled.
+
+**Live-verified** against a disposable window through the served panel: the Telemetry tab showed 22
+frames / 0 stale / 0 failures / 0 gaps with CPU-RAM-GPU-NPU `unavailable` and actions `unsupported`,
+the Guardian tab showed the enforced limits and marked action budget and gameplay input **NOT
+enforced**, and Emergency Stop reported only after the backend answered — "confirmed by the backend:
+session STOPPED, input cleanup ok (no held input), bounded wait 8s", with the persisted intervention
+`emergency_stop/stopped/5.8 ms` and cleanup `held_after 0`. That pass found one defect the unit tests
+had not pinned: a Guardian abort persisted `end_reason: "stopped"` instead of naming the abort; it
+now names it, with unit and HTTP assertions.
+
+**Measured on this host** (historical baselines, not targets): persistent capture steady state
+median 119.7 ms / mean 120.5 ms → 8.3 fps (NF-01 measured 135.6 ms median); telemetry aggregation
+3.73–4.22 µs/iteration and snapshot serialization 0.0725–0.1121 ms, measured over `to_dict()` +
+`json.dumps` (the earlier 0.0407 ms timed only `json.dumps` and is superseded). The two 60-frame
+persistence arms now separate consistently — throttled 2.113/2.124/2.139 s versus
+write-every-frame 2.323/2.385/2.389 s, i.e. 0.21–0.26 s per 60 frames (~9–11 % of loop wall time,
+throttled arm always running first). It is a policy measurement on a synthetic capture, not a
+gameplay claim.
+
+**Verification pass (2026-10-17).** Six defects found by probing the seams and fixed with regression
+tests: the input boundary trusted session state instead of a per-run confirmed identity (now
+`SessionRecord.target_validated`, persisted and exposed as `guardian.target.validated`); the session
+cap left evicted sessions' frame directories on disk forever; a restart that trimmed an over-cap
+snapshot did not write the trimmed set back (both mutation-checked); `history()` shipped the raw persisted telemetry
+(latency window) in every row despite promising compact rows; the cleanup note could claim "presses
+matched releases" when releases outnumbered presses; and `scripts/benchmark_novaforge_telemetry.py`
+timed only `json.dumps` while claiming `to_dict()` + `json.dumps`.
+
+**Limitations.** No action-execution path, so the action budget cannot fire and no
+proposed/executed/verified counts exist; no per-session CPU/RAM or GPU/NPU provider; the input
+boundary is tested as policy, not against live input; `windows_available` is still a capability
+claim; the UI was verified through Node-executed logic, the DOM-shim renderers and the HTTP
+contract, not a browser race; the benchmark's two arms run sequentially, so a residual warm-up
+effect cannot be fully excluded (arm order works against the measured difference); and an evicted
+session's frames are deleted with it, so only the newest `max_sessions_kept` runs stay inspectable.
+The full repository suite was not run. **NF-03 was not started.**
+
+## NovaForge NF-03 — Evidence Timeline & Replay
+
+Every NovaForge session now has an ordered, bounded, persisted evidence timeline and a read-only replay
+surface. Report: `docs/NOVAFORGE_NF03_REPORT.md`. **Verdict: PASS WITH LIMITATIONS.** NF-04, NF-05 and
+NF-06 were not started.
+
+**Timeline.** `timeline.py` records a typed event per fact — lifecycle transitions, target validation
+and loss, frame capture/rejection/failure, observations, telemetry snapshots, Guardian interventions,
+errors, input cleanup and timeline persistence results. Each event carries a unique id, a per-session
+`seq` (the only ordering key), a wall-clock `at` label, `elapsed_ms` measured with `time.monotonic()`
+from the session origin, its source, a bounded payload and bounded evidence refs. Unknown types are
+refused, duplicate `event_id`s are ingested once, and `seq` stays unique and contiguous under
+concurrent appends. There is deliberately **no** `action.*` or `verification.*` event: NF-03 has no such
+stage and says so rather than emitting fiction.
+
+**Persistence.** One snapshot per session in the shared `JsonStateStore`, written through the manager's
+existing throttled path. When a session closes the manager reads the snapshot back and compares its
+highest stored `seq` with the newest event in memory: success is `persistence.state: verified`, a
+mismatch is `failed` with the expected/stored sequences, an error on the session and a
+`timeline.persistence_failed` event. A restart restores the log; a session that predates it gets a
+timeline reconstructed from the persisted record and every event is marked `derived: true`. Evicting a
+session deletes its stored log so deleted evidence cannot be resurrected. The log is bounded at 240
+events per session and reports how many old events retention dropped.
+
+**Evidence.** References are bounded identifiers, never paths or image payloads; frames resolve through
+the same confined frame boundary as the existing frame route, and a pruned frame resolves
+`available: false` with the retention reason while the event stays inspectable. Verification found and
+fixed a real provenance defect: the NF-01 record keeps only its newest 30 observations and numbers new
+ones from the current list length, so several can share `index: 31`; index-only resolution returned the
+**oldest retained** match — a different observation than the event named. Observation and intervention
+refs now carry the recording timestamp, an index-only ref that matches several entries is reported
+`ambiguous`, and regression tests pin both.
+
+**Replay and comparison.** Three authenticated GET routes — `GET /novaforge/sessions/{id}/timeline`
+(paged, filterable), `GET …/timeline/{seq}` and `GET /novaforge/timeline/compare?left=&right=` — in all
+five registration places, with `docs/API.md` in sync. Nothing on the replay path can start, pause,
+resume, stop, cancel or send input: `timeline.py` contains no lifecycle call, the handlers only read the
+manager, POST is 405, and an HTTP test asserts a stopped session is unchanged afterwards. The replay
+payload advertises `read_only: true` and `can_*: false`, and the new Forge **Evidence Timeline** tab
+renders that banner from the flags. Failure classification names only evidence-backed categories
+(`capture_failure`, `target_loss`, `timeout`, `guardian_cancellation`, `persistence_failure`,
+`unexpected_exception`, `unknown`), marks each direct or inferred, cites its events, and never claims
+success — `completion.verified` is always false because no verifier exists. Comparison renders 17 rows;
+an unmeasured figure is `None` with a reason, never zero, and action/verification rows are
+`available: false`.
+
+**Panel.** The sidebar **Evidence (NF-03)** destination is now enabled and opens the sixth Forge tab:
+session selector, category/source/severity filters, chronological list, event inspector with payload and
+per-reference evidence state, authenticated frame viewer, Prev/Next, Load more, classification card,
+two-session comparison card, and distinct loading/empty/unavailable/auth-error/persistence-error
+states. A stale session/filter response and a stale frame response are both discarded by request
+tokens. Benchmarks, Evaluation and Forge Coach remain disabled.
+
+**Verified (second pass included).** `test_novaforge_timeline.py` + `test_novaforge_ui.py` **83 passed**
+in 4.97 s; all four NovaForge files (`test_novaforge.py`, timeline, UI, API) **187 passed** in 408.97 s;
+`test_route_shape_contract.py` + `test_web_platform.py` **63 passed / 416 subtests**; both mypy views
+clean over 420 files; `docs/API.md` in sync; every static JS file passes `node --check`; the panel was
+re-verified live in a browser after a server restart (74-event session; only the limitations that apply
+rendered; the event count read 74 of 74). Measured in the latest run: append **10.285 µs/event**,
+snapshot write **1.315–4.078 ms** (1–240 events, 935 B–170,575 B), read+restore **1.571–20.962 ms**,
+timeline page **7.516 ms**, single event **0.015 ms**, compare **0.205 ms**, restart read **7.714 ms**.
+A second verification pass fixed six more things: an oversized persisted integer or deeply nested payload
+could raise out of a timeline load (now bounded); an ambiguous intervention reference reported the wrong
+"no timestamp" reason; a failed shutdown stop path could lose the final events (now flushed in a
+`finally`); the roadmap card claimed NF-03 was unimplemented and called it per-action replay; a loaded
+page's event count showed the newest page's size; and a recorded timeline listed the derived-order
+caveat it does not need.
+
+**Limitations.** No action or verification stage exists, so the timeline records none and comparison
+reports both unavailable; derived timelines order by wall-clock timestamps that can tie and have no
+elapsed time; 240 events per session is a hard bound that drops old events (reported); old frames are
+deleted by the existing retention policy and their references explain it; observation indexes remain
+non-unique at the record level (NF-03 compensates with timestamps, but an index-only ref is
+unresolvable); the live UI check used a deterministic capture double rather than a real game; and the
+full repository suite was not run.
+
+## NovaForge NF-04 — Benchmark Lab
+
+NovaForge runs are now **measurable on the same basis**: a benchmark run is one real observation session,
+measured from its own telemetry and evidence timeline, persisted as a versioned record, aggregated over
+eligible attempts and compared only when the configurations match. Report:
+`docs/NOVAFORGE_NF04_REPORT.md`. **Verdict: PASS WITH LIMITATIONS.** NF-05 and NF-06 were not started.
+
+**Catalog.** `benchmark.py` declares a versioned scenario catalog — `observation-baseline`,
+`capture-latency` (percentiles only from 20 samples), `observation-continuity` — and lists
+`gameplay-objective` as an **unsupported** entry with the reason it cannot run (no decision pipeline, no
+input path, no objective verifier). Every runnable scenario declares `act: false`,
+`verify_objective: false` and a verifier `{available: false}`. A 25-entry metric catalog types each row
+`measured`, `derived` (formula and both inputs named) or `unsupported` (with `available: false` and a
+reason); an unmeasured figure is never zero. Configuration is validated (budget 1–300 s, interval 0.05–5 s, notes ≤500 chars,
+scenario minimum frames), and invalid input is a 422 rather than a clamped run.
+
+**Runner.** `benchmark_lab.py` runs one attempt at a time on the manager's one session slot, validates
+the scenario and the **live** window in preflight (which starts nothing), bounds the attempt by the
+budget plus a hard deadline, and cancels through the session's normal stop path so input cleanup and the
+intervention record still happen. The terminal status is decided from the session's real ending —
+`completed` only for a time-limit/completed session with the scenario's minimum frames and latency
+samples, `aborted` for cancellation/deadline/shutdown, `failed` when the session failed, `invalid` when
+start was refused or the minimum data was not recorded. A completed run means **data complete**; every
+reason says no objective is claimed. Runs persist in the shared `JsonStateStore` under one namespace with
+a 60-attempt cap; a stored `running` record from a dead process is recovered as `aborted`, never
+resurrected as active.
+
+**Aggregate and comparison.** Aggregation is cohort-scoped to the newest eligible run's configuration,
+target geometry and operating system — a 10 s and a 300 s run are never pooled — names that cohort,
+lists completed runs on another basis as `excluded_by: configuration`, and reports per-metric
+median/mean/n/min/max/stdev (sample formula, `None` below two samples) over the cohort only. Comparison refuses incompatible pairs with the reason (scenario, version, budget, interval, window
+title/geometry, operating system, mixed configurations, non-eligible runs) and returns `not_established`
+with its explanation instead of naming a winner — NF-04 invokes no model or policy, so no model can be
+declared superior.
+
+**Panel.** The sidebar **Benchmarks (NF-04)** destination is now enabled and opens the seventh Forge
+tab: catalog and scenario detail, live window picker, budget/interval/notes, **Validate before Start**,
+live run card, history (every attempt, status and reason), aggregate, run detail with typed metric rows
+and JSON export, and the compatible-comparison card. Loading, empty, unavailable, auth-error and
+conflict states are distinct; a stale poll cannot overwrite a newer render.
+
+**Verified.** `test_novaforge_benchmark.py` **42 passed / 60 subtests**; `test_novaforge_ui.py` **48
+passed**; `test_novaforge_benchmark_api.py` **15 passed** (212.64 s) through the real `create_app()`; the NF-01/02/03
+regression files added **147 passed** (116 unit/timeline + 31 HTTP) — **260 NovaForge tests** in all;
+`test_route_shape_contract.py` + `test_web_platform.py` **63 passed / 425 subtests**; both mypy views
+clean over 422 files; `docs/API.md` in sync; every static JS file passes `node --check`.
+The panel was verified live against a real Notepad window: preflight reported 1388 × 1294 px and 17
+expected opportunities, two identical 4 s runs completed (6 and 7 frames; 201.242 / 206.828 ms median
+latency), the aggregate read `2 ELIGIBLE / 2 ATTEMPTS`, comparison was `COMPATIBLE` with a
+`Not established` verdict, JSON export was enabled, and the console held no errors. Measured:
+finalize **17.72–19.84 ms** including the verified write-back (collection 0.24–0.58 ms),
+`history`/`aggregate`/`compare` **0.08 / 0.83 / 0.35 ms**, restart read **0.06–0.13 ms**, snapshot
+**42,534 B** for 3 runs and **84,931 B** for 6 (~14 KB per run; ~0.84 MB at the cap), session overrun
+**20–80 ms** on a 2 s budget. A second,
+adversarial pass found and fixed nine defects (empty reasons on six unavailable rows, a median quoting
+the p95 rule, boolean/fractional config coercion, pooled incompatible aggregates, first-run-only
+side checks, unverified persistence, `null` duration rendered as `0.0 s`, "retained frames" for three
+references, and tab re-entry resetting the form); each has a regression test and the fixed panel was
+re-verified live against Notepad.
+
+**Limitations.** No model, policy, action or objective evaluation exists, so `model`/`policy` are
+`available: false` and gameplay is an unsupported catalog entry; one run at a time shares the one session
+slot; retention is 60 attempts and snapshot size grows linearly (~14 KB each); p95 needs 20 samples and
+covers the telemetry's bounded newest window; capture is primary-display and window-cropped; the live
+check used Notepad, not a game; and the full repository suite was not run.
+
+## NovaForge NF-05 — Controlled Game Evaluation
+
+NovaControl can now evaluate a compatible environment **one at a time, baseline first, and only what it
+can actually observe**: a versioned compatibility registry decides whether an environment may be
+evaluated and in which mode, readiness is judged against the live window before anything starts, and the
+result is a per-game report that links to the evidence instead of asserting a score. Report:
+`docs/NOVAFORGE_NF05_REPORT.md`. **Verdict: PASS WITH LIMITATIONS.** NF-06 was not started.
+
+**The result is negative, and that is the finding.** `games.py` registers three environments —
+`disposable-window` and `offline-game-window` (both `OBSERVATION_ONLY`) and `gameplay-objective`
+(`UNSUPPORTED`) — and the catalog's own summary is `2 runnable · 2 observation-only · 0 controllable`.
+Validation refuses to let that be papered over: a `SUPPORTED*` entry must declare the `control` mode
+**and** an available input path **and** an available objective verifier ("capture alone is not
+control"), an `OBSERVATION_ONLY` entry may not declare `control`, an unsupported one may not declare a
+mode at all, and **no record may claim launch support** — NF-05 never launches or installs a game.
+
+**Readiness is a gate, not a formality.** `readiness_checks` judges 14 checks per request against the
+live window — compatibility, evaluation mode, target identity and uniqueness, fresh-frame capture,
+observation source, the objective verifier, the gameplay input path, the Guardian stop/cancel paths,
+input cleanup, benchmark configuration, evidence persistence, the offline declaration and the exclusive
+session slot — each with its evidence and, when it fails, its reason. A capability that does not exist is
+`unavailable` (the objective verifier, with its reason) rather than a green row, and a required failure
+**refuses the run**: there is no override in the UI and none in the API.
+
+**An evaluation is a record around one NF-04 benchmark run, never a second runner or lifecycle.**
+`evaluation.py` composes the benchmark lab over the NF-01 session manager, so one session slot, the
+Guardian's stop path, NF-02 telemetry and NF-03 timeline evidence all apply unchanged. Start re-validates
+server-side, requires an explicit `confirm: true`, enforces the pinned target identity, refuses (409) a
+second concurrent evaluation — and still **retains** the refused attempt as `invalid` with its reasons,
+because hiding an attempted evaluation is the same lie as hiding a failed one. Terminal statuses are
+`completed` (data completeness, as the record's own reason says), `failed`, `aborted`, `invalid` and
+`unsupported`.
+
+**Baseline-first.** The oldest completed valid evaluation of a game/scenario/version is the baseline;
+later ones are candidates compared through NF-04's own compatibility rules (scenario, budget, interval,
+window geometry, operating system), which refuse an incompatible pair with the reason instead of
+producing a delta. The verdict is `not_established` — NF-05 invokes no model and no policy, so declaring
+one superior would be fiction.
+
+**Honesty is literal on the wire.** Every record and report carries `objective.verified: false` with the
+reason, `objective_verified: false` and `real_gameplay_control_exercised: false`; no frame payloads are
+copied (the report links to the benchmark record, the session, the timeline and the telemetry) and
+`missing_evidence` names whatever is absent. Nine authenticated routes in all five registration places;
+the eighth Forge tab (registry, compatibility detail, readiness checklist, Validate→confirm→Start,
+live card, history, report with comparison table and JSON export) is reached from an enabled sidebar
+destination while **Forge Coach stays disabled and labelled NF-06**.
+
+**Verified.** `test_novaforge_evaluation.py` **37 passed** and `test_novaforge_ui.py` **61 passed / 31
+subtests**; `test_novaforge_evaluation_api.py` **12 passed** (176.72 s) through the real `create_app()`;
+the NF-01…NF-04 regression added **172 passed / 97 subtests** plus **31 + 15 HTTP passed** — **328
+NovaForge tests** in all; `test_route_shape_contract.py` **18 passed / 90 subtests**, `test_web_platform.py`
+**45 passed / 344 subtests**, `test_web_api.py` **75 passed** (run in three `-k` groups; the file exceeds
+the 600 s single-invocation limit), `test_focus_rings.py` **7 passed**; both mypy views clean over **424
+files**; `docs/API.md` in sync; every static JS file passes `node --check`. Measured
+(`scripts/benchmark_novaforge_evaluation.py`, deterministic capture seam): preflight **0.198 ms**, three
+2 s evaluations **2139.95 / 2182.30 / 2204.94 ms** wall (50–100 ms session overrun), `get`/`history`/
+`baseline`/`report` **0.001 / 0.017 / 0.053 / 0.101 ms**, restart read **0.018 ms**, snapshot **56,903 B**
+for 3 evaluations (~19 KB each; ≈1.1 MB at the 60 cap). Live-verified in a browser against a real Notepad
+window: readiness passed with the measured identity (`handle 1049688 · pid 32468`), Start stayed disabled
+until the confirmation box was ticked, two 3 s runs completed (baseline then candidate, comparison
+`Compatible` / `Not established`), the report read `Objective verified — no`, the **Open Evidence
+Timeline** link opened the session's timeline, and the console held no errors. A verification pass found
+two defects, each fixed: `.field { display: flex }` silently defeated the `hidden` attribute (the
+not-required offline declaration stayed on screen while the DOM said it was hidden) — one global
+`[hidden] { display: none !important; }` rule fixed it and the redundant `.command-palette[hidden]` rule
+was deleted — and two mypy errors in the new module were fixed with real annotations. A later verification pass found two more: a readiness row could blame a window it never measured (a request refused for a bad budget reported `target_identity` as unidentified while `target_uniqueness` passed on a check that never ran), and a refused `control` attempt was retained as an `observation_only` record. Both are fixed and pinned, four report claims that had no test behind them now do, and the final tree re-ran at **350 NovaForge tests** (119 evaluation + panel, 28 HTTP through the real `create_app()`, 217 NF-01…NF-04 + platform, 49 NF-01…NF-04 HTTP and route-contract; both mypy views clean; `docs/API.md` in sync) with a live pass repeated against a fresh server on 8001 after a stale one was found still answering with the pre-fix build.
+
+**Limitations.** No environment is controllable and no objective verifier exists, so real gameplay input
+was **not** exercised and no objective was verified; no game was launched and none was evaluated (the live
+runs observed a disposable Notepad window, and every artifact says so); the offline/single-player
+classification is operator-declared rather than probed; one evaluation at a time; retention is 60
+records; capture is primary-display and window-cropped; and the full repository suite was not run in one
+pass.
+
+## NovaForge NF-06 — Forge Coach and controlled experiments (2026-10-18)
+
+NF-06 is delivered: `novaforge/coach.py` reads what NF-01…NF-05 recorded and returns evidence-backed
+findings, an earliest-recoverable-error *candidate* that never claims causation, and **14** declared
+recommendation rules ranked by severity and evidence strength; `novaforge/experiments.py` turns a
+recommendation into a controlled experiment (`repeat` or single-variable `configuration_change`) whose
+approval is bound to the configuration digest, whose preflight is revalidated at run time as a refusal, and
+whose verdicts (`improved` / `regressed` / `inconclusive` / `not_comparable`) always report
+`gameplay_claimed: false` and `objective_verified: false`. Twelve routes in all five registration places,
+a ninth Forge tab plus the enabled **Forge Coach NF-06** sidebar destination, `docs/API.md` in sync, **425
+NovaForge tests** and both mypy views clean over 426 files; a full write-up with the measured figures and
+the eleven defects fixed along the way is in `docs/NOVAFORGE_NF06_REPORT.md`. **Verdict: PASS WITH
+LIMITATIONS** — no controllable environment and no objective verifier exist, and NF-04 cannot certify a
+delta across a budget or interval change, so a cross-basis experiment is always reported per arm.
+
+An acceptance pass over NF-06 (2026-10-18, after the live run) found and fixed four more defects: the
+verdict's “≥2 eligible runs per side” gate counted *attempts*, so an arm with two tries and one invalidated
+run could claim `improved` from a single value (it now counts eligible runs); a run-time readiness refusal
+was a dead end (it moved the record to `blocked`, which `approve` refused and `run` did not accept — the
+approval is unchanged, so the same approved experiment can now be retried once the window is back, while a
+proposal blocked for its own validation errors still never runs); the refusal reasons were not rendered
+after a reload (the card now shows “Why the run was refused”, and Run stays available for the retry); and a
+machine-speed-dependent test pinned a 2 s arm against a 20-frame validity floor. Verified by
+`tests/test_novaforge_coach.py` (47 tests) + `tests/test_novaforge_ui.py` (86 tests) together
+**133 passed / 60 subtests**, the NF-06 HTTP suite **9 passed**, NF-01's API suite **31 passed**, both mypy
+views clean, and the served panel re-checked live. See `docs/NOVAFORGE_NF06_REPORT.md` §13a for the exact
+results and §14 for the checks that could not be completed.
+
+## NovaForge NF-01…NF-06 independent verification (2026-10-19)
+
+A cross-phase audit re-checked every requirement the six phase reports claim, against the tree and a live
+application. **Verdict: PASS WITH LIMITATIONS** — every claimed capability is implemented and evidenced;
+the three capabilities nobody has (gameplay input, an objective verifier, a game launch) are reported
+UNAVAILABLE rather than approximated. Full report: [NOVAFORGE_VERIFICATION.md](NOVAFORGE_VERIFICATION.md).
+
+Evidence: **126/126 test files executed — 4,527 passed, 3,488 subtests, 0 failed, 12 skipped**; NovaForge
+alone **425 passed / 183 subtests** in 10 files; both mypy views clean over **426 files**; `docs/API.md` in
+sync; `node --check` clean on 13 JS files; and a **25/25-step live pass** on a fresh server (pin a real
+window → session with 6 fresh frames → telemetry/timeline → stop with `verification.unverified` → benchmark
+completed → observation-only evaluation → Coach findings → experiment refused before approval, then
+approved by digest and run to an honest `inconclusive`). The panel rendered the same evidence with zero
+console messages.
+
+One integration defect was found and fixed: the evaluation and audit stores staged writes under a fixed
+`<name>.tmp`, so two processes (two app instances, or two test runs) collided with `WinError 32`; both now
+stage uniquely named files like `persistence/json_store.py` already did, and **four new regression tests**
+pin that another writer's stage is never touched and a failed replace leaves no stage behind. They were
+mutation-tested: forcing the shared stage back reproduces `PermissionError [WinError 32]` for both stores.
+The NF-06 report's unmeasured "route-contract tests do not finish" implication was corrected with measured
+timings (46.1 s / 28.0 s per test). No test was skipped, weakened or deselected, and NF-07 was not started.
+
+**Go/no-go: NO-GO for the next phase and for the game-by-game campaign.** The observation → telemetry →
+evidence → benchmark → evaluation → Coach → approved-experiment chain works and is evidenced end to end, but
+scene interpretation, decision/action proposal and an independent objective verifier do not exist, and
+there is no target-validated input path (`INPUT_PATH_AVAILABLE = False`); the action budget is stored but not
+enforceable. The requirement matrix, data-flow trace, gameplay-readiness audit and unverified list are in the
+report.
+
+*Superseded in part (2026-10-20):* NF-07 delivered the target-validated input path and the independent
+objective verifier, and the budget is enforced at execution. The NO-GO now applies to what is still absent:
+scene interpretation and a decision/action proposal pipeline (NF-06 recommends experiments, not actions), plus
+any objective kind beyond a window title.
+
+### Sidebar consolidation (2026-10-20, correction found in the live page)
+
+`Evidence NF-03`, `Benchmarks NF-04`, `Evaluation NF-05` and `Forge Coach NF-06` were four extra sidebar
+entries that all opened the same `novaforgePanel` as `NovaForge` itself. They are deleted, together with
+their `data-forge-*` click hooks in `js/novaforge.js` and the unused `.nav-item.planned` CSS; the sidebar now
+has one NovaForge destination and the nine phase tabs inside the panel.
+
+Deleting them exposed why the duplication mattered: the tab strip scrolled horizontally instead of wrapping,
+so `Benchmark Lab`, `Game Evaluation`, `Evidence Timeline` and `Forge Coach` sat past the visible edge. With
+no sidebar entry left for those phases, an off-screen tab was an unreachable feature. `.forge-tabs` now
+wraps (two rows, `scrollWidth == clientWidth`), and `test_every_phase_tab_is_reachable_without_horizontal_scrolling`
+plus the tightened destination tests pin both facts. Verified live in a browser: 12 nav items with one
+NovaForge entry, nine tabs, each activating its own view. `tests/test_novaforge_ui.py` 87 passed / 49
+subtests; `tests/test_web_api.py` 75 passed / 72 subtests; `tests/test_web_platform.py` 45 passed / 356
+subtests — all exit 0. This changes presentation only — the
+requirement matrix, data flow and the NO-GO verdict below are unchanged.
+
+## NovaForge NF-07 — guarded action path & objective verification (2026-10-20)
+
+NF-07 supplies the two halves every earlier Forge phase had to report as missing — the acting half and the
+verifying half — and refuses the confusions the readiness audit called out. `novaforge/actions.py` defines
+four bounded action kinds (key tap, hold, click, move) under one `ActionPolicy`, a digest bound to the
+session **and** the action **and** the pinned window's handle/pid, and an `ActionRunner` whose only path to
+input is the desktop package's `InputGuard` (so every press has a release on success, error, cancellation,
+timeout, stop and target loss). `novaforge/objective.py` verifies by reading the OS (`window_title`) and
+nothing else: `verified_success` / `verified_failure` / `unknown`, and only the first can complete a
+session. The manager keeps the three distinctions: a **plan** injects nothing, a **refusal** is `denied` and
+never consumes the action budget (now enforced at execution), and an **execution** is not a success.
+Approval is revalidated immediately before injection (identity, geometry, foreground), a vanished or
+replaced window pauses instead of injecting, and Guardian cancel/emergency stop interrupts input already in
+flight. Five routes (`objective`, `actions/plan`, `actions/execute`, `verify`, `verification`) in all five
+registration places; `docs/API.md` in sync; the Guardian tab gains a **Gameplay Objective & Actions** card,
+and the panel's status/limits/roadmap copy was corrected — it still told a reader there was "no verifier"
+and that the action budget could not be enforced.
+
+**Accepted on real hardware, not a stub.** `scripts/novaforge_gameplay_acceptance.py` launches its own
+disposable window (`scripts/forge_harness_window.ps1`, which retitles itself to `READY` only when it receives
+a key press) and asserts 15 steps: target pinned, plan sends nothing, a mismatched digest denied, the
+approved digest injecting exactly one press/release with nothing held, the verifier reading
+`NC FORGE HARNESS - READY` from handle + pid, the session reaching `COMPLETED/objective_verified`, a
+Guardian cancel interrupting a 1500 ms hold in **253.7 ms**, an `Esc` through the same guarded path closing
+the window → `PAUSED/target_lost` with the next action refused, and an idempotent emergency stop with
+cleanup `3 / 3`. `scripts/novaforge_live_workflow.py` repeats the chain over the live HTTP API (10/10) and
+the same flow was driven through the panel in a browser: badge `VERIFIED SUCCESS`, evidence naming the
+window, action log `executed`, input cleanup `1 / 1`.
+
+Building it against a real window found **three defects no unit test could see**, each fixed and pinned by a
+mutation-checked test: a cancelled capture exchange left an unread reply on the worker's pipe so the next
+`find` answered for the wrong request (a cancelled session could not re-validate its window); a stop
+request was permanent because the guard captured its `InputStop` at construction, so one abort made every
+later action — including the next session's — abort instantly; and a Guardian abort could not interrupt an
+in-flight hold because it queued behind the lock the action held, while input cleanup reported the process's
+lifetime press totals as a per-session number (`2 / 2` for a session that tapped once).
+
+Report: `docs/NOVAFORGE_NF07_REPORT.md`. **Verdict: PASS WITH LIMITATIONS** — only a window-title objective
+is checkable, input is limited to the declared gameplay keys, nothing launches a game, and anti-cheat and
+per-game policy remain unproven; the action path was accepted against a disposable window, not a commercial
+game.
+
 ## Next Work
+
+NovaForge can now act and verify, so the prerequisites for *playing* have narrowed to ONE: a **decision
+pipeline** that chooses what to do from what was observed (NF-06 recommends, but it recommends *experiments*,
+not actions). The two that were missing are delivered: a Guardian-enforced gameplay input path
+(digest-bound, policy-bounded, guard-released) and an objective verifier that reads the target rather than
+its own action log. The next honest step is therefore the same target NF-05 refuses to fake: a slow,
+turn-based, offline environment whose state a verifier can read — which in practice means a second objective
+kind (a pixel region or OCR text, not only a window title), because no real game announces success in its
+window title.
+
+Two smaller, self-contained gaps are recorded by NF-06 itself: the panel cannot author an explicit
+experiment spec (a change whose value the record cannot supply must be proposed through the API), and
+repeats beyond one run per arm — the only way NF-04 will certify anything — have unit coverage but no live
+run through the panel yet.
+
+The remediation above removes the essential blockers; what remains before gameplay is measured is
+the first honest target — a slow, turn-based, offline game driven through these interfaces — and
+the next performance step (GPU duplication + a raw frame path) if the rate is to rise above ~8 fps.
+Neither was started in this pass.
 
 The intelligence roadmap ends here, and the one thing Phase 26 deliberately did **not**
 start is the dedicated **game-playing evaluation**: `generalization.game_eval` ships the

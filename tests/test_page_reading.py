@@ -12,6 +12,7 @@ Pins two things:
 
 from __future__ import annotations
 
+import time
 import unittest
 from unittest.mock import patch
 
@@ -203,6 +204,38 @@ class ReadManyTests(unittest.IsolatedAsyncioTestCase):
         reader = self._StubReader({})
         self.assertEqual(await reader.read_many([]), {})
         self.assertEqual(reader.seen, [])
+
+
+class ReadManyDeadlineTests(unittest.IsolatedAsyncioTestCase):
+    """A batch of page reads is bounded by ONE deadline.
+
+    A slow host used to hold the batch open for its own socket timeout, and a
+    batch of slow hosts held the whole research run open — the longest stage of
+    a run was six sequential-ish page fetches.
+    """
+
+    async def test_a_slow_batch_stops_at_its_deadline(self) -> None:
+        class SlowReader(PageReader):
+            def __init__(self) -> None:
+                super().__init__(timeout=5.0, concurrency=2)
+                self.finished: list[str] = []
+
+            def read(self, url: str) -> str:
+                time.sleep(0.5)
+                self.finished.append(url)
+                return f"prose for {url}"
+
+        reader = SlowReader()
+        reader.batch_deadline_seconds = 0.6
+        started = time.perf_counter()
+        result = await reader.read_many([f"https://a.example/{i}" for i in range(6)])
+        elapsed = time.perf_counter() - started
+
+        # Unbounded, 6 URLs at concurrency 2 with a 0.5s read is 1.5s.
+        self.assertLess(elapsed, 1.2)
+        # Whatever the deadline did allow through is still returned.
+        self.assertTrue(all(url in result for url in reader.finished))
+        self.assertLess(len(reader.finished), 6)
 
 
 if __name__ == "__main__":

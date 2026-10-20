@@ -7,12 +7,29 @@ Wikipedia when web results are too few.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+from typing import Any
 from urllib.parse import quote_plus
 from urllib.request import Request, urlopen
 
 from novacontrol.explore.models import ResearchSource
+
+
+# The Wikipedia fallback is a per-request HTTP call with a 5s socket timeout.
+_WIKI_TIMEOUT_SECONDS = 5.0
+
+
+async def _fetch_json(url: str) -> Any:
+    """Fetch and decode a JSON body off the event loop (``urlopen`` blocks)."""
+
+    def _blocking() -> Any:
+        request = Request(url, headers={"User-Agent": "NovaControl/1.0"})
+        with urlopen(request, timeout=_WIKI_TIMEOUT_SECONDS) as response:
+            return json.loads(response.read().decode("utf-8", errors="replace"))
+
+    return await asyncio.to_thread(_blocking)
 
 
 class WikipediaSearchProvider:
@@ -55,9 +72,7 @@ class WikipediaSearchProvider:
         try:
             wiki_title = title.replace(" ", "_")
             url = f"{self.summary_url}{quote_plus(wiki_title)}"
-            request = Request(url, headers={"User-Agent": "NovaControl/1.0"})
-            with urlopen(request, timeout=5) as response:
-                data = json.loads(response.read().decode("utf-8", errors="replace"))
+            data = await _fetch_json(url)
 
             if data.get("type") == "standard":
                 page_url = data.get("content_urls", {}).get("desktop", {}).get("page", "")
@@ -75,9 +90,7 @@ class WikipediaSearchProvider:
         """Search Wikipedia articles by content using the search API."""
         try:
             url = f"{self.search_url}?action=query&list=search&srsearch={quote_plus(query)}&srlimit={limit}&format=json"
-            request = Request(url, headers={"User-Agent": "NovaControl/1.0"})
-            with urlopen(request, timeout=5) as response:
-                data = json.loads(response.read().decode("utf-8", errors="replace"))
+            data = await _fetch_json(url)
 
             results = []
             for item in data.get("query", {}).get("search", [])[:limit]:

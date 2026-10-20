@@ -62,6 +62,11 @@ _DEFAULT_MAX_CHARS = 12_000
 # report cache, so a re-asked question is served from the same evidence.
 _DEFAULT_CACHE_TTL_SECONDS = 300.0
 
+# The whole batch of page reads shares one deadline. A batch of concurrent
+# reads is ceil(max_pages / concurrency) round trips; without a ceiling a run
+# of slow hosts made that the longest stage of a research run.
+_DEFAULT_BATCH_DEADLINE_SECONDS = 15.0
+
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -214,12 +219,14 @@ class PageReader:
         max_pages: int = 6,
         concurrency: int = 4,
         cache_ttl_seconds: float = _DEFAULT_CACHE_TTL_SECONDS,
+        batch_deadline_seconds: float = _DEFAULT_BATCH_DEADLINE_SECONDS,
         cache: TtlCache[str] | None = None,
     ) -> None:
         self.timeout = timeout
         self.max_chars = max_chars
         self.max_pages = max_pages
         self.concurrency = max(1, concurrency)
+        self.batch_deadline_seconds = batch_deadline_seconds
         self.cache_ttl_seconds = cache_ttl_seconds
         self.cache = cache or TtlCache()
 
@@ -287,11 +294,18 @@ class PageReader:
             async with gate:
                 return url, await asyncio.to_thread(self.read, url)
 
-        try:
-            results = await asyncio.gather(*(_one(url) for url in targets))
-        except Exception as exc:  # pragma: no cover - gather only raises on cancellation
-            logger.debug("Concurrent page read failed: %s", exc)
-            return {}
+        tasks = [asyncio.create_task(_one(url)) for url in targets]
+        done, pending = await asyncio.wait(tasks, timeout=self.batch_deadline_seconds)
+        for task in pending:
+            task.cancel()
+        if pending:
+            # A cancelled read is already on a worker thread; abandoning the
+            # await stops the batch growing with it. Its result still lands in
+            # the cache when the thread finishes.
+            await asyncio.gather(*pending, return_exceptions=True)
+        results = [
+            task.result() for task in done if not task.cancelled() and task.exception() is None
+        ]
         return {url: text for url, text in results if text.strip()}
 
 

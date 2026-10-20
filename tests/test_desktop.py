@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import os
 import shlex
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -24,7 +26,78 @@ from novacontrol.desktop import (
     LocalDesktopRunner,
     NoopDesktopRunner,
 )
+from novacontrol.desktop.capture import (
+    CaptureResult,
+    PersistentScreenCapture,
+    looks_like_png,
+)
 from novacontrol.desktop.controller import parse_desktop_command
+
+
+# A stand-in for the capture HOST that speaks the worker's line protocol. It is
+# plain Python, so the protocol, the restart and the cleanup are all testable on
+# any OS — nothing here touches a real screen or needs PowerShell.
+_FAKE_CAPTURE_HOST = r'''
+import os, sys
+
+die_after = int(sys.argv[1]) if len(sys.argv) > 1 else 0
+out = sys.stdout
+out.write("ready 800x600\n")
+out.flush()
+count = 0
+while True:
+    line = sys.stdin.readline()
+    if not line:
+        break
+    line = line.strip()
+    if not line:
+        continue
+    if line == "exit":
+        break
+    if line == "stats":
+        out.write("stats 4096 12\n")
+        out.flush()
+        continue
+    count += 1
+    if die_after and count > die_after:
+        os._exit(3)
+    with open(line, "wb") as handle:
+        handle.write(b"\x89PNG\r\n\x1a\n" + str(count).encode())
+    out.write("ok 7 %d 800x600\n" % os.path.getsize(line))
+    out.flush()
+'''
+
+# A host whose FIRST kind of request is slow enough to be cancelled mid-flight:
+# the reply still lands on the pipe afterwards, which is exactly how a naive
+# exchange reads someone else's answer.
+_SLOW_CAPTURE_HOST = r'''
+import os, sys, time
+out = sys.stdout
+out.write("ready 800x600\n")
+out.flush()
+while True:
+    line = sys.stdin.readline()
+    if not line:
+        break
+    line = line.strip()
+    if not line:
+        continue
+    if line == "exit":
+        break
+    payload = b"AFTER"
+    if "slow" in line:
+        payload = b"SLOW"
+        time.sleep(0.5)
+    with open(line, "wb") as handle:
+        handle.write(b"\x89PNG\r\n\x1a\n" + payload)
+    out.write("ok 7 %d 800x600\n" % os.path.getsize(line))
+    out.flush()
+'''
+
+# A host that becomes ready and then ignores stdin entirely (no `exit` handler).
+_DEAF_CAPTURE_HOST = (
+    "import sys, time; sys.stdout.write('ready 4x4\\n'); sys.stdout.flush(); time.sleep(60)"
+)
 
 
 def _python_command(code: str, *args: str) -> str:
@@ -876,3 +949,273 @@ class DesktopInAppPlanningTests(unittest.TestCase):
     def test_plan_stop_emits_stop_app(self):
         workflow, _descriptions, _first = self.controller.plan_command("stop that")
         self.assertEqual(workflow.actions[0].type.value, "stop_app")
+
+
+# ---------------------------------------------------------------------------
+# Screen capture as a resource (game-control audit, Phase B)
+# ---------------------------------------------------------------------------
+
+
+def _fake_worker(*, die_after: int = 0, startup_timeout: float = 5.0) -> PersistentScreenCapture:
+    """The persistent worker pointed at the Python protocol host."""
+    return PersistentScreenCapture(
+        program=sys.executable,
+        arguments=("-u", "-c", _FAKE_CAPTURE_HOST, str(die_after)),
+        startup_timeout=startup_timeout,
+        frame_timeout=5.0,
+        shutdown_grace=0.5,
+    )
+
+
+def _deaf_worker(*, startup_timeout: float = 5.0) -> PersistentScreenCapture:
+    return PersistentScreenCapture(
+        program=sys.executable,
+        arguments=("-c", _DEAF_CAPTURE_HOST),
+        startup_timeout=startup_timeout,
+        frame_timeout=2.0,
+        shutdown_grace=0.2,
+    )
+
+
+class CaptureWorkerProtocolTests(unittest.IsolatedAsyncioTestCase):
+    """One host, many frames: the resource the audit's measurement argues for."""
+
+    async def asyncSetUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.directory = Path(self._tmp.name)
+
+    async def test_one_host_serves_every_frame(self) -> None:
+        worker = _fake_worker()
+        self.addCleanup(worker.aclose)
+        first = await worker.capture(str(self.directory / "frame-0.png"))
+        second = await worker.capture(str(self.directory / "frame-1.png"))
+        third = await worker.capture(str(self.directory / "frame-2.png"))
+        for result in (first, second, third):
+            self.assertTrue(result.ok, result.error)
+            self.assertTrue(result.persistent)
+            self.assertEqual((result.width, result.height), (800, 600))
+            self.assertEqual(result.elapsed_ms, 7)
+            self.assertGreater(result.size_bytes, 0)
+            self.assertTrue(looks_like_png(result.path))
+        self.assertEqual(worker.spawns, 1, "a reusable resource must not respawn per frame")
+        self.assertEqual(worker.frames, 3)
+        self.assertEqual(worker.size, (800, 600))
+        # Each frame really was written by that request, not handed back stale.
+        payloads = {(self.directory / f"frame-{i}.png").read_bytes() for i in range(3)}
+        self.assertEqual(len(payloads), 3)
+
+    async def test_a_dead_host_is_restarted_once_transparently(self) -> None:
+        worker = _fake_worker(die_after=1)
+        self.addCleanup(worker.aclose)
+        first = await worker.capture(str(self.directory / "a.png"))
+        self.assertTrue(first.ok, first.error)
+        second = await worker.capture(str(self.directory / "b.png"))
+        self.assertTrue(second.ok, second.error)
+        self.assertEqual(worker.spawns, 2, "the second frame must come from a fresh host")
+        self.assertEqual(worker.frames, 2)
+
+    async def test_a_host_that_never_becomes_ready_is_reported_never_raised(self) -> None:
+        worker = PersistentScreenCapture(
+            program=sys.executable,
+            arguments=("-c", "import time; time.sleep(30)"),
+            startup_timeout=0.4,
+            frame_timeout=2.0,
+            shutdown_grace=0.2,
+        )
+        result = await worker.capture(str(self.directory / "never.png"))
+        self.assertFalse(result.ok)
+        self.assertIn("ready", result.error)
+        self.assertFalse(worker.running, "a host that never became ready must not be left behind")
+        self.assertFalse((self.directory / "never.png").exists())
+
+    async def test_cleanup_terminates_a_host_that_ignores_exit(self) -> None:
+        worker = _deaf_worker()
+        self.assertTrue(await worker.ensure_started())
+        process = worker._process
+        self.assertIsNotNone(process)
+        await worker.aclose()
+        self.assertFalse(worker.running, "shutdown must not leave the capture host alive")
+        # Second close is a no-op, not an error.
+        await worker.aclose()
+        self.assertFalse(worker.running)
+
+    async def test_a_cancelled_exchange_cannot_answer_the_next_command(self) -> None:
+        """The worker speaks request/reply, so a cancelled request leaves a stray
+        reply behind. The next command must never read it as its own answer —
+        that is how a cancelled capture makes the following ``find`` report the
+        previous window (observed live as a session that could not re-validate).
+        """
+        worker = PersistentScreenCapture(
+            program=sys.executable,
+            arguments=("-u", "-c", _SLOW_CAPTURE_HOST),
+            startup_timeout=5.0,
+            frame_timeout=5.0,
+            shutdown_grace=0.2,
+        )
+        self.addCleanup(worker.aclose)
+        cancelled_path = self.directory / "slow-request.png"
+        in_flight = asyncio.create_task(worker.capture(str(cancelled_path)))
+        await asyncio.sleep(0.15)
+        in_flight.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await in_flight
+        # Let the abandoned reply arrive, so it really is waiting on the pipe.
+        await asyncio.sleep(0.8)
+        following = await worker.capture(str(self.directory / "following.png"))
+        self.assertTrue(following.ok, following.error)
+        written = (self.directory / "following.png").read_bytes()
+        self.assertIn(b"AFTER", written, "the next command read the cancelled request's reply")
+        self.assertEqual(worker.spawns, 2, "a desynchronised worker must be restarted")
+
+    async def test_stats_report_the_hosts_own_resource_use(self) -> None:
+        worker = _fake_worker()
+        self.addCleanup(worker.aclose)
+        stats = await worker.stats()
+        self.assertEqual(stats.working_set_bytes, 4096)
+        self.assertEqual(stats.cpu_ms, 12)
+
+
+class FakeCapture:
+    """A capture worker double the runner can be given instead of a real host."""
+
+    def __init__(self, *, mode: str = "png", age_seconds: float = 0.0, ok: bool = True,
+                 error: str = "", persistent: bool = True) -> None:
+        self.mode = mode
+        self.age_seconds = age_seconds
+        self.ok = ok
+        self.error = error
+        self.persistent = persistent
+        self.closed = 0
+        self.requests: list[str] = []
+
+    async def capture(self, path: str, **_: object) -> CaptureResult:
+        self.requests.append(str(path))
+        target = Path(path)
+        if self.ok:
+            if self.mode == "png":
+                target.write_bytes(b"\x89PNG\r\n\x1a\n" + b"payload")
+            elif self.mode == "garbage":
+                target.write_bytes(b"definitely not an image")
+            if self.age_seconds:
+                stamp = time.time() - self.age_seconds
+                os.utime(target, (stamp, stamp))
+        return CaptureResult(
+            ok=self.ok, path=str(target), error=self.error, persistent=self.persistent,
+            size_bytes=target.stat().st_size if target.exists() else 0,
+        )
+
+    async def aclose(self) -> None:
+        self.closed += 1
+
+
+class ScreenshotEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    """Phase D: a screenshot task succeeds only on a FRESH, valid capture."""
+
+    async def asyncSetUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.directory = Path(self._tmp.name)
+        self.target = str(self.directory / "shot.png")
+
+    async def _capture(self, capture: FakeCapture) -> dict:
+        runner = LocalDesktopRunner(screen_capture=capture)
+        result = await runner.run(DesktopAction(
+            type=DesktopActionType.TAKE_SCREENSHOT,
+            target="screenshot",
+            description="Capture the screen.",
+            parameters={"save_path": self.target},
+        ))
+        return dict(result)
+
+    async def test_a_frame_written_now_is_fresh_and_verified(self) -> None:
+        capture = FakeCapture()
+        result = await self._capture(capture)
+        self.assertTrue(result["fresh"], result)
+        self.assertEqual(result["capture_mode"], "persistent")
+        self.assertEqual(result["verification"], "fresh capture written during this call")
+        self.assertEqual(result["size_bytes"], len(b"\x89PNG\r\n\x1a\n") + len(b"payload"))
+
+    async def test_an_old_file_on_disk_is_not_a_capture(self) -> None:
+        """The audit's weak check: 'the file exists' proves nothing."""
+        result = await self._capture(FakeCapture(age_seconds=3600))
+        self.assertTrue(result["exists"])
+        self.assertFalse(result["fresh"], "an hour-old PNG is not this capture")
+
+    async def test_a_file_that_is_not_a_png_is_not_a_capture(self) -> None:
+        result = await self._capture(FakeCapture(mode="garbage"))
+        self.assertTrue(result["exists"])
+        self.assertFalse(result["fresh"])
+
+    async def test_a_worker_that_writes_nothing_reports_the_reason(self) -> None:
+        """A worker failure must not be silently rescued by the fallback arm."""
+        capture = FakeCapture(ok=False, error="the screen capture produced no image")
+        runner = LocalDesktopRunner(screen_capture=capture)
+
+        async def no_fallback(path: str) -> None:
+            return None
+
+        runner._capture_screenshot_oneshot = no_fallback  # type: ignore[method-assign]
+        result = dict(await runner.run(DesktopAction(
+            type=DesktopActionType.TAKE_SCREENSHOT,
+            target="screenshot",
+            description="Capture the screen.",
+            parameters={"save_path": self.target},
+        )))
+        self.assertFalse(result["fresh"])
+        self.assertFalse(result["exists"])
+        self.assertIn("no image", result["verification"])
+
+    async def test_a_failed_worker_falls_back_to_the_one_shot_path(self) -> None:
+        failed = FakeCapture(ok=False, error="worker unavailable")
+        runner = LocalDesktopRunner(screen_capture=failed)
+        calls: list[str] = []
+
+        async def fake_oneshot(path: str) -> None:
+            calls.append(path)
+            Path(path).write_bytes(b"\x89PNG\r\n\x1a\n" + b"oneshot")
+
+        runner._capture_screenshot_oneshot = fake_oneshot  # type: ignore[method-assign]
+        result = await runner.run(DesktopAction(
+            type=DesktopActionType.TAKE_SCREENSHOT,
+            target="screenshot",
+            description="Capture the screen.",
+            parameters={"save_path": self.target},
+        ))
+        output = dict(result)
+        self.assertEqual(calls, [self.target])
+        self.assertEqual(output["capture_mode"], "oneshot")
+        self.assertTrue(output["fresh"], output)
+
+    async def test_an_untouched_file_at_the_path_is_not_a_capture(self) -> None:
+        """The audit's exact case: the path already holds a frame from before."""
+        Path(self.target).write_bytes(b"\x89PNG\r\n\x1a\n" + b"old frame")
+        stamp = time.time() - 30
+        os.utime(self.target, (stamp, stamp))
+        runner = LocalDesktopRunner(
+            screen_capture=FakeCapture(ok=False, error="worker unavailable")
+        )
+
+        async def no_fallback(path: str) -> None:
+            return None
+
+        runner._capture_screenshot_oneshot = no_fallback  # type: ignore[method-assign]
+        result = dict(await runner.run(DesktopAction(
+            type=DesktopActionType.TAKE_SCREENSHOT,
+            target="screenshot",
+            description="Capture the screen.",
+            parameters={"save_path": self.target},
+        )))
+        self.assertTrue(result["exists"], "the stale file is still on disk...")
+        self.assertFalse(result["fresh"], "...and must not be reported as a capture")
+        self.assertFalse(result["freshness"]["file_written"])
+        self.assertIn("not written by this capture", result["verification"])
+
+    async def test_close_releases_the_capture_worker(self) -> None:
+        capture = FakeCapture()
+        runner = LocalDesktopRunner(screen_capture=capture)
+        await runner.close()
+        await runner.close()
+        self.assertEqual(capture.closed, 2)
+        self.assertEqual(capture.requests, [], "closing must not capture anything")
+

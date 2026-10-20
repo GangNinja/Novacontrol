@@ -27,6 +27,20 @@ class DesktopActionType(StrEnum):
     WEB_SEARCH = "web_search"
     # Vision-guided in-app action: click a labeled element on screen.
     VISION_CLICK = "vision_click"
+    # Coordinate-addressed input (Phase C of the game-control audit). These are
+    # the explicit, geometry-aware primitives a game needs: move to an exact
+    # physical-pixel point, click it, and hold/release a mouse button or a key
+    # so a press is guaranteed to be matched by a release. Each travels through
+    # the same approval, permission and audit layers as every other action.
+    MOUSE_MOVE = "mouse_move"
+    MOUSE_CLICK = "mouse_click"
+    MOUSE_BUTTON_DOWN = "mouse_button_down"
+    MOUSE_BUTTON_UP = "mouse_button_up"
+    KEY_DOWN = "key_down"
+    KEY_UP = "key_up"
+    # Target-window geometry (bounds, client area, DPI scale, foreground state)
+    # — the evidence an input action needs BEFORE it addresses a coordinate.
+    WINDOW_GEOMETRY = "window_geometry"
     # Direct game launch via platform deep link (steam://rungameid/<appid>).
     GAME_LAUNCH = "game_launch"
     # App deep-link navigation (steam://open/library, ms-settings:<page>, ...).

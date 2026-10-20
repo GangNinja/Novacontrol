@@ -176,6 +176,19 @@ async def _ocr_words(image_path: str) -> list[dict[str, Any]] | None:
     return data or None
 
 
+async def screen_text(image_path: str) -> list[dict[str, Any]] | None:
+    """Recognized screen text with positions, as perception's text seam.
+
+    The same Windows OCR engine ``locate_element`` matches labels with, exposed
+    for the perception layer so an agentic observation can carry text that was
+    actually READ off the screen without a vision model. ``None`` means the OCR
+    engine is unavailable (not that the screen was blank) — a caller that
+    flattens those two into "no text" would report an unread screen as an empty
+    one, which is the failure mode this return type exists to prevent.
+    """
+    return await _ocr_words(image_path)
+
+
 def _word_center(word: dict[str, Any]) -> tuple[int, int]:
     return int(word["x"]) + int(word["w"]) // 2, int(word["y"]) + int(word["h"]) // 2
 

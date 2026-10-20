@@ -49,15 +49,27 @@ class ChatTranscriptStore:
         clean = str(text or "").strip()
         if not clean or role not in {"user", "assistant"}:
             return None
+        turns = self.turns()
+        stamp = int(at) if at is not None else time_ms()
+        if at is None and turns:
+            # Two turns recorded inside the same millisecond would share `at`.
+            # A reload renders the thread by that field, so the pair becomes
+            # indistinguishable — a real duplication a full-speed machine
+            # produced (the panel test caught it on Linux, where the user turn
+            # and its answer landed in the same millisecond). Generated stamps
+            # are kept strictly increasing; a caller-supplied `at` (migration)
+            # is kept verbatim, because it is somebody else's history.
+            last = int(turns[-1].get("at") or 0)
+            if stamp <= last:
+                stamp = last + 1
         turn: dict[str, Any] = {
             "role": role,
             "text": clean[:2000],
             "route": str(route or ""),
-            "at": int(at if at is not None else (time_ms())),
+            "at": stamp,
         }
         if self._store is None:
             return turn  # no persistence available: turn lives only in this call
-        turns = self.turns()
         turns.append(turn)
         self._store.write(self._namespace, {"turns": turns[-self._limit :]})
         return turn

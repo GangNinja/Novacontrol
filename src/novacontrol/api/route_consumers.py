@@ -87,6 +87,69 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("POST", "/vision/model/clear"): "no-render",  # vision model card remove button; refreshes card
     ("POST", "/vision/describe"): "renderGeneric",  # Vision panel Describe Screen
     ("POST", "/vision/click"): "renderGeneric",  # Vision panel guided click
+    # NovaForge has its own panel module (js/novaforge.js) that polls the session
+    # and updates in place — it never goes through run(type) -> render(), so each
+    # route is enumerated as no-render rather than claiming a renderer it lacks.
+    ("GET", "/novaforge/status"): "no-render",  # panel bootstrap/refresh
+    ("GET", "/novaforge/windows"): "no-render",  # target picker list
+    ("GET", "/novaforge/mission"): "no-render",  # fills the mission form
+    ("POST", "/novaforge/mission"): "no-render",  # Save Mission button + field errors
+    ("POST", "/novaforge/validate"): "no-render",  # Validate button + readiness card
+    ("GET", "/novaforge/capabilities"): "no-render",  # readiness card + Guardian tab
+    ("POST", "/novaforge/sessions/{session_id}/objective"): "no-render",  # objective form
+    ("POST", "/novaforge/sessions/{session_id}/actions/plan"): "no-render",  # Plan Action button
+    ("POST", "/novaforge/sessions/{session_id}/actions/execute"): "no-render",  # Run Action button
+    ("POST", "/novaforge/sessions/{session_id}/verify"): "no-render",  # Verify button
+    ("GET", "/novaforge/sessions/{session_id}/verification"): "no-render",  # verdict card
+    ("GET", "/novaforge/sessions"): "no-render",  # session history list
+    ("POST", "/novaforge/sessions"): "no-render",  # Start button
+    ("GET", "/novaforge/sessions/{session_id}"): "no-render",  # session poll + history row
+    ("POST", "/novaforge/sessions/{session_id}/pause"): "no-render",  # Pause button
+    ("POST", "/novaforge/sessions/{session_id}/resume"): "no-render",  # Resume button
+    ("POST", "/novaforge/sessions/{session_id}/stop"): "no-render",  # Stop button
+    ("POST", "/novaforge/sessions/{session_id}/cancel"): "no-render",  # Cancel button
+    ("POST", "/novaforge/sessions/{session_id}/emergency-stop"): "no-render",  # Guardian tab
+    ("GET", "/novaforge/sessions/{session_id}/telemetry"): "no-render",  # Telemetry tab
+    ("GET", "/novaforge/sessions/{session_id}/timeline"): "no-render",  # Timeline tab
+    ("GET", "/novaforge/sessions/{session_id}/timeline/{seq}"): "no-render",  # event detail
+    ("GET", "/novaforge/timeline/compare"): "no-render",  # comparison card
+    ("GET", "/novaforge/frames/{session_id}"): "no-render",  # frame <img> source
+    # NF-04 Benchmark Lab: js/novaforge.js owns these responses and renders them
+    # in the Benchmark tab (catalog, preflight, run detail, history, comparison).
+    ("GET", "/novaforge/benchmarks/scenarios"): "no-render",  # scenario catalog
+    ("GET", "/novaforge/benchmarks/scenarios/{scenario_id}"): "no-render",  # scenario detail
+    ("POST", "/novaforge/benchmarks/preflight"): "no-render",  # preflight card
+    ("GET", "/novaforge/benchmarks/runs"): "no-render",  # run history list
+    ("POST", "/novaforge/benchmarks/runs"): "no-render",  # Start Benchmark button
+    ("GET", "/novaforge/benchmarks/runs/{run_id}"): "no-render",  # progress poll + run detail
+    ("POST", "/novaforge/benchmarks/runs/{run_id}/cancel"): "no-render",  # Cancel button
+    ("GET", "/novaforge/benchmarks/compare"): "no-render",  # comparison card
+    ("GET", "/novaforge/benchmarks/aggregate"): "no-render",  # aggregate card
+    # NF-05 Controlled Game Evaluation: js/novaforge.js renders the registry,
+    # preflight checklist, live evaluation and report in the Evaluation tab.
+    ("GET", "/novaforge/games"): "no-render",  # environment registry picker
+    ("GET", "/novaforge/games/{game_id}"): "no-render",  # compatibility card
+    ("GET", "/novaforge/evaluations"): "no-render",  # evaluation history list
+    ("GET", "/novaforge/evaluations/baseline"): "no-render",  # baseline card
+    ("POST", "/novaforge/evaluations/preflight"): "no-render",  # readiness checklist
+    ("POST", "/novaforge/evaluations"): "no-render",  # confirmed Start button
+    ("GET", "/novaforge/evaluations/{evaluation_id}"): "no-render",  # live poll + detail
+    ("POST", "/novaforge/evaluations/{evaluation_id}/cancel"): "no-render",  # Cancel button
+    ("GET", "/novaforge/evaluations/{evaluation_id}/report"): "no-render",  # report card
+    # NF-06 Forge Coach: js/novaforge.js owns the analysis, the recommendation
+    # decisions and the experiment lifecycle; every response is rendered there.
+    ("GET", "/novaforge/coach"): "no-render",  # capability card
+    ("POST", "/novaforge/coach/analyse"): "no-render",  # Analyse button + findings
+    ("GET", "/novaforge/coach/recommendations"): "no-render",  # persisted decisions
+    ("POST", "/novaforge/coach/recommendations/{recommendation_id}"): "no-render",  # approve/reject a recommendation
+    ("GET", "/novaforge/experiments"): "no-render",  # experiment history list
+    ("POST", "/novaforge/experiments"): "no-render",  # Propose button
+    ("GET", "/novaforge/experiments/{experiment_id}"): "no-render",  # live poll + spec review
+    ("POST", "/novaforge/experiments/{experiment_id}/approve"): "no-render",  # Approve button
+    ("POST", "/novaforge/experiments/{experiment_id}/reject"): "no-render",  # Reject button
+    ("POST", "/novaforge/experiments/{experiment_id}/run"): "no-render",  # Run button
+    ("POST", "/novaforge/experiments/{experiment_id}/cancel"): "no-render",  # Cancel button
+    ("GET", "/novaforge/experiments/{experiment_id}/results"): "no-render",  # comparison card
     # Phase 21 has no panel of its own yet: these are the API/CLI surfaces for the
     # perception layer, and claiming a renderer here would put a control in the
     # contract that does not exist (the same reasoning as POST /plan/run).

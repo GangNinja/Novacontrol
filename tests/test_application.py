@@ -205,6 +205,34 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.payload["target"], "notepad")
         self.assertFalse(response.payload["approval"]["approved"])
 
+    async def test_desktop_unmatched_command_is_refused_not_scripted(self) -> None:
+        """An unmatched phrase must be refused, not re-aimed at a shell (audit §2).
+
+        The native parser marks "I don't understand" with an EXECUTE_SCRIPT step.
+        Before the Phase D fix those phrases planned as a script — gated, but the
+        wrong target — instead of a refusal that tells the user what works.
+        """
+        app = await self._desktop_app()
+
+        for command in ("turn the volume down", "play some music", "increase the brightness"):
+            with self.subTest(command=command):
+                plan = app.plan_desktop_command(command)
+                self.assertEqual(plan["status"], "not_an_action")
+                self.assertEqual(plan["workflow"]["actions"], [])
+                self.assertNotIn("token", plan["approval"])
+                self.assertIn("nothing was run", plan["summary"])
+
+    async def test_desktop_real_chains_still_plan_after_the_refusal_gate(self) -> None:
+        """The refusal is narrow: every recognised step kind still plans."""
+        app = await self._desktop_app()
+
+        plan = app.plan_desktop_command("open notepad and take a screenshot")
+        self.assertEqual(plan["status"], "waiting_for_approval")
+        self.assertTrue(plan["approval"]["token"])
+        kinds = [action["type"] for action in plan["workflow"]["actions"]]
+        self.assertIn("open_application", kinds)
+        self.assertIn("take_screenshot", kinds)
+
     async def test_phone_planning_covers_text_call_and_screenshot_phrasing(self) -> None:
         """plan_phone_command builds the right action type for each phrasing family."""
         app = NovaControlApplication()

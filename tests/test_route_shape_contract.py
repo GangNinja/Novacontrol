@@ -152,6 +152,23 @@ class RendererShapeContractTests(unittest.TestCase):
             route="POST /desktop/plan", renderer="renderCommand",
         )
 
+    def test_desktop_plan_refuses_an_unmatched_phrase_instead_of_scripting_it(self) -> None:
+        """`renderCommand` must receive a coherent refusal, not an EXECUTE_SCRIPT plan.
+
+        The audit found unmatched phrasing aimed at a shell. The fix returns a
+        `not_an_action` envelope over the SAME route: 200, a summary that says
+        nothing ran, an empty workflow, and no approval token — renderCommand
+        renders the summary and suppresses the Approve button because there is
+        nothing to approve.
+        """
+        plan = self._post("/desktop/plan", {"command": "turn the volume down"})
+
+        self.assertEqual(plan["status"], "not_an_action")
+        self.assertEqual(plan["workflow"]["actions"], [])
+        self.assertEqual(plan["steps"], [])
+        self.assertNotIn("token", plan["approval"])
+        self.assertIn("nothing was run", plan["summary"])
+
     def test_render_command_fields_in_phone_plan_bridge_blocked(self) -> None:
         """No device: status is waiting_for_phone_bridge and `bridge` carries
         the state/adapter/available/next_steps renderPhoneStatus reads.

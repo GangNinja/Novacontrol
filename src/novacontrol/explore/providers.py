@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from dataclasses import replace
 from html import unescape
@@ -13,6 +14,32 @@ from urllib.parse import quote_plus, unquote, urlparse, parse_qs
 from urllib.request import Request, urlopen
 
 from novacontrol.explore.models import ResearchSource, VideoResult
+
+
+# One provider attempt may spend at most this long on the socket. It is the
+# ceiling the service's search wave is budgeted against (see ExploreService).
+_SEARCH_TIMEOUT_SECONDS = 10.0
+
+
+async def _fetch_text(url: str, *, headers: dict[str, str]) -> str:
+    """Fetch a page body WITHOUT blocking the event loop.
+
+    ``urlopen`` is blocking. Called directly from an ``async def`` it freezes
+    every other task in the process for as long as the socket takes — one
+    Explore run stalled the whole server (chat, SSE, other requests) for
+    seconds at a time. The blocking read therefore happens on a worker thread,
+    the same door ``PageReader.read_many`` uses.
+    """
+
+    def _blocking() -> str:
+        request = Request(url, headers=dict(headers))
+        with urlopen(request, timeout=_SEARCH_TIMEOUT_SECONDS) as response:
+            # `urlopen` is untyped, so the decoded body is annotated here: the
+            # helper promises a str, and mypy strict refuses to launder Any.
+            body: str = response.read().decode("utf-8", errors="replace")
+            return body
+
+    return await asyncio.to_thread(_blocking)
 
 
 @runtime_checkable
@@ -34,9 +61,7 @@ class DuckDuckGoLiteSearchProvider:
 
     async def search(self, query: str, *, limit: int = 6) -> tuple[ResearchSource, ...]:
         url = f"{self.endpoint}?q={quote_plus(query)}"
-        request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urlopen(request, timeout=10) as response:
-            html = response.read().decode("utf-8", errors="replace")
+        html = await _fetch_text(url, headers={"User-Agent": "Mozilla/5.0"})
         parser = _DuckDuckGoLiteParser(limit=limit)
         parser.feed(html)
         return parser.results()
@@ -49,9 +74,9 @@ class BingSearchProvider:
 
     async def search(self, query: str, *, limit: int = 6) -> tuple[ResearchSource, ...]:
         url = f"{self.endpoint}?q={quote_plus(query)}"
-        request = Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-        with urlopen(request, timeout=10) as response:
-            html = response.read().decode("utf-8", errors="replace")
+        html = await _fetch_text(
+            url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        )
         parser = _BingSearchParser(limit=limit)
         parser.feed(html)
         return parser.results()
@@ -64,12 +89,10 @@ class GoogleSearchProvider:
 
     async def search(self, query: str, *, limit: int = 6) -> tuple[ResearchSource, ...]:
         url = f"{self.endpoint}?q={quote_plus(query)}&num={limit}"
-        request = Request(url, headers={
+        html = await _fetch_text(url, headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
         })
-        with urlopen(request, timeout=10) as response:
-            html = response.read().decode("utf-8", errors="replace")
         parser = _GoogleSearchParser(limit=limit)
         parser.feed(html)
         return parser.results()
@@ -105,10 +128,8 @@ class YouTubeSearchVideoProvider:
 
     async def search_videos(self, query: str, *, limit: int = 5) -> tuple[VideoResult, ...]:
         search_url = f"https://www.youtube.com/results?search_query={quote_plus(query)}"
-        request = Request(search_url, headers={"User-Agent": "Mozilla/5.0"})
         try:
-            with urlopen(request, timeout=10) as response:
-                html = response.read().decode("utf-8", errors="replace")
+            html = await _fetch_text(search_url, headers={"User-Agent": "Mozilla/5.0"})
             videos = _extract_youtube_videos(html, limit=limit)
             if videos:
                 return videos

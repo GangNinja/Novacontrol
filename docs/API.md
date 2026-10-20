@@ -56,6 +56,60 @@ The Phase 12 API subsystem provides REST and WebSocket entrypoints through FastA
 - `POST /vision/model/clear`: Remove the configured vision model; element location returns to OCR-only. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /vision/describe`: Capture the screen and describe it (vision model or window probe). *(frontend: web panel `renderGeneric`)*
 - `POST /vision/click`: Vision-locate a labeled element on screen, click it, and verify. *(frontend: web panel `renderGeneric`)*
+- `GET /novaforge/status`: NovaForge readiness, saved mission draft and the active session. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/windows`: Open windows for the NovaForge target picker, or why they cannot be read. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/mission`: Read the persisted NovaForge mission draft. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/mission`: Persist a NovaForge mission draft and report its field validation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/validate`: Validate a mission and its live target window without starting a session. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/sessions`: Stored NovaForge sessions, newest first. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions`: Start a validated NovaForge observation session. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/sessions/{session_id}`: One NovaForge session: state, frames, observations and stages. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/pause`: Pause a running session and wait for the loop to acknowledge. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/resume`: Resume a paused session after re-validating its target window. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/stop`: Cancel a session, release input and persist its final record. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/cancel`: Abort the session loop now, release input and confirm the outcome (idempotent). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/emergency-stop`: Guardian emergency stop: bounded abort, input cleanup and the confirmed result. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/capabilities`: Per-capability availability with the exact blocker: capture, action execution, Guardian enforcement, objective verification, persistence, decision pipeline, game launch. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/objective`: Attach a checkable objective (window title) to a live session; unsupported kinds are recorded and reported unsupported. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/actions/plan`: Validate and digest-bind one gameplay action without sending it; a denial carries the Guardian's reason. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/actions/execute`: Execute one digest-bound action proposal after revalidating target identity, foreground, policy and budget. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/verify`: Run the independent objective verifier and record its verdict and evidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/sessions/{session_id}/verification`: The objective, its verdict, evidence references and action counts for one session. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/sessions/{session_id}/telemetry`: Measured telemetry and Guardian status for one session. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/sessions/{session_id}/timeline`: Read-only evidence timeline for one session (filterable, paged). *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/sessions/{session_id}/timeline/{seq}`: One timeline event with its evidence resolved. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/timeline/compare`: Compare two persisted sessions from their recorded evidence; query: `left`, `right`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/frames/{session_id}`: Serve one captured frame (PNG); query parameter: `seq`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/benchmarks/scenarios`: Benchmark scenario catalog with supported/unsupported status, verifiers and metric definitions. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/benchmarks/scenarios/{scenario_id}`: One benchmark scenario's requirements and definitions; query parameter: `version`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/benchmarks/preflight`: Validate a benchmark scenario and its live target window without starting a run. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/benchmarks/runs`: Persisted benchmark runs, newest first; query parameters: `limit`, `scenario`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/benchmarks/runs`: Start one bounded benchmark observation run. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/benchmarks/runs/{run_id}`: One benchmark run: configuration, metrics, evidence and limitations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/benchmarks/runs/{run_id}/cancel`: Cancel an active benchmark run through its session's stop path (idempotent). *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/benchmarks/compare`: Compare compatible benchmark runs from recorded results; query: `left`, `right`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/benchmarks/aggregate`: Per-scenario aggregate metrics for eligible runs; query: `scenario`, `version`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/games`: Game/environment compatibility registry with honest capability counts. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/games/{game_id}`: One environment's compatibility, capabilities and scenarios; query parameter: `version`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/evaluations`: Retained evaluation attempts, newest first; query parameters: `limit`, `game`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/evaluations/baseline`: Current baseline for an environment/scenario; query parameters: `game`, `scenario`, `version`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/evaluations/preflight`: Judge every readiness check against the live window without starting an evaluation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/evaluations`: Start one confirmed observation-only evaluation through the benchmark lab. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/evaluations/{evaluation_id}`: One evaluation: readiness, benchmark run, baseline and status. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/evaluations/{evaluation_id}/cancel`: Cancel an active evaluation through its session's stop path (idempotent). *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/evaluations/{evaluation_id}/report`: Per-game evaluation report with evidence links, missing evidence and limitations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/coach`: Coach capability card: sources, classifications, experiment rules and honest limits. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/coach/analyse`: Evidence-backed analysis of one recorded session or evaluation (read-only; findings are recomputed). *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/coach/recommendations`: Persisted recommendation statuses (operator decisions), newest first. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/coach/recommendations/{recommendation_id}`: Record an operator decision (proposed/approved/rejected/…) about one recommendation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/experiments`: Retained controlled experiments, newest first; query parameters: `limit`, `status`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/experiments`: Propose an experiment from a recommendation or an explicit spec; starts nothing. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/experiments/{experiment_id}`: One experiment: spec, approval, arms, results and history. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/experiments/{experiment_id}/approve`: Approve the CURRENT configuration (its digest is bound to the approval). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/experiments/{experiment_id}/reject`: Reject a proposal; the rejection is retained with its note. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/experiments/{experiment_id}/run`: Run both arms through the evaluation lab (background, bounded, approval-checked). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/experiments/{experiment_id}/cancel`: Cancel an experiment and its active arm (idempotent once terminal). *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/experiments/{experiment_id}/results`: The comparison and verdict, or an explicit not-available-yet answer. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /perception/status`: Perception layer report: providers, budgets, tracking and telemetry (no content). *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /perception/capabilities`: Perception capability classification with live availability on this machine. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /perception`: Perceive an image, frame list, screen or camera into a structured scene (reading only - nothing is executed). *(frontend: no web panel - API/CLI or infrastructure)*

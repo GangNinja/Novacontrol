@@ -1644,5 +1644,44 @@ class EvaluationApiTests(unittest.TestCase):
         self.assertFalse(self._nova.evaluation.recording_enabled)
 
 
+class ConcurrentStoreWriteTests(unittest.TestCase):
+    """Two writers staging a rewrite at once must not collide.
+
+    The store used to stage every rewrite under a FIXED ``<name>.tmp``. Two processes
+    writing the same store then shared one staged file: the second writer truncated the
+    first one's stage and, on Windows, the ``os.replace`` failed with
+    ``WinError 32`` while the other handle was open (that is how the audit found it).
+    A uniquely named stage in the same directory makes another writer's stage invisible.
+    """
+
+    def test_a_rewrite_never_touches_another_writer_s_staged_file(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "evaluations.jsonl"
+            store = JsonlRecordStore(path)
+            legacy_stage = path.with_suffix(path.suffix + ".tmp")
+            legacy_stage.write_text("held by another writer\n", encoding="utf-8")
+
+            with legacy_stage.open("r+", encoding="utf-8") as held:
+                store.replace([{"id": "1", "value": "new"}])
+                held.seek(0)
+                self.assertEqual(held.read(), "held by another writer\n")
+
+            self.assertEqual([row["id"] for row in store.read()], ["1"])
+
+    def test_a_failed_replace_leaves_no_staged_file_behind(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "evaluations.jsonl"
+            store = JsonlRecordStore(path)
+
+            with mock.patch(
+                "novacontrol.evaluation.storage.os.replace",
+                side_effect=OSError("the store is read-only"),
+            ):
+                with self.assertRaises(OSError):
+                    store.replace([{"id": "1"}])
+
+            self.assertEqual(sorted(p.name for p in Path(temp_dir).iterdir()), [])
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

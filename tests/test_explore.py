@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping, Sequence
+import time
 import unittest
 
 from novacontrol.core.events import Event, EventBus
@@ -899,6 +901,144 @@ class ExploreSearchRetryTests(unittest.IsolatedAsyncioTestCase):
         )
         await healthy_service.research(ExploreRequest("how does photosynthesis work"))
         self.assertEqual(cache.ttls[-1], 900)
+
+
+class SlowSearchProvider:
+    """Every query takes ``delay`` seconds and returns nothing.
+
+    Stands in for the degraded search surface a research run must stay bounded
+    against: providers that answer slowly and can never serve the query.
+    """
+
+    def __init__(self, delay: float) -> None:
+        self.delay = delay
+        self.started = 0
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    async def search(self, query: str, *, limit: int = 6) -> tuple[ResearchSource, ...]:
+        self.started += 1
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            await asyncio.sleep(self.delay)
+        finally:
+            self.in_flight -= 1
+        return ()
+
+
+class ExploreSearchWaveTests(unittest.IsolatedAsyncioTestCase):
+    """The queries one research run issues are ONE concurrent wave, under one
+    deadline.
+
+    Sequentially, each query walks the whole provider stack and every attempt
+    may spend its full socket timeout, so the cost multiplied by the query
+    count and again by the empty-result retry — measured at 22 network calls of
+    up to 10s each, i.e. roughly four minutes (see
+    docs/INTEGRATION_PERFORMANCE_AUDIT.md). These two properties are what stop
+    that returning.
+    """
+
+    async def test_the_queries_of_one_run_are_searched_concurrently(self) -> None:
+        provider = SlowSearchProvider(0.2)
+        service = ExploreService(
+            search_provider=provider,
+            video_provider=FakeVideoProvider(),
+            wiki_provider=FakeWikiProvider(),
+            read_pages=False,
+            search_budget_seconds=10.0,
+        )
+        started = time.perf_counter()
+        await service.research(ExploreRequest("why do cats purr", include_videos=False))
+        elapsed = time.perf_counter() - started
+
+        # Several queries ran ...
+        self.assertGreaterEqual(provider.started, 2)
+        # ... at the same time ...
+        self.assertGreaterEqual(provider.max_in_flight, 2)
+        # ... so the run costs one wave's waiting, not one delay per query.
+        self.assertLess(elapsed, provider.started * provider.delay)
+
+    async def test_a_slow_provider_cannot_stretch_a_run_past_its_budget(self) -> None:
+        provider = SlowSearchProvider(5.0)
+        service = ExploreService(
+            search_provider=provider,
+            video_provider=FakeVideoProvider(),
+            wiki_provider=FakeWikiProvider(),
+            read_pages=False,
+            search_budget_seconds=0.3,
+        )
+        started = time.perf_counter()
+        report = await service.research(ExploreRequest("why do cats purr", include_videos=False))
+        elapsed = time.perf_counter() - started
+
+        # A 5s-per-query provider must not turn into 5s x queries x retries.
+        self.assertLess(elapsed, 3.0)
+        # Abandoning the wave degrades honestly: still the offline report.
+        self.assertEqual(report.provider_status, "offline")
+
+
+class _FakeHttpResponse:
+    """Minimal stand-in for the object ``urlopen`` returns."""
+
+    def __init__(self, body: bytes = b"") -> None:
+        self._body = body
+
+    def read(self, *args: object) -> bytes:
+        return self._body
+
+    def __enter__(self) -> _FakeHttpResponse:
+        return self
+
+    def __exit__(self, *args: object) -> bool:
+        return False
+
+
+class ExploreProviderEventLoopTests(unittest.IsolatedAsyncioTestCase):
+    """The search stack is standard library, and ``urlopen`` is BLOCKING: called
+    straight from an ``async def`` it freezes every other task in the process
+    for as long as the socket takes. A single research run stalled the whole
+    server — chat, SSE, other requests — for seconds at a time.
+    """
+
+    async def _largest_event_loop_stall(self, call):  # type: ignore[no-untyped-def]
+        gaps: list[float] = []
+        stop = False
+
+        async def beat() -> None:
+            last = time.perf_counter()
+            while not stop:
+                await asyncio.sleep(0.005)
+                now = time.perf_counter()
+                gaps.append(now - last)
+                last = now
+
+        heartbeat = asyncio.create_task(beat())
+        # Let the heartbeat take its first ticks, so a call that blocks the loop
+        # is reported as the stall it is rather than as an empty sample.
+        await asyncio.sleep(0.05)
+        await call()
+        stop = True
+        await heartbeat
+        return max(gaps) if gaps else float("inf")
+
+    async def test_a_slow_provider_fetch_does_not_freeze_the_event_loop(self) -> None:
+        from unittest.mock import patch
+
+        from novacontrol.explore import providers as explore_providers
+
+        def _slow_urlopen(request: object, timeout: float | None = None) -> _FakeHttpResponse:
+            time.sleep(0.4)  # a slow socket, on whichever thread makes the call
+            return _FakeHttpResponse(b"<html><body></body></html>")
+
+        provider = explore_providers.DuckDuckGoLiteSearchProvider()
+        with patch.object(explore_providers, "urlopen", _slow_urlopen):
+            stall = await self._largest_event_loop_stall(
+                lambda: provider.search("why do cats purr", limit=1)
+            )
+
+        # Without the worker thread this stall is the full 0.4s blocking fetch.
+        self.assertLess(stall, 0.2)
 
 
 if __name__ == "__main__":
