@@ -71,6 +71,12 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("GET", "/chat/history"): "no-render",  # renderChatHistory seeds the shared thread
     ("POST", "/chat/history"): "no-render",  # recordChatTurn append + one-time migrate
     ("POST", "/build/save"): "no-render",  # saveBuildArtifact button + toast
+    ("POST", "/build/project"): "no-render",  # Build panel drafts a project into its own file list
+    ("GET", "/build/artifacts"): "no-render",  # Build panel's Run list of saved artifacts
+    ("POST", "/build/run"): "no-render",  # Build panel re-runs a saved artifact + output pane
+    ("GET", "/models/status"): "no-render",  # no panel: model-manager status (CLI/API)
+    ("POST", "/models/load"): "no-render",  # no panel: load a model (CLI/API)
+    ("POST", "/models/unload"): "no-render",  # no panel: release a model (CLI/API)
     ("GET", "/tasks"): "no-render",  # reserved for future explicit lists
     ("POST", "/tasks/delete"): "no-render",  # deleteTask row button + refreshStatus
     ("POST", "/tasks/clear"): "no-render",  # clearAllTasksButton + toast-undo
@@ -92,14 +98,75 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     # route is enumerated as no-render rather than claiming a renderer it lacks.
     ("GET", "/novaforge/status"): "no-render",  # panel bootstrap/refresh
     ("GET", "/novaforge/windows"): "no-render",  # target picker list
+    # NF-12: Game Library tab. Discovery, the launch preview, the approve step
+    # and the graceful close all repaint the tab in place.
+    ("GET", "/novaforge/library"): "no-render",  # library list + counts
+    ("GET", "/novaforge/library/resolve"): "no-render",  # status answer card
+    ("POST", "/novaforge/library/launch"): "no-render",  # Launch Game preview + approve
+    ("POST", "/novaforge/library/close"): "no-render",  # close the test-launched game
+    ("POST", "/novaforge/library/attach"): "no-render",  # attach to a running game
     ("GET", "/novaforge/mission"): "no-render",  # fills the mission form
     ("POST", "/novaforge/mission"): "no-render",  # Save Mission button + field errors
     ("POST", "/novaforge/validate"): "no-render",  # Validate button + readiness card
     ("GET", "/novaforge/capabilities"): "no-render",  # readiness card + Guardian tab
+    ("GET", "/novaforge/trials"): "no-render",  # Guardian tab trial history + metrics
+    # NF-15: the observation card in Mission Control owns these responses and
+    # repaints in place, like the rest of js/novaforge.js.
+    ("GET", "/novaforge/observation"): "no-render",  # observation card poll
+    ("POST", "/novaforge/observation/start"): "no-render",  # Start Observable
+    ("POST", "/novaforge/observation/pause"): "no-render",  # Pause observation
+    ("POST", "/novaforge/observation/resume"): "no-render",  # Resume observation
+    ("POST", "/novaforge/observation/stop"): "no-render",  # Stop observation
+    ("POST", "/novaforge/observation/observe"): "no-render",  # Observe Once
+    ("GET", "/novaforge/observation/frame"): "no-render",  # validated frame <img>
+    ("GET", "/novaforge/state"): "no-render",  # game-state card poll
+    ("POST", "/novaforge/state/analyze"): "no-render",  # Analyze Once button
+    ("POST", "/novaforge/state/reset"): "no-render",  # Reset Baseline button
+    ("GET", "/novaforge/state/profiles"): "no-render",  # profiles table
+    ("GET", "/novaforge/objectives"): "no-render",  # objective card poll
+    ("POST", "/novaforge/objectives/reset"): "no-render",  # Reset Objectives button
+    ("GET", "/novaforge/objectives/profiles"): "no-render",  # objective rules table
+    # NF-18: the game-knowledge card in the NovaForge panel owns these responses
+    # and repaints in place; it shows evidence and status, never a strategy.
+    ("GET", "/novaforge/knowledge"): "no-render",  # knowledge card poll
+    ("GET", "/novaforge/knowledge/records"): "no-render",  # record list
+    ("POST", "/novaforge/knowledge"): "no-render",  # explicit record (API/CLI)
+    ("POST", "/novaforge/knowledge/{knowledge_id}/revalidate"): "no-render",  # revalidate
     ("POST", "/novaforge/sessions/{session_id}/objective"): "no-render",  # objective form
     ("POST", "/novaforge/sessions/{session_id}/actions/plan"): "no-render",  # Plan Action button
     ("POST", "/novaforge/sessions/{session_id}/actions/execute"): "no-render",  # Run Action button
+    # NF-19: the control card polls its own state and its buttons repaint in
+    # place; an action result is rendered from the POST body, never re-fetched.
+    ("GET", "/novaforge/sessions/{session_id}/control"): "no-render",  # control card poll
+    ("POST", "/novaforge/sessions/{session_id}/control"): "no-render",  # one control action request
+    ("POST", "/novaforge/sessions/{session_id}/control/cancel"): "no-render",  # Cancel action
+    ("POST", "/novaforge/sessions/{session_id}/control/release"): "no-render",  # Release inputs
+    ("GET", "/novaforge/sessions/{session_id}/plan"): "no-render",  # plan card poll
+    ("POST", "/novaforge/sessions/{session_id}/plan"): "no-render",  # Plan Next Actions
+    ("POST", "/novaforge/sessions/{session_id}/plan/execute"): "no-render",  # Execute Approved Plan
+    ("POST", "/novaforge/sessions/{session_id}/plan/cancel"): "no-render",  # Cancel Plan
+    ("POST", "/novaforge/sessions/{session_id}/plan/replan"): "no-render",  # Replan
+    # NF-21: outcomes are read back from the service and the session timeline; the
+    # API is the caller here (no panel renders these responses yet), so they are
+    # declared no-render with the rest of the panel-internal surface.
+    ("GET", "/novaforge/sessions/{session_id}/outcomes"): "no-render",  # outcome state read
+    ("POST", "/novaforge/sessions/{session_id}/outcomes/verify"): "no-render",  # verify a plan's steps
+    ("POST", "/novaforge/sessions/{session_id}/outcomes/recover"): "no-render",  # apply one recovery
+    ("POST", "/novaforge/sessions/{session_id}/outcomes/cancel"): "no-render",  # cancel verification
+    # NF-22: the autonomous-run card (JARVIS panel) polls its own state and its
+    # buttons repaint in place, so the panel renders these responses itself rather
+    # than through the generic result renderer.
+    ("GET", "/novaforge/sessions/{session_id}/autonomy"): "no-render",  # autonomy card poll
+    ("POST", "/novaforge/sessions/{session_id}/autonomy/start"): "no-render",  # Start Autonomous Run
+    ("POST", "/novaforge/sessions/{session_id}/autonomy/pause"): "no-render",  # Pause Run button
+    ("POST", "/novaforge/sessions/{session_id}/autonomy/resume"): "no-render",  # Resume Run button
+    ("POST", "/novaforge/sessions/{session_id}/autonomy/cancel"): "no-render",  # Cancel Run button
+    ("POST", "/novaforge/sessions/{session_id}/autonomy/approve"): "no-render",  # per-plan approval
+    ("GET", "/novaforge/autonomy/trace"): "no-render",  # trace view
     ("POST", "/novaforge/sessions/{session_id}/verify"): "no-render",  # Verify button
+    ("POST", "/novaforge/sessions/{session_id}/loop"): "no-render",  # Run Closed Loop button
+    ("POST", "/novaforge/sessions/{session_id}/loop/cancel"): "no-render",  # Stop Loop button
+    ("POST", "/novaforge/sessions/{session_id}/vision/interpret"): "no-render",  # Describe Frame button
     ("GET", "/novaforge/sessions/{session_id}/verification"): "no-render",  # verdict card
     ("GET", "/novaforge/sessions"): "no-render",  # session history list
     ("POST", "/novaforge/sessions"): "no-render",  # Start button

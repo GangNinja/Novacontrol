@@ -1547,6 +1547,115 @@ body.nc-focus-mode .system-ribbon { background: rgba(3, 9, 20, 0.97); }
 .forge-readiness-body ul { margin: 0; padding-left: 18px; color: var(--text-secondary); }
 .forge-readiness-body li { margin-bottom: 4px; }
 
+.forge-observation-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--gutter-y);
+}
+
+.forge-observation-controls .field { margin-bottom: 8px; }
+
+.forge-observation-live {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+.forge-observation-frame {
+  position: relative;
+  border: 1px solid var(--border-dim);
+  border-radius: 4px;
+  overflow: hidden;
+  background: #030810;
+}
+
+.forge-observation-frame img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.forge-observation-frame .forge-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  background: rgba(3, 8, 16, 0.82);
+}
+
+.forge-observation-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 16px;
+  margin: 0;
+  font-size: 0.78rem;
+}
+
+.forge-observation-facts div { min-width: 0; }
+.forge-observation-facts dt {
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.forge-observation-facts dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  word-break: break-word;
+}
+
+.forge-observation-history {
+  margin-top: 10px;
+  font-size: 0.78rem;
+}
+
+/* NF-23: the observation ladder. Ten separate stages, each with its own state,
+   so "a window exists" can never be read as "a frame was validated". */
+.forge-observation-ladder {
+  margin-top: 10px;
+  font-size: 0.78rem;
+}
+
+.forge-observation-ladder ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-secondary);
+}
+
+.forge-observation-ladder li { margin-bottom: 4px; }
+
+.forge-observation-ladder .muted {
+  font-size: 0.72rem;
+  margin-top: 6px;
+}
+
+.forge-observation-history ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-secondary);
+}
+
+.forge-observation-history li { margin-bottom: 4px; }
+
+.forge-observation-history .forge-badge { margin-left: 6px; }
+
+/* NF-16: the game-state card's lists. A reading is text, not a tile grid, so it
+   reuses the observation card's type scale rather than inventing another. */
+.forge-state-list {
+  margin-top: 10px;
+  font-size: 0.78rem;
+}
+
+.forge-state-list ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-secondary);
+}
+
+.forge-state-list li { margin-bottom: 4px; }
+
+.forge-state-list p { margin: 0; }
+
 .forge-roadmap-list {
   margin: 0 0 8px;
   padding-left: 18px;
@@ -1891,6 +2000,69 @@ body.nc-focus-mode .system-ribbon { background: rgba(3, 9, 20, 0.97); }
 .forge-summary-section li { margin-bottom: 3px; }
 
 .forge-history-list { display: grid; gap: 8px; margin-top: 12px; }
+
+/* NF-08: one loop run's own record, rendered under the controls that produced it. */
+.forge-loop-result { display: grid; gap: 8px; margin-top: 12px; }
+.forge-loop-result .forge-card-head { margin: 0; }
+
+/* NF-12: the game library list. A row states its evidence and its status
+   separately; the launch-tested chip is only ever painted from the service's
+   own record, never because an executable exists. */
+.forge-library-list {
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.forge-library-row {
+  display: grid;
+  gap: 5px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-dim);
+  border-radius: 6px;
+  background: rgba(4, 12, 26, 0.45);
+}
+
+.forge-library-row:hover { border-color: var(--border-hover); }
+
+.forge-library-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.forge-library-title {
+  font-size: 0.9rem;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.forge-library-evidence,
+.forge-library-reason {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.forge-library-reason { color: var(--text-secondary); }
+
+.forge-library-result { display: grid; gap: 8px; }
+
+.forge-library-summary {
+  margin: 0;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.forge-library-row[data-status="NOT_FOUND_ON_INTERNAL_STORAGE"] { opacity: 0.72; }
+.forge-library-row[data-status="REQUIRES_LAUNCHER_OR_RUNTIME"] { border-style: dashed; }
 
 .forge-history-row {
   border: 1px solid var(--border-dim);
@@ -2294,6 +2466,96 @@ body.nc-focus-mode .system-ribbon { background: rgba(3, 9, 20, 0.97); }
   .forge-timeline-toolbar { grid-template-columns: minmax(0, 1fr); }
 }
 
+/* ── Controlled evaluation ───────────────────────────────────────────────── */
+
+.forge-control-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 14px 0 6px;
+}
+
+.forge-control-head h4 { margin: 0; }
+
+.forge-plan-list { display: grid; gap: 8px; margin-bottom: 8px; }
+
+.forge-plan-row {
+  border: 1px solid var(--border-dim);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.forge-plan-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.forge-plan-index {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  min-width: 1.4em;
+}
+
+.forge-plan-kind {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--brand-cyan);
+}
+
+.forge-plan-row-head .cyber-btn { margin-left: auto; }
+
+.forge-plan-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.forge-plan-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.forge-plan-field .cyber-input { font-size: 0.78rem; }
+
+.forge-plan-errors ul { margin: 0; padding-left: 18px; }
+
+.forge-digest {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  word-break: break-all;
+  color: var(--brand-cyan);
+  padding: 6px 8px;
+  border: 1px solid var(--border-glow);
+  border-radius: 5px;
+  background: rgba(0, 234, 255, 0.05);
+}
+
+.forge-control-digest { margin-top: 12px; }
+.forge-control-digest h4 { margin: 12px 0 4px; }
+
+.forge-verdict {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-left: 3px solid var(--border-dim);
+  border-radius: 4px;
+  font-size: 0.82rem;
+}
+
+.forge-verdict[data-tone="ok"] { border-left-color: var(--brand-green); color: var(--brand-green); }
+.forge-verdict[data-tone="bad"] { border-left-color: var(--brand-pink); color: var(--brand-pink); }
+.forge-verdict[data-tone="warn"] { border-left-color: var(--brand-amber); color: var(--brand-amber); }
+
 /* ── Notices ──────────────────────────────────────────────────────────────── */
 
 .forge-notice {
@@ -2447,3 +2709,31 @@ body.nc-focus-mode .system-ribbon { background: rgba(3, 9, 20, 0.97); }
 .coach-recommendation-actions { margin-top: 10px; flex-wrap: wrap; }
 
 .coach-spec .forge-benchmark-pair { align-items: start; }
+/* NF-22: the autonomous run's card. The badge carries the state the supervisor
+   reports, so an actively driving run is visibly different from an idle one and
+   a finished run is visibly not live. */
+.forge-autonomy-card .forge-badge[data-state="autonomous"] {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.forge-autonomy-card .forge-badge[data-state="ended"] {
+  color: var(--text-secondary);
+  border-color: var(--border-dim);
+  opacity: 0.8;
+}
+
+/* A run over simulated evidence is visibly NOT the live label: same card, a
+   different word, so a simulated session can never read as real control. */
+.forge-autonomy-card .forge-badge[data-state="simulated"] {
+  color: var(--text-secondary);
+  border-color: var(--border-dim);
+}
+
+.forge-autonomy-approval {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border-dim);
+  border-left: 2px solid var(--accent);
+  border-radius: 3px;
+}

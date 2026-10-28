@@ -1,0 +1,50 @@
+{
+  "target": "Freedom Fighters",
+  "runs": 6,
+  "bounds": [
+    0,
+    0,
+    2880,
+    1800
+  ],
+  "foreground": true,
+  "surface_ms": [
+    230.0,
+    112.4,
+    117.0,
+    121.6,
+    124.6,
+    137.1
+  ],
+  "display_ms": [
+    142.9,
+    109.9,
+    107.5,
+    109.1,
+    121.0,
+    133.4
+  ],
+  "surface_median_ms": 123.1,
+  "display_median_ms": 115.5,
+  "sizes": {
+    "surface_bytes": 23571,
+    "surface_px": "2880x1800",
+    "display_bytes": 575614,
+    "display_px": "2880x1800"
+  },
+  "validation_ms": [
+    333.7,
+    39.0,
+    46.4,
+    49.2,
+    48.9,
+    43.1
+  ],
+  "validation_median_ms": 47.6,
+  "validation_readable": true,
+  "validation_blank": true,
+  "worker": {
+    "spawns": 1,
+    "frames": 12
+  }
+}

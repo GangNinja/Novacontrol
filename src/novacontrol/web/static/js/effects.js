@@ -136,6 +136,29 @@
   // `.telemetry-card` belongs in the same family: the Command Center's live
   // metric cards are cards, and they respond to the pointer like the rest.
   const CARD_SELECTOR = ".surface, .command-console, .info-card, .metric-card, .telemetry-card";
+  // A decorative transform must never be applied to an ANCESTOR of an
+  // interactive control. The browser hit-tests pointer input through a
+  // 3D-transformed ancestor, and once a card has carried the tilt its subtree's
+  // hit-test regions can disagree with the layout: a click on a control inside
+  // it is retargeted to the card, so the control's handler never runs. Measured
+  // on the JARVIS console — after one run, `mousedown` for "Approve And Run"
+  // landed on ARTICLE.command-console and the click was swallowed; the same
+  // click lands correctly with the tilt off. Cards that hold a control
+  // (buttons, links, inputs) therefore keep their plain box-shadow hover lift
+  // and are skipped here, which covers every panel that re-renders controls
+  // into a card rather than just the console.
+  const INTERACTIVE_SELECTOR =
+    "button, a[href], input, select, textarea, [role='button'], [contenteditable='true']";
+  const tiltable = new WeakMap();
+
+  function isTiltable(card) {
+    let cached = tiltable.get(card);
+    if (cached === undefined) {
+      cached = !card.querySelector(INTERACTIVE_SELECTOR);
+      tiltable.set(card, cached);
+    }
+    return cached;
+  }
 
   function clearTilt() {
     document.querySelectorAll(CARD_SELECTOR).forEach((card) => {
@@ -145,6 +168,7 @@
 
   function onMouseMove(e) {
     document.querySelectorAll(CARD_SELECTOR).forEach((card) => {
+      if (!isTiltable(card)) return;
       const rect = card.getBoundingClientRect();
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;

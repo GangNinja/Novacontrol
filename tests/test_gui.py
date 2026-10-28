@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import importlib.util
+import os
 import unittest
 
 from novacontrol.gui import DashboardTab, DashboardViewModel
+
+_HAS_PYSIDE = importlib.util.find_spec("PySide6") is not None
 from novacontrol.gui.theme import _disable_effects, _has_animations, build_dashboard_qss
 
 
@@ -15,6 +19,8 @@ class GuiTests(unittest.TestCase):
         self.assertIn(DashboardTab.EXPLORE, view_model.state.tabs)
         self.assertIn(DashboardTab.DEMOS, view_model.state.tabs)
         self.assertIn(DashboardTab.AUTOMATION, view_model.state.tabs)
+        self.assertIn(DashboardTab.NOVAFORGE, view_model.state.tabs)
+        self.assertEqual(DashboardTab.NOVAFORGE.label, "NovaForge")
 
     def test_view_model_tracks_state(self) -> None:
         view_model = DashboardViewModel.with_default_tabs()
@@ -78,6 +84,97 @@ class ThemeTests(unittest.TestCase):
             sorted(disabled),
             ["UI_AnimateCombo", "UI_AnimateMenu", "UI_AnimateTooltip", "UI_FadeTooltip"],
         )
+
+
+@unittest.skipUnless(_HAS_PYSIDE, "PySide6 is an optional GUI extra")
+class GameHostTabTests(unittest.TestCase):
+    """The embedded-game tab builds, reads the NF-12 library and detaches cleanly.
+
+    Runs offscreen: it proves widget construction and the panel's wiring, not
+    native embedding. The live reparenting evidence is in the NF-13A report.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
+    def make_panel(self) -> object:
+        import asyncio
+
+        from novacontrol.gui.game_host import GameHostPanel
+
+        class FakeNova:
+            async def game_library(self, query: str = "") -> dict[str, object]:
+                return {
+                    "available": True,
+                    "entries": [
+                        {
+                            "title": "Shadow Fight Arena",
+                            "status": "ALREADY_RUNNING",
+                            "reason": "Already running as SFA (pid 7).",
+                            "artifact": {"source": "steam", "launch_target": "1446890"},
+                            "running": {"pid": 7, "name": "SFA", "window": "Shadow Fight Arena",
+                                        "start_time": "2026-10-23T01:43:30.5955071Z"},
+                            "tested": False,
+                        }
+                    ],
+                    "matched": 1,
+                    "total": 1,
+                    "owned": None,
+                    "observation": {"available": False, "reason": "No backend validated a frame."},
+                }
+
+            async def close_game_launch(self, *, launch_id: str = "") -> dict[str, object]:
+                return {"closed": False, "summary": "not ours"}
+
+        return GameHostPanel(FakeNova(), asyncio.run)
+
+    def test_panel_reads_the_library_and_shows_a_native_surface(self) -> None:
+        panel = self.make_panel()
+        try:
+            panel.refresh_library()  # type: ignore[attr-defined]
+            self.assertEqual(panel.library.count(), 1)  # type: ignore[attr-defined]
+            self.assertIn("Shadow Fight Arena", panel.library.itemText(0))  # type: ignore[attr-defined]
+            self.assertIsInstance(panel.surface.native_handle(), int)  # type: ignore[attr-defined]
+            self.assertIn("unavailable", panel.capture_label.text())  # type: ignore[attr-defined]
+            self.assertEqual(panel.host.state, "closed")  # type: ignore[attr-defined]
+            self.assertFalse(panel.close_button.isEnabled())  # type: ignore[attr-defined]
+        finally:
+            panel.shutdown()  # type: ignore[attr-defined]
+            panel.deleteLater()  # type: ignore[attr-defined]
+
+    def test_compatibility_is_rendered_separately_from_capture(self) -> None:
+        panel = self.make_panel()
+        try:
+            panel.refresh_library()  # type: ignore[attr-defined]
+            text = panel.compatibility_label.text()  # type: ignore[attr-defined]
+            self.assertIn("Compatibility: NOT_TESTED", text)
+            self.assertIn("capture compatibility: not_tested", text)
+            self.assertIn("assessed separately", text)
+            # Capture availability is its own line; compatibility must not be
+            # derived from it (and vice versa).
+            self.assertIn("unavailable", panel.capture_label.text())  # type: ignore[attr-defined]
+        finally:
+            panel.shutdown()  # type: ignore[attr-defined]
+            panel.deleteLater()  # type: ignore[attr-defined]
+
+    def test_shutdown_is_idempotent(self) -> None:
+        panel = self.make_panel()
+        panel.refresh_library()  # type: ignore[attr-defined]
+        panel.shutdown()  # type: ignore[attr-defined]
+        panel.shutdown()  # type: ignore[attr-defined]
+        self.assertEqual(panel.host.state, "closed")  # type: ignore[attr-defined]
+        panel.deleteLater()  # type: ignore[attr-defined]
+
+    def test_shutdown_without_a_game_is_a_no_op(self) -> None:
+        panel = self.make_panel()
+        self.assertEqual(panel.host.state, "closed")  # type: ignore[attr-defined]
+        panel.shutdown()  # type: ignore[attr-defined]
+        self.assertEqual(panel.host.state, "closed")  # type: ignore[attr-defined]
+        panel.deleteLater()  # type: ignore[attr-defined]
 
 
 if __name__ == "__main__":

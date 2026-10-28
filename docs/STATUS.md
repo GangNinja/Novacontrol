@@ -2417,21 +2417,379 @@ later action — including the next session's — abort instantly; and a Guardia
 in-flight hold because it queued behind the lock the action held, while input cleanup reported the process's
 lifetime press totals as a per-session number (`2 / 2` for a session that tapped once).
 
-Report: `docs/NOVAFORGE_NF07_REPORT.md`. **Verdict: PASS WITH LIMITATIONS** — only a window-title objective
-is checkable, input is limited to the declared gameplay keys, nothing launches a game, and anti-cheat and
-per-game policy remain unproven; the action path was accepted against a disposable window, not a commercial
-game.
+Report: `docs/NOVAFORGE_NF07_REPORT.md`. **Verdict: PASS WITH LIMITATIONS** — only a window-title or a
+declared game-state artifact objective is checkable, input is limited to the declared gameplay keys, nothing
+launches a game, and anti-cheat and per-game policy remain unproven; the action path was accepted against a
+disposable window, not a commercial game.
+
+### NF-07 → NF-05 integration pass (2026-10-21)
+
+The audit's remaining gap — an evaluation that could neither act nor verify — is closed. `mode: "control"`
+on `POST /novaforge/evaluations` now parses one operator-authored objective and action plan, judges the
+objective/plan/budget/platform checks during preflight, mints a **single-use approval bound to the plan
+digest**, attaches the objective to the session it starts, and executes each action through the same
+`plan_action` → `execute_action` path the Guardian tab uses. The `artifact-harness` environment declares
+`control` (Windows-only, disposable), the `controlled-objective` benchmark scenario measures
+`objective_success` / `completion_time_seconds` / `actions_executed` from the session's own verdict, and the
+registry's capability blocks are overlaid with the live manager's report (a declaration is kept under
+`declared`; it is never mistaken for live capability). The ending rule is documented in
+`docs/NOVAFORGE_NF07_INTEGRATION_GAP_AUDIT.md` §11: a plan's own `action_budget` ending and an
+`objective_verified` close are both completed controlled runs, an external stop is aborted, and an undecided
+run is inconclusive — never success. The frame floor no longer marks a fast decided success invalid, but a
+decided run still needs one fresh frame. **No planner was added**: observation-only is still the default,
+no real game was launched or controlled, and the real-game verdict remains NO-GO.
+
+The same path was then driven end to end over HTTP by
+`scripts/novaforge_controlled_evaluation_acceptance.py`, which starts its own isolated server and disposable
+harness: preflight → digest approval → refusal without a digest and for another plan's digest → approved
+execution → `verified_success` with `objective_success 1.0`, `actions_executed 1`, a recorded timeline and a
+resolved report. **15/15 steps, exit 0**, repeated four times. That run found two real defects, both fixed:
+the control runner executed before the session's own observation loop had confirmed the target (a race that
+could refuse the first action), and the PowerShell capture/probe helpers were spawned with a console window
+that stole the foreground from the guarded target — the same symptom, and the reason the acceptance run was
+intermittent. Both now wait/spawn without a console (`_await_target_validated`, `CREATE_NO_WINDOW`), each
+pinned by a test.
+
+### Controlled-run UI in the NovaForge panel (2026-10-21)
+
+The controlled chain is reachable from the panel. The Evaluation tab gains a **Mode** selector
+(`observation_only` default / `control`), an objective editor (kind, comparison, value, artifact
+path, dotted pointer, maximum age), an **operator-authored action plan** (key, hold, click, move)
+with per-row editing, the environment's declared `ActionPolicy` shown as keys/buttons/max-hold/
+max-actions, an action budget, and an approval checkbox bound to the digest the preflight issued.
+Start is disabled until readiness passes, the configuration signature matches, consent is given —
+and, in control mode, the preflight's own `approval.digest` exists; the payload echoes that digest
+and never mints one. A start that fails ambiguously is never re-posted: the panel adopts a
+`running` record whose `plan_digest` matches and polls it.
+
+The ending is rendered as the verifier's, not the action log's: the active card and the report
+show the verdict with its tone and reason, the six control stages separately, each approved
+action with its status, and the measured metrics where an unmeasured row says `Unavailable —
+reason` instead of `0`. `completed · objective verified` requires `objective.decided` (full
+record) or `objective_verified` (history row); otherwise the run reads `objective inconclusive`.
+Observation-only keeps `completed · data complete` and its own confirmation.
+
+Driving the served UI found three defects, all fixed and pinned: an edited plan row kept its old
+summary (now updated in place); the refactor had dropped the observation-mode confirmation from
+the gate (caught by `test_start_requires_readiness_and_an_explicit_confirmation_for_this_exact_config`,
+the guard now requires consent in both modes); and a decided run left `refusal` at `pending`
+(`_run_control` now closes it as `not_applicable`). Two live runs through the browser against
+`NC FORGE HARNESS` both ended `completed · objective verified` with a digest-bound approval, one
+executed key, `objective_success achieved` and the verdict quoting the window title; the
+observation-only workflow was re-checked in the same session. `tests/test_novaforge_ui.py` is
+104 passed / 61 subtests (16 new, behavioural and DOM-rendered), both mypy views are clean and
+`docs/API.md` is in sync (no route changed). Report: `docs/NOVAFORGE_CONTROLLED_UI_REPORT.md`.
+**Verdict: PASS WITH LIMITATIONS** — the UI is no longer a blocker to a first controlled game
+evaluation; the missing decision pipeline, the two objective kinds a real game does not announce,
+the single controllable environment and the unproven anti-cheat policy remain.
+
+## NF-08 — observation, screen-text objectives and the closed loop (2026-10-21)
+
+**PASS WITH LIMITATIONS.** The two blockers NF-07 named are delivered, and both are exercised live
+rather than declared. `novaforge/observation.py` builds one structured, timestamped observation whose
+status (`observed | degraded | stale | unavailable`) is the whole contract: a stale frame, an unreadable
+window or a screen with nothing interpretable is never actionable, and a readable **title** counts as
+text that was read, with every absent source named in `uncertainty`. `ocr_text` is now a verified
+objective kind: a fresh frame is captured and cropped to the target, text is read off it with the same
+Windows OCR engine the vision layer uses, an optional region bounds the evidence, and the verdict is
+**never given an invented confidence** — the engine reports none, so recognised words may decide while an
+empty reading cannot prove `absent`. `novaforge/policy.py` + `closed_loop.py` add a bounded loop that
+decides one action at a time and executes it through the session's existing plan/digest/Guardian path;
+its one shipped policy is a deterministic navigation rule whose capability says `model_backed: false`.
+The loop stops on a stale observation, a lost target, a refused plan, the budget, the deadline or an
+operator cancel, and `completed` requires the verifier — a `verified_failure` is final only after an
+action, because before one it is the starting state. Two routes (`POST …/loop`, `POST …/loop/cancel`)
+are in all five registration places, `/novaforge/capabilities` reports the pipeline and its honest
+limits, and the Guardian tab gains the OCR objective fields and a Closed Loop card. **73 new tests**
+across the loop/observation/policy module (47) and the panel (6) plus the OCR verifier and HTTP paths;
+the NovaForge suites are 313 passed / 75 subtests, gameplay HTTP 11 / 10, route contract 18 / 90,
+benchmark 75 / 111, evaluation 76 / 34, `test_web_api.py` static subset 3 / 12, both mypy views clean
+over 431 files, `docs/API.md` in sync. **Live, on real hardware:** a disposable WinForms harness was
+driven with one injected `space`; the OCR verifier read `RECEIVED 1 KEY(S)` from a fresh frame and the
+session completed `verified_success` in 5.96 s through the served panel, with the API reporting the same
+verdict from its evidence. Limitations: the policy is not a game brain, no vision model is wired into
+observation, silent OCR cannot prove absence, the target must be visible on the primary display, one
+loop runs per session, and the preview screenshot tool could not composite the page (verified textually).
+Report: `docs/NOVAFORGE_NF08_REPORT.md`.
+
+## NF-09 — vision-model integration and evidence-grounded state interpretation (2026-10-22)
+
+**PASS WITH LIMITATIONS — the integration is implemented and exercised; live inference FAILED on this
+hardware.** NF-08 left one seam open: `ObservationBuilder` accepted a `describe` step that nothing
+implemented, so `/novaforge/capabilities` said `vision_model: false` on every machine. `novaforge/visual.py`
+fills it through the EXISTING vision provider — `provider_supports_vision` (Ollama capability metadata,
+registered cloud presets) decides what may see, `vision/manager.py` and the persisted `vision_llm`
+namespace choose the model, and `_load_image_base64_for_vision` prepares the frame — so no second model
+registry, HTTP client or capability gate was added. A model answer becomes a typed, versioned
+`VisualInterpretation` (v1) that names its frame and target, the provider and model, the latency, the
+attack surface it ignored, its evidence refs and its uncertainty; `confidence` stays `null` (a self-rated
+number is kept only as `reported_confidence`), a claimed title or `text_visible: false` that contradicts
+OCR is recorded as a **conflict** rather than resolved, and action-shaped fields are dropped and reported.
+Stale (>2 s), clipped and unavailable frames are refused BEFORE any inference; the frame is cropped by the
+existing capture worker, downscaled by the existing preparation, byte-capped, and awaited under a deadline
+with a two-entry frame cache. `POST /novaforge/sessions/{id}/vision/interpret` is read-only and returns the
+interpretation beside measured evidence; `/novaforge/capabilities` reports `vision_interpretation` with
+the model, deadline and an exact reason when unavailable. The Guardian tab gains a compact **Describe
+Frame** section that labels the answer a model claim, never evidence, and cannot act.
+
+**Two defects were found by verification and fixed.** Wiring the describer into the bounded loop
+unconditionally cost **24.3 s for a one-action loop** (12 s description cap plus action/verify) and broke
+the NF-08 20 s-deadline acceptance test; the loop now observes measured evidence only
+(`describe=False`) and the test class runs in **3.44 s** again — the read-only endpoint is the deliberate
+way to ask a model. An **empty** model answer was classified `degraded` ("answered without a usable
+structure"), which claims an answer that does not exist; it is now `unavailable` with the reason.
+
+**Live, on real hardware:** Ollama served `qwen3-vl:4b` (3.30 GB, CPU), the gate reported vision, and
+two attempts were made through the production endpoint against a fresh `NC FORGE HARNESS` crop.
+Attempt 1 (1200-token budget, 280 s): 1235 prompt tokens, 46.7 s prompt eval, 1200 decoded tokens at
+8.10 tok/s, **194.9 s, empty answer**. Attempt 2 (2000 tokens, 720 px, 295 s): **timed out**. A
+direct short-prompt probe of the same model read the harness text and returned JSON in 54.2 s, so the
+model can see; its reasoning does not fit the reply budget on this CPU. **Live inference: FAIL** — no
+interpretation was produced and none is claimed. Tests: `test_novaforge_vision.py` **46 passed**;
+NovaForge core/API/gameplay/UI/vision/loop/timeline **417 passed / 88 subtests**; NF-04/05/06
+**209 / 164**; vision + route contract **160 / 107**; `test_web_api.py` + `test_web_platform.py`
+**120 / 437**; both mypy views clean over **432 files**; `docs/API.md` in sync; `node --check` clean. The
+full repository suite was not run in one pass. The page was re-checked live after a reload: the NF-09
+roadmap row rendered and the Guardian tab read `Visual interpretation: qwen3-vl:4b via llm:ollama ·
+a model description is a claim, not evidence` with no console errors; the Describe Frame click was not
+re-run live because the known inference takes up to 295 s (the endpoint was exercised twice). Report:
+`docs/NOVAFORGE_NF09_REPORT.md`.
+
+## NF-10 — adaptive gameplay policy and evidence-based evaluation (2026-10-22)
+
+**PASS WITH LIMITATIONS.** NF-10 replaced neither the loop nor its gates; it added a **state-dependent
+policy** and the baseline to measure it against, on a multi-state version of the disposable harness.
+`scripts/forge_harness_window.ps1 -Task stages` exposes a title-anchored state machine —
+`STAGE IDLE --A--> STAGE ARMED --B--> STAGE COMPLETE`, with `FAULT --R--> IDLE` as recovery — so the same
+correct action is never always correct and the next action depends on what the previous one caused. The
+default `ready` task is untouched, so the NF-07/NF-08 acceptance still passes unchanged.
+
+`HarnessStagesPolicy` (v1) reads the stage from the measured title, chooses that stage's key, refuses on
+stale/unreadable states and after a stall, and leaves COMPLETE to the verifier. Its proposals carry the
+action, reason, evidence refs, expected next title, policy id/version, uncertainty and `model_backed`.
+Vision is a **fallback only**: a model description is consulted only when the title states no stage, must
+be a structured conflict-free claim, and the decision is then labelled model-backed. `FixedKeyPolicy` is
+the baseline: one key on every observation, no state reading. `LoopResult` now records policy version,
+model-backed provenance and per-step observation age, decision latency and evidence count;
+`novaforge/policy_eval.py` turns those results into trial rows and aggregates — it runs nothing and makes
+no verdict. The Forge closed-loop card gains a policy selector and reports the policy, its version and
+whether any decision was model-backed.
+
+**Live acceptance** (`scripts/novaforge_policy_acceptance.py --trials 3`, real window, real injected keys,
+real verifier, identical limits and a fresh window per trial): the candidate **3/3 verified_success**, two
+actions and two observed transitions each, 1.965/2.276/2.366 s; a controlled-failure recovery trial
+**verified_success** from `FAULT` in three actions and 2.695 s; the fixed baseline **0/3**, one action,
+verified failure in `FAULT` at 1.53/1.59/1.10 s. Delta in success rate +1.0; the candidate is slower
+because it takes more actions, which the task requires. The adaptation metric is strict: trials where the
+policy DECIDED DIFFERENTLY after a state change are **3/3 candidate vs 0/3 baseline** — the baseline moved
+IDLE→FAULT with its own wrong key and never made a second decision, which is not a response. N=3 on a
+deterministic task: no significance claim, raw rows preserved. **No live model-backed decision exists** — NF-09's CPU inference failure stands, so
+`model_backed_trials: 0` and the model-backed-policy verdict is FAIL. The run found and fixed a real input
+defect: the key table was generated uppercase while `normalize_key` lowercases, so only a/s/d/w letters
+worked — `b` and `r` were "not a key this build knows". Also fixed: NF-08's "failure after an action ends
+the run" rule now yields to a multi-step policy (default preserved), a policy stop with a failing verdict
+is reported `failed` not `stopped`, and the transition metric read the wrong observation shape (then, on
+review, credited the baseline with adapting merely because its own wrong key changed the state — it now
+requires a changed second decision).
+
+**Verification pass (same day) closed three gaps the phase's own requirements name.** The loop had no
+**decision timeout** — `policy.propose()` was awaited unbounded while the observation and verifier had
+limits — so one hung policy could hold the run and the operator's Stop indefinitely; a cancel during the
+wait was also unattributable. `LoopLimits.decision_timeout_seconds` (default 10 s, validated) bounds the
+decision, a spent bound stops the run, and a cancel that arrives meanwhile is reported as `canceled`. A
+**policy fault escaped the loop**: only `PolicyUnavailable` was caught, so a raising policy, a malformed
+answer (no action/kind/reason, or a bare dict) or a raising planner/executor propagated out of `run()`;
+the answer is now validated before planning and every such fault is recorded as `error` with the fault
+named and nothing executed. **§8 exposure was incomplete**: the panel showed plan/execute status but not
+the observed state, decision reason, evidence refs, expected outcome, uncertainty or verifier reason, and
+exposed no metrics or trial history. Each step now renders all of those, the verifier's own verdict is
+quoted separately from the loop's stop reason, and a **Trial history** card shows per-policy aggregates
+and the last five rows — refusals and inconclusive runs included — from the new read-only
+`GET /novaforge/trials`; `POST .../loop` also returns `trial` and `policy_summaries`. Aggregates come
+from `policy_eval`, records are capped at 50 and labelled `durable: false` (process-local), and a metric
+with no samples is omitted, never printed as zero. Tests: policy **33 passed**, policy/loop/gameplay/API
+**253 / 26**, desktop/UI/vision/timeline **340 / 121**, route/contract/API-reference **60 / 413**; both
+mypy views clean over **433 files**;
+`docs/API.md` in sync (323 routes); `node --check` clean. The full repository suite was not run in one
+pass. Report: `docs/NOVAFORGE_NF10_REPORT.md`.
+
+## NovaForge NF-12 — game discovery & launch workflow integration (2026-10-23)
+
+NF-11's catalog and launch lifecycle are now reachable from the workflow that already exists: a
+**Game Library** tab in the NovaForge panel (search, per-title evidence, `Preview Launch` →
+`Approve & Launch`, close, attach), five `/novaforge/library*` routes, and `launch <game>` /
+`is <game> installed` in chat. `/command/plan` and `/command/execute` route a game phrase through the
+same verified path, so one single-use token gates a launch whether it came from chat, the Quick Command
+tab or the library. The new surface exposes the four launch facts separately — requested, process,
+window, verified — and reports capture availability with `implied_by_launch: false`; a discovered
+row only says `tested` when this service actually started and verified that title.
+
+**Live, on this host:** the catalog read 12 titles (3 launchable, 1 running, 5 missing, 3 runtime);
+`/ask` answered "already running" from Freedom Fighters' row and returned a concrete launch plan for
+Shadow Fight Arena with no process started. A library preview → approve launched SFA (pid 25520,
+window verified), a graceful close confirmed its exit; `/command/plan` → `/command/execute` repeated
+the cycle (pid 30816); replaying a consumed token returned 403 with nothing launched. The preview also
+refuses a second game while a test-owned instance is still tracked (`ANOTHER_GAME_OWNED`, no token,
+live-checked against GTA V while SFA was owned, then the owned game was closed and its exit confirmed).
+The panel then
+rendered 12 rows, previewed SFA, approved through its own button (pid 33168, all four stages true) and
+closed it, with no console errors. Every launch stayed inside the existing memory gate (2.37–3.08 GB
+free, 80–85 % used); GTA V was not launched.
+
+**Tests:** `test_novaforge_library.py` 40 passed / 19 subtests; `test_novaforge_library_ui.py` 13
+passed; launcher/library/library-ui **105 passed / 22 subtests**; application/desktop/JARVIS
+**125 passed / 49 subtests**; web/API/route/UI/library group **347 passed / 627 subtests**; both mypy
+views clean over **436 files**; `docs/API.md` in sync (328 routes); `node --check` clean. Verdict
+**PASS** — the catalog, the plan/execute token path and the library surface share one launch service,
+and a launch, a running instance and a capturable frame stay three separate claims. Report:
+`docs/NOVAFORGE_NF12_GAME_WORKFLOW_INTEGRATION_REPORT.md`.
+
+## NovaForge NF-13A — embedded game host (2026-10-24)
+
+A dedicated NovaForge dashboard tab now hosts a REAL native game window inside the panel
+(`gui/game_host.py` + `novaforge/embedding.py`): the NF-12 catalog and `GameLaunchService` are reused for
+launch and close, `(pid, start_time, hwnd)` is tracked and re-checked while embedded, seven host states
+are distinguished, and embedding, capture and gameplay are reported as separate axes — a verified parent
+is never a verified frame, and no browser panel can host an HWND. **Live:** the disposable window
+embedded, resized, focused, detached and restored (parent verified by read-back); **no installed game
+could be embedded** — the lightweight titles open borderless-fullscreen, which the host refuses by
+design, and hosted-window capture is unavailable on this host. Tests: 60 mocked host tests + 8 GUI tests;
+both mypy views clean. Verdict **PARTIAL** — the host is real, exercised and tested; the game half is
+blocked on a windowed instance, which is the operator's choice, not host code. Report:
+`docs/NOVAFORGE_NF13A_EMBEDDED_GAME_HOST_REPORT.md`.
+
+## NovaForge NF-14 — game embedding compatibility & recovery (2026-10-24)
+
+`novaforge/compat.py` classifies a title's embedding and capture compatibility from EVIDENCE, keeping the
+two axes independent, and the host now recovers from window events instead of drifting: a
+self-minimized/hidden/re-parented/recreated window is detected and either restored or reported
+`SUPPORTED_WITH_LIMITATIONS`, a failed restore stays retryable, a reused HWND is never reported as the
+game's window, and a corrupt persisted row cannot crash the panel. A verification pass fixed twelve such
+defects, each pinned by a test. **Live:** SFA `UNSUPPORTED` with zero native writes and a recorded
+fallback; the disposable fixture `SUPPORTED`, embedded (parent verified), resized, closed,
+`process_exited`, cleanup `changed: false`; hosted-window capture failed and the record says
+`capture: unavailable`. Tests: phase **110 passed** (embedding 100, GUI 10); host/GUI/capture/desktop-
+input/`test_novaforge` **289 passed / 34 subtests**; library/launcher **105 passed / 22 subtests**; both
+mypy views clean. Verdict **PASS WITH LIMITATIONS** — refusal, recovery and reporting are verified;
+embedding a real game remains unproven. Report:
+`docs/NOVAFORGE_NF14_GAME_EMBEDDING_COMPATIBILITY_REPORT.md`.
+
+## NovaForge NF-15 — unified game observation (2026-10-25)
+
+Observation now has ONE pipeline and a record instead of an ad-hoc frame fetch. `novaforge/observer.py`
+binds a target by title + pid + process start time + handle, re-reads that identity every tick, captures
+through the SAME capability router a session uses (`manager.capture_observation`), validates every frame
+with the existing `inspect_frame`/`validate_frame`, and records one of three honest statuses:
+`observed` (a validated frame — the only one the panel may show as a live frame), `rejected` (a frame
+existed and the verdict refused it; the file is deleted) or `unavailable` (no frame: minimized, hidden,
+missing, timed out or failed), with `None` for every unmeasured figure. A minimized or hidden target
+pauses without capturing; restore resumes automatically; a user pause never does; a recreated window with
+the same pid is re-bound, a different process is never adopted, and an exited process is terminal
+(`process_exited`) rather than a missing window. Scheduling is one bounded loop (interval clamped
+0.25–5 s, one capture in flight, probe/capture/identity/stop timeouts, 120 history rows, 12 frames per
+session, 3 sessions), and the measured rate, latency and scheduling delay are reported as measured — a
+slower capture reports the rate it achieved.
+
+Seven routes (`GET /novaforge/observation`, `/start`, `/pause`, `/resume`, `/stop`, `/observe`,
+`/frame`) are registered in all five places with `docs/API.md` in sync. The Mission Control panel gains a
+**Unified Observation** card: target/interval/label, state-driven Start/Pause/Resume/Stop/Observe Once,
+engine facts (target identity, window state, backend, dimensions, rate, latency, delay, failures,
+counts), a bounded read history that keeps refusals, and a frame panel that starts hidden with no `src`,
+is fetched only after validation, and says **“validated now”** only while observing and fresh (≤ 5 s) —
+otherwise it is explicitly a record. The card states that reading a window is not understanding or
+controlling it.
+
+**Live** (`scripts/novaforge_nf15_observation_probe.py`, memory gate 3.88 GB free / 74.8 % used, then
+2.01 GB / 86.9 %): Shadow Fight Arena (pid 6540, start pinned, `UnityWndClass`, 2880×1800, DPI 192) was
+launched through the NF-12 token path and observed at a requested 0.5 s interval — **4/4 validated
+frames**, backend `gdi_display` then `printwindow`, one frame at 6.33 MB non-blank, achieved **0.838 Hz**,
+latency average **433 ms** (max 447), scheduling delay average 680 ms; minimizing the window paused it
+(`target_minimized`, **0 frames** captured while unavailable); restoring resumed it in **1.59 s**; stop
+left **0 frames** after the wait; the game was closed gracefully (`CLOSED`, process confirmed gone) and
+observation stayed `stopped`. A previous run recorded the refusal path: two ticks rejected as **blank**
+(PrintWindow answered a solid fill while the game was not foreground) with the files deleted, then a
+validated 2880×1800 window-surface frame.
+
+**Tests (verification pass):** `test_novaforge_observation.py` **49 passed**; `test_capture_backends.py`
+**55 passed**; `test_novaforge_ui.py` **133 passed / 75 subtests** (8 Node-executed observation-logic
+pins); capture/Forge/vision/route group **194 passed / 90 subtests**; web/desktop group **154 passed /
+92 subtests**; gameplay/API/embedding/launcher group **234 passed / 18 subtests**; UI/application/library
+group **237 passed / 119 subtests**; both mypy views clean over **440 files**; `docs/API.md` in sync;
+`node --check` clean. The pass found and fixed seven defects — a mypy regression, a clipped-frame note
+lost through the capture router, a failure-record count lag, a duplicate-loop race after a terminal
+failure, the missing window-state fact, a non-Windows identity probe that reported a live process as
+exited (it now raises, which the observer records as `unknown`), and a timing-dependent session-isolation
+assertion that failed when the observation file ran alone — each pinned by a test. **Post-fix live:** a disposable
+painted window (no game launched, `printwindow`, 1312×918, 25–33 ms capture) validated 2/2 frames at a
+1.0 s interval (**0.996 Hz** measured), paused `target_minimized` with **0 new frames**, resumed in
+**0.54 s**, and stopped with its counts frozen for 2.5 s. Verdict **PASS WITH LIMITATIONS** — one
+fullscreen Unity title (game runs recorded before the fixes), ~0.84 Hz on this laptop, live focus-loss
+and window recreation `NOT_TESTED`, hosted-window capture still unavailable.
+Report: `docs/NOVAFORGE_NF15_UNIFIED_GAME_OBSERVATION_REPORT.md`.
+
+## NovaForge NF-16 — game state understanding (2026-10-25)
+
+A frame becomes a **typed state record** instead of prose: `novaforge/state.py` extracts labelled HUD fields through OCR, classifies each *reading* (recognised / unreadable / absent / unsupported), selects a declared HUD profile **with a version**, and attaches the observation identity and freshness every field rests on. Ambiguity is a first-class `unknown` — an unreadable value is never rewritten as zero, and an absent marker proves neither success nor failure. Profile mismatch is detected rather than assumed compatible. Fixture HUDs only: no commercial-game profile was validated. Verdict **PASS WITH LIMITATIONS**. Report: `docs/NOVAFORGE_NF16_GAME_STATE_UNDERSTANDING_REPORT.md`.
+
+## NovaForge NF-17 — objective and progress understanding (2026-10-25)
+
+The objective now has a **type** and an evidence trail: a typed objective model, evidence-backed discovery, progress tracking, and completion/failure verification with bounded history, a panel card and an offline evaluation. Completion is claimed only from evidence that says so. Live-game evaluation `NOT_TESTED`. Verdict **PASS WITH LIMITATIONS**. Report: `docs/NOVAFORGE_NF17_OBJECTIVE_PROGRESS_REPORT.md`.
+
+## NovaForge NF-18 — game-specific knowledge and memory (2026-10-25)
+
+Game knowledge is **evidence-first and expiring**: a typed knowledge model over the existing memory subsystem, durable game-scoped storage, explicit verification and contradiction rules, freshness that ages a claim instead of trusting it forever, a retrieval API and a panel card. A stored belief keeps its provenance and can be contradicted by later evidence. Verdict **PASS WITH LIMITATIONS**. Report: `docs/NOVAFORGE_NF18_GAME_KNOWLEDGE_MEMORY_REPORT.md`.
+
+## NovaForge NF-19 — game control interface (2026-10-26)
+
+ONE typed, bounded, cancellable and observable input operation at a time, through the desktop package's existing `InputGuard`, so a press has a release on success, error, timeout, cancellation and target loss; effect verification is **not implemented by design** (NF-21 owns it). Live-verified on the disposable Windows harness window (**20/20 checks**, run 5, no game launched). Verdict **PASS WITH LIMITATIONS**. Report: `docs/NOVAFORGE_NF19_GAME_CONTROL_INTERFACE_REPORT.md`.
+
+## NovaForge NF-20 — game planning and action selection (2026-10-26)
+
+A goal becomes a **typed, bounded, evidence-grounded plan** wired to NF-19, exposed over HTTP and the panel: a plan states its preconditions and the evidence it expects, so an unverifiable step is a bug rather than a default. Two independent verification passes found and fixed **five defects**. The only shipped plan rule is the NF-17 labelled fixture, so this is not a game brain; live gameplay planning `NOT_TESTED`. Verdict **PASS WITH LIMITATIONS**. Report: `docs/NOVAFORGE_NF20_GAME_PLANNING_REPORT.md`.
+
+## NovaForge NF-21 — outcome verification and bounded recovery (2026-10-26)
+
+The loop closes both ends. A verifier distinguishes **executed** from **completed** and refuses to pass on "actions exist", judging a run by where each step **ended up** (a retried success is a success, with the failure kept in `outcomes`); a step that never ran is `INCONCLUSIVE`, never a pass. Recovery is bounded and declines the retries that cannot work — a destructive action, an irreversible repository step, a refusal, a missing dependency (retry cannot install a package). Live verification `NOT_TESTED`: no game has a verified observable mapping. Verdict **PASS WITH LIMITATIONS**. Report: `docs/NOVAFORGE_NF21_OUTCOME_VERIFICATION_RECOVERY_REPORT.md`.
+
+## NovaForge NF-22 — first bounded autonomous gameplay (2026-10-26)
+
+Observe → decide → act → verify → recover runs as ONE bounded loop over the NF-16…NF-21 stack, with every limit, gate and safety stop the phase requires: budget, deadline, cancellation, target loss, stale observation and a refused plan all end the run rather than being retried into. **38 user-level steps** pass through the served application. All of it is on **simulated evidence** — live gameplay is `NOT_TESTED`, and the report says so wherever the distinction matters. Verdict **PASS WITH LIMITATIONS**. Report: `docs/NOVAFORGE_NF22_FIRST_AUTONOMOUS_GAMEPLAY_REPORT.md`.
+
+## NovaForge NF-23 — real-game compatibility and observation (2026-10-27)
+
+Observation against a **real window**, and an honest account of what it cannot see: a ten-stage observation ladder where each stage rests on its own evidence, eight live states on the surface (one label each, none borrowed), capture-backend routing with frame validation, target identity pinned by pid + process start time + handle, freshness and lifecycle, and a dark-frame corruption fix in which **two independent reads must agree** before a blank frame is served as a dark read. The whole path is served on `/novaforge/capabilities?title=…` and mirrored in the panel. **Verdict PARTIAL PASS** — implementation and automated verification pass; the live half is **BLOCKED** on a safe installed offline title that starts (**B-01**). Report: `docs/NOVAFORGE_NF23_REAL_GAME_COMPATIBILITY_REPORT.md`.
+
+## NovaForge NF-24 — real-game state understanding and objective recognition (2026-10-27)
+
+What screen is this, is a change to it **a fact yet**, and which objective does that close — each with its evidence: a scene model (`menu/loading/gameplay/pause/death/victory/defeat/unknown`) where `observed` requires a declared profile rule over a **recognized** field while a generic cue is only `inferred`; N-of-M temporal confirmation where a repeated observation id can never count twice; contradictions recorded rather than resolved; profile compatibility checks; and false-positive / false-completion tests. **Verdict PARTIAL PASS** — no commercial-game profile was validated (**B-01**). Report: `docs/NOVAFORGE_NF24_REAL_GAME_STATE_UNDERSTANDING_REPORT.md`.
+
+## NovaForge NF-25 — real-game objective execution and progress validation (2026-10-27)
+
+One bounded real-game task through the existing NF-19 → NF-22 pipeline, judged from **evidence** rather than from dispatch: `tasks.py` refuses to start without an objective, a **verifiable** success condition, an explicit evidence requirement, permitted action kinds and budgets inside the supervisor's ceilings; **ten preflight gates** refuse by name; completion is `verified_completion` only when the run ended `objective_completed` **and** the declared evidence is present **and** every dispatched action was permitted. A dispatched input is not a game response, a game response is not progress, and progress is not completion. **Verdict PARTIAL** — no live-game objective was executed (no launchable safe title, no operator approval: **B-01**, **B-02**). Report: `docs/NOVAFORGE_NF25_REAL_GAME_OBJECTIVE_EXECUTION_REPORT.md`.
+
+## NovaForge NF-26 — adaptive gameplay, learning and performance (2026-10-27)
+
+A rule this phase exists to enforce: a strategy is not better because it was selected more often, sent more actions or scored well internally. `learning.py` turns NF-25's judged reports into **versioned experience records**, measures each strategy from **decided** trials only, **refuses** to call a difference an improvement without enough decided trials and detached intervals, changes the planner only through a bounded **strategy hint** the NF-20 planner may ignore, groups recurring failures with their counterevidence, and keeps every change traceable and reversible. It captures no frame, interprets no state, verifies no outcome and sends no input; its whole input is NF-25's report and its whole output is a hint. 70 new tests, dependency suites 161 / 170 / 363 / 58, both mypy views clean over 454 files, `docs/API.md` in sync, evaluation 6/6 with **0 false labels and 0 live-evidence claims**. The baseline-versus-adapted demonstration is **fixture-based (simulated)**. **Verdict PARTIAL PASS** — the live half is **NOT RUN**. Report: `docs/NOVAFORGE_NF26_ADAPTIVE_GAMEPLAY_REPORT.md`.
+
+## NovaForge NF-23…NF-26 consolidated acceptance and remediation (2026-10-28)
+
+A cross-phase audit re-verified every NF-23…NF-26 requirement against the tree, the API, the panel and the served application instead of against the reports, then fixed what it found. **Six findings, all fixed** (two high, two medium, two low verification gaps). The consequential one (**R-01**) was a silent data loss: a session-start field the build does not read used to be **dropped without a word**, so an operator who wrote `max_seconds` instead of `time_limit_seconds` got a session with **no time limit** and no warning — `NovaForgeManager.validate` now refuses unknown fields by name and lists the ones it accepts, and the shipped application demonstrably caught this audit's own stale payload that way. Also fixed: autonomy provenance defaulted to `live` when undeclared (now `simulated`, so simulated evidence cannot be promoted into NF-26's real-game ledger), an omitted step list recorded as "zero submitted steps", the manager recording the game's **name** as the run's profile, and two invariants that were true but unpinned ("learning never gates the task", and zero-versus-unmeasured).
+
+**Verdicts, all four: PARTIAL PASS** — PASS on every in-scope requirement this host can demonstrate, BLOCKED on each phase's live-game half (**B-01** a launchable offline title will not start; **B-02** no operator approval for live input). None is FAIL: no safety property is violated, no critical path is broken, and no phase was re-labelled to make the row look better. Full suite **5,963 passed / 1 skipped / 3,847 subtests across 148 files**, both mypy views clean, `docs/API.md` in sync. No game was launched and no gameplay input was sent. Report: `docs/NOVAFORGE_NF23_NF26_CONSOLIDATED_ACCEPTANCE_REPORT.md`; findings register: `docs/NOVAFORGE_NF23_NF26_REMEDIATION_REGISTER.md`.
 
 ## Next Work
 
-NovaForge can now act and verify, so the prerequisites for *playing* have narrowed to ONE: a **decision
-pipeline** that chooses what to do from what was observed (NF-06 recommends, but it recommends *experiments*,
-not actions). The two that were missing are delivered: a Guardian-enforced gameplay input path
-(digest-bound, policy-bounded, guard-released) and an objective verifier that reads the target rather than
-its own action log. The next honest step is therefore the same target NF-05 refuses to fake: a slow,
-turn-based, offline environment whose state a verifier can read — which in practice means a second objective
-kind (a pixel region or OCR text, not only a window title), because no real game announces success in its
-window title.
+NovaForge can now observe, decide, act, verify, recover and learn: the decision pipeline NF-06 could not
+supply exists (NF-20 plans, NF-22 runs the bounded loop), the input path is Guardian-enforced and
+digest-bound (NF-19), the verifier reads the target rather than its own action log (NF-21), and a
+finished task is judged from its evidence (NF-25) with adaptation refusing to call anything improved
+without decided trials (NF-26). The one thing the build has never done is **play a real game**, and that
+is now an environment gap rather than a code gap: no safe installed offline title starts on this host
+(**B-01**), and no operator approval for live gameplay input has been requested or granted (**B-02**).
+The next honest step is therefore a **preflight**, not a new phase: confirm a launchable offline title
+(or accept that only disposable-window negatives are available), obtain explicit approval for one bounded
+live run, and re-enter at NF-23's live half — after which NF-24's profile, NF-25's task and NF-26's trials
+can each be answered against real evidence instead of fixtures.
 
 Two smaller, self-contained gaps are recorded by NF-06 itself: the panel cannot author an explicit
 experiment spec (a change whose value the record cannot supply must be proposed through the API), and

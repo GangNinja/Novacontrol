@@ -51,6 +51,7 @@ from novacontrol.novaforge import (
 )
 from novacontrol.novaforge.benchmark import metric_spec
 from novacontrol.novaforge.coach import FINDING_KINDS, SEVERITIES, EVIDENCE_STRENGTHS
+from novacontrol.novaforge.objective import ObjectiveDefinition
 from novacontrol.persistence.json_store import JsonStateStore
 
 from test_novaforge import FakeDesktop
@@ -98,6 +99,60 @@ class _EmptyManager:
 
     def telemetry_payload(self, session_id: str) -> dict[str, Any]:
         return {"telemetry": {"capture": {"frames": 0}, "session": {}, "target": {}}}
+
+
+class VerifiedObjectiveCoachTests(unittest.TestCase):
+    """NF-07's verifier must reach the analysis: a decided verdict is a RESULT.
+
+    The structural finding used to be appended unconditionally, with evidence
+    asserting ``objective_verification: available False``. After NF-07 added the
+    verifier that statement is false about the build AND about a session whose
+    objective was just confirmed, so a verified success was analysed as "No
+    objective was verified by this session". The three states are now distinct,
+    and this regression pins the first: a decided verdict is quoted, never denied.
+    """
+
+    def _analyse(self, verification: dict[str, Any], objective: Any = None) -> dict[str, Any]:
+        manager = _EmptyManager()
+        manager.record.verification = dict(verification)
+        manager.record.objective = objective
+        with TemporaryDirectory() as tmp:
+            coach = NovaForgeCoach(manager=manager, store=JsonStateStore(Path(tmp)))
+            return coach.analyse(session_id=manager.record.session_id)
+
+    def test_a_verified_success_is_a_result_not_a_missing_verifier(self) -> None:
+        analysis = self._analyse(
+            {
+                "outcome": "verified_success",
+                "verified": True,
+                "achieved": True,
+                "decided": True,
+                "reason": "Read 'NC FORGE HARNESS - READY' from window 42 (pid 7): satisfied.",
+            },
+            ObjectiveDefinition.from_payload(
+                {"kind": "window_title", "parameter": "READY", "mode": "contains"}
+            ),
+        )
+        by_category = {item["category"]: item for item in analysis["findings"]}
+        self.assertNotIn("objective_verifier_missing", by_category)
+        finding = by_category["objective_verified"]
+        self.assertIn("SUCCESS", finding["title"])
+        self.assertIn("READY", finding["explanation"])
+        earliest = analysis["earliest_recoverable_error"]["reason"].lower()
+        self.assertIn("objective", earliest)
+        self.assertNotIn("no objective verifier", earliest)
+
+    def test_an_undecided_objective_is_not_reported_as_verified(self) -> None:
+        analysis = self._analyse(
+            {},
+            ObjectiveDefinition.from_payload(
+                {"kind": "window_title", "parameter": "READY", "mode": "contains"}
+            ),
+        )
+        by_category = {item["category"]: item for item in analysis["findings"]}
+        self.assertIn("objective_unverified", by_category)
+        self.assertNotIn("objective_verified", by_category)
+        self.assertIn("never decided", by_category["objective_unverified"]["title"])
 
 
 class _CoachFixture(unittest.IsolatedAsyncioTestCase):

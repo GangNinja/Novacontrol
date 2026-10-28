@@ -572,6 +572,7 @@
 
           <nav class="forge-tabs" role="tablist" aria-label="NovaForge workspace">
             <button id="forgeTabMission" class="forge-tab active" type="button" role="tab" aria-selected="true" aria-controls="forgeMissionView" data-forge-tab="forgeMissionView">Mission Control</button>
+            <button id="forgeTabLibrary" class="forge-tab" type="button" role="tab" aria-selected="false" aria-controls="forgeLibraryView" data-forge-tab="forgeLibraryView">Game Library</button>
             <button id="forgeTabLive" class="forge-tab" type="button" role="tab" aria-selected="false" aria-controls="forgeLiveView" data-forge-tab="forgeLiveView">Live Session</button>
             <button id="forgeTabTelemetry" class="forge-tab" type="button" role="tab" aria-selected="false" aria-controls="forgeTelemetryView" data-forge-tab="forgeTelemetryView">Telemetry</button>
             <button id="forgeTabGuardian" class="forge-tab" type="button" role="tab" aria-selected="false" aria-controls="forgeGuardianView" data-forge-tab="forgeGuardianView">Guardian</button>
@@ -637,6 +638,221 @@
                 <p class="muted">Reading capture capability…</p>
               </div>
             </article>
+            <article class="surface forge-card forge-observation" aria-labelledby="forgeObservationTitle">
+              <div class="forge-card-head">
+                <h3 id="forgeObservationTitle">Unified Observation</h3>
+                <span id="forgeObservationState" class="forge-badge" data-state="idle">idle</span>
+              </div>
+              <div class="forge-observation-grid">
+                <div class="forge-observation-controls">
+                  <label class="field">
+                    <span>Target window</span>
+                    <input id="forgeObservationTarget" type="text" class="cyber-input" maxlength="160" placeholder="The validated mission target, or a window title" autocomplete="off">
+                  </label>
+                  <div class="forge-limit-row">
+                    <label class="field">
+                      <span>Interval <span class="muted">(seconds)</span></span>
+                      <input id="forgeObservationInterval" type="number" min="0.25" max="5" step="0.25" class="cyber-input" value="1">
+                    </label>
+                    <label class="field">
+                      <span>Game label <span class="muted">(optional)</span></span>
+                      <input id="forgeObservationGame" type="text" class="cyber-input" maxlength="80" placeholder="e.g. Shadow Fight Arena" autocomplete="off">
+                    </label>
+                  </div>
+                  <div class="button-row">
+                    <button id="forgeObservationStart" type="button" class="cyber-btn primary">Start Observing</button>
+                    <button id="forgeObservationPause" type="button" class="cyber-btn" disabled>Pause</button>
+                    <button id="forgeObservationResume" type="button" class="cyber-btn" disabled>Resume</button>
+                    <button id="forgeObservationStop" type="button" class="cyber-btn danger" disabled>Stop</button>
+                    <button id="forgeObservationOnce" type="button" class="cyber-btn" disabled>Observe Once</button>
+                    <button id="forgeObservationRefresh" type="button" class="cyber-btn small">Refresh</button>
+                  </div>
+                  <p id="forgeObservationHint" class="forge-limit-hint">Observation has not been started. Nothing is captured until a target is bound.</p>
+                </div>
+                <div class="forge-observation-live">
+                  <div id="forgeObservationFrameWrap" class="forge-observation-frame" hidden>
+                    <img id="forgeObservationFrame" alt="Latest validated observation frame">
+                    <span id="forgeObservationFrameLabel" class="forge-badge">not live</span>
+                  </div>
+                  <p id="forgeObservationFrameEmpty" class="muted">No validated frame yet. Observation has not been tested.</p>
+                  <dl id="forgeObservationFacts" class="forge-observation-facts"></dl>
+                </div>
+              </div>
+              <div id="forgeObservationLadder" class="forge-observation-ladder" aria-live="polite"></div>
+              <div id="forgeObservationHistory" class="forge-observation-history" aria-live="polite"></div>
+              <p class="forge-limit-hint">Reading a window is not understanding or controlling it. Only a frame that passed target, freshness and content validation is shown; a rejected frame is deleted, and a target that is minimized, hidden or gone pauses observation until it is valid again.</p>
+            </article>
+            <article class="surface forge-card forge-understanding" aria-labelledby="forgeStateTitle">
+              <div class="forge-card-head">
+                <h3 id="forgeStateTitle">Game State Understanding</h3>
+                <span id="forgeStateBadge" class="forge-badge" data-state="untested">untested</span>
+              </div>
+              <div class="forge-state-controls">
+                <label class="field">
+                  <span>Profile <span class="muted">(optional id; blank matches the window title)</span></span>
+                  <input id="forgeStateProfile" type="text" class="cyber-input" maxlength="80" placeholder="e.g. nc-forge-tick@1" autocomplete="off">
+                </label>
+                <div class="button-row">
+                  <button id="forgeStateAnalyzeButton" type="button" class="cyber-btn primary">Analyze Now</button>
+                  <button id="forgeStateRefreshButton" type="button" class="cyber-btn small">Refresh</button>
+                  <button id="forgeStateResetButton" type="button" class="cyber-btn small">Reset Baseline</button>
+                </div>
+                <p id="forgeStateHint" class="forge-limit-hint">No state has been read. Analysis uses the newest validated observation frame; it never captures a frame of its own.</p>
+              </div>
+              <dl id="forgeStateFacts" class="forge-observation-facts"></dl>
+              <div id="forgeStateHud" class="forge-state-list" aria-live="polite"></div>
+              <div id="forgeStateEntities" class="forge-state-list" aria-live="polite"></div>
+              <div id="forgeStateChanges" class="forge-state-list" aria-live="polite"></div>
+              <div id="forgeStateUnknown" class="forge-state-list" aria-live="polite"></div>
+              <div id="forgeStateHistory" class="forge-observation-history" aria-live="polite"></div>
+              <p class="forge-limit-hint">A state is a reading of the screen, not an understanding of the game. Extracted text is what OCR placed inside a profile region; a detected region is geometry with an unknown kind; a change is an observed difference between two readings, never an inferred event. No input is sent and nothing is planned.</p>
+            </article>
+            <article class="surface forge-card forge-objectives" aria-labelledby="forgeObjectivesTitle">
+              <div class="forge-card-head">
+                <h3 id="forgeObjectivesTitle">Objective &amp; Progress</h3>
+                <span id="forgeObjectivesBadge" class="forge-badge" data-state="untested">untested</span>
+              </div>
+              <div class="forge-state-controls">
+                <div class="button-row">
+                  <button id="forgeObjectivesReadButton" type="button" class="cyber-btn primary">Read Objectives</button>
+                  <button id="forgeObjectivesRefreshButton" type="button" class="cyber-btn small">Refresh</button>
+                  <button id="forgeObjectivesResetButton" type="button" class="cyber-btn small">Reset Objectives</button>
+                </div>
+                <p id="forgeObjectivesHint" class="forge-limit-hint">No objective has been interpreted. Reading goes through the state reading: it never captures a frame of its own, plans or acts.</p>
+              </div>
+              <dl id="forgeObjectivesFacts" class="forge-observation-facts"></dl>
+              <div id="forgeObjectivesList" class="forge-state-list" aria-live="polite"></div>
+              <div id="forgeObjectivesDiagnostics" class="forge-state-list" aria-live="polite"></div>
+              <div id="forgeObjectivesHistory" class="forge-observation-history" aria-live="polite"></div>
+              <p class="forge-limit-hint">An objective is an interpretation of what the screen says, never the game's internal task state. Completion and failure are reported only from explicit evidence — a declared completion line, a declared failure line, or a declared counter reaching its target. A vanished objective is not completion, and this phase sends no input.</p>
+            </article>
+            <article class="surface forge-card forge-knowledge" aria-labelledby="forgeKnowledgeTitle">
+              <div class="forge-card-head">
+                <h3 id="forgeKnowledgeTitle">Game Knowledge</h3>
+                <span id="forgeKnowledgeBadge" class="forge-badge" data-state="untested">untested</span>
+              </div>
+              <div class="forge-state-controls">
+                <label class="field">
+                  <span>Game <span class="muted">(knowledge is scoped to one game; blank uses the last state's game)</span></span>
+                  <input id="forgeKnowledgeGame" type="text" class="cyber-input" maxlength="120" placeholder="as read from the validated state" autocomplete="off">
+                </label>
+                <div class="button-row">
+                  <button id="forgeKnowledgeRefreshButton" type="button" class="cyber-btn primary">Refresh Knowledge</button>
+                </div>
+                <p id="forgeKnowledgeHint" class="forge-limit-hint">No game knowledge has been read. Knowledge is stored ONLY from validated state and objective readings, and it is scoped to the game those readings name.</p>
+              </div>
+              <dl id="forgeKnowledgeFacts" class="forge-observation-facts"></dl>
+              <div id="forgeKnowledgeList" class="forge-state-list" aria-live="polite"></div>
+              <div id="forgeKnowledgeQuestions" class="forge-state-list" aria-live="polite"></div>
+              <div id="forgeKnowledgeDue" class="forge-state-list" aria-live="polite"></div>
+              <div id="forgeKnowledgeHistory" class="forge-observation-history" aria-live="polite"></div>
+              <p class="forge-limit-hint">A record's status is the strength of its evidence, not a probability. A contradiction is kept as a second record; nothing is overwritten, and an old record is reported for revalidation rather than silently discarded. Session memory (recent observations, objectives and failures) is transient and is never stored. This card retrieves knowledge only: it plans nothing and sends no input.</p>
+            </article>
+            <!-- NF-19: the bounded control interface. It reports what the INPUT
+                 INTERFACE did, never that the game reacted: every result carries
+                 `effect: null`. A press can be released from here, and Cancel
+                 interrupts one in-flight bounded action.
+            -->
+            <article class="surface forge-card" id="forgeControlCard">
+              <div class="forge-card-head">
+                <h3>Control Interface</h3>
+                <span class="forge-badge" id="forgeControlBadge" data-state="untested">checking</span>
+              </div>
+              <p id="forgeControlHint" class="muted">Reading the control interface…</p>
+              <div class="forge-limit-row">
+                <label class="field">
+                  <span>Action</span>
+                  <select id="forgeControlKind" class="cyber-input" aria-label="Control action">
+                    <option value="key_press">Key press</option>
+                    <option value="key_hold">Bounded key hold</option>
+                    <option value="key_release">Key release</option>
+                    <option value="mouse_move">Move cursor</option>
+                    <option value="mouse_press">Mouse press</option>
+                    <option value="mouse_hold">Bounded mouse hold</option>
+                    <option value="mouse_release">Mouse release</option>
+                    <option value="wait">Wait</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Key / hold or wait ms</span>
+                  <input id="forgeControlKey" type="text" class="cyber-input" maxlength="40" placeholder="w 120" autocomplete="off">
+                </label>
+                <label class="field">
+                  <span>Point (x,y)</span>
+                  <input id="forgeControlPoint" type="text" class="cyber-input" maxlength="40" placeholder="500,300" autocomplete="off">
+                </label>
+              </div>
+              <div class="button-row">
+                <button id="forgeControlRunButton" type="button" class="cyber-btn primary" disabled>Send Control Action</button>
+                <button id="forgeControlCancelButton" type="button" class="cyber-btn" disabled>Cancel Action</button>
+                <button id="forgeControlReleaseButton" type="button" class="cyber-btn" disabled>Release Inputs</button>
+              </div>
+              <p class="forge-limit-hint">Completion means the input operation finished, not that the game reacted: no effect is observed or verified in this phase. One action runs at a time; holds, waits and deadlines are bounded by the control policy, and only inputs this interface pressed are tracked and released.</p>
+              <ul id="forgeControlLog" class="forge-history-list">
+                <li class="muted">No control action has been sent for this session.</li>
+              </ul>
+            </article>
+            <!-- NF-20: bounded planning. A plan is a hypothesis built from the
+                 session's own state/objective/knowledge; Execute submits it
+                 through NF-19 only after explicit approval, and no receipt ever
+                 claims an in-game effect.
+            -->
+            <article class="surface forge-card" id="forgePlanCard">
+              <div class="forge-card-head">
+                <h3>Action Plan</h3>
+                <span class="forge-badge" id="forgePlanBadge" data-state="untested">untested</span>
+              </div>
+              <p id="forgePlanHint" class="muted">No plan has been built for this session.</p>
+              <div class="button-row">
+                <button id="forgePlanBuildButton" type="button" class="cyber-btn primary" disabled>Plan Next Actions</button>
+                <button id="forgePlanExecuteButton" type="button" class="cyber-btn" disabled>Execute Approved Plan</button>
+                <button id="forgePlanReplanButton" type="button" class="cyber-btn" disabled>Replan</button>
+                <button id="forgePlanCancelButton" type="button" class="cyber-btn" disabled>Cancel Plan</button>
+              </div>
+              <dl id="forgePlanFacts" class="forge-observation-facts"></dl>
+              <div id="forgePlanCandidates" class="forge-state-list" aria-live="polite"></div>
+              <ul id="forgePlanHistory" class="forge-history-list">
+                <li class="muted">No plan has been built for this session.</li>
+              </ul>
+              <p class="forge-limit-hint">A plan is evidence-grounded, not a prediction: it names its state, objective and knowledge, the candidates it rejected and why, and its own bounds. Approval is required before anything is sent, and execution stops on the first refusal, failure, stale observation or changed objective. “Executed” means the input operations completed — the in-game effect is verified in NF-21, not here.</p>
+            </article>
+            <!-- NF-22: one bounded autonomous run. The card is a client of the
+                 supervisor the backend owns: it shows the pinned objective and its
+                 completion criteria, the phase, the plan, the budgets and the last
+                 verified outcome, and its controls post the OPERATOR's decisions.
+                 Start sends bounded input to the game, so it needs an explicit
+                 approval; nothing here widens a budget or restarts a finished run.
+            -->
+            <article class="surface forge-card forge-autonomy-card" id="forgeAutonomyCard">
+              <div class="forge-card-head">
+                <h3>Autonomous Run</h3>
+                <span class="forge-badge" id="forgeAutonomyBadge" data-state="untested">untested</span>
+              </div>
+              <p id="forgeAutonomyHint" class="muted">No autonomous run yet. A run observes, interprets the objective, plans, asks for approval, executes through the control interface and verifies the effect, inside the budgets below.</p>
+              <div class="button-row">
+                <button id="forgeAutonomyStartButton" type="button" class="cyber-btn primary" disabled>Start Autonomous Run</button>
+                <button id="forgeAutonomyPauseButton" type="button" class="cyber-btn" disabled>Pause Run</button>
+                <button id="forgeAutonomyResumeButton" type="button" class="cyber-btn" disabled>Resume Run</button>
+                <button id="forgeAutonomyCancelButton" type="button" class="cyber-btn" disabled>Cancel Run</button>
+                <button id="forgeAutonomyRefreshButton" type="button" class="cyber-btn">Refresh Run</button>
+              </div>
+              <div id="forgeAutonomyApproval" class="forge-autonomy-approval" role="status" aria-live="polite" hidden>
+                <p class="muted">The policy approves each plan separately: this run is waiting for you. It has not sent anything.</p>
+                <div class="button-row">
+                  <button id="forgeAutonomyApproveButton" type="button" class="cyber-btn primary" disabled>Approve This Plan</button>
+                  <button id="forgeAutonomyRejectButton" type="button" class="cyber-btn" disabled>Refuse And Stop</button>
+                </div>
+              </div>
+              <dl id="forgeAutonomyFacts" class="forge-observation-facts"></dl>
+              <ul id="forgeAutonomyActions" class="forge-history-list">
+                <li class="muted">No plan has been built for this session yet.</li>
+              </ul>
+              <p id="forgeAutonomyOutcome" class="muted">No autonomous run for this session.</p>
+              <ul id="forgeAutonomyCycles" class="forge-history-list">
+                <li class="muted">No decision cycle has run yet.</li>
+              </ul>
+              <p class="forge-limit-hint">An autonomous run drives the game through this session's own control interface, and it never approves itself: the approval above is yours, and only a plan it was approved for can run. Completion is NF-17's reading of a fresh state, so a finished plan or a game that stayed open is not success. Every budget (cycles, actions, wall clock, recoveries, replans) stops the run when reached, an observation it cannot trust pauses it, and a cancelled or finished run is never restarted here.</p>
+            </article>
             <article class="surface forge-card forge-roadmap">
               <h3>Phase Roadmap</h3>
               <ul class="forge-roadmap-list">
@@ -646,8 +862,58 @@
                 <li><strong>NF-05</strong> Controlled Game Evaluation — implemented in this panel (Game Evaluation tab): a validated compatibility registry, per-game readiness checks that refuse an unsafe start, baseline-first observation runs over the NF-04 benchmark lab, retained evidence and a per-game report. An evaluation run is observation-only — it sends no input and claims no objective — so no gameplay capability is claimed for a game.</li>
                 <li><strong>NF-06</strong> Forge Coach — implemented in this panel (Forge Coach tab): evidence-backed findings with provenance, an earliest-recoverable-error analysis, prioritized recommendations and controlled experiments that run through the NF-05 evaluation lab. Approval is bound to the exact configuration, and a result that cannot be compared honestly says so.</li>
                 <li><strong>NF-07</strong> Guarded action path &amp; objective verification — implemented in this panel (Guardian tab): a typed, policy-bounded action is PLANNED as a digest-bound proposal, EXECUTED only after that exact approval re-validates the pinned window, and VERIFIED by reading the window back. A refusal is not a failure, an execution is not a success, and only a verified objective completes a session.</li>
+                <li><strong>NF-08</strong> Observation, screen-text objectives &amp; the closed loop — implemented in this panel (Guardian tab): a structured observation marks a stale, degraded or unreadable screen as non-actionable; an <code>ocr_text</code> objective reads a fresh frame of the window instead of its title; and a bounded loop asks the installed policy for one action at a time, executing it through the NF-07 gates. The shipped policy is a deterministic rule for the disposable harness, so this is a control loop to build on — not a game-playing brain.</li>
+                <li><strong>NF-09</strong> Vision-model integration &amp; evidence-grounded state interpretation — implemented in this panel (Guardian tab, Describe Frame): a fresh frame of the target is described by the configured vision model through the existing provider, and the answer is a TYPED, versioned interpretation that names its frame and model, states its own uncertainty and is labelled "model interpretation", never measured evidence. Stale or clipped frames are refused before inference, a model answer can never approve, plan or execute an action, and the panel reports honestly when no image-capable model exists. The bounded loop deliberately does not call a model: it observes measured evidence, which keeps it fast and deterministic.</li>
               </ul>
-              <p class="muted">NF-04, NF-05 and NF-06 observe, capture and analyse only: a completed run means its data was recorded, never that an objective was achieved or a game was played. NF-06 invokes no model and trains nothing.</p>
+              <p class="muted">NF-04, NF-05 and NF-06 observe, capture and analyse only: a completed run means its data was recorded, never that an objective was achieved or a game was played. NF-06 invokes no model and trains nothing. NF-09 invokes a vision model when a person asks it to describe a frame; the answer is a claim about pixels, not an objective verdict, and it never authorises an action.</p>
+            </article>
+          </div>
+
+          <div id="forgeLibraryView" class="forge-view" role="tabpanel" aria-labelledby="forgeTabLibrary" hidden>
+            <div id="forgeLibraryNotice" class="forge-notice" role="status" aria-live="polite" hidden></div>
+            <div class="forge-mission-grid">
+              <article class="surface forge-card">
+                <div class="forge-card-head">
+                  <h3>Installed Games</h3>
+                  <span class="forge-badge" id="forgeLibraryBadge">not read</span>
+                </div>
+                <label class="field">
+                  <span>Find a game</span>
+                  <input id="forgeLibrarySearch" type="search" class="cyber-input" placeholder="e.g. gta, freedom, tekken" autocomplete="off">
+                </label>
+                <div class="button-row">
+                  <button id="forgeLibraryRefreshButton" type="button" class="cyber-btn small">Refresh</button>
+                  <button id="forgeLibraryCloseButton" type="button" class="cyber-btn danger small" disabled>Close Test-Launched Game</button>
+                </div>
+                <p class="forge-limit-hint" id="forgeLibraryCounts">Discovery reads Steam manifests, Start Menu shortcuts and configured game roots on internal fixed drives only.</p>
+                <ul id="forgeLibraryList" class="forge-library-list" aria-live="polite">
+                  <li class="muted">Reading the local catalog…</li>
+                </ul>
+              </article>
+              <article class="surface forge-card">
+                <div class="forge-card-head">
+                  <h3>Launch &amp; Observation</h3>
+                  <span class="forge-badge" id="forgeLibraryState">idle</span>
+                </div>
+                <div id="forgeLibraryResult" class="forge-library-result" aria-live="polite">
+                  <p class="muted">Choose a launchable game to preview the exact installation, target and resource gate. Nothing starts until you approve the preview.</p>
+                </div>
+                <ol class="forge-stages" id="forgeLibraryStages">
+                  <li class="forge-stage"><span class="forge-stage-name">Requested</span><span class="forge-stage-value" id="forgeLaunchStageRequested">No launch requested.</span></li>
+                  <li class="forge-stage"><span class="forge-stage-name">Process</span><span class="forge-stage-value" id="forgeLaunchStageProcess">No process seen.</span></li>
+                  <li class="forge-stage"><span class="forge-stage-name">Window</span><span class="forge-stage-value" id="forgeLaunchStageWindow">No window seen.</span></li>
+                  <li class="forge-stage"><span class="forge-stage-name">Verified</span><span class="forge-stage-value" id="forgeLaunchStageVerified">Not verified.</span></li>
+                </ol>
+                <p class="forge-stage-hint">These four facts are separate. A process without a window is not a verified launch, and a verified launch is not a captured frame — observation is reported below it, never assumed.</p>
+                <div id="forgeLibraryObservation" class="forge-limit-hint">Observation has not been checked.</div>
+              </article>
+            </div>
+            <article class="surface forge-card forge-roadmap">
+              <h3>Discovery Sources &amp; Limits</h3>
+              <ul id="forgeLibraryLimits" class="forge-roadmap-list">
+                <li>Reading discovery limits…</li>
+              </ul>
+              <p class="forge-limit-hint">A game is marked launch-tested only when this service actually started and verified it. Installing, updating, signing in and gameplay input are out of scope.</p>
             </article>
           </div>
 
@@ -677,6 +943,8 @@
                   <div><dt>Age</dt><dd id="forgeFrameAge">—</dd></div>
                   <div><dt>Resolution</dt><dd id="forgeFrameRes">—</dd></div>
                   <div><dt>Source</dt><dd id="forgeFrameSource">—</dd></div>
+                  <div><dt>Backend</dt><dd id="forgeFrameBackend">—</dd></div>
+                  <div><dt>Validation</dt><dd id="forgeFrameValidation">—</dd></div>
                 </dl>
                 <p class="forge-frame-note" id="forgeFrameNote"></p>
               </article>
@@ -814,14 +1082,28 @@
                   <span>Objective kind</span>
                   <select id="forgeObjectiveKind" class="cyber-input">
                     <option value="window_title">Target window title</option>
+                    <option value="ocr_text">Screen text (OCR)</option>
                     <option value="unsupported">Other (recorded as unsupported)</option>
                   </select>
                 </label>
                 <label class="field">
-                  <span>Expected title text</span>
+                  <span id="forgeObjectiveParameterLabel">Expected title text</span>
                   <input id="forgeObjectiveParameter" type="text" class="cyber-input" maxlength="200" placeholder="e.g. READY" autocomplete="off">
                 </label>
+                <label class="field">
+                  <span>Comparison</span>
+                  <select id="forgeObjectiveMode" class="cyber-input">
+                    <option value="contains">contains</option>
+                    <option value="equals">equals</option>
+                    <option value="absent">absent</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Read region <span class="muted">(x,y,width,height; OCR only)</span></span>
+                  <input id="forgeObjectiveRegion" type="text" class="cyber-input" maxlength="40" placeholder="whole window" autocomplete="off">
+                </label>
               </div>
+              <p class="forge-limit-hint" id="forgeObjectiveHint">A window-title verdict is read from the OS. An OCR verdict reads a FRESH frame of the window and needs a recognised word; when the engine reports no confidence, an empty reading is undecided rather than “absent”.</p>
               <div class="button-row">
                 <button id="forgeObjectiveSaveButton" type="button" class="cyber-btn" disabled>Set Objective</button>
                 <button id="forgeVerifyButton" type="button" class="cyber-btn" disabled>Verify Now</button>
@@ -853,6 +1135,61 @@
               <ul id="forgeActionLog" class="forge-history-list">
                 <li class="muted">No action has been planned for this session.</li>
               </ul>
+            </article>
+            <!-- NF-08: the closed loop. It decides, but it does not get its own
+                 action path: every proposal travels the plan/digest/Guardian
+                 route above, and the verdict remains the verifier's. -->
+            <article class="surface forge-card" id="forgeLoopCard">
+              <div class="forge-card-head">
+                <h3>Closed Loop</h3>
+                <span class="forge-badge" id="forgeLoopBadge">checking</span>
+              </div>
+              <p id="forgeLoopPolicy" class="muted">Reading the decision pipeline…</p>
+              <!-- NF-09: the vision model's availability is stated separately from
+                   the policy's, because "a model can see" and "a model can decide"
+                   are different capabilities and neither implies the other. -->
+              <p id="forgeLoopVision" class="muted">Reading visual interpretation…</p>
+              <div class="forge-limit-row">
+                <label class="field">
+                  <span>Policy</span>
+                  <!-- NF-10: the state-dependent policy and its fixed-action
+                       baseline are both selectable, and the run names which
+                       one decided. A run is never labelled by assumption. -->
+                  <select id="forgeLoopPolicySelect" class="cyber-input" aria-label="Decision policy">
+                    <option value="ready">Harness ready (NF-08 rule)</option>
+                    <option value="stages">Harness stages (NF-10)</option>
+                    <option value="fixed">Fixed key (baseline)</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Actions <span class="muted">(1–64)</span></span>
+                  <input id="forgeLoopMaxActions" type="number" min="1" max="64" step="1" class="cyber-input" value="4">
+                </label>
+                <label class="field">
+                  <span>Deadline <span class="muted">(seconds, ≤120)</span></span>
+                  <input id="forgeLoopDeadline" type="number" min="1" max="120" step="1" class="cyber-input" value="30">
+                </label>
+              </div>
+              <div class="button-row">
+                <button id="forgeLoopRunButton" type="button" class="cyber-btn primary" disabled>Run Closed Loop</button>
+                <button id="forgeLoopCancelButton" type="button" class="cyber-btn" disabled>Stop Loop</button>
+                <button id="forgeDescribeFrame" type="button" class="cyber-btn" disabled>Describe Frame</button>
+              </div>
+              <p class="forge-limit-hint">The loop observes, asks the selected policy for ONE action, and executes it through the same plan/digest/Guardian path a manual action uses. It stops on a stale or unreadable observation, a refused plan, the budget, the deadline or your stop — and only the verifier's verdict can complete it. Every installed policy is a deterministic rule over the observation; the fixed key is the baseline, not a fallback. None is game intelligence.</p>
+              <div id="forgeLoopResult" class="forge-loop-result" aria-live="polite">
+                <p class="muted">No loop has run for this session.</p>
+              </div>
+              <!-- NF-10: trial rows and aggregates. Read-only, process-local, and
+                   kept with their failures: a history of successes only cannot
+                   be used to judge a policy. -->
+              <div id="forgeTrialHistory" class="forge-loop-result" aria-live="polite">
+                <p class="muted">Reading the trial record…</p>
+              </div>
+              <!-- Read-only: a model description, labelled as a model claim and
+                   shown beside the measured evidence it must never replace. -->
+              <div id="forgeVisionInterpretation" class="forge-loop-result" aria-live="polite">
+                <p class="muted">Describe Frame asks the vision model about the current frame. It cannot act or verify.</p>
+              </div>
             </article>
           </div>
 
@@ -975,11 +1312,13 @@
 
           <div id="forgeEvaluationView" class="forge-view" role="tabpanel" aria-labelledby="forgeTabEvaluation" hidden>
             <div class="forge-readonly-banner" role="note">
-              <strong>Evaluation, not a win.</strong> A run is ONE bounded observation of an
-              already-open, already-validated window. <em>Completed</em> means the evidence is data
-              complete; it never means the game was played, won, or that NovaControl can play it.
-              No game is launched here and an evaluation run sends no input; a completed run is
-              data completeness, never a game objective — every report says so.
+              <strong>Evaluation, not a win.</strong> A run is ONE bounded session against an
+              already-open, already-validated window. <em>Observation only</em> (the default) sends no
+              input, so <em>completed</em> means the evidence is data complete — never that the game
+              was played, won, or that NovaControl can play it. <em>Controlled evaluation</em> is
+              experimental, restricted to the disposable Artifact Harness, and executes only an
+              operator-authored plan that was approved by digest; its verdict is read from the
+              target's own evidence, never from the action log. No game is launched here.
             </div>
             <div class="forge-benchmark-grid">
               <article class="surface forge-card">
@@ -1001,9 +1340,83 @@
               <article class="surface forge-card">
                 <h3>Evaluation Configuration</h3>
                 <label class="field">
+                  <span>Mode</span>
+                  <select id="forgeEvaluationMode" class="cyber-input" aria-label="Evaluation mode">
+                    <option value="observation_only" selected>Observation only (default)</option>
+                    <option value="control">Controlled evaluation (experimental)</option>
+                  </select>
+                </label>
+                <div id="forgeEvaluationControlBanner" class="forge-notice" role="note" hidden>
+                  <strong>Experimental.</strong> This build can control exactly one environment: the
+                  disposable <em>Artifact Harness</em> (Windows). No real game is supported, no planner
+                  chooses these actions, and nothing is approved or executed without an explicit
+                  operator confirmation.
+                </div>
+                <label class="field">
                   <span>Scenario <span class="muted">(compatible with this environment)</span></span>
                   <select id="forgeEvaluationScenario" class="cyber-input" aria-label="Evaluation scenario"></select>
                 </label>
+                <div id="forgeEvaluationControlConfig" hidden>
+                  <div class="forge-control-head">
+                    <h4>Objective</h4>
+                    <span id="forgeEvaluationObjectiveState" class="forge-badge">not configured</span>
+                  </div>
+                  <div class="forge-limit-row">
+                    <label class="field">
+                      <span>Kind <span class="muted">(only verifiers ready on this host)</span></span>
+                      <select id="forgeEvaluationObjectiveKind" class="cyber-input" aria-label="Objective kind">
+                        <option value="window_title">window_title — the target's title</option>
+                        <option value="game_state_file">game_state_file — a JSON artifact it writes</option>
+                      </select>
+                    </label>
+                    <label class="field">
+                      <span>Comparison</span>
+                      <select id="forgeEvaluationObjectiveMode" class="cyber-input" aria-label="Objective comparison">
+                        <option value="contains" selected>contains</option>
+                        <option value="equals">equals</option>
+                        <option value="absent">absent</option>
+                        <option value="gte">greater than or equal</option>
+                        <option value="lte">less than or equal</option>
+                      </select>
+                    </label>
+                  </div>
+                  <label class="field" id="forgeEvaluationObjectiveParameterRow">
+                    <span>Expected value <span class="muted">(the title text, or the artifact value)</span></span>
+                    <input id="forgeEvaluationObjectiveParameter" type="text" class="cyber-input" maxlength="200" autocomplete="off" placeholder="READY">
+                  </label>
+                  <label class="field" id="forgeEvaluationObjectivePathRow" hidden>
+                    <span>Artifact path <span class="muted">(relative to a declared artifact root — never absolute)</span></span>
+                    <input id="forgeEvaluationObjectivePath" type="text" class="cyber-input" maxlength="400" autocomplete="off" placeholder="state.json">
+                  </label>
+                  <label class="field" id="forgeEvaluationObjectivePointerRow" hidden>
+                    <span>JSON pointer <span class="muted">(dotted path into the artifact)</span></span>
+                    <input id="forgeEvaluationObjectivePointer" type="text" class="cyber-input" maxlength="200" autocomplete="off" placeholder="game.score">
+                  </label>
+                  <label class="field" id="forgeEvaluationObjectiveAgeRow" hidden>
+                    <span>Maximum age <span class="muted">(seconds; blank means no limit)</span></span>
+                    <input id="forgeEvaluationObjectiveAge" type="number" min="0" max="3600" step="1" class="cyber-input">
+                  </label>
+                  <p id="forgeEvaluationObjectiveEvidence" class="forge-limit-hint">The target's own title is read by the verifier; the action record is never evidence.</p>
+
+                  <div class="forge-control-head">
+                    <h4>Operator-authored action plan</h4>
+                    <span id="forgeEvaluationPlanState" class="forge-badge">0 actions</span>
+                  </div>
+                  <div id="forgeEvaluationPlanList" class="forge-plan-list" aria-live="polite"></div>
+                  <div class="button-row">
+                    <button id="forgeEvaluationPlanAddKey" type="button" class="cyber-btn small">+ Key</button>
+                    <button id="forgeEvaluationPlanAddHold" type="button" class="cyber-btn small">+ Hold</button>
+                    <button id="forgeEvaluationPlanAddClick" type="button" class="cyber-btn small">+ Click</button>
+                    <button id="forgeEvaluationPlanAddMove" type="button" class="cyber-btn small">+ Move</button>
+                  </div>
+                  <p id="forgeEvaluationPlanSummary" class="forge-frame-note">No action is planned yet.</p>
+                  <div id="forgeEvaluationPlanProblems" class="forge-field-errors" aria-live="polite" hidden></div>
+                  <p id="forgeEvaluationPlanLimits" class="forge-limit-hint"></p>
+                  <label class="field">
+                    <span>Action budget <span class="muted">(the session refuses the next action once spent)</span></span>
+                    <input id="forgeEvaluationBudget" type="number" min="1" max="8" step="1" class="cyber-input" value="1">
+                  </label>
+                </div>
                 <label class="field">
                   <span>Target window <span class="muted">(already open; never launched)</span></span>
                   <select id="forgeEvaluationTarget" class="cyber-input" aria-label="Evaluation target window"></select>
@@ -1035,10 +1448,16 @@
                   <select id="forgeEvaluationBaseline" class="cyber-input" aria-label="Evaluation baseline"></select>
                 </label>
                 <p class="forge-limit-hint">Model / policy: unavailable — NF-05 evaluates current capability and invokes no model or policy. NF-06 plans experiments over these same runs; it trains nothing, changes no weights and applies no configuration on its own.</p>
-                <label class="forge-check">
+                <label class="forge-check" id="forgeEvaluationConfirmRow">
                   <input id="forgeEvaluationConfirm" type="checkbox">
                   <span>I confirm this is an already-open, offline/single-player window and that this
                   run only observes it.</span>
+                </label>
+                <label class="forge-check" id="forgeEvaluationApprovalRow" hidden>
+                  <input id="forgeEvaluationApprove" type="checkbox">
+                  <span>I approve this exact objective, action plan, target and set of limits for ONE
+                  run. Approval is bound to the digest shown below; editing anything requires a new
+                  validation.</span>
                 </label>
                 <div class="button-row">
                   <button id="forgeEvaluationPreflightButton" type="button" class="cyber-btn">Validate Readiness</button>

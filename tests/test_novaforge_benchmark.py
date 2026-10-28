@@ -158,9 +158,14 @@ class ScenarioCatalogTests(unittest.TestCase):
         self.assertTrue(by_id["observation-baseline"]["supported"])
         self.assertTrue(by_id["capture-latency"]["supported"])
         self.assertTrue(by_id["observation-continuity"]["supported"])
+        # The controlled scenario is run only through a confirmed evaluation.
+        self.assertTrue(by_id["controlled-objective"]["supported"])
+        self.assertTrue(by_id["controlled-objective"]["objective_required"])
+        self.assertEqual(by_id["controlled-objective"]["evaluation"], "controlled_objective")
         self.assertFalse(by_id["gameplay-objective"]["supported"])
-        self.assertIn("no objective verifier", by_id["gameplay-objective"]["unsupported_reason"])
-        self.assertEqual(payload["supported_count"], 3)
+        self.assertFalse(by_id["gameplay-objective"]["objective_required"])
+        self.assertIn("decision pipeline", by_id["gameplay-objective"]["unsupported_reason"])
+        self.assertEqual(payload["supported_count"], 4)
         self.assertEqual(payload["unsupported_count"], 1)
         self.assertTrue(payload["metric_catalog"])
 
@@ -171,11 +176,24 @@ class ScenarioCatalogTests(unittest.TestCase):
                 with self.subTest(scenario=item["scenario_id"], metric=key):
                     self.assertIn(key, catalog)
 
-    def test_every_runnable_scenario_declares_a_verifier_and_observation_only(self) -> None:
+    def test_runnable_scenarios_declare_the_verdict_they_can_actually_reach(self) -> None:
+        """An observation run claims no objective; a controlled run requires one.
+
+        The two kinds must not share a shape: an observation scenario that
+        declared a verifier would let data completeness look like a won game,
+        and a controlled scenario without one would have nothing to verify.
+        """
         for item in scenario_payload()["scenarios"]:
             if not item["supported"]:
                 continue
             with self.subTest(scenario=item["scenario_id"]):
+                if item["objective_required"]:
+                    self.assertEqual(item["evaluation"], "controlled_objective")
+                    self.assertTrue(item["verifier"]["available"])
+                    self.assertIn("verified_failure", item["success_criteria"])
+                    self.assertTrue(item["capabilities"]["act"])
+                    self.assertTrue(item["capabilities"]["verify_objective"])
+                    continue
                 self.assertEqual(item["evaluation"], "observation_only")
                 self.assertFalse(item["verifier"]["available"])
                 self.assertIn("NOT gameplay success", item["success_criteria"])
@@ -230,7 +248,7 @@ class ScenarioConfigValidationTests(unittest.TestCase):
             {"scenario_id": "gameplay-objective", "target_title": "Game"}
         )
         self.assertIsNone(config)
-        self.assertTrue(any("no decision pipeline" in item for item in errors))
+        self.assertTrue(any("decision pipeline" in item for item in errors))
 
     def test_model_or_policy_selection_is_refused(self) -> None:
         _, config, errors = config_from_request(
@@ -373,7 +391,12 @@ class MetricCollectionTests(unittest.TestCase):
                 self.assertFalse(rows[key]["available"])
 
     def test_every_unavailable_row_carries_a_reason(self) -> None:
-        for scenario_id in ("observation-baseline", "capture-latency", "observation-continuity"):
+        for scenario_id in (
+            "observation-baseline",
+            "capture-latency",
+            "observation-continuity",
+            "controlled-objective",
+        ):
             scenario = resolve_scenario(scenario_id)
             assert scenario is not None
             rows = collect_metrics(
@@ -425,7 +448,7 @@ class MetricCollectionTests(unittest.TestCase):
         self.assertFalse(rows["frame_yield"]["available"])
         self.assertIn("denominator is undefined", rows["frame_yield"]["reason"])
 
-    def test_unsupported_metric_is_a_row_not_a_zero(self) -> None:
+    def test_an_undecided_objective_is_a_row_not_a_zero(self) -> None:
         rows = collect_metrics(
             scenario=resolve_scenario("gameplay-objective"),
             telemetry=_telemetry(),
@@ -435,13 +458,68 @@ class MetricCollectionTests(unittest.TestCase):
         )
         self.assertIsNone(rows["objective_success"]["value"])
         self.assertFalse(rows["objective_success"]["available"])
-        self.assertIn("No objective verifier", rows["objective_success"]["reason"])
+        self.assertIn("No decided objective verdict", rows["objective_success"]["reason"])
+        self.assertIsNone(rows["completion_time_seconds"]["value"])
+        self.assertFalse(rows["completion_time_seconds"]["available"])
+
+    def test_a_decided_verdict_is_measured_and_a_failure_is_zero(self) -> None:
+        scenario = resolve_scenario("controlled-objective")
+        assert scenario is not None
+        success = collect_metrics(
+            scenario=scenario,
+            telemetry=_telemetry(),
+            events=0,
+            errors=0,
+            interventions=0,
+            objective={
+                "achieved": True,
+                "completion_time_seconds": 1.25,
+                "reason": "the window title reads READY",
+            },
+            actions=3,
+        )
+        self.assertTrue(success["objective_success"]["available"])
+        self.assertEqual(success["objective_success"]["value"], 1.0)
+        self.assertTrue(success["completion_time_seconds"]["available"])
+        self.assertEqual(success["completion_time_seconds"]["value"], 1.25)
+        self.assertTrue(success["actions_executed"]["available"])
+        self.assertEqual(success["actions_executed"]["value"], 3.0)
+
+        failure = collect_metrics(
+            scenario=scenario,
+            telemetry=_telemetry(),
+            events=0,
+            errors=0,
+            interventions=0,
+            objective={"achieved": False, "completion_time_seconds": 2.0, "reason": "no"},
+        )
+        self.assertTrue(failure["objective_success"]["available"])
+        self.assertEqual(failure["objective_success"]["value"], 0.0, "a measured failure is 0, not unavailable")
+        self.assertFalse(failure["actions_executed"]["available"], "an unconfigured action path is not zero")
 
 
 class AggregateTests(unittest.TestCase):
     def setUp(self) -> None:
         self.scenario = resolve_scenario("observation-baseline")
         assert self.scenario is not None
+
+    def test_a_controlled_cohort_reports_the_verdict_it_recorded(self) -> None:
+        """An aggregate must not claim "no verifier" over runs that had one."""
+        controlled = resolve_scenario("controlled-objective")
+        assert controlled is not None
+        success = _stored_run("ctrl1", scenario_id="controlled-objective")
+        success["objective"] = {"decided": True, "achieved": True}
+        failure = _stored_run("ctrl2", scenario_id="controlled-objective")
+        failure["objective"] = {"decided": True, "achieved": False}
+
+        aggregate = aggregate_runs([success, failure], controlled)
+        self.assertTrue(aggregate["objective_verified"])
+        self.assertIn("decided verdict", aggregate["objective_note"])
+
+        undecided = _stored_run("ctrl3", scenario_id="controlled-objective")
+        undecided["objective"] = {"decided": False, "achieved": None}
+        aggregate = aggregate_runs([undecided], controlled)
+        self.assertFalse(aggregate["objective_verified"])
 
     def test_only_completed_valid_runs_enter_the_sample(self) -> None:
         runs = [
@@ -756,15 +834,20 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
         payload.update(overrides)
         return payload
 
-    async def _run_to_end(self, lab: NovaForgeBenchmarkLab, request: dict[str, Any], timeout: float = 12.0):
-        run = await lab.start(request)
+    async def _wait_run(
+        self, lab: NovaForgeBenchmarkLab, run_id: str, timeout: float = 12.0
+    ) -> dict[str, Any]:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            current = lab.get(run["id"])
+            current = lab.get(run_id)
             if current and current["status"] != "running":
                 return current
             await asyncio.sleep(0.02)
-        raise AssertionError(f"run did not finish: {lab.get(run['id'])}")
+        raise AssertionError(f"run did not finish: {lab.get(run_id)}")
+
+    async def _run_to_end(self, lab: NovaForgeBenchmarkLab, request: dict[str, Any], timeout: float = 12.0):
+        run = await lab.start(request)
+        return await self._wait_run(lab, run["id"], timeout)
 
     async def _session_id(
         self, lab: NovaForgeBenchmarkLab, run: dict[str, Any], timeout: float = 3.0
@@ -795,7 +878,11 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(run["evidence"]["timeline_endpoint"].startswith("/novaforge/sessions/"))
         self.assertEqual(run["evidence"]["gaps"], [])
         self.assertIsNone(run["objective"]["achieved"])
-        self.assertFalse(run["objective"]["verifier"]["available"])
+        self.assertFalse(run["objective"]["configured"])
+        self.assertFalse(run["objective"]["available"])
+        self.assertFalse(run["objective"]["decided"])
+        self.assertEqual(run["objective"]["outcome"], "unsupported")
+        self.assertIn("No objective was configured", run["objective"]["reason"])
         self.assertTrue(run["objective"]["data_complete"])
         self.assertFalse(run["model"]["available"])
         self.assertIsNone(run["model"]["id"])
@@ -813,6 +900,97 @@ class BenchmarkRunnerTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(BenchmarkValidationError):
             lab.compare([run["id"]], [run["id"]])
+
+    async def test_a_fast_verified_success_is_completed_not_invalid(self) -> None:
+        """A decided verdict ends the session before the observation floor.
+
+        The manager closes a session the moment an objective is verified, so a
+        fast success records fewer frames than the scenario's floor. The floor
+        used to mark that run INVALID — the one run that answered the question
+        — although the verdict, not the frame count, is what the run measured.
+        The floor still binds an undecided run, and a decided run still needs one
+        fresh frame: a verdict with nothing observed is not a measurement.
+        """
+
+        async def probe(_handle: int) -> Any:
+            return self.desktop.window
+
+        manager = self.manager(objective_probe=probe)
+        lab = self.lab(manager)
+        run = await lab.start(
+            {
+                "scenario_id": "controlled-objective",
+                "target_title": "NC FORGE TEST",
+                "duration_seconds": 10,
+                "frame_interval_seconds": 0.5,
+                "max_actions": 1,
+            }
+        )
+        session_id = await self._session_id(lab, run)
+        await _wait_for(
+            lambda: bool(manager.get(session_id) and manager.get(session_id).frames),
+            message="the first fresh frame",
+        )
+        manager.set_objective(
+            session_id, {"kind": "window_title", "parameter": "READY"}
+        )
+        # The target retitles itself: the same handle and process, a new label.
+        # That title change IS the objective being met.
+        window = self.desktop.window
+        assert window is not None
+        window.title = "NC FORGE TEST - READY"
+        verdict = await manager.verify_objective(session_id)
+        self.assertEqual(verdict["outcome"], "verified_success", verdict)
+
+        finished = await self._wait_run(lab, run["id"])
+        scenario = resolve_scenario("controlled-objective")
+        assert scenario is not None
+        frames = finished["metrics"]["frames"]["value"]
+        self.assertLess(frames, scenario.min_frames, "the run must end below the floor")
+        self.assertEqual(finished["status"], "completed", finished["reason"])
+        self.assertTrue(finished["valid"], finished["reason"])
+        self.assertTrue(finished["objective"]["configured"])
+        self.assertTrue(finished["objective"]["decided"])
+        self.assertEqual(finished["objective"]["outcome"], "verified_success")
+        self.assertTrue(finished["objective"]["achieved"])
+        self.assertEqual(finished["metrics"]["objective_success"]["value"], 1.0)
+        self.assertTrue(finished["metrics"]["completion_time_seconds"]["available"])
+        self.assertIn("decided the objective", finished["reason"])
+
+    async def test_a_decided_failure_is_completed_but_not_a_success(self) -> None:
+        """A verifier that says NO is a decided result, not an invalid run."""
+
+        async def probe(_handle: int) -> Any:
+            return self.desktop.window
+
+        manager = self.manager(objective_probe=probe)
+        lab = self.lab(manager)
+        run = await lab.start(
+            {
+                "scenario_id": "controlled-objective",
+                "target_title": "NC FORGE TEST",
+                "duration_seconds": 10,
+                "frame_interval_seconds": 0.5,
+                "max_actions": 1,
+            }
+        )
+        session_id = await self._session_id(lab, run)
+        await _wait_for(
+            lambda: bool(manager.get(session_id) and manager.get(session_id).frames),
+            message="the first fresh frame",
+        )
+        manager.set_objective(
+            session_id, {"kind": "window_title", "parameter": "NEVER APPEARS"}
+        )
+        verdict = await manager.verify_objective(session_id)
+        self.assertEqual(verdict["outcome"], "verified_failure", verdict)
+
+        finished = await self._wait_run(lab, run["id"])
+        self.assertEqual(finished["status"], "completed", finished["reason"])
+        self.assertTrue(finished["valid"], finished["reason"])
+        self.assertTrue(finished["objective"]["decided"])
+        self.assertFalse(finished["objective"]["achieved"])
+        self.assertEqual(finished["metrics"]["objective_success"]["value"], 0.0)
 
     async def test_a_missing_duration_is_unavailable_not_zero(self) -> None:
         """The record's duration must agree with the metric row that says it is absent."""

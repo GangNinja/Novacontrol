@@ -128,7 +128,23 @@ class CompletionVisionProvider:
     def available(self) -> bool:
         return self._provider is not None and provider_supports_vision(self._provider)
 
-    async def see(self, *, prompt: str, image_path: str) -> str:
+    @property
+    def supports_structured(self) -> bool:
+        """Whether this wrapper can ask for a JSON-constrained answer.
+
+        A caller that needs a parseable answer (the NovaForge interpreter does)
+        can say so; a caller that wants prose simply does not ask. The OpenAI
+        surfaces all accept ``response_format``, and Ollama's compatible
+        endpoint uses it to constrain the reply — which matters on a local
+        reasoning model whose thinking can otherwise consume the whole budget
+        and leave no answer at all (measured on qwen3-vl:4b: 900 tokens of
+        reasoning, 0 tokens of content, 156 s).
+        """
+        return True
+
+    async def see(
+        self, *, prompt: str, image_path: str, structured: bool = False
+    ) -> str:
         if not self.available:
             raise VisionProviderError("the configured provider cannot see images")
         if not prompt.strip():
@@ -144,8 +160,19 @@ class CompletionVisionProvider:
         complete = getattr(self._provider, "complete", None)
         if complete is None:
             raise VisionProviderError("the vision provider has no complete method")
+        options: dict[str, Any] = {}
+        if structured:
+            # Deliberately the COMPATIBLE surface only. ``json_mode`` would ask
+            # the local provider for Ollama's native endpoint, whose message
+            # shape is a text ``content`` plus an ``images`` list — not the
+            # OpenAI content blocks (with ``image_url``) this wrapper sends. A
+            # multimodal call must not be rerouted into a shape that cannot
+            # carry its image, so the JSON request stays on /v1.
+            options["response_format"] = {"type": "json_object"}
+        if self._max_tokens > 0:
+            options["max_tokens"] = self._max_tokens
         try:
-            answer = await complete(_vision_messages(prompt, image_data))
+            answer = await complete(_vision_messages(prompt, image_data), **options)
         except Exception as exc:  # noqa: BLE001 - classified, then reported
             raise VisionProviderError(f"vision call failed: {exc}") from exc
         return str(answer or "").strip()

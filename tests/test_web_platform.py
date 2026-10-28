@@ -237,6 +237,42 @@ class WebPlatformTests(unittest.TestCase):
         self.assertNotIn("requestAnimationFrame", render_utils)
         self.assertNotIn("style.transform", render_utils)
 
+    def test_the_card_tilt_never_transforms_an_ancestor_of_a_control(self) -> None:
+        """A 3D-tilted card can retarget pointer input, so control-bearing cards are skipped.
+
+        Measured defect: once a card has carried the tilt transform, the browser
+        hit-tests input through it, and a click on a control inside the card is
+        delivered to the card instead — on the JARVIS console the second
+        "Approve And Run" mousedown landed on ARTICLE.command-console and the
+        handler never ran (see tests/test_browser_token_reuse_e2e.py, whose
+        two-click flow failed before this guard and passes after it). The
+        behavioural proof lives in that browser spec; this pin keeps the guard
+        from being deleted, since no browser runs in CI to notice.
+        """
+        effects = (
+            Path("src/novacontrol/web/static/js/effects.js").read_text(encoding="utf-8")
+        )
+        for needle in (
+            "INTERACTIVE_SELECTOR",
+            "function isTiltable",
+            'button, a[href], input, select, textarea',
+        ):
+            self.assertIn(needle, effects, f"the tilt lost its interactive-control guard: {needle}")
+        self.assertIn(
+            "new WeakMap()", effects,
+            "the control check must be cached per card, not re-queried on every mousemove",
+        )
+        # The guard is consulted INSIDE the tilt loop, before it can write.
+        move = effects.find("function onMouseMove")
+        self.assertGreater(move, 0, "the tilt lost its mousemove handler")
+        guard = effects.find("isTiltable(card)", move)
+        write = effects.find("perspective(800px)", move)
+        self.assertGreater(guard, 0, "onMouseMove no longer consults isTiltable")
+        self.assertLess(
+            guard, write,
+            "the interactive-control guard must run before the tilt transform is written",
+        )
+
     def test_asset_versions_use_server_injected_marker(self) -> None:
         """Cache-bust tokens are injected at serve time, never hardcoded by hand."""
         self.assertIn("?v=__NC_ASSET_VERSION__", self.html)

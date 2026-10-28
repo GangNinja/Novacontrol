@@ -287,6 +287,26 @@ class ConfigSurfaceTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         return NovaControlApplication(data_dir=tmp.name)
 
+    def test_vision_selection_never_probes_when_ollama_is_disabled(self) -> None:
+        """The disable flag is honoured on the vision boot path too.
+
+        The chat brain already skipped detection when the flag was set, but the
+        vision pipeline was wired through its own capability refresh and probed
+        the runtime on every app construction. On a host where the port accepts
+        a connection slowly that turned each TestClient boot into seconds of
+        socket waits — and a deployment that closed the runtime still reached
+        it. Any probe here now fails the test.
+        """
+        with (
+            mock.patch.dict(os.environ, {"NOVACONTROL_DISABLE_OLLAMA": "1"}),
+            mock.patch(
+                "novacontrol.integrations.llm.detect_ollama",
+                side_effect=AssertionError("vision selection must not probe"),
+            ),
+        ):
+            app = self._app()
+            self.assertEqual(app._selected_vision_model(), "")
+
     def test_set_cloud_model_hot_swaps_into_all_consumers(self) -> None:
         app = self._app()
         status = app.set_vision_llm("openai", "sk-live-key-987654321")

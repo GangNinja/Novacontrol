@@ -20,7 +20,12 @@ from novacontrol.application import NovaControlApplication
 from novacontrol.core.events import Event
 from novacontrol.explore import ExploreRequest
 from novacontrol.explore.trending import TrendingTopicsProvider
+from novacontrol.novaforge.knowledge import (
+    KnowledgeEvidence,
+    candidate_from_payload,
+)
 from novacontrol.novaforge import (
+    AutonomyConflictError,
     BenchmarkConflictError,
     BenchmarkNotFoundError,
     BenchmarkValidationError,
@@ -872,7 +877,13 @@ def create_app() -> Any:
 
     @app.post("/command/plan")
     async def command_plan(payload: CommandPlanRequest, _principal: str = Depends(require_auth)) -> dict[str, Any]:
-        return nova.plan_command(payload.command)
+        """Plan a device command — or a catalog game launch, which is verified.
+
+        A game phrase returns the library's plan (resolution, resource gate,
+        approval token) instead of a desktop chain, because the library is the
+        only path that verifies the process and window that actually appeared.
+        """
+        return await nova.plan_command_or_game(payload.command)
 
     @app.post("/command/execute")
     async def command_execute(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
@@ -990,6 +1001,68 @@ def create_app() -> Any:
             "active": manager.describe(active) if active is not None else None,
         }
 
+    # ── NF-12: the game library (discovery + verified launch) ────────────
+    # These are the user-facing doors to the NF-11 catalog and lifecycle
+    # service. Discovery, resolution, the resource gate and the process/window
+    # identity check all stay in that service; these handlers only shape the
+    # request and map a refusal to its HTTP status.
+    @app.get("/novaforge/library")
+    async def novaforge_library(
+        q: str = "", _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Discovered games, launchability evidence and this process's own claim."""
+        return await nova.game_library(q)
+
+    @app.get("/novaforge/library/resolve")
+    async def novaforge_library_resolve(
+        name: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """One name's catalog status, without preparing or launching anything."""
+        return await nova.game_library_resolve(name)
+
+    @app.post("/novaforge/library/launch")
+    async def novaforge_library_launch(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Preview a launch, or execute the exact plan its token approved.
+
+        Without a token this is READ-ONLY: it resolves the name, measures the
+        resource gate and returns a plan. With the token that plan minted it
+        starts the game and verifies the process and window.
+        """
+        command = str(payload.get("command") or payload.get("name") or "").strip()
+        if not command:
+            raise HTTPException(status_code=422, detail="A 'name' or 'command' is required.")
+        token = str(payload.get("approval_token") or "").strip() or None
+        try:
+            if token:
+                return await nova.execute_game_launch(command, approval_token=token)
+            return await nova.plan_game_launch(command)
+        except ValueError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    @app.post("/novaforge/library/close")
+    async def novaforge_library_close(
+        payload: dict[str, Any] | None = None, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Close the instance this process started, confirming that it exited."""
+        try:
+            return await nova.close_game_launch(
+                launch_id=str((payload or {}).get("launch_id") or "")
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/novaforge/library/attach")
+    async def novaforge_library_attach(
+        payload: dict[str, Any] | None = None, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Report a game that was already running; it is never closed here."""
+        try:
+            return await nova.attach_game(str((payload or {}).get("name") or ""))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.get("/novaforge/windows")
     async def novaforge_windows(_principal: str = Depends(require_auth)) -> dict[str, Any]:
         """Open windows for the target picker.
@@ -1056,6 +1129,10 @@ def create_app() -> Any:
 
     async def _novaforge_control(session_id: str, action: str) -> dict[str, Any]:
         """Drive one lifecycle move; a refused move is a 409, a missing id 404."""
+        if action in {"pause", "stop", "cancel", "emergency-stop"}:
+            # A running closed loop must not keep proposing actions against a
+            # session that is being paused or closed underneath it.
+            nova.cancel_novaforge_loop(session_id)
         try:
             if action == "pause":
                 return await nova.novaforge.pause(session_id)
@@ -1106,16 +1183,278 @@ def create_app() -> Any:
         return await _novaforge_control(session_id, "emergency-stop")
 
     @app.get("/novaforge/capabilities")
-    async def novaforge_capabilities(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def novaforge_capabilities(
+        title: str = "", _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """What this build can actually do, per capability, with the blocker named.
 
         Availability is a property of the machine and the wiring, not a request:
         a host without a capture worker reports no capture, and a build without
         an injector reports no action path, rather than claiming either because
         the class exists.
+
+        ``observation_ladder`` reports the ten separate capabilities between a
+        discovered title and an accepted observation, each decided from its own
+        evidence. ``title`` names a catalog title to ask about; without one the
+        ladder reports the observation actually bound to a target.
         """
         capabilities = nova.novaforge.capabilities()
+        # The closed loop is composed by the APPLICATION around the manager, so
+        # its capability is read from the application: a manager swapped at
+        # runtime (a test seam, a rebuild) must not be able to hide a loop that
+        # exists, or advertise one that does not.
+        capabilities["decision_pipeline"] = nova._novaforge_loop_capability()
+        # NF-09: visual interpretation has its own row, so a caller does not have
+        # to dig into the loop's observation block to learn whether a model can
+        # see, which one, and why not.
+        capabilities["vision_interpretation"] = nova._novaforge_vision_capability()
+        # NF-23: the observation ladder, so a caller never has to infer "a window
+        # exists" from "a frame was written" (or either from a discovered title).
+        capabilities["observation_ladder"] = await nova.novaforge.observation_ladder(title)
         return {"capabilities": capabilities, "policy": capabilities["action_policy"]}
+
+    @app.get("/novaforge/trials")
+    async def novaforge_trials(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Policy trial rows and aggregates recorded by this process (read-only).
+
+        Every row is read from a finished loop's own result, and the aggregates
+        come from the same evaluation module the acceptance script uses. A
+        refused, failed or inconclusive run is kept: a history that only shows
+        successes cannot be used to judge a policy.
+        """
+        return nova.novaforge_trial_history()
+
+    # ── NovaForge NF-15: unified game observation ─────────────────────────
+    # An observation is NOT a session: it binds one window, captures it on a
+    # bounded schedule and publishes validated frames. It sends no input and
+    # cannot plan, approve or execute anything. A target that is minimized,
+    # hidden, gone or replaced pauses it — the routes below never resume by
+    # themselves.
+
+    @app.get("/novaforge/observation")
+    async def novaforge_observation(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """The observation pipeline's state, measurements and last records."""
+        return nova.novaforge.observation_status()
+
+    @app.post("/novaforge/observation/start")
+    async def novaforge_observation_start(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Bind a target and start observing; a refusal names the reason.
+
+        Body: ``title`` (or ``target_title``), optional ``game``, ``pid``,
+        ``start_time``, ``process`` and ``interval`` (seconds; clamped to the
+        observer's bounds). A pinned identity is verified before binding.
+        """
+        return await nova.novaforge.start_observation(payload)
+
+    @app.post("/novaforge/observation/pause")
+    async def novaforge_observation_pause(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Pause a user-requested observation; this pause is never auto-cleared."""
+        return await nova.novaforge.pause_observation()
+
+    @app.post("/novaforge/observation/resume")
+    async def novaforge_observation_resume(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Resume a user pause after re-reading the pinned target."""
+        return await nova.novaforge.resume_observation()
+
+    @app.post("/novaforge/observation/stop")
+    async def novaforge_observation_stop(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Stop the observation schedule and clean up (idempotent)."""
+        return await nova.novaforge.stop_observation()
+
+    @app.post("/novaforge/observation/observe")
+    async def novaforge_observation_observe(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Capture and validate one frame now; a concurrent read is ``busy``."""
+        return await nova.novaforge.observe_frame_once()
+
+    @app.get("/novaforge/observation/frame")
+    async def novaforge_observation_frame(
+        _principal: str = Depends(require_auth),
+    ) -> Any:
+        """Serve the newest VALIDATED observation frame (PNG).
+
+        A rejected frame is deleted, so this can only answer with pixels that
+        passed validation. No frame yet is a 404 — an empty image would look
+        like a rendering bug instead of "nothing was observed".
+        """
+        path = nova.novaforge.observation_frame_path()
+        if path is None or not path.is_file():
+            raise HTTPException(
+                status_code=404, detail="No validated observation frame is available."
+            )
+        return FileResponse(
+            path,
+            media_type="image/png",
+            headers={
+                **_never_cache_headers(),
+                "Content-Disposition": "inline",
+            },
+        )
+
+    # ── NovaForge NF-16: game state understanding ──────────────────────────
+    # A state is a READING of one validated observation, not an understanding of
+    # the game and not a plan. It never captures, clicks or acts: the frame it
+    # reads comes from NF-15's observer, and every refusal names its reason.
+
+    @app.get("/novaforge/state")
+    async def novaforge_state(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """The state reader's last reading, bounded history and measurements."""
+        return nova.novaforge.state.status()
+
+    @app.post("/novaforge/state/analyze")
+    async def novaforge_state_analyze(
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Read one state from the newest validated observation.
+
+        Body (optional): ``profile_id`` pins a perception profile by id; an
+        omitted key leaves the automatic title match in charge. A stale frame,
+        a missing frame, a superseded observation or a second concurrent reading
+        is a refusal carrying ``reason_code`` — never a fabricated state.
+        """
+        body = payload or {}
+        pinned = str(body.get("profile_id") or "").strip()
+        outcome = await nova.novaforge.state.analyze(
+            profile_id=(pinned if "profile_id" in body else None)
+        )
+        return outcome.to_dict()
+
+    @app.post("/novaforge/state/reset")
+    async def novaforge_state_reset(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Forget the comparison baseline; the bounded history is kept."""
+        return nova.novaforge.state.reset()
+
+    @app.get("/novaforge/state/profiles")
+    async def novaforge_state_profiles(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """The perception profiles this build ships, rejected ones included."""
+        return nova.novaforge.state.profiles()
+
+    # ── NovaForge NF-17: objective and progress understanding ──────────────
+    # Objectives are derived from the states NF-16 produces; there is no separate
+    # capture here and nothing is executed. Completion is only ever reported with
+    # the evidence that established it, and a vanished objective stays unverified.
+
+    @app.get("/novaforge/objectives")
+    async def novaforge_objectives(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """The current objective picture, bounded history and diagnostics."""
+        return nova.novaforge.objective_state.status()
+
+    @app.post("/novaforge/objectives/reset")
+    async def novaforge_objectives_reset(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Forget the current objectives and ordering baseline; history is kept."""
+        return nova.novaforge.objective_state.reset()
+
+    @app.get("/novaforge/objectives/profiles")
+    async def novaforge_objective_profiles(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """The objective rules this build ships, rejected profiles included."""
+        return nova.novaforge.objective_state.profiles()
+
+    # ── NovaForge NF-18: game knowledge and memory ──────────────────────────
+    # Knowledge is scoped to ONE game and every record names its evidence. This
+    # surface only stores and retrieves beliefs: it plans nothing, sends nothing
+    # and never turns a transient observation into a fact.
+
+    @app.get("/novaforge/knowledge")
+    async def novaforge_knowledge(
+        game: str = "",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Knowledge status, per-game counts and the transient session memory."""
+        return await nova.novaforge.knowledge_status(game=game.strip())
+
+    @app.get("/novaforge/knowledge/records")
+    async def novaforge_knowledge_records(
+        game: str = "",
+        category: str = "",
+        status: str = "",
+        q: str = "",
+        limit: int = 50,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Records for one game; filters: `category`, `status`, `q`, `limit`."""
+        if not game.strip():
+            raise HTTPException(
+                status_code=422,
+                detail="game is required: knowledge is scoped to one game",
+            )
+        return await nova.novaforge.knowledge_records(
+            game=game.strip(),
+            category=category.strip() or None,
+            status=status.strip() or None,
+            query=q,
+            limit=max(1, min(int(limit), 200)),
+        )
+
+    @app.post("/novaforge/knowledge")
+    async def novaforge_record_knowledge(
+        payload: dict[str, Any],
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Record one explicit, evidence-bearing knowledge candidate.
+
+        A refused candidate is a 422 with the reason: an unparseable evidence
+        reference or an unknown category must never be silently dropped, because
+        the caller would then believe a claim was stored when it was not.
+        """
+        try:
+            candidate = candidate_from_payload(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return await nova.novaforge.record_knowledge(candidate)
+
+    @app.post("/novaforge/knowledge/{knowledge_id}/revalidate")
+    async def novaforge_revalidate_knowledge(
+        knowledge_id: str,
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Re-check one stale/contradicted record with fresh evidence."""
+        body = payload or {}
+        rows = body.get("evidence") or []
+        if not isinstance(rows, list):
+            raise HTTPException(status_code=422, detail="evidence must be a list")
+        evidence: list[KnowledgeEvidence] = []
+        for index, row in enumerate(rows):
+            parsed = KnowledgeEvidence.from_dict(row) if isinstance(row, dict) else None
+            if parsed is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"evidence[{index}] is invalid: it needs a known source, "
+                    + "method and summary",
+                )
+            evidence.append(parsed)
+        if not evidence:
+            raise HTTPException(
+                status_code=422,
+                detail="evidence is required: revalidation needs a fresh observation",
+            )
+        return await nova.novaforge.revalidate_knowledge(
+            knowledge_id, evidence, game=str(body.get("game") or "").strip()
+        )
 
     @app.post("/novaforge/sessions/{session_id}/objective")
     async def novaforge_set_objective(
@@ -1161,6 +1500,297 @@ def create_app() -> Any:
         except MissionValidationError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @app.get("/novaforge/sessions/{session_id}/control")
+    async def novaforge_control_status(
+        session_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """The NF-19 control interface's state, bounds, held inputs and last result."""
+        try:
+            return nova.novaforge.control_status(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+
+    @app.post("/novaforge/sessions/{session_id}/control")
+    async def novaforge_control_execute(
+        session_id: str, payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Run ONE typed, bounded input action; a refusal is a 200 with its code.
+
+        Body: `kind` (`key_press`/`key_release`/`key_hold`/`mouse_move`/
+        `mouse_press`/`mouse_release`/`mouse_hold`/`wait`) plus the kind's own
+        parameters (`key`, `button`, `x`, `y`, `duration_ms`, `deadline_ms`).
+        Completion is the input operation's contract, never a verified effect.
+        """
+        try:
+            return await nova.novaforge.control_execute(session_id, payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+        except MissionValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/novaforge/sessions/{session_id}/control/cancel")
+    async def novaforge_control_cancel(
+        session_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Ask the in-flight control action to stop and release what it holds."""
+        try:
+            return await nova.novaforge.cancel_control_action(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+
+    @app.post("/novaforge/sessions/{session_id}/control/release")
+    async def novaforge_control_release(
+        session_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Release every input the control interface still holds (idempotent)."""
+        try:
+            return await nova.novaforge.release_control_inputs(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+
+    @app.get("/novaforge/sessions/{session_id}/plan")
+    async def novaforge_plan_status(
+        session_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """The NF-20 planner's state: declared rules, current plan, bounds, gate.
+
+        A plan awaiting approval is served WITH a freshly minted single-use
+        approval token, so the review the operator sees and the approval they
+        give refer to this plan even after a reload.
+        """
+        try:
+            return nova.forge_plan_receipt(nova.novaforge.planning_status(session_id))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+
+    @app.post("/novaforge/sessions/{session_id}/plan")
+    async def novaforge_plan_build(
+        session_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Build ONE bounded plan from the session's verified evidence; nothing is sent.
+
+        A receipt carries `plan.status`: `awaiting_approval` means approval is
+        still required (and the receipt carries the token that approval needs),
+        `insufficient_information` / `no_action` mean no step could be justified,
+        and every receipt carries `effect_verified: false`.
+        """
+        try:
+            return nova.forge_plan_receipt(await nova.novaforge.plan_actions(session_id))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+
+    @app.post("/novaforge/sessions/{session_id}/plan/execute")
+    async def novaforge_plan_execute(
+        session_id: str, payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Execute ONE approved plan, step by step, through the NF-19 control path.
+
+        Body: `plan_id`, `approved: true` AND `approval_token` from the plan
+        preview this approval refers to. Without the token nothing runs (403):
+        the flag alone is a request, the token is the approval. A plan that needs
+        no approval (or one that already ran) is unaffected, and a refusal is a
+        result, not a 500.
+        """
+        try:
+            return await nova.execute_forge_plan(session_id, payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+        except MissionValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    @app.post("/novaforge/sessions/{session_id}/plan/cancel")
+    async def novaforge_plan_cancel(
+        session_id: str, payload: dict[str, Any] | None = None, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Cancel the session's pending or running plan (idempotent)."""
+        try:
+            return await nova.novaforge.cancel_plan(
+                session_id, str((payload or {}).get("plan_id") or "")
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+
+    @app.post("/novaforge/sessions/{session_id}/plan/replan")
+    async def novaforge_plan_replan(
+        session_id: str, payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Regenerate a stopped plan from FRESH evidence, within its replan bound.
+
+        Body: `plan_id`, optional `reason` from the declared trigger set. The
+        previous plan is invalidated before the new one exists, so it can never
+        be executed afterwards by an id that was still lying around, and the
+        fresh plan is served with the approval token it needs.
+        """
+        try:
+            return nova.forge_plan_receipt(
+                await nova.novaforge.replan_actions(session_id, payload)
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+        except MissionValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # ── NovaForge NF-21: outcome verification and bounded recovery ──────────
+    # A verdict is read from a FRESH observation of the declared observable, never
+    # from "the input operation completed". These routes can observe, invalidate a
+    # plan, ask for a new plan, pause or stop a session — and they contain no path
+    # that sends input, so no recovery here can repeat an action.
+
+    @app.get("/novaforge/sessions/{session_id}/outcomes")
+    async def novaforge_outcomes(
+        session_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """NF-21 state: declared rules, the last verification, outcomes, bounds."""
+        try:
+            return nova.novaforge.verification_status(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+
+    @app.post("/novaforge/sessions/{session_id}/outcomes/verify")
+    async def novaforge_outcomes_verify(
+        session_id: str, payload: dict[str, Any] | None = None, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Verify a plan's dispatched steps against fresh readings.
+
+        Body (optional): `plan_id` (the newest plan by default) and `max_steps`.
+        Each step gets a contract from a declared rule or from verified knowledge
+        that declares its own observable; a step neither covers is reported
+        `not_verifiable`. Missing evidence is `outcome_unknown` — never a failure,
+        and never a success.
+        """
+        try:
+            return await nova.novaforge.verify_outcomes(session_id, payload or {})
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+        except MissionValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/novaforge/sessions/{session_id}/outcomes/recover")
+    async def novaforge_outcomes_recover(
+        session_id: str, payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Carry out ONE outcome's recorded recovery decision, within its bounds.
+
+        Body: `outcome_id`, optionally `approve: true`. A side-effecting response
+        (replan, pause, stop) is refused without that approval and names it; a
+        fresh-observation response re-reads instead of repeating the action.
+        """
+        try:
+            return await nova.novaforge.recover_outcome(session_id, payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+        except MissionValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/novaforge/sessions/{session_id}/outcomes/cancel")
+    async def novaforge_outcomes_cancel(
+        session_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Ask an in-flight verification to stop at its next checkpoint."""
+        try:
+            return await nova.novaforge.cancel_verification(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+
+    # ── NovaForge NF-22: the first bounded autonomous gameplay session ─────
+    # The supervisor behind these routes owns no window, captures no frame and
+    # injects no input: each cycle observes, interprets, reads the objective,
+    # plans, is approved, executes through NF-19, is verified by NF-21 and then
+    # continues or stops inside its declared budgets. Approval is the OPERATOR's
+    # (nothing here supplies one), and a run ends only at a terminal outcome — it
+    # is never restarted by a route.
+
+    @app.get("/novaforge/sessions/{session_id}/autonomy")
+    async def novaforge_autonomy_status(
+        session_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """The run's phase, objective, plan, budgets, last verdict and bounds."""
+        try:
+            return nova.novaforge.autonomy_status(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+
+    @app.post("/novaforge/sessions/{session_id}/autonomy/start")
+    async def novaforge_autonomy_start(
+        session_id: str,
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Begin ONE bounded autonomous run over a live session.
+
+        Body: `approved: true` (the operator's own approval — the run sends input
+        to a game), optional `note`, `task` and `limits` (each limit may be
+        narrowed, never widened). Without the approval this answers
+        `code: approval_required` and starts nothing.
+        """
+        body = dict(payload or {})
+        try:
+            return await nova.novaforge.start_autonomy(
+                session_id,
+                approved=body.get("approved") is True,
+                note=str(body.get("note") or ""),
+                task=str(body.get("task") or ""),
+                limits=body.get("limits") if isinstance(body.get("limits"), dict) else None,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+        except AutonomyConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/novaforge/sessions/{session_id}/autonomy/pause")
+    async def novaforge_autonomy_pause(
+        session_id: str,
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Pause the run: the session pauses and the next cycle re-observes."""
+        reason = str((payload or {}).get("reason") or "operator") if isinstance(payload, dict) else "operator"
+        return await nova.novaforge.pause_autonomy(session_id, reason=reason)
+
+    @app.post("/novaforge/sessions/{session_id}/autonomy/resume")
+    async def novaforge_autonomy_resume(
+        session_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Resume a paused run. A run that ended is never restarted."""
+        return await nova.novaforge.resume_autonomy(session_id)
+
+    @app.post("/novaforge/sessions/{session_id}/autonomy/cancel")
+    async def novaforge_autonomy_cancel(
+        session_id: str,
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Cancel the run before its next stage, then let it end cleanly."""
+        reason = str((payload or {}).get("reason") or "operator") if isinstance(payload, dict) else "operator"
+        return await nova.novaforge.cancel_autonomy(session_id, reason=reason)
+
+    @app.post("/novaforge/sessions/{session_id}/autonomy/approve")
+    async def novaforge_autonomy_approve(
+        session_id: str,
+        payload: dict[str, Any],
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Answer a run parked in WAITING_FOR_APPROVAL (the per-plan policy).
+
+        Body: `approved: true|false`, optional `note`. One answer covers exactly
+        one plan; the next plan parks again.
+        """
+        body = dict(payload or {})
+        return await nova.novaforge.approve_autonomy_plan(
+            session_id, approved=body.get("approved") is True, note=str(body.get("note") or "")
+        )
+
+    @app.get("/novaforge/autonomy/trace")
+    async def novaforge_autonomy_trace(
+        session_id: str = "", _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """The whole orchestration history: phases, evidence, plans and verdicts."""
+        return nova.novaforge.autonomy_trace(session_id)
+
     @app.post("/novaforge/sessions/{session_id}/verify")
     async def novaforge_verify(
         session_id: str, _principal: str = Depends(require_auth)
@@ -1170,6 +1800,49 @@ def create_app() -> Any:
             return await nova.novaforge.verify_objective(session_id, reason="api")
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+
+    @app.post("/novaforge/sessions/{session_id}/loop")
+    async def novaforge_loop_run(
+        session_id: str, payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Run the closed loop once: observe, decide, plan, execute, verify.
+
+        Every action still travels the session's own plan/execute path, so a
+        Guardian denial or a stopped session ends the run with that reason
+        rather than being retried around.
+        """
+        try:
+            return await nova.run_novaforge_loop(session_id, payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+        except MissionValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except SessionConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/novaforge/sessions/{session_id}/loop/cancel")
+    async def novaforge_loop_cancel(
+        session_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Ask a running closed loop to stop before its next action."""
+        return nova.cancel_novaforge_loop(session_id)
+
+    @app.post("/novaforge/sessions/{session_id}/vision/interpret")
+    async def novaforge_vision_interpret(
+        session_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Describe the target's current frame with the vision model (read-only).
+
+        Returns the typed interpretation plus the measured evidence refs it sits
+        beside. Nothing here can plan, approve or execute an action, and the
+        answer never becomes an objective verdict.
+        """
+        try:
+            return await nova.interpret_novaforge_frame(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
+        except MissionValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/novaforge/sessions/{session_id}/verification")
     async def novaforge_verification(
@@ -1436,7 +2109,7 @@ def create_app() -> Any:
     async def novaforge_evaluation_start(
         payload: dict[str, Any], _principal: str = Depends(require_auth)
     ) -> dict[str, Any]:
-        """Start one confirmed observation-only evaluation through the benchmark lab."""
+        """Start one confirmed evaluation: observation-only, or an approved controlled plan."""
         try:
             return await nova.novaforge_evaluations.start(payload)
         except GameNotFoundError as exc:

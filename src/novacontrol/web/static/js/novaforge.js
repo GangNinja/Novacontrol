@@ -32,6 +32,7 @@
     activeId: "",
     state: "",
     targetTitle: "",
+    targetLabel: "",
     timer: null,
     polling: false,
     busy: false,
@@ -42,6 +43,15 @@
     lastFrameKey: "",
     frameToken: 0,
     current: null,
+    // NF-19: the control card's own last read, kept out of `current` so a
+    // session poll never invents a control state it did not receive.
+    control: { body: null, polling: false, busy: false },
+    // NF-20: the plan card's own last read. Same rule: a session poll never
+    // invents a plan, and a build/execute answer is what repaints this card.
+    plan: { body: null, polling: false, busy: false },
+    // NF-22: the autonomous card's own last read. Same rule again: a poll
+    // never invents a run, and only the supervisor's answer repaints it.
+    autonomy: { body: null, polling: false, busy: false },
     // Every authoritative session response bumps this token. A poll that was
     // already in flight when a command or another tab changed the session is
     // discarded instead of painting an older state over the newer one.
@@ -74,6 +84,56 @@
       proposal: null,
       busy: false,
     },
+    // NF-08: the closed loop. ``capability`` is read from the application (the
+    // loop is composed AROUND the manager), ``result`` is the last run's own
+    // record, and ``running`` disables both buttons rather than pretending a
+    // request that can take a deadline is instant.
+    loop: {
+      capability: null,
+      running: false,
+      result: null,
+    },
+    // NF-10 trial rows and aggregates, read from the server's own evaluation
+    // module. `null` means "not read yet", never "no trials".
+    trials: null,
+    // NF-15: unified observation. Nothing here predicts the pipeline's state:
+    // `status` is the observer's own response, `lastKey` prevents re-fetching a
+    // frame that was already validated, and `frameToken` makes a slow image
+    // fetch harmless when the target changes or stops.
+    observation: {
+      status: null,
+      timer: null,
+      polling: false,
+      busy: false,
+      objectUrl: "",
+      lastKey: "",
+      frameToken: 0,
+      // The ladder is read on demand (never on the 1.5 s poll): its first two
+      // stages resolve a title against the catalog, which probes processes.
+      ladderToken: 0,
+      // A status poll that lands after a command response would repaint the
+      // older state; the token makes the older answer harmless.
+      statusToken: 0,
+    },
+    // NF-16: the last state reading, and one guard so a double-click cannot ask
+    // for two readings (the service refuses the second anyway).
+    understanding: {
+      status: null,
+      busy: false,
+    },
+    // NF-17: the last objective interpretation. `busy` guards the read button;
+    // interpretation itself happens inside the state reading it consumes.
+    objectives: {
+      status: null,
+      busy: false,
+    },
+    // NF-18: durable game knowledge for ONE game. `game` is the scope the last
+    // read used; `body` is the server's own answer (never a synthesised one).
+    knowledge: {
+      body: null,
+      game: "",
+      busy: false,
+    },
     // NF-04 state. `runToken` makes a stale poll harmless when a new run starts;
     // `signature` is the EXACT configuration the current preflight validated.
     benchmark: {
@@ -94,13 +154,21 @@
     // NF-05 state. An evaluation is a compatibility record around ONE benchmark
     // run; `signature` is the exact configuration readiness validated, and
     // `confirmed` is the operator's explicit acknowledgement.
+    // `mode` is the operator's choice, never inferred from a run. The plan is a
+    // DRAFT held here (not read back from the DOM) so the payload, the signature
+    // and the rendered summary can never disagree about what is proposed.
     evaluation: {
       games: [],
       selected: null,
       detail: null,
       scenarios: [],
+      mode: "observation_only",
       preflight: null,
       signature: "",
+      approval: null,
+      control: null,
+      plan: [],
+      busy: false,
       evaluationId: "",
       run: null,
       runToken: 0,
@@ -120,6 +188,18 @@
       experiment: null,
       history: [],
       timer: null,
+      busy: false,
+    },
+    // NF-12 state. `payload` is the LAST catalog read verbatim (never rebuilt
+    // from the rows); `plan` is the exact preview awaiting approval and
+    // `result` the last execution/close response. `token` makes a slow search
+    // response harmless when the query changed while it was in flight.
+    library: {
+      payload: null,
+      plan: null,
+      result: null,
+      query: "",
+      token: 0,
       busy: false,
     },
   };
@@ -189,8 +269,47 @@
 
   function sourceLabel(source) {
     if (source === "window_crop") return "window crop";
+    if (source === "window_surface") return "window surface";
     if (source === "screen") return "full screen";
     return source || "—";
+  }
+
+  function backendLabel(backend) {
+    if (backend === "printwindow") return "PrintWindow (window surface)";
+    if (backend === "gdi_display") return "GDI display crop";
+    return backend || "—";
+  }
+
+  // The validation verdict in the operator's words. Each fact is printed
+  // separately because they fail independently: a fresh timestamp proves
+  // nothing about whether the pixels are the target.
+  function validationLabel(validation) {
+    if (!validation || typeof validation !== "object") return "not validated";
+    var parts = [];
+    parts.push(validation.capture_ok ? "captured" : "no capture");
+    parts.push(validation.target_visible ? "target visible" : "target not visible");
+    parts.push(validation.fresh ? "fresh" : "stale");
+    parts.push(validation.content_ok ? "content is the target" : "content unverified");
+    return parts.join(" · ");
+  }
+
+  // The target's visibility is a separate fact from its identity. A minimized
+  // fullscreen game still has the same handle/pid, so the panel says
+  // "minimized" instead of leaving the title looking like a live target.
+  function targetVisibilityLabel(target) {
+    if (!target) return "";
+    if (target.minimized === true) return "minimized";
+    if (target.visible === false) return "hidden";
+    if (target.foreground === true) return "foreground";
+    if (target.foreground === false) return "background";
+    return "";
+  }
+
+  function targetLine(target) {
+    var title = (target && target.title) || "";
+    var state = targetVisibilityLabel(target);
+    if (!title) return state;
+    return state ? title + " · " + state : title;
   }
 
   function setText(id, text) {
@@ -364,7 +483,7 @@
     var badge = byId("forgeState");
     badge.textContent = state || "IDLE";
     badge.dataset.state = state || "IDLE";
-    setText("forgeTarget", forge.targetTitle || "no session target");
+    setText("forgeTarget", forge.targetLabel || forge.targetTitle || "no session target");
   }
 
   /* ── Pure decisions (exported for behavioral tests) ─────────
@@ -384,6 +503,36 @@
     // freshness window is stale, and an unreadable timestamp is never "live".
     var stale = Boolean(frame.stale) || age === null || age > STALE_MS;
     return { stale: stale, age_ms: age };
+  }
+
+  // A frame is only live while the session is RUNNING. A paused session —
+  // including one paused because its target was minimized — must not leave
+  // the last image on screen looking current.
+  function frameLiveState(state, frame, now) {
+    if (TERMINAL.indexOf(state) >= 0) {
+      return { show: false, mode: "session ended", stale: false };
+    }
+    if (state !== "RUNNING") {
+      return { show: false, mode: state === "PAUSED" ? "paused" : "not live", stale: false };
+    }
+    if (!frame) return { show: false, mode: "waiting for frame", stale: false };
+    // A frame is only shown as LIVE when it passed validation. A session frame
+    // is normally already validated, but a record written before validation
+    // existed (or a backend that reported itself unusable) must not borrow the
+    // label: that is how H02 presented the desktop as gameplay. ``screen`` is
+    // the full-desktop fallback and is never a frame OF the target.
+    var verdict = frame.validation && typeof frame.validation === "object"
+      ? frame.validation : {};
+    if (frame.source === "screen" || verdict.livable === false) {
+      return {
+        show: false,
+        mode: "target not visible — feed not live",
+        stale: false,
+        reason: verdict.reason || "The capture was not a validated frame of the target.",
+      };
+    }
+    var freshness = frameFreshness(frame, now);
+    return { show: true, mode: freshness.stale ? "stale" : "live", stale: freshness.stale };
   }
 
   // A frame fetch is asynchronous and polling can overlap it, so the newest
@@ -645,6 +794,13 @@
       String(target.reason || ""), target.valid === true));
     targetBox.appendChild(metricRow("Window", target.title || "—",
       target.handle == null ? "" : "handle " + target.handle + " · pid " + target.pid));
+    targetBox.appendChild(metricRow("Window state", targetVisibilityLabel(target) || "unknown",
+      target.minimized === true
+        ? "The target is minimized; capture and input are paused until it is restored."
+        : target.visible === false
+          ? "The target is not visible; capture and input are paused."
+          : "",
+      target.minimized !== true && target.visible !== false));
     targetBox.appendChild(metricRow("Input boundary", input.allow ? "allowed" : "blocked",
       String(input.reason || ""), input.allow === true));
     targetBox.appendChild(metricRow("Input path", guardian.input_path_available ? "available" : "unsupported",
@@ -781,6 +937,7 @@
     // Every call supersedes any fetch still in flight, including the branches
     // that paint no frame at all.
     var token = ++forge.frameToken;
+    var live = frameLiveState(state, frame, Date.now());
     // A terminal session has no live feed. The last frame is a RECORD, and
     // leaving it in the viewport labelled "live" is exactly the stale-frame
     // confusion this panel exists to prevent.
@@ -802,19 +959,38 @@
       );
       return;
     }
-    if (!frame) {
+    if (!live.show) {
       image.hidden = true;
       image.removeAttribute("src");
+      if (forge.objectUrl) {
+        URL.revokeObjectURL(forge.objectUrl);
+        forge.objectUrl = "";
+      }
+      forge.lastFrameKey = "";
       byId("forgeFrameStale").hidden = true;
-      byId("forgeFrameMode").textContent = state === "RUNNING" ? "waiting for frame" : "no frame";
+      byId("forgeFrameMode").textContent = live.mode;
       var empty = visionEmptyText(state);
+      if (live.reason) {
+        empty = {
+          title: "TARGET NOT VISIBLE — FEED NOT LIVE",
+          detail: live.reason + (frame
+            ? " Last accepted frame: seq " + frame.seq + " captured " + formatTime(frame.captured_at) + "."
+            : ""),
+        };
+      }
+      if (state !== "RUNNING" && state !== "PAUSED") {
+        empty = {
+          title: "Session " + (state || "inactive") + " — no live feed.",
+          detail: "The frame area is deliberately blank unless the session is RUNNING.",
+        };
+      }
       setVisionEmpty(empty.title, empty.detail);
       return;
     }
     var key = forge.sessionId + ":" + frame.seq;
-    var stale = frameFreshness(frame).stale;
+    var stale = live.stale;
     byId("forgeFrameStale").hidden = !stale;
-    byId("forgeFrameMode").textContent = stale ? "stale" : "live";
+    byId("forgeFrameMode").textContent = live.mode;
 
     if (key !== forge.lastFrameKey) {
       try {
@@ -849,10 +1025,37 @@
 
   function objectivePayload() {
     var kind = byId("forgeObjectiveKind").value;
-    var payload = { kind: kind };
-    if (kind === "window_title") payload.parameter = byId("forgeObjectiveParameter").value.trim();
-    else payload.description = "Recorded by the panel as an objective this build cannot check.";
-    return payload;
+    var parameter = byId("forgeObjectiveParameter").value.trim();
+    var mode = byId("forgeObjectiveMode").value || "contains";
+    var region = (byId("forgeObjectiveRegion").value || "").trim();
+    if (kind === "window_title") return { kind: kind, parameter: parameter };
+    if (kind === "ocr_text") {
+      var ocr = { kind: kind, parameter: parameter, mode: mode };
+      // A blank region means the whole window frame; sending "" would be the
+      // same fact stated twice, so it is omitted.
+      if (region) ocr.region = region;
+      return ocr;
+    }
+    return {
+      kind: kind,
+      description: "Recorded by the panel as an objective this build cannot check.",
+    };
+  }
+
+  function syncObjectiveFields() {
+    var kind = byId("forgeObjectiveKind").value;
+    var label = byId("forgeObjectiveParameterLabel");
+    var region = byId("forgeObjectiveRegion");
+    if (label) {
+      label.textContent = kind === "ocr_text"
+        ? "Expected on-screen text"
+        : kind === "window_title" ? "Expected title text" : "Free-text objective";
+    }
+    if (region) region.disabled = kind !== "ocr_text";
+    if (byId("forgeObjectiveParameter")) {
+      byId("forgeObjectiveParameter").placeholder = kind === "ocr_text"
+        ? "e.g. LEVEL COMPLETE" : "e.g. READY";
+    }
   }
 
   function actionPayload() {
@@ -944,6 +1147,1290 @@
     });
   }
 
+  /* ── NF-19: the bounded control interface ────────────────────────
+   *
+   * This card sends ONE typed input operation at a time through the session's
+   * own guard, and it reports what the INPUT INTERFACE did. `completed` never
+   * means the game reacted: every result carries `effect: null`, and the panel
+   * says so in the same breath as the status.
+   */
+
+  function syncControlFields() {
+    var kind = byId("forgeControlKind");
+    if (!kind) return;
+    var key = byId("forgeControlKey");
+    var point = byId("forgeControlPoint");
+    var value = kind.value;
+    var keyed = value.indexOf("key_") === 0;
+    var mouse = value.indexOf("mouse_") === 0;
+    key.disabled = value === "mouse_move" || value === "mouse_press" ||
+      value === "mouse_release";
+    point.disabled = !mouse;
+    key.placeholder = value === "key_hold" ? "w 120"
+      : value === "wait" ? "250"
+      : value === "mouse_hold" ? "120"
+      : keyed ? "w" : "120";
+    point.placeholder = value === "mouse_hold" ? "500,300 (client point)" : "500,300";
+  }
+
+  function controlPayloadFor(kind, keyFieldValue, pointFieldValue) {
+    var keyField = String(keyFieldValue || "").trim();
+    var pointField = String(pointFieldValue || "").trim();
+    var payload = { kind: kind };
+    var parts = keyField.split(/\s+/);
+    function point() {
+      var pair = pointField.split(",");
+      var x = parseInt((pair[0] || "").trim(), 10);
+      var y = parseInt((pair[1] || "").trim(), 10);
+      // Both or neither: a half point is a request the server can only refuse,
+      // and omitting it says "no point" instead of guessing zero.
+      if (!isNaN(x) && !isNaN(y)) { payload.x = x; payload.y = y; }
+    }
+    function ms() {
+      var value = parseInt(parts[0] || "", 10);
+      payload.duration_ms = isNaN(value) ? 120 : value;
+    }
+    if (kind === "key_press" || kind === "key_release") payload.key = parts[0] || "";
+    if (kind === "key_hold") { payload.key = parts[0] || ""; ms(); }
+    if (kind === "mouse_move" || kind === "mouse_press" || kind === "mouse_release") point();
+    if (kind === "mouse_hold") { point(); ms(); }
+    if (kind === "wait") ms();
+    return payload;
+  }
+
+  function controlPayload() {
+    return controlPayloadFor(
+      byId("forgeControlKind").value,
+      byId("forgeControlKey").value,
+      byId("forgeControlPoint").value
+    );
+  }
+
+  // The buttons are gated on the SERVER's own view, never on the session state:
+  // a RUNNING session with a closed gate cannot send, and an in-flight action
+  // disables both sending and releasing (cancel is the way out). Pure, so a
+  // Node test drives exactly the decision the panel ships.
+  function inputControlState(status) {
+    var session = (status && status.session) || null;
+    var gate = (session && session.gate) || {};
+    var available = Boolean(status && status.available);
+    var active = Boolean(status && status.active);
+    var held = (status && status.held) || [];
+    var badge = !status ? "untested"
+      : !session ? "no session"
+      : !available ? "no input path"
+      : gate.allow ? "ready" : String(gate.state || "blocked");
+    return {
+      badge: badge,
+      available: available,
+      active: active,
+      held: held,
+      run: available && Boolean(gate.allow) && !active,
+      cancel: active,
+      release: Boolean(held.length) && !active,
+      heldText: controlHeldText(held),
+      gateReason: available
+        ? String(gate.reason || "")
+        : "No gameplay input path is wired; nothing can be sent.",
+    };
+  }
+
+  function controlHeldText(held) {
+    if (!held || !held.length) return "No input is held by this interface.";
+    return "Held by this interface: " + held.map(function (row) {
+      return String(row.kind) + ":" + String(row.name);
+    }).join(", ") + ". Release it, or let the session's cleanup free it.";
+  }
+
+  function renderControl(status) {
+    forge.control.body = status || null;
+    var badge = byId("forgeControlBadge");
+    if (!badge) return;
+    var view = inputControlState(status);
+    var session = (status && status.session) || null;
+    var gate = (session && session.gate) || {};
+    var available = view.available;
+    var active = view.active;
+    var held = view.held;
+    badge.textContent = view.badge;
+    badge.dataset.state = view.badge;
+
+    var lines = [];
+    if (!status) {
+      lines.push("The control interface has not been read for this session.");
+    } else if (!available) {
+      lines.push("No gameplay input path is wired; nothing can be sent.");
+    } else {
+      var policy = status.policy || {};
+      lines.push("One bounded action at a time · deadline " +
+        String(policy.action_deadline_ms || "?") + " ms · key hold ≤ " +
+        String(policy.max_key_hold_ms || "?") + " ms · wait ≤ " +
+        String(policy.max_wait_ms || "?") + " ms.");
+      if (session && !gate.allow) lines.push("Gate: " + String(gate.reason || gate.state || "refused"));
+      lines.push(controlHeldText(held));
+      if (active && status.active) {
+        lines.push("In flight: " + String(status.active.kind || "") + " (" +
+          String(status.active.status || "") + ").");
+      }
+      var cleanup = status.last_cleanup || {};
+      if (cleanup && cleanup.ok === false) {
+        lines.push("Cleanup reported a problem: " + String(cleanup.note || "release failed") + ".");
+      }
+    }
+    setText("forgeControlHint", lines.join(" "));
+
+    var runButton = byId("forgeControlRunButton");
+    var cancelButton = byId("forgeControlCancelButton");
+    var releaseButton = byId("forgeControlReleaseButton");
+    if (runButton) runButton.disabled = !view.run || forge.control.busy;
+    if (cancelButton) cancelButton.disabled = !view.cancel;
+    if (releaseButton) releaseButton.disabled = !view.release || forge.control.busy;
+
+    var log = byId("forgeControlLog");
+    if (!log) return;
+    log.innerHTML = "";
+    var rows = (status && status.history) || [];
+    if (!rows.length) {
+      log.appendChild(el("li", "muted", "No control action has been sent for this session."));
+      return;
+    }
+    rows.slice(0, 6).forEach(function (row) {
+      var item = el("li", "forge-action-row");
+      item.dataset.status = String(row.status || "");
+      item.appendChild(el("strong", "", String(row.status || "") + " · " + String(row.kind || "")));
+      item.appendChild(el("span", "muted", " " + String(row.reason || "")));
+      log.appendChild(item);
+    });
+  }
+
+  async function loadControlStatus() {
+    if (!forge.sessionId || forge.control.polling) return;
+    var token = forge.stateToken;
+    forge.control.polling = true;
+    try {
+      var body = await requestJson(
+        "/novaforge/sessions/" + encodeURIComponent(forge.sessionId) + "/control");
+      if (!responseStillCurrent(token, forge.stateToken)) return;
+      renderControl(body);
+    } catch (error) {
+      // A missing/finished session is not an error to shout about; the card
+      // says what it could not read rather than keeping a stale "ready".
+      renderControl(null);
+    } finally {
+      forge.control.polling = false;
+    }
+  }
+
+  async function postControl(path, payload, what) {
+    if (forge.control.busy) return null;
+    forge.control.busy = true;
+    notice("", "");
+    try {
+      return await requestJson(path, payload === null ? {} : payload);
+    } catch (error) {
+      notice(what + " failed: " + String(error.message || error), "error");
+      return null;
+    } finally {
+      forge.control.busy = false;
+    }
+  }
+
+  async function sendControlAction() {
+    if (!forge.sessionId) return;
+    var answer = await postControl(
+      "/novaforge/sessions/" + encodeURIComponent(forge.sessionId) + "/control",
+      controlPayload(), "Control action");
+    if (!answer) return;
+    var result = answer.result || {};
+    notice(result.ok
+      ? "Input operation completed. No in-game effect was observed: completion is not gameplay success."
+      : "Control action " + String(answer.status || "refused") + " (" +
+        String(answer.code || "") + "): " + String(answer.reason || ""),
+      result.ok ? "" : "error");
+    await loadControlStatus();
+    await refreshSession();
+  }
+
+  async function cancelControlAction() {
+    if (!forge.sessionId) return;
+    var answer = await postControl(
+      "/novaforge/sessions/" + encodeURIComponent(forge.sessionId) + "/control/cancel",
+      null, "Cancel action");
+    if (!answer) return;
+    notice(answer.cancelled
+      ? String(answer.reason || "Cancel requested.")
+      : String(answer.reason || "No control action is in flight."),
+      answer.cancelled ? "" : "error");
+    await loadControlStatus();
+  }
+
+  async function releaseControlInputs() {
+    if (!forge.sessionId) return;
+    var answer = await postControl(
+      "/novaforge/sessions/" + encodeURIComponent(forge.sessionId) + "/control/release",
+      null, "Release inputs");
+    if (!answer) return;
+    var cleanup = answer.cleanup || {};
+    notice(cleanup.ok
+      ? "Released " + String(cleanup.released || 0) + " input(s); nothing is held by this interface."
+      : "Release incomplete: " + String(cleanup.note || "input may still be held."),
+      cleanup.ok ? "" : "error");
+    await loadControlStatus();
+  }
+
+  /* ── NF-20: bounded planning ────────────────────────────────────
+   *
+   * A plan is built from the session's verified state, objective and knowledge,
+   * scored by declared criteria, and executed ONLY after approval. Every status
+   * here distinguishes a proposal from an input operation, and no receipt ever
+   * claims an in-game effect: that belongs to NF-21.
+   */
+
+  var PLAN_ENDED = [
+    "executed", "stopped", "failed", "cancelled", "rejected",
+    "insufficient_information", "no_action", "replan_required",
+    "replan_exhausted", "invalidated"
+  ];
+
+  // Pure: the button rules, shared by the card and its tests. `build` follows
+  // the SERVER's gate, `execute` follows the plan's own approval state, and a
+  // running plan disables everything but Cancel.
+  function planView(status) {
+    var view = {
+      badge: "untested",
+      build: false,
+      execute: false,
+      cancel: false,
+      replan: false,
+      current: null,
+      gateReason: "No plan has been read for this session."
+    };
+    if (!status) return view;
+    var session = status.session || {};
+    var gate = session.gate || {};
+    var current = status.current || null;
+    var running = Boolean(status.running);
+    var busy = Boolean(forge.plan.busy);
+    var name = current ? String(current.status || "") : "";
+    var policy = status.policy || {};
+    view.current = current;
+    view.badge = running ? "running" : (name || (status.available ? "ready" : "untested"));
+    view.gateReason = gate.allow ? "" : String(gate.reason || gate.state || "blocked");
+    view.build = Boolean(gate.allow) && !running && !busy;
+    view.execute = Boolean(gate.allow) && !running && !busy &&
+      Boolean(current && (current.steps || []).length) &&
+      (name === "awaiting_approval" || name === "planned");
+    view.cancel = !busy && (name === "awaiting_approval" || name === "planned" || running);
+    view.replan = Boolean(gate.allow) && !running && !busy && Boolean(current) &&
+      PLAN_ENDED.indexOf(name) >= 0 &&
+      Number(current.replan_count || 0) < Number(policy.max_replans || 0);
+    return view;
+  }
+
+  function planAgeText(seconds) {
+    if (seconds === null || seconds === undefined) return "unreadable";
+    return Number(seconds).toFixed(1) + " s";
+  }
+
+  function renderPlan(status) {
+    forge.plan.body = status || null;
+    var badge = byId("forgePlanBadge");
+    if (!badge) return;
+    var view = planView(status);
+    var current = view.current;
+    badge.textContent = view.badge;
+    badge.dataset.state = view.badge;
+
+    var buildButton = byId("forgePlanBuildButton");
+    var executeButton = byId("forgePlanExecuteButton");
+    var cancelButton = byId("forgePlanCancelButton");
+    var replanButton = byId("forgePlanReplanButton");
+    if (buildButton) buildButton.disabled = !view.build;
+    if (executeButton) executeButton.disabled = !view.execute;
+    if (cancelButton) cancelButton.disabled = !view.cancel;
+    if (replanButton) replanButton.disabled = !view.replan;
+
+    var lines = [];
+    if (!status) {
+      lines.push("The planner has not been read for this session.");
+    } else if (view.gateReason) {
+      lines.push("Planning gate: " + view.gateReason);
+    }
+    if (current) {
+      lines.push("Plan " + String(current.plan_id || "") + " · " +
+        String(current.status || "") + (current.code ? " (" + String(current.code) + ")" : "") + ".");
+      if (current.reason) lines.push(String(current.reason));
+    } else if (status) {
+      lines.push("No plan is current. Build one from the latest verified state; nothing is sent until you approve it.");
+    }
+    setText("forgePlanHint", lines.join(" "));
+
+    var facts = byId("forgePlanFacts");
+    if (facts) {
+      facts.innerHTML = "";
+      if (current) {
+        var objective = current.objective || {};
+        var refs = current.evidence_refs || {};
+        var budgets = current.budgets || {};
+        var approval = current.approval || {};
+        [
+          ["Objective", String(objective.description || "unavailable")],
+          ["State", String(refs.state_id || "unavailable") + " · " + planAgeText(refs.state_age_seconds)],
+          ["Steps", String((current.steps || []).length) + " of " + String(budgets.max_actions || "?")],
+          ["Approval", String(approval.status || "unknown")],
+          ["Replans", String(current.replan_count || 0)],
+          ["Effect", "not observed (NF-21)"]
+        ].forEach(function (pair) {
+          var row = el("div", "");
+          row.appendChild(el("dt", "", pair[0]));
+          row.appendChild(el("dd", "", pair[1]));
+          facts.appendChild(row);
+        });
+      }
+    }
+
+    var candidates = byId("forgePlanCandidates");
+    if (candidates) {
+      candidates.innerHTML = "";
+      var rows = (current && current.candidates) || [];
+      if (rows.length) {
+        var list = el("ul", "");
+        rows.slice(0, 6).forEach(function (row) {
+          var item = el("li", "");
+          item.dataset.feasible = row.feasible ? "true" : "false";
+          item.appendChild(el("strong", "", (row.feasible ? "selected: " : "rejected: ") +
+            String(row.description || row.candidate_id || "")));
+          var note = row.feasible
+            ? "score " + String(row.score === null || row.score === undefined ? "n/a" : row.score) +
+              " · risk " + String(row.risk || "") + " · cost " + String(row.expected_cost_ms || 0) + " ms"
+            : String(row.rejection || "a precondition was not true");
+          item.appendChild(el("span", "muted", " " + note));
+          list.appendChild(item);
+        });
+        candidates.appendChild(list);
+      }
+    }
+
+    var history = byId("forgePlanHistory");
+    if (history) {
+      history.innerHTML = "";
+      var historyRows = (status && status.history) || [];
+      if (!historyRows.length) {
+        history.appendChild(el("li", "muted", "No plan has been built for this session."));
+      } else {
+        historyRows.slice(0, 6).forEach(function (row) {
+          var item = el("li", "forge-action-row");
+          item.dataset.status = String(row.status || "");
+          item.appendChild(el("strong", "", String(row.status || "") +
+            (row.code ? " (" + String(row.code) + ")" : "")));
+          item.appendChild(el("span", "muted", " " + String(row.reason || "")));
+          history.appendChild(item);
+        });
+      }
+    }
+  }
+
+  async function loadPlanStatus() {
+    if (!forge.sessionId || forge.plan.polling) return;
+    var token = forge.stateToken;
+    forge.plan.polling = true;
+    try {
+      var body = await requestJson(
+        "/novaforge/sessions/" + encodeURIComponent(forge.sessionId) + "/plan");
+      if (!responseStillCurrent(token, forge.stateToken)) return;
+      renderPlan(body);
+    } catch (error) {
+      renderPlan(null);
+    } finally {
+      forge.plan.polling = false;
+    }
+  }
+
+  async function postPlan(path, payload, what) {
+    if (forge.plan.busy) return null;
+    forge.plan.busy = true;
+    notice("", "");
+    try {
+      return await requestJson(path, payload === null ? {} : payload);
+    } catch (error) {
+      notice(what + " failed: " + String(error.message || error), "error");
+      return null;
+    } finally {
+      forge.plan.busy = false;
+    }
+  }
+
+  function planPath(suffix) {
+    return "/novaforge/sessions/" + encodeURIComponent(forge.sessionId) + "/plan" + (suffix || "");
+  }
+
+  async function buildPlan() {
+    if (!forge.sessionId) return;
+    var answer = await postPlan(planPath(""), null, "Build plan");
+    if (!answer) return;
+    var plan = answer.plan || {};
+    notice(plan.status === "awaiting_approval"
+      ? "Plan built and awaiting approval. Nothing has been sent."
+      : "No plan was selected: " + String(plan.status || "refused") +
+        (plan.code ? " (" + String(plan.code) + ")" : "") + ". " + String(plan.reason || ""),
+      plan.status === "awaiting_approval" ? "" : "error");
+    renderPlan(await loadPlanBody());
+  }
+
+  async function loadPlanBody() {
+    // One read after a mutation keeps the card on the server's own record.
+    try {
+      return await requestJson(planPath(""));
+    } catch (error) {
+      return null;
+    }
+  }
+
+  async function executePlan() {
+    var status = forge.plan.body || {};
+    var current = status.current || {};
+    if (!forge.sessionId || !current.plan_id) return;
+    // The approval is the SERVER-minted token carried by this plan preview, not
+    // the `approved` flag: it is single-use and bound to this plan id, so an
+    // approval can never be replayed onto another plan or a later run.
+    var approval = current.approval || {};
+    var answer = await postPlan(planPath("/execute"),
+      { plan_id: current.plan_id, approved: true, approval_token: approval.token || "" },
+      "Execute plan");
+    if (!answer) {
+      // A missing or expired token is a refusal, not a dead end: repaint from a
+      // fresh preview so the next press approves the plan on screen.
+      renderPlan(await loadPlanBody());
+      return;
+    }
+    var plan = answer.plan || {};
+    var executed = plan.status === "executed";
+    notice(executed
+      ? "Plan executed: every planned input operation completed. The in-game effect was NOT observed or verified."
+      : "Plan ended " + String(plan.status || "refused") +
+        (plan.code ? " (" + String(plan.code) + ")" : "") + ": " + String(plan.reason || ""),
+      executed ? "" : "error");
+    renderPlan(await loadPlanBody());
+    await refreshSession();
+  }
+
+  async function cancelPlan() {
+    var status = forge.plan.body || {};
+    var current = status.current || {};
+    if (!forge.sessionId) return;
+    var answer = await postPlan(planPath("/cancel"),
+      current.plan_id ? { plan_id: current.plan_id } : {}, "Cancel plan");
+    if (!answer) return;
+    notice(answer.cancelled
+      ? String((answer.plan && answer.plan.reason) || "Plan cancelled before the next step.")
+      : "No cancellable plan was running.", answer.cancelled ? "" : "error");
+    renderPlan(await loadPlanBody());
+  }
+
+  async function replanPlan() {
+    var status = forge.plan.body || {};
+    var current = status.current || {};
+    if (!forge.sessionId || !current.plan_id) return;
+    var answer = await postPlan(planPath("/replan"),
+      { plan_id: current.plan_id, reason: "operator" }, "Replan");
+    if (!answer) return;
+    var plan = answer.plan || {};
+    notice(plan.status === "awaiting_approval"
+      ? "Replanned from fresh evidence; the new plan awaits approval."
+      : "Replanning did not produce a runnable plan: " + String(plan.status || "refused") +
+        (plan.code ? " (" + String(plan.code) + ")" : "") + ". " + String(plan.reason || ""),
+      plan.status === "awaiting_approval" ? "" : "error");
+    renderPlan(await loadPlanBody());
+  }
+
+  /* ── NF-22: one bounded autonomous run ───────────────────────────
+   *
+   * The card is a CLIENT of the supervisor the backend owns: it renders the
+   * phase, the pinned objective, the plan, the budgets and the last verdict, and
+   * its controls post the operator's own decisions (start with approval, pause,
+   * resume, cancel, and one answer per parked plan). Nothing here starts a run,
+   * widens a budget or restarts one that ended, and a run whose frames come from
+   * the simulated world is labelled simulated rather than live.
+   */
+
+  function autonomyPath(suffix) {
+    return "/novaforge/sessions/" + encodeURIComponent(forge.sessionId) + "/autonomy" + (suffix || "");
+  }
+
+  function autonomyRun(body) {
+    return (body && body.runs && body.runs[0]) || null;
+  }
+
+  // The button rules, pure and shared with the tests: Start follows the run's own
+  // permission (approval is the operator's), Pause needs a live run, Resume needs
+  // a paused one, and a run that ended enables nothing at all.
+  function autonomyView(body) {
+    var run = autonomyRun(body);
+    var view = {
+      badge: body && body.available ? "idle" : "untested",
+      phase: run ? String(run.phase || "") : "",
+      start: false,
+      pause: false,
+      resume: false,
+      cancel: false,
+      approve: false,
+      reject: false,
+      reason: "No autonomous run has been read for this session."
+    };
+    if (!body) return view;
+    var busy = Boolean(forge.autonomy.busy);
+    var terminal = Boolean(run && run.terminal);
+    view.phase = run ? String(run.phase || "") : "";
+    // Only a run whose evidence the supervisor reports as LIVE may wear the
+    // autonomous label. A run driving the simulated world says so instead: a
+    // badge that reads "autonomous" over simulated evidence would tell the
+    // operator the machine is controlling a game when it is not.
+    view.evidence_source = String((run && run.evidence_source) || body.evidence_source || "");
+    var live = view.evidence_source === "live";
+    view.badge = run
+      ? (terminal ? "ended" : (live ? "autonomous" : "simulated"))
+      : (body.available ? "idle" : "untested");
+    view.start = Boolean(body.can_start) && !busy;
+    // Pause is offered only while something is actually running to pause: a
+    // parked run is waiting on the operator's answer, and a control that does
+    // nothing when pressed teaches the operator to distrust the card.
+    view.pause = Boolean(run && run.active && view.phase !== "PAUSED"
+      && view.phase !== "WAITING_FOR_APPROVAL") && !busy;
+    view.resume = Boolean(run && view.phase === "PAUSED") && !busy;
+    view.cancel = Boolean(run && run.active) && !busy;
+    view.approve = Boolean(run && view.phase === "WAITING_FOR_APPROVAL") && !busy;
+    view.reject = view.approve;
+    view.reason = run
+      ? (String(run.reason || "") || "The run is " + view.phase + ".")
+      : "No autonomous run yet. Approval is required: a run sends bounded input to the game.";
+    return view;
+  }
+
+  function autonomyBudgets(limits) {
+    return "cycles " + String(limits.max_cycles || "?") +
+      ", actions " + String(limits.max_actions || "?") +
+      " (max " + String(limits.max_actions_per_plan || "?") + " per plan)" +
+      ", " + String(limits.session_seconds || "?") + " s" +
+      ", recoveries " + String(limits.recovery_attempts || 0) +
+      ", replans " + String(limits.replans || 0);
+  }
+
+  // What the card shows. Everything is read from the supervisor's own record: the
+  // pinned objective, the criteria it was approved against, the state and plan of
+  // the last cycle, the evidence source, the budgets and the last verdict.
+  function autonomyFactList(body) {
+    var run = autonomyRun(body);
+    var limits = (body && body.limits) || {};
+    var policy = (body && body.policy) || {};
+    var resources = (body && body.resources) || {};
+    if (!run) {
+      return [
+        ["Evidence source", String((body && body.evidence_source) || "unknown")],
+        ["Approval", (body && body.approval_required)
+          ? "required before anything is sent" : "not required by the policy"],
+        ["Plan approval", String(policy.plan_approval || "run")],
+        ["Resource gate", resources.available
+          ? (String(resources.level || "") + ": " + String(resources.reason || ""))
+          : "not measured on this host"],
+        ["Budgets", autonomyBudgets(limits)],
+        ["Objective", "none pinned: a run pins its objective and completion criteria before its first cycle."]
+      ];
+    }
+    var cycles = run.cycles || [];
+    var last = cycles.length ? cycles[cycles.length - 1] : {};
+    var planCycle = autonomyPlanCycle(cycles);
+    var objective = last.objective || {};
+    var state = last.state || {};
+    var plan = planCycle.plan || {};
+    var approval = planCycle.approval || {};
+    var planCycleNote = (planCycle.index && planCycle !== last)
+      ? " (cycle " + String(planCycle.index) + ")" : "";
+    var verification = last.verification || {};
+    var observation = last.observation || {};
+    var steps = run.steps || [];
+    var action = steps.length ? steps[steps.length - 1] : {};
+    return [
+      ["Game", String(run.game || "unknown")],
+      ["Session", String(run.session_id || "")],
+      ["Evidence source", String(run.evidence_source || "unknown")],
+      ["Phase", String(run.phase || "") +
+        (run.active ? " (controlling)" : (run.terminal ? " (ended)" : ""))],
+      ["Objective", String(run.objective || run.objective_id || "unread")],
+      ["Completion criteria", (run.completion_criteria || []).join("; ") || "none declared"],
+      ["State", String(state.status || "unread")],
+      ["Objective status", String(objective.status || "unread")],
+      ["Plan", plan.plan_id
+        ? (String(plan.plan_id) + " (" + String(plan.status || "") + ", " +
+          String((plan.steps || []).length) + " step(s))" + planCycleNote)
+        : "none in this cycle"],
+      ["Dispatched actions", String(run.actions_dispatched || 0) +
+        " of " + String(limits.max_actions || "?")],
+      ["Approval", approval.mode === "run"
+        ? "covered by the run's own approval"
+        : (approval.approved ? "approved by the operator" : String(approval.reason || "not answered"))],
+      ["Last observation", String(observation.captured_at || "none")],
+      ["Last verified outcome", verification.status
+        ? (String(verification.status) + " — " + String(verification.reason || ""))
+        : (run.outcome ? String(run.outcome) : "none yet")],
+      ["Recoveries / replans", String(run.recoveries || 0) + " / " + String(run.replans || 0)],
+      ["Budgets", autonomyBudgets(limits)],
+      ["Elapsed", (run.elapsed_seconds === null || run.elapsed_seconds === undefined)
+        ? "running"
+        : (String(run.elapsed_seconds) + " s of " + String(limits.session_seconds || "?") + " s")],
+      ["Last cycle step", String(action.phase || "") +
+        (action.outcome ? " (" + String(action.outcome) + ")" : "")]
+    ];
+  }
+
+  // The CURRENT plan is the newest plan the run built. A cycle that ends the run
+  // can hold no plan at all (the one that observed completion), and a cycle that
+  // failed before planning holds none either — reading the last cycle alone would
+  // show "no plan" after three dispatched actions, which is exactly the opposite
+  // of what the operator needs to audit.
+  function autonomyPlanCycle(cycles) {
+    var rows = cycles || [];
+    for (var index = rows.length - 1; index >= 0; index -= 1) {
+      if ((((rows[index] || {}).plan || {}).steps || []).length) return rows[index];
+    }
+    return rows.length ? rows[rows.length - 1] : {};
+  }
+
+  // Scope H asks for the planned and executed ACTIONS, not only their count: the
+  // current plan's own steps, and NF-19's record for each one is what happened to
+  // it. A step with no record was never dispatched — a parked plan's steps are
+  // listed with exactly that.
+  function autonomyActionList(body) {
+    var run = autonomyRun(body);
+    var cycles = (run && run.cycles) || [];
+    var last = autonomyPlanCycle(cycles);
+    var prefix = cycles.length > 1 && last.index ? "cycle " + String(last.index) + " · " : "";
+    var steps = ((last.plan || {}).steps) || [];
+    var records = ((last.execution || {}).steps) || [];
+    var byAction = {};
+    records.forEach(function (record) {
+      byAction[String(record.action_id || record.index)] = record;
+    });
+    return steps.map(function (step) {
+      var record = byAction[String(step.action_id || step.index)] || {};
+      var status = record.status
+        ? String(record.status)
+        : (last.approval && last.approval.approved === false ? "refused" : "not dispatched");
+      return prefix + String(step.index || "?") + ". " + String(step.kind || "action") + " — " +
+        String(step.description || step.expected_effect || "no description") +
+        " (" + status + (record.code ? ": " + String(record.code) : "") + ")";
+    });
+  }
+
+  function renderAutonomy(body) {
+    var view = autonomyView(body);
+    var run = autonomyRun(body);
+    var badge = byId("forgeAutonomyBadge");
+    if (badge) {
+      badge.textContent = view.badge;
+      badge.dataset.state = view.badge === "autonomous" ? "active"
+        : (view.badge === "ended" ? "done"
+          : (view.badge === "simulated" ? "simulated" : "untested"));
+    }
+    setText("forgeAutonomyHint", view.phase ? (view.phase + ": " + view.reason) : view.reason);
+    var facts = byId("forgeAutonomyFacts");
+    if (facts) {
+      facts.textContent = "";
+      autonomyFactList(body).forEach(function (pair) {
+        var wrap = el("div", "forge-observation-fact");
+        wrap.appendChild(el("dt", "", pair[0]));
+        wrap.appendChild(el("dd", "", pair[1] === "" ? "—" : String(pair[1])));
+        facts.appendChild(wrap);
+      });
+    }
+    var actionList = byId("forgeAutonomyActions");
+    if (actionList) {
+      actionList.textContent = "";
+      var actionRows = run ? autonomyActionList(body) : [];
+      if (!actionRows.length) {
+        actionList.appendChild(el("li", "muted", run
+          ? "The last cycle built no plan."
+          : "No plan has been built for this session yet."));
+      }
+      actionRows.forEach(function (row) {
+        actionList.appendChild(el("li", "", row));
+      });
+    }
+    var cycles = byId("forgeAutonomyCycles");
+    if (cycles) {
+      cycles.textContent = "";
+      var rows = (run && run.cycles) || [];
+      if (!rows.length) {
+        cycles.appendChild(el("li", "muted", "No decision cycle has run yet."));
+      }
+      rows.forEach(function (row) {
+        var rowPlan = row.plan || {};
+        var rowVerification = row.verification || {};
+        var outcome = row.outcome || rowVerification.status || rowPlan.status || "";
+        cycles.appendChild(el("li", "", "cycle " + String(row.index) + ": " +
+          String(row.phase || "") + " — " + String(row.reason || "") +
+          (outcome ? " (" + String(outcome) + ")" : "") +
+          (row.actions_dispatched
+            ? " [" + String(row.actions_dispatched) + " dispatched]" : "")));
+      });
+    }
+    var approval = byId("forgeAutonomyApproval");
+    if (approval) approval.hidden = view.phase !== "WAITING_FOR_APPROVAL";
+    var buttons = {
+      forgeAutonomyStartButton: view.start,
+      forgeAutonomyPauseButton: view.pause,
+      forgeAutonomyResumeButton: view.resume,
+      forgeAutonomyCancelButton: view.cancel,
+      forgeAutonomyApproveButton: view.approve,
+      forgeAutonomyRejectButton: view.reject
+    };
+    Object.keys(buttons).forEach(function (id) {
+      var button = byId(id);
+      if (button) button.disabled = !buttons[id];
+    });
+    if (!run) {
+      setText("forgeAutonomyOutcome", "No autonomous run for this session.");
+      return;
+    }
+    setText("forgeAutonomyOutcome", run.terminal
+      ? ("Ended: " + String(run.outcome || run.phase) + " — " + String(run.reason || ""))
+      : ("Running: " + String(run.phase || "") + " (" + String(run.evidence_source || "") + " evidence)"));
+  }
+
+  async function loadAutonomy() {
+    if (!forge.sessionId || forge.autonomy.polling) return;
+    var token = forge.stateToken;
+    forge.autonomy.polling = true;
+    try {
+      var body = await requestJson(autonomyPath(""));
+      if (!responseStillCurrent(token, forge.stateToken)) return;
+      forge.autonomy.body = body;
+      renderAutonomy(body);
+    } catch (error) {
+      // A session that has ended is not an error to shout about: the card says
+      // what it could not read instead of keeping a stale "autonomous" label.
+      forge.autonomy.body = null;
+      renderAutonomy(null);
+    } finally {
+      forge.autonomy.polling = false;
+    }
+  }
+
+  async function postAutonomy(path, payload, what) {
+    if (!forge.sessionId || forge.autonomy.busy) return null;
+    forge.autonomy.busy = true;
+    notice("", "");
+    try {
+      return await requestJson(autonomyPath(path), payload === null ? {} : payload);
+    } catch (error) {
+      notice(what + " failed: " + String(error.message || error), "error");
+      return null;
+    } finally {
+      forge.autonomy.busy = false;
+    }
+  }
+
+  async function startAutonomy() {
+    var answer = await postAutonomy("/start",
+      { approved: true, task: "", note: "operator" }, "Start autonomous run");
+    if (!answer) return;
+    notice(answer.started
+      ? ("Autonomous run started on " + String(answer.evidence_source) +
+        " evidence. It drives the game through the session's own control " +
+        "interface until its objective, one of its budgets or the operator ends it.")
+      : ("Nothing was started: " + String(answer.code || "") + " — " + String(answer.reason || "")),
+      answer.started ? "" : "error");
+    await loadAutonomy();
+    await refreshSession();
+  }
+
+  async function pauseAutonomy() {
+    var answer = await postAutonomy("/pause", { reason: "operator" }, "Pause run");
+    if (!answer) return;
+    notice(String(answer.reason || "Pause requested."), answer.paused ? "" : "error");
+    await loadAutonomy();
+  }
+
+  async function resumeAutonomy() {
+    var answer = await postAutonomy("/resume", null, "Resume run");
+    if (!answer) return;
+    notice(String(answer.reason || "Resume requested."), answer.resumed ? "" : "error");
+    await loadAutonomy();
+    await refreshSession();
+  }
+
+  async function cancelAutonomy() {
+    var answer = await postAutonomy("/cancel", { reason: "operator" }, "Cancel run");
+    if (!answer) return;
+    notice(String(answer.reason || "Cancel requested."), answer.cancelled ? "" : "error");
+    await loadAutonomy();
+  }
+
+  async function answerAutonomy(approved) {
+    var answer = await postAutonomy("/approve",
+      {
+        approved: approved,
+        note: approved ? "operator approved this plan" : "operator refused this plan"
+      },
+      approved ? "Approve plan" : "Refuse plan");
+    if (!answer) return;
+    notice(String(answer.reason || (approved ? "Plan approved." : "Plan refused.")),
+      answer.approved === approved ? "" : "error");
+    await loadAutonomy();
+  }
+
+  /* ── NF-08: the closed loop ────────────────────────────────────── */
+
+  function loopStatusText(status) {
+    var labels = {
+      completed: "completed — objective verified",
+      failed: "failed — the verifier decided against it",
+      stopped: "stopped before/inside the loop",
+      refused: "refused by a gate",
+      canceled: "cancelled by the operator",
+      unavailable: "unavailable on this host",
+      error: "error",
+    };
+    return labels[String(status || "")] || String(status || "no run");
+  }
+
+  function trialOutcomeText(outcome) {
+    var labels = {
+      verified_success: "verified success",
+      verified_failure: "verified failure",
+      inconclusive: "inconclusive — the verifier did not decide",
+      refused: "refused by a gate",
+      aborted: "aborted",
+      verification_error: "verification error",
+      unavailable: "unavailable on this host",
+      error: "error",
+    };
+    return labels[String(outcome || "")] || String(outcome || "no outcome");
+  }
+
+  function renderTrialHistory(record) {
+    var out = byId("forgeTrialHistory");
+    if (!out) return;
+    out.innerHTML = "";
+    // ``record`` is the fetched payload; omitting it renders the last one read.
+    var data = record || forge.trials;
+    if (!data) {
+      out.appendChild(el("p", "muted", "Reading the trial record…"));
+      return;
+    }
+    if (data.error) {
+      out.appendChild(el("p", "muted", "Trial history unavailable: " + String(data.error)));
+      return;
+    }
+    var rows = data.trials || [];
+    var summaries = data.summaries || [];
+    var head = el("div", "forge-card-head");
+    head.appendChild(el("strong", "", "Trial history"));
+    head.appendChild(el("span", "forge-badge",
+      rows.length + (rows.length === 1 ? " trial" : " trials")));
+    out.appendChild(head);
+    if (!rows.length) {
+      out.appendChild(el("p", "muted",
+        "No policy trial has finished in this process yet. A run appears here once " +
+        "the loop returns, whatever its outcome."));
+      return;
+    }
+    // Aggregates come from the server's policy_eval, so the panel and the report
+    // cannot disagree about what happened. A figure with no samples is omitted,
+    // never shown as zero.
+    summaries.forEach(function (summary) {
+      var outcomes = summary.outcomes || {};
+      var trials = Number(summary.trials || 0);
+      var line = [
+        String(summary.policy || "policy") +
+          (summary.policy_version ? " v" + Number(summary.policy_version) : ""),
+        trials + (trials === 1 ? " trial" : " trials"),
+        "verified: " + Number(outcomes.verified_success || 0) + " success / " +
+          Number(outcomes.verified_failure || 0) + " failure",
+        summary.success_rate == null ? "rate unavailable" :
+          "rate " + Number(summary.success_rate),
+        summary.actions_executed_mean == null ? "" :
+          "actions " + Number(summary.actions_executed_mean),
+        summary.elapsed_seconds_mean == null ? "" :
+          "mean " + Number(summary.elapsed_seconds_mean) + " s",
+        "decided differently after a transition: " +
+          Number(summary.responded_to_transition_trials || 0) + "/" + trials,
+        summary.model_backed_trials == null || Number(summary.model_backed_trials) === 0
+          ? "no model-backed decision"
+          : "model-backed: " + Number(summary.model_backed_trials),
+      ].filter(Boolean).join(" · ");
+      out.appendChild(el("p", "muted", line));
+    });
+    var list = el("ul", "forge-history-list");
+    rows.slice().reverse().slice(0, 5).forEach(function (trial) {
+      var row = el("li", "forge-action-row");
+      row.dataset.status = String(trial.outcome || "");
+      row.appendChild(el("strong", "",
+        "#" + Number(trial.trial || 0) + " " + trialOutcomeText(trial.outcome)));
+      var meta = [
+        String(trial.policy || ""),
+        trial.actions == null ? "" : "actions: " + Number(trial.actions),
+        trial.refused ? "refused: " + Number(trial.refused) : "",
+        trial.elapsed_s == null ? "" : Number(trial.elapsed_s) + " s",
+        trial.responded_to_transition
+          ? "decided differently after a transition"
+          : "no changed decision",
+      ].filter(Boolean).join(" · ");
+      row.appendChild(el("div", "muted", meta));
+      if (trial.reason) row.appendChild(el("div", "muted", String(trial.reason)));
+      list.appendChild(row);
+    });
+    out.appendChild(list);
+    var note = String(data.note || "");
+    if (note) out.appendChild(el("p", "forge-limit-hint", note));
+  }
+
+  async function refreshTrialHistory() {
+    try {
+      forge.trials = await requestJson("/novaforge/trials");
+    } catch (error) {
+      forge.trials = { error: String(error.message || error) };
+    }
+    renderTrialHistory();
+  }
+
+  function renderLoop(data) {
+    var badge = byId("forgeLoopBadge");
+    var policy = byId("forgeLoopPolicy");
+    var runButton = byId("forgeLoopRunButton");
+    var cancelButton = byId("forgeLoopCancelButton");
+    var body = byId("forgeLoopResult");
+    if (!badge || !policy || !runButton || !cancelButton || !body) return;
+    var capability = forge.loop.capability;
+    var available = !!(capability && capability.available);
+    var active = !!(data && ACTIVE.indexOf(data.state) >= 0);
+    badge.textContent = capability
+      ? (available
+        ? String((capability.policy && capability.policy.policy) || "installed")
+        : "unavailable")
+      : "checking";
+    badge.dataset.available = available ? "true" : "false";
+    if (capability) {
+      var modelBacked = Boolean(capability.policy && capability.policy.model_backed);
+      var version = capability.policy && capability.policy.version;
+      policy.textContent = (available ? "Decision pipeline: " : "Decision pipeline unavailable: ") +
+        String(capability.reason || "") +
+        (available
+          ? (modelBacked ? " Model-backed." : " The installed policy is a deterministic rule, not a gameplay brain.")
+          : "") +
+        (version ? " Policy version " + String(version) + "." : "");
+    }
+    // Fill the selector from the capability when the build offers policies the
+    // static markup does not know, and keep the operator's current choice.
+    var policySelect = byId("forgeLoopPolicySelect");
+    if (policySelect && capability && capability.policies && capability.policies.length) {
+      var chosen = policySelect.value;
+      capability.policies.forEach(function (row) {
+        if (!row || !row.id) return;
+        var exists = false;
+        for (var i = 0; i < policySelect.options.length; i += 1) {
+          if (policySelect.options[i].value === row.id) { exists = true; break; }
+        }
+        if (!exists) {
+          var option = document.createElement("option");
+          option.value = row.id;
+          option.textContent = String(row.policy || row.id) +
+            (row.model_backed ? " (model-backed)" : "");
+          policySelect.appendChild(option);
+        }
+      });
+      if (chosen) policySelect.value = chosen;
+    }
+    runButton.disabled = !(active && available && !forge.loop.running);
+    cancelButton.disabled = !forge.loop.running;
+    // NF-09: visual interpretation is reported on its OWN line. "A model can
+    // see" is a different capability from "a model can decide", and neither
+    // implies the other, so the panel never lets one sentence stand for both.
+    var visionLine = byId("forgeLoopVision");
+    var describeButton = byId("forgeDescribeFrame");
+    var visionCapability = capability && capability.vision;
+    if (visionLine) {
+      if (!visionCapability) {
+        visionLine.textContent = "Visual interpretation: this build did not report one.";
+      } else if (visionCapability.available) {
+        visionLine.textContent = "Visual interpretation: " +
+          (visionCapability.model || visionCapability.provider || "a vision model") +
+          (visionCapability.provider ? " via " + visionCapability.provider : "") +
+          " · a model description is a claim, not evidence.";
+      } else {
+        visionLine.textContent = "Visual interpretation unavailable: " +
+          String(visionCapability.reason || "no image-capable model is wired") +
+          " OCR and window-title evidence remain available.";
+      }
+    }
+    if (describeButton) {
+      describeButton.disabled = !(active && forge.sessionId);
+    }
+
+    body.innerHTML = "";
+    if (forge.loop.running) {
+      body.appendChild(el("p", "muted",
+        "Running… the loop stops at the first untrusted observation, refused action, " +
+        "spent budget or deadline. This request returns when it stops."));
+      return;
+    }
+    var result = forge.loop.result;
+    if (!result) {
+      body.appendChild(el("p", "muted", active
+        ? "No closed loop has run for this session."
+        : "Start (or resume) a session to run the loop against it."));
+      return;
+    }
+    var head = el("div", "forge-card-head");
+    head.appendChild(el("strong", "", "Closed loop: " + loopStatusText(result.status)));
+    head.appendChild(el("span", "forge-badge", verificationBadge(result.verification)));
+    body.appendChild(head);
+    body.appendChild(el("p", "muted", String(result.reason || "No reason was reported.")));
+    var reportedPolicy = result.policy ||
+      (capability && capability.policy && capability.policy.policy) || "not reported";
+    var verification = result.verification || null;
+    if (verification) {
+      // The verdict is the VERIFIER's, quoted with its own reason: the loop's
+      // stop reason is a different fact and must not stand in for it.
+      body.appendChild(el("p", "muted",
+        "Verifier: " + String(verification.outcome || "no verdict") +
+        (verification.reason ? " — " + String(verification.reason) : "")));
+    }
+    body.appendChild(el("p", "muted",
+      "Policy: " + String(reportedPolicy) +
+      (result.policy_version ? " v" + Number(result.policy_version) : "") +
+      (result.model_backed
+        ? " · at least one decision was model-backed"
+        : " · deterministic decisions only") +
+      " · actions executed: " + Number(result.actions_executed || 0) +
+      " · refused: " + Number(result.actions_refused || 0) +
+      " · decisions: " + Number(result.decisions || 0) +
+      (result.elapsed_seconds == null ? "" : " · " + Number(result.elapsed_seconds) + " s")));
+    var steps = (result.steps || []).slice(-8);
+    if (steps.length) {
+      var list = el("ul", "forge-history-list");
+      steps.forEach(function (step) {
+        var row = el("li", "forge-action-row");
+        row.dataset.status = String(step.execute_status || step.plan_status || (step.proposal ? "proposed" : "observed"));
+        var action = (step.proposal && step.proposal.action) || {};
+        var label = action.kind
+          ? action.kind + (action.key ? " " + action.key : "") +
+            (action.x == null ? "" : " " + action.x + "," + action.y)
+          : "observation";
+        row.appendChild(el("strong", "", "#" + (Number(step.index || 0) + 1) + " " + label));
+        var meta = [
+          step.plan_status ? "plan: " + step.plan_status : "",
+          step.execute_status ? "execute: " + step.execute_status : "",
+          step.outcome_met === true ? "expectation met"
+            : step.outcome_met === false ? "expectation missed" : "",
+          step.proposal && step.proposal.model_backed ? "model-backed decision" : "",
+          step.observation_age_seconds == null ? "" :
+            "frame age: " + Number(step.observation_age_seconds) + " s",
+          step.decision_latency_ms == null ? "" :
+            "decided in " + Number(step.decision_latency_ms) + " ms",
+        ].filter(Boolean).join(" · ");
+        row.appendChild(el("span", "muted", " " + (meta || String(step.reason || ""))));
+        // NF-10: the decision, not just the keystroke. The observed state, the
+        // policy's own reason, what it expected, what it was unsure about and
+        // the evidence it cited are all shown — a proposal without them is a
+        // script, and this panel must not make one look like a decision.
+        var observed = step.observation || {};
+        var state = [
+          observed.status && observed.status !== "observed"
+            ? "observation: " + String(observed.status) : "",
+          observed.title ? "state: " + String(observed.title) : "",
+          observed.text ? "text: " + String(observed.text).slice(0, 80) : "",
+        ].filter(Boolean).join(" · ");
+        if (state) row.appendChild(el("div", "muted", state));
+        if (step.proposal && step.proposal.reason) {
+          row.appendChild(el("div", "muted", "Reason: " + String(step.proposal.reason)));
+        }
+        if (step.expected_outcome) {
+          row.appendChild(el("div", "muted", "Expected: " + String(step.expected_outcome)));
+        }
+        if (step.proposal && step.proposal.uncertainty && step.proposal.uncertainty.length) {
+          row.appendChild(el("div", "muted",
+            "Uncertainty: " + step.proposal.uncertainty.join(" ")));
+        }
+        var refs = (step.proposal && step.proposal.evidence) || [];
+        if (refs.length) {
+          row.appendChild(el("div", "muted", "Evidence: " + refs.join(" · ")));
+        }
+        list.appendChild(row);
+      });
+      body.appendChild(list);
+    }
+    body.appendChild(el("p", "forge-limit-hint",
+      "A completed run means the objective's verifier decided success from the target's " +
+      "own evidence. A stopped run is not a failure unless the verifier said so."));
+  }
+
+  function visionStatusText(status) {
+    var labels = {
+      interpreted: "described within the schema",
+      degraded: "answered without a usable structure",
+      invalid: "answer could not be parsed",
+      stale: "frame was already stale — not sent to the model",
+      clipped: "frame was clipped — not sent to the model",
+      unavailable: "no interpretation was produced",
+    };
+    return labels[String(status || "")] || String(status || "no interpretation");
+  }
+
+  function renderVisionInterpretation(body) {
+    var out = byId("forgeVisionInterpretation");
+    if (!out) return;
+    out.innerHTML = "";
+    var vision = (body && body.vision) || null;
+    var capability = (body && body.capability) || {};
+    var observation = (body && body.observation) || {};
+    if (!vision) {
+      // A missing interpretation has two different causes: the model is not
+      // wired, or the OBSERVATION never produced a frame to ask about (stale,
+      // unreadable, target gone). Reporting the capability reason for the
+      // second case would blame the model for the frame's problem.
+      var observationReason = observation.status && observation.status !== "observed"
+        ? "the observation was " + String(observation.status) + " — " +
+          String(observation.reason || "no reason was reported")
+        : String(capability.reason || "no image-capable model is wired on this host");
+      out.appendChild(el("p", "muted",
+        "No visual interpretation exists: " + observationReason +
+        " The measured evidence (window title, OCR text and frame) is unaffected."));
+      return;
+    }
+    var head = el("div", "forge-card-head");
+    head.appendChild(el("strong", "", "Vision: " + visionStatusText(vision.status)));
+    // Only a value that actually carries a description is a model
+    // interpretation; a timeout or refusal has no interpretation to label.
+    head.appendChild(el("span", "forge-badge",
+      vision.interpreted ? "model interpretation" : "no interpretation"));
+    out.appendChild(head);
+    if (vision.description) {
+      out.appendChild(el("p", "", "Model interpretation (not evidence): " + vision.description));
+    }
+    if (vision.reason && !vision.description) {
+      out.appendChild(el("p", "muted", String(vision.reason)));
+    }
+    var meta = [
+      vision.model || vision.provider ? "model: " + (vision.model || vision.provider) : "",
+      vision.duration_ms == null ? "" : "inference: " + Number(vision.duration_ms) + " ms",
+      !vision.frame || vision.frame.age_seconds == null ? "" :
+        "frame age: " + Number(vision.frame.age_seconds) + " s",
+      vision.cached ? "cached answer" : "",
+      "schema: " + (vision.schema_valid ? "valid" : "not valid"),
+    ].filter(Boolean).join(" · ");
+    out.appendChild(el("p", "muted", meta));
+    if (vision.labels && vision.labels.length) {
+      out.appendChild(el("p", "muted", "Visible text the model claimed: " + vision.labels.join(" · ")));
+    }
+    if (body && body.measured && body.measured.length) {
+      out.appendChild(el("p", "muted", "Measured evidence read from the target: " + body.measured.join(", ")));
+    }
+    var conflicts = (body && body.conflicts && body.conflicts.length)
+      ? body.conflicts
+      : (vision.conflicts || []);
+    if (conflicts.length) {
+      var list = el("ul", "forge-history-list");
+      conflicts.forEach(function (item) {
+        list.appendChild(el("li", "forge-action-row", String(item)));
+      });
+      out.appendChild(el("p", "forge-limit-hint",
+        "Model and measurement disagree; the observation is reported as uncertain rather than choosing one account."));
+      out.appendChild(list);
+    }
+    if (vision.uncertainty && vision.uncertainty.length) {
+      out.appendChild(el("p", "forge-limit-hint", vision.uncertainty.join(" ")));
+    }
+    out.appendChild(el("p", "forge-limit-hint",
+      "A model description is a claim about pixels. It cannot approve, plan or execute an action, and it is never an objective verdict."));
+  }
+
+  async function describeFrameFromPanel() {
+    if (!forge.sessionId) return;
+    var out = byId("forgeVisionInterpretation");
+    var button = byId("forgeDescribeFrame");
+    if (out) {
+      out.innerHTML = "";
+      out.appendChild(el("p", "muted",
+        "Capturing a fresh frame and asking the vision model… this can take longer than a text answer."));
+    }
+    if (button) button.disabled = true;
+    try {
+      var body = await requestJson(
+        "/novaforge/sessions/" + encodeURIComponent(forge.sessionId) + "/vision/interpret", {});
+      renderVisionInterpretation(body);
+    } catch (error) {
+      if (out) {
+        out.innerHTML = "";
+        out.appendChild(el("p", "muted",
+          "Visual interpretation failed: " + String(error.message || error)));
+      }
+      notice("Visual interpretation failed: " + String(error.message || error), "error");
+    } finally {
+      renderLoop(forge.current);
+    }
+  }
+
+  async function loadLoopCapability() {
+    try {
+      var body = await requestJson("/novaforge/capabilities");
+      forge.loop.capability = ((body && body.capabilities) || {}).decision_pipeline || null;
+    } catch (error) {
+      forge.loop.capability = {
+        available: false,
+        reason: "The capability could not be read: " + String(error.message || error),
+      };
+    }
+    renderLoop(forge.current);
+    await refreshTrialHistory();
+  }
+
+  async function runLoopFromPanel() {
+    if (!forge.sessionId || forge.loop.running) return;
+    var actions = parseInt(byId("forgeLoopMaxActions").value, 10);
+    var deadline = parseInt(byId("forgeLoopDeadline").value, 10);
+    var policySelect = byId("forgeLoopPolicySelect");
+    var policy = policySelect && policySelect.value ? policySelect.value : "ready";
+    forge.loop.running = true;
+    forge.loop.result = null;
+    renderLoop(forge.current);
+    try {
+      var answer = await requestJson(
+        "/novaforge/sessions/" + encodeURIComponent(forge.sessionId) + "/loop",
+        {
+          policy: policy,
+          max_actions: isNaN(actions) ? 6 : actions,
+          deadline_seconds: isNaN(deadline) ? 30 : deadline,
+        });
+      forge.loop.result = answer;
+      notice("Closed loop: " + loopStatusText(answer.status) + " — " + String(answer.reason || ""),
+        answer.status === "completed" ? "" : "error");
+    } catch (error) {
+      forge.loop.result = { status: "error", reason: String(error.message || error) };
+      notice("Closed loop failed: " + String(error.message || error), "error");
+    } finally {
+      forge.loop.running = false;
+      renderLoop(forge.current);
+    }
+    // A finished run is a trial now; read the record back rather than assuming
+    // the panel's own numbers match what the server stored.
+    await refreshTrialHistory();
+    await refreshSession();
+  }
+
+  async function cancelLoopFromPanel() {
+    if (!forge.sessionId) return;
+    try {
+      var answer = await requestJson(
+        "/novaforge/sessions/" + encodeURIComponent(forge.sessionId) + "/loop/cancel", {});
+      notice(answer.cancelled
+        ? "Stop requested: " + String(answer.reason || "the loop will stop before its next action.")
+        : "No loop is running: " + String(answer.reason || ""),
+        answer.cancelled ? "" : "error");
+    } catch (error) {
+      notice("Loop stop failed: " + String(error.message || error), "error");
+    }
+  }
+
   async function postGameplay(path, payload, what) {
     if (forge.gameplay.busy) return null;
     forge.gameplay.busy = true;
@@ -962,12 +2449,16 @@
 
   async function setObjectiveFromPanel() {
     if (!forge.sessionId) return;
+    var payload = objectivePayload();
     var answer = await postGameplay(
       "/novaforge/sessions/" + encodeURIComponent(forge.sessionId) + "/objective",
-      objectivePayload(), "Set objective");
+      payload, "Set objective");
     if (!answer) return;
+    var reads = payload.kind === "ocr_text"
+      ? "the text recognised on a fresh frame of the window"
+      : payload.kind === "window_title" ? "the target window's title" : "the objective";
     notice(answer.supported
-      ? "Objective recorded; a verifier will read the target window's title."
+      ? "Objective recorded; a verifier will read " + reads + "."
       : "Objective recorded as UNSUPPORTED: " + (answer.reason || ""),
       answer.supported ? "" : "error");
     await refreshSession();
@@ -1027,6 +2518,7 @@
     forge.sessionId = data.session_id;
     if (previousSession !== data.session_id) forge.lastFrameKey = "";
     forge.targetTitle = (data.target && data.target.title) || "";
+    forge.targetLabel = targetLine(data.target);
     setState(data.state);
     setText("forgeSessionId", data.session_id);
     setText("forgeFrameCount", String((data.counts && data.counts.frames) || 0));
@@ -1043,6 +2535,8 @@
       setText("forgeFrameAge", formatAge(data.frame.age_ms));
       setText("forgeFrameRes", data.frame.width + " × " + data.frame.height + " px");
       setText("forgeFrameSource", sourceLabel(data.frame.source));
+      setText("forgeFrameBackend", backendLabel(data.frame.backend));
+      setText("forgeFrameValidation", validationLabel(data.frame.validation));
       setText("forgeFrameNote", data.frame.note || (data.frame.capture_mode
         ? "capture mode: " + data.frame.capture_mode : ""));
     } else {
@@ -1050,6 +2544,8 @@
       setText("forgeFrameAge", "—");
       setText("forgeFrameRes", "—");
       setText("forgeFrameSource", "—");
+      setText("forgeFrameBackend", "—");
+      setText("forgeFrameValidation", "—");
       setText("forgeFrameNote", data.state === "RUNNING"
         ? "No fresh frame has been recorded yet."
         : "This session has no captured frame.");
@@ -1057,8 +2553,28 @@
 
     renderTelemetry(data.telemetry);
     renderGuardian(data.guardian);
-    if (previousSession !== data.session_id) forge.gameplay.proposal = null;
+    if (previousSession !== data.session_id) {
+      forge.gameplay.proposal = null;
+      // A new session is not the last session's loop run OR plan.
+      forge.loop.result = null;
+      forge.plan.body = null;
+      forge.autonomy.body = null;
+    }
     renderGameplay(data);
+    renderControl(forge.control.body && forge.control.body.session &&
+      forge.control.body.session.session_id === data.session_id
+      ? forge.control.body : null);
+    renderPlan(forge.plan.body && forge.plan.body.session &&
+      forge.plan.body.session.session_id === data.session_id
+      ? forge.plan.body : null);
+    renderAutonomy(forge.autonomy.body && forge.autonomy.body.runs
+      ? forge.autonomy.body : null);
+    if (ACTIVE.indexOf(data.state) >= 0) {
+      loadControlStatus();
+      loadPlanStatus();
+      loadAutonomy();
+    }
+    renderLoop(data);
     renderStages(data.stages);
     var observed = (data.stages || []).filter(function (stage) { return stage.stage === "observed"; })[0];
     byId("forgeIntelStatus").textContent = observed && observed.available
@@ -1106,6 +2622,1264 @@
       schedulePoll();
     } finally {
       forge.polling = false;
+    }
+  }
+
+  /* ── NF-15: unified game observation ────────────────────────
+   *
+   * The card shows the OBSERVER's state, not the session's. A frame is fetched
+   * only after the observer says it validated one, and it is labelled
+   * "validated now" only while the observation is running and the frame is
+   * inside the freshness window. Everything else is a record, not a feed.
+   */
+
+  var OBSERVATION_ACTIVE = ["observing", "paused"];
+  var OBSERVATION_POLL_MS = 1500;
+
+  function observationControls(status) {
+    var state = (status && status.state) || "idle";
+    var userPaused = Boolean(status && status.pause && status.pause.user_requested);
+    return {
+      start: OBSERVATION_ACTIVE.indexOf(state) < 0,
+      pause: state === "observing" || (state === "paused" && !userPaused),
+      resume: state === "paused" && userPaused,
+      stop: OBSERVATION_ACTIVE.indexOf(state) >= 0,
+      once: state === "observing" || (state === "paused" && !userPaused),
+    };
+  }
+
+  function syncObservationControls(status) {
+    var controls = observationControls(status);
+    [
+      ["forgeObservationStart", "start"],
+      ["forgeObservationPause", "pause"],
+      ["forgeObservationResume", "resume"],
+      ["forgeObservationStop", "stop"],
+      ["forgeObservationOnce", "once"],
+    ].forEach(function (pair) {
+      var node = byId(pair[0]);
+      if (node) node.disabled = !controls[pair[1]];
+    });
+  }
+
+  // A missing measurement is NOT zero. Rate, latency and scheduling delay are
+  // printed by `metricText`-style rules so an unmeasured figure says so.
+  function observationRateText(measured) {
+    var rate = measured && measured.rate_hz;
+    if (rate === null || rate === undefined) return "not measured yet";
+    return Number(rate).toFixed(2) + " Hz";
+  }
+
+  function observationLatencyText(measured) {
+    var latency = (measured && measured.latency_ms) || {};
+    if (latency.last === null || latency.last === undefined) return "not measured yet";
+    return latency.last + " ms (avg " + (latency.average === null || latency.average === undefined ? "—" : latency.average) +
+      ", max " + (latency.max === null || latency.max === undefined ? "—" : latency.max) + ")";
+  }
+
+  function observationDelayText(measured) {
+    var delay = (measured && measured.schedule_delay_ms) || {};
+    if (delay.last === null || delay.last === undefined) return "not measured yet";
+    return delay.last + " ms (max " + (delay.max === null || delay.max === undefined ? "—" : delay.max) + ")";
+  }
+
+  function observationFreshness(status, now) {
+    var success = status && status.last_success;
+    var state = (status && status.state) || "idle";
+    if (!success) return { show: false, mode: "not tested", stale: true };
+    var at = Date.parse(success.at || "");
+    var age = isNaN(at) ? null : (now == null ? Date.now() : now) - at;
+    var stale = age === null || age > STALE_MS;
+    if (state !== "observing") {
+      return { show: false, mode: "observation is " + state + " — the last validated frame is a record", stale: true };
+    }
+    if (stale) return { show: false, mode: "the last validated frame is stale", stale: true };
+    return { show: true, mode: "validated now", stale: false };
+  }
+
+  function observationFact(dl, label, value) {
+    var group = document.createElement("div");
+    group.appendChild(el("dt", "", label));
+    group.appendChild(el("dd", "", value));
+    dl.appendChild(group);
+  }
+
+  // The facts are built as data so a Node test can assert every row without a
+  // DOM: a missing measurement must say so and a validated frame must name its
+  // own time and sequence.
+  function observationFactRows(status) {
+    var counts = (status && status.counts) || null;
+    var success = (status && status.last_success) || null;
+    var last = (status && status.last_observation) || null;
+    return [
+      ["Game", (status && status.game) || "not bound"],
+      ["Target", observationTargetText(status)],
+      ["Window", observationWindowText(status)],
+      ["Last read", last ? last.status + " · " + formatTime(last.captured_at) : "not tested"],
+      ["Last validated", success ? formatTime(success.at) + " · seq " + success.seq : "never"],
+      ["Backend", (status && status.backend) || "none accepted"],
+      ["Frame", success ? success.width + "×" + success.height + " (seq " + success.seq + ")" : "no validated frame"],
+      ["Measured rate", observationRateText(status && status.measured)],
+      ["Capture latency", observationLatencyText(status && status.measured)],
+      ["Scheduling delay", observationDelayText(status && status.measured)],
+      ["Consecutive failures", status ? String(status.consecutive_failures) : "not read"],
+      ["Counts", counts
+        ? counts.observed + " observed · " + counts.rejected + " rejected · " + counts.unavailable + " unavailable"
+        : "not read"],
+      ["Session", (status && status.session_id) || "none"],
+    ];
+  }
+
+  function observationTargetText(status) {
+    var target = status && status.target;
+    if (!target || !target.title) return "not bound";
+    var parts = [target.title];
+    if (target.pid) parts.push("pid " + target.pid);
+    if (target.start_time) parts.push("start " + target.start_time);
+    if (target.handle) parts.push("hwnd " + target.handle);
+    return parts.join(" · ");
+  }
+
+  // Window status is its own fact, separate from process identity: a window
+  // can keep its handle and pid while it is minimized, hidden or behind another
+  // window, and those are exactly the states in which a frame is not live.
+  function observationWindowText(status) {
+    if (!status) return "not read";
+    var pause = status.pause || {};
+    if (pause.code) {
+      return pause.code + (pause.user_requested ? " · paused by the user" : " · paused");
+    }
+    var last = status.last_observation;
+    if (!last) return "not tested";
+    var visibility = last.visibility || {};
+    var bits = [];
+    if (visibility.minimized) bits.push("minimized");
+    else if (visibility.visible === false) bits.push("hidden");
+    else bits.push("visible");
+    if (visibility.foreground === true) bits.push("foreground");
+    else if (visibility.foreground === false) bits.push("background");
+    bits.push(last.target_valid === false ? "target invalid" : "target valid");
+    return bits.join(" · ");
+  }
+
+  function observationReasonText(status) {
+    if (!status) return "Observation has not been read.";
+    var pause = status.pause || {};
+    if (pause.detail) return pause.detail;
+    if (status.reason) return String(status.reason);
+    if (status.state === "observing") return "Observation is running; frames are validated before they are shown.";
+    if (status.state === "idle") return "Observation has not been started. Nothing is captured until a target is bound.";
+    return "Observation is " + String(status.state) + ".";
+  }
+
+  /* ── NF-23: the observation ladder ─────────────────────────
+   *
+   * Ten separate capabilities stand between "installed on this machine" and
+   * "an observation was accepted", and the card never lets one imply the next.
+   * The badge shows exactly one of these labels, decided from the observer's
+   * own signals: a frame that is merely old is not a capture failure, a
+   * minimized window is not a backend error, and a stationary scene that
+   * validates is live.
+   */
+
+  var OBSERVATION_LIVE_LABELS = {
+    live_valid: "LIVE AND VALID",
+    capture_unavailable: "CAPTURE UNAVAILABLE",
+    target_not_visible: "TARGET HIDDEN OR MINIMIZED",
+    stale_frame: "STALE FRAME",
+    invalid_frame: "INVALID OR UNVERIFIED FRAME",
+    identity_mismatch: "TARGET IDENTITY MISMATCH",
+    backend_error: "BACKEND ERROR",
+    not_observed: "NOT OBSERVED YET",
+  };
+
+  // Codes that describe the TARGET's state — its own window — rather than a
+  // capture failure: the observer pauses on these instead of counting them as
+  // failures, and the card says so in the same words.
+  // Includes the observer's PAUSE codes for the same conditions (a paused
+  // observation records no frame, so its silence must read as a target state,
+  // never as "the frame is invalid" — there is no frame).
+  var OBSERVATION_TARGET_STATE_CODES = {
+    target_minimized: true,
+    target_hidden: true,
+    target_offscreen: true,
+    target_not_foreground: true,
+    window_missing: true,
+    target_missing: true,
+    target_identity_unavailable: true,
+  };
+
+  // The target is still capturable, but it is not the window/process that was
+  // bound: an identity failure, not a backend one.
+  var OBSERVATION_REPLACED_STATE_CODES = {
+    target_replaced: true,
+  };
+
+  // Codes that mean the capture itself produced no usable frame.
+  var OBSERVATION_BACKEND_ERROR_CODES = {
+    capture_failed: true,
+    capture_timeout: true,
+    observation_error: true,
+    frame_directory_unusable: true,
+    target_probe_failed: true,
+  };
+
+  function observationLiveState(status) {
+    function out(state, detail) {
+      return {
+        state: state,
+        label: OBSERVATION_LIVE_LABELS[state] || state,
+        detail: detail || "",
+      };
+    }
+    if (!status || typeof status !== "object") {
+      return out("not_observed", "Observation has not been read.");
+    }
+    if (status.available === false) {
+      return out("capture_unavailable",
+        "No capture is wired on this host, so no frame can be acquired for any target.");
+    }
+    var pause = status.pause || {};
+    var pauseCode = String(pause.code || "");
+    if (pauseCode && OBSERVATION_REPLACED_STATE_CODES[pauseCode]) {
+      return out("identity_mismatch", String(pause.detail ||
+        "The bound target is no longer the same window or process."));
+    }
+    if (pauseCode && OBSERVATION_TARGET_STATE_CODES[pauseCode]) {
+      return out("target_not_visible", String(pause.detail || (
+        "The target window is " + pauseCode.replace("target_", "") + ", so it cannot be captured.")));
+    }
+    var last = status.last_observation || null;
+    if (!last) {
+      return out("not_observed", "No read has been recorded yet.");
+    }
+    var verdict = (last.validation && typeof last.validation === "object") ? last.validation : {};
+    var code = String(last.reason_code || "");
+    var detail = String(last.reason || verdict.reason || "");
+    if (last.status === "observed") {
+      if (verdict.fresh === false) {
+        return out("stale_frame",
+          detail || "The validated frame is older than the freshness window.");
+      }
+      if (status.state !== "observing") {
+        return out("stale_frame", "Observation is " + String(status.state || "idle") +
+          " — the last validated frame is a record, not a feed.");
+      }
+      return out("live_valid",
+        "The newest frame passed target, freshness and content validation while the " +
+        "observation is running.");
+    }
+    // A read that produced no frame, in the order that names the real cause.
+    if (code && OBSERVATION_BACKEND_ERROR_CODES[code]) {
+      return out("backend_error", detail || code);
+    }
+    if (verdict.capture_ok === false) {
+      return out("backend_error", detail || "The capture backend produced no frame.");
+    }
+    if (code && OBSERVATION_REPLACED_STATE_CODES[code]) {
+      return out("identity_mismatch",
+        detail || "The bound target is no longer the same window or process.");
+    }
+    if (verdict.target_visible === false || (code && OBSERVATION_TARGET_STATE_CODES[code])) {
+      return out("target_not_visible",
+        detail || "The target window is minimized, hidden or otherwise not capturable.");
+    }
+    if (verdict.content === "not_target") {
+      return out("identity_mismatch", detail || "The frame is not a frame of the target.");
+    }
+    if (verdict.content === "blank") {
+      return out("invalid_frame", detail || "Nothing was painted in the frame.");
+    }
+    if (!verdict.content && verdict.capture_ok !== true) {
+      // No frame was read for this record at all (a pause or an end record):
+      // calling that an INVALID FRAME would describe pixels that never existed.
+      return out("not_observed", detail || "No frame has been read for this observation.");
+    }
+    if (verdict.fresh === false) {
+      return out("stale_frame", detail || "The frame is older than the freshness window.");
+    }
+    return out("invalid_frame", detail || "The last read produced no validated frame.");
+  }
+
+  var OBSERVATION_STAGE_LABELS = {
+    discovered: "Game discovered",
+    launchable: "Game launchable",
+    process_started: "Process started",
+    window_identified: "Window identified",
+    embedding_compatible: "Window compatible with embedding",
+    embedded: "Embedded natively",
+    backend_selected: "Capture backend selected",
+    frame_acquired: "Frame acquired",
+    frame_validated: "Frame validated",
+    observation_accepted: "Observation accepted",
+  };
+
+  var OBSERVATION_STAGE_STATES = {
+    true: "yes",
+    false: "no",
+    unknown: "unknown",
+    not_wired: "not wired",
+  };
+
+  function observationStageStateText(stage, state) {
+    if (stage === "embedding_compatible" && state === "false") return "EMBEDDING UNSUPPORTED";
+    if (stage === "embedded" && state === "false") return "not embedded";
+    return OBSERVATION_STAGE_STATES[state] || String(state || "unknown");
+  }
+
+  function observationLadderHeadline(ladder) {
+    if (!ladder || typeof ladder !== "object") {
+      return "The observation ladder has not been read.";
+    }
+    if (ladder.accepted) return "An observation has been accepted through this path.";
+    var held = String(ladder.held_at || "");
+    if (!held) return "Every stage on the observation path is satisfied.";
+    return "Held at: " + (OBSERVATION_STAGE_LABELS[held] || held) + ".";
+  }
+
+  // Rows are data so a Node test can assert every stage without a DOM, and so
+  // the embedding rows can be marked as embedding — they are measured, never
+  // required, and never the reason an observation is held up.
+  function observationLadderRows(ladder) {
+    var stages = (ladder && ladder.stages) || [];
+    var embeddingStages = (ladder && ladder.embedding_stages) || [];
+    return stages.map(function (row) {
+      var stage = String(row.stage || "");
+      var state = String(row.state || "unknown");
+      return {
+        stage: stage,
+        name: OBSERVATION_STAGE_LABELS[stage] || stage,
+        state: state,
+        text: observationStageStateText(stage, state),
+        embedding: embeddingStages.indexOf(stage) >= 0,
+        detail: String(row.detail || ""),
+      };
+    });
+  }
+
+  function renderObservationLadder(ladder) {
+    var box = byId("forgeObservationLadder");
+    if (!box) return;
+    box.innerHTML = "";
+    if (!ladder || typeof ladder !== "object") {
+      box.appendChild(el("p", "muted", "The observation ladder has not been read."));
+      return;
+    }
+    box.appendChild(el("p", "", observationLadderHeadline(ladder)));
+    var list = el("ul", "");
+    observationLadderRows(ladder).forEach(function (row) {
+      var suffix = row.embedding ? " (embedding · not required for capture)" : "";
+      var item = el("li", "", row.name + ": " + row.text + suffix);
+      if (row.detail) item.appendChild(el("div", "muted", row.detail));
+      list.appendChild(item);
+    });
+    box.appendChild(list);
+    if (ladder.note) box.appendChild(el("p", "muted", String(ladder.note)));
+  }
+
+  // On demand only: the ladder's first two stages resolve a title against the
+  // catalog, which runs a process probe. Polling it would launch PowerShell
+  // every 1.5 s to answer a question that rarely changes.
+  async function loadObservationLadder() {
+    var box = byId("forgeObservationLadder");
+    if (!box) return;
+    var status = forge.observation.status;
+    var title = (status && status.target && status.target.title) || "";
+    if (!title) {
+      var typed = byId("forgeObservationTarget");
+      title = typed ? String(typed.value || "").trim() : "";
+    }
+    var token = ++forge.observation.ladderToken;
+    try {
+      var body = await requestJson("/novaforge/capabilities" +
+        (title ? "?title=" + encodeURIComponent(title) : ""));
+      if (token !== forge.observation.ladderToken) return;
+      renderObservationLadder(
+        (body && body.capabilities && body.capabilities.observation_ladder) || null);
+    } catch (error) {
+      if (token !== forge.observation.ladderToken) return;
+      box.innerHTML = "";
+      box.appendChild(el("p", "muted",
+        "The observation ladder could not be read: " + String(error.message || error) + "."));
+    }
+  }
+
+  function renderObservationHistory(status) {
+    var box = byId("forgeObservationHistory");
+    if (!box) return;
+    box.innerHTML = "";
+    var rows = (status && status.history) || [];
+    if (!rows.length) {
+      box.appendChild(el("p", "muted", "No observation records yet. A read that produced no frame is recorded too, with its reason."));
+      return;
+    }
+    box.appendChild(el("p", "muted", "Recent reads (newest last). A rejected or unavailable read is kept so a failure can be diagnosed."));
+    var list = el("ul", "");
+    rows.slice(-8).forEach(function (row) {
+      var bits = [
+        "#" + row.seq,
+        String(row.status),
+        row.backend || "no backend",
+        row.width && row.height ? row.width + "×" + row.height : "no frame",
+        row.capture_ms == null ? "latency not measured" : row.capture_ms + " ms",
+        row.reason_code || "",
+        formatTime(row.captured_at),
+      ].filter(Boolean);
+      var item = el("li", "", bits.join(" · "));
+      list.appendChild(item);
+      if (row.reason) item.appendChild(el("div", "muted", String(row.reason)));
+    });
+    box.appendChild(list);
+  }
+
+  function revokeObservationFrame() {
+    if (forge.observation.objectUrl) {
+      URL.revokeObjectURL(forge.observation.objectUrl);
+      forge.observation.objectUrl = "";
+    }
+  }
+
+  async function loadObservationFrame(status) {
+    var wrap = byId("forgeObservationFrameWrap");
+    var image = byId("forgeObservationFrame");
+    var empty = byId("forgeObservationFrameEmpty");
+    var label = byId("forgeObservationFrameLabel");
+    if (!wrap || !image || !empty) return;
+    var token = ++forge.observation.frameToken;
+    var freshness = observationFreshness(status, Date.now());
+    if (!freshness.show) {
+      wrap.hidden = true;
+      image.removeAttribute("src");
+      revokeObservationFrame();
+      forge.observation.lastKey = "";
+      empty.hidden = false;
+      var success = status && status.last_success;
+      empty.textContent = success
+        ? "Last validated frame: seq " + success.seq + " captured " + formatTime(success.at) + " — " + freshness.mode + "."
+        : "No validated frame yet. Observation has not been tested.";
+      return;
+    }
+    var latest = status.last_success;
+    var key = String(status.session_id || "") + ":" + latest.seq;
+    empty.hidden = true;
+    wrap.hidden = false;
+    if (label) label.textContent = freshness.mode;
+    if (key === forge.observation.lastKey) return;
+    try {
+      var response = await fetch("/novaforge/observation/frame", { headers: authHeaders() });
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      var blob = await response.blob();
+      if (!frameStillCurrent(token, forge.observation.frameToken)) return;
+      var nextUrl = URL.createObjectURL(blob);
+      revokeObservationFrame();
+      forge.observation.objectUrl = nextUrl;
+      forge.observation.lastKey = key;
+      image.src = nextUrl;
+    } catch (error) {
+      if (!frameStillCurrent(token, forge.observation.frameToken)) return;
+      wrap.hidden = true;
+      empty.hidden = false;
+      empty.textContent = "The validated frame could not be loaded: " + String(error.message || error) + ".";
+    }
+  }
+
+  function renderObservationStatus(status) {
+    var badge = byId("forgeObservationState");
+    if (!badge) return;
+    forge.observation.status = status || null;
+    var state = (status && status.state) || "idle";
+    // The badge names the DISPLAY state (one of the eight), and keeps the
+    // observer's own lifecycle state beside it: "paused" never reads as live.
+    var live = observationLiveState(status);
+    badge.textContent = live.label;
+    badge.dataset.state = live.state;
+    badge.dataset.observerState = state;
+    syncObservationControls(status);
+    var hint = observationReasonText(status);
+    if (live.detail && hint.indexOf(live.detail) < 0) {
+      hint = hint + " " + live.detail;
+    }
+    setText("forgeObservationHint", hint);
+    var facts = byId("forgeObservationFacts");
+    if (facts) {
+      facts.innerHTML = "";
+      observationFactRows(status).forEach(function (row) {
+        observationFact(facts, row[0], row[1]);
+      });
+    }
+    renderObservationHistory(status);
+    loadObservationFrame(status);
+  }
+
+  function scheduleObservationPoll() {
+    if (forge.observation.timer) clearTimeout(forge.observation.timer);
+    forge.observation.timer = null;
+    var status = forge.observation.status;
+    if (!status || OBSERVATION_ACTIVE.indexOf(status.state) < 0) return;
+    forge.observation.timer = setTimeout(loadObservationStatus, OBSERVATION_POLL_MS);
+  }
+
+  async function loadObservationStatus() {
+    if (forge.observation.polling) return;
+    forge.observation.polling = true;
+    var token = ++forge.observation.statusToken;
+    try {
+      var body = await requestJson("/novaforge/observation");
+      if (token !== forge.observation.statusToken) return;
+      renderObservationStatus(body);
+    } catch (error) {
+      if (token !== forge.observation.statusToken) return;
+      setText("forgeObservationHint", "Observation status could not be read: " + String(error.message || error));
+    } finally {
+      forge.observation.polling = false;
+      scheduleObservationPoll();
+    }
+  }
+
+  async function observationCommand(path, payload) {
+    if (forge.observation.busy) return null;
+    forge.observation.busy = true;
+    // This command's answer is newer than any status read already in flight.
+    forge.observation.statusToken += 1;
+    try {
+      var body = await requestJson(path, payload || {});
+      // This answer is the newest state; a status read that was in flight when
+      // the command was issued must not repaint over it.
+      forge.observation.statusToken += 1;
+      renderObservationStatus(body);
+      // A command just changed which stages are reachable, so the ladder is
+      // re-read here rather than on the poll.
+      loadObservationLadder();
+      // A refusal is guidance, not a crash: it names what to do next and the
+      // card keeps the observer's real state (which the response carries).
+      if (body && body.reason_code) {
+        setText("forgeObservationHint", String(body.reason || body.reason_code));
+      }
+      return body;
+    } catch (error) {
+      setText("forgeObservationHint", "Observation command failed: " + String(error.message || error));
+      return null;
+    } finally {
+      forge.observation.busy = false;
+      scheduleObservationPoll();
+    }
+  }
+
+  function observationTargetChoice() {
+    var typed = (byId("forgeObservationTarget").value || "").trim();
+    if (typed) return typed;
+    var select = byId("forgeMissionTarget");
+    return select ? String(select.value || "").trim() : "";
+  }
+
+  function startObservation() {
+    var title = observationTargetChoice();
+    if (!title) {
+      setText("forgeObservationHint", "Choose a target window (the mission target or a typed title) before starting.");
+      return;
+    }
+    var payload = { title: title };
+    var game = (byId("forgeObservationGame").value || "").trim();
+    if (game) payload.game = game;
+    var interval = Number(byId("forgeObservationInterval").value);
+    if (isFinite(interval) && interval > 0) payload.interval = interval;
+    // Pin the process the mission validation measured, so a same-titled window
+    // from another process cannot be observed instead.
+    var validated = forge.validatedTarget;
+    if (validated && validated.pid && String(validated.title || "") === title) {
+      payload.pid = validated.pid;
+    }
+    return observationCommand("/novaforge/observation/start", payload);
+  }
+
+  function pauseObservation() { return observationCommand("/novaforge/observation/pause"); }
+  function resumeObservation() { return observationCommand("/novaforge/observation/resume"); }
+  function stopObservation() { return observationCommand("/novaforge/observation/stop"); }
+  function observeOnce() { return observationCommand("/novaforge/observation/observe"); }
+
+  /* ── NF-16: game state understanding ────────────────────────
+   *
+   * A state is a READING of one validated observation. The card shows what was
+   * read and what could not be read, with the same five-status vocabulary the
+   * service uses: recognized / absent / ambiguous / unreadable / unsupported.
+   * Entity kinds are printed as unknown because that is what the detector can
+   * say, and "quality" is a heuristic coverage count, not a confidence.
+   */
+
+  function stateProfileText(status) {
+    var state = status && status.state;
+    if (!state) return "not read";
+    var profile = state.profile || {};
+    if (!profile.matched) return "none matched";
+    return (profile.profile_id || "") + " v" + (profile.version || "?") +
+      (profile.forced ? " (pinned)" : "");
+  }
+
+  function stateCoverageText(quality) {
+    if (!quality) return "not measured";
+    var declared = quality.declared;
+    var recognized = quality.recognized;
+    if (declared === null || declared === undefined || !declared) {
+      return "no declared fields (generic reading)";
+    }
+    return recognized + " of " + declared + " declared field(s) · heuristic";
+  }
+
+  function stateProcessingText(measured) {
+    var processing = (measured && measured.processing_ms) || {};
+    if (processing.last === null || processing.last === undefined) return "not measured yet";
+    return processing.last + " ms (avg " +
+      (processing.average === null || processing.average === undefined ? "—" : processing.average) +
+      ", max " + (processing.max === null || processing.max === undefined ? "—" : processing.max) + ")";
+  }
+
+  function stateEntitySummary(state) {
+    if (!state) return "not read";
+    var status = state.entity_status;
+    if (status === "detected") {
+      return (state.entities || []).length + " region(s) · kind unknown";
+    }
+    return String(status || "unknown");
+  }
+
+  function stateFactRows(status) {
+    var state = (status && status.state) || null;
+    var counts = (status && status.counts) || {};
+    var error = status && status.last_error;
+    var refusal = status && status.last_refusal;
+    return [
+      ["Game", state ? (state.game || "unlabelled") : "not read"],
+      ["Observation", state
+        ? state.observation.observation_id + " · " + formatTime(state.observation.at)
+        : "never"],
+      ["Session", state ? (state.observation.session_id || "none") : "none"],
+      ["Profile", stateProfileText(status)],
+      ["State", state ? String(state.status) : "untested"],
+      ["Scene", stateSceneText(state)],
+      ["Quality", stateCoverageText(state && state.quality)],
+      ["Processing", stateProcessingText(status && status.measured)],
+      ["Entities", stateEntitySummary(state)],
+      ["Changes", state ? String((state.changes || []).length) : "not read"],
+      ["Counts", (counts.analyzed || 0) + " analyzed · " + (counts.failed || 0) +
+        " failed · " + (counts.superseded || 0) + " superseded"],
+      ["Last error", error ? (error.reason_code + " — " + error.reason) : "none"],
+      ["Last refusal", refusal
+        ? (refusal.reason_code + " — " + refusal.reason)
+        : "none"],
+    ];
+  }
+
+  function stateHudRows(state) {
+    return ((state && state.hud) || []).map(function (row) {
+      return {
+        label: row.label || row.element_id,
+        element: row.element_id,
+        status: String(row.status),
+        text: row.text || "",
+        value: row.value === null || row.value === undefined ? "" : String(row.value),
+        reason: row.reason || "",
+      };
+    });
+  }
+
+  function stateSceneText(state) {
+    if (!state) return "not read";
+    var scene = state.scene || {};
+    var transition = state.transition || {};
+    var kind = scene.kind || "unknown";
+    var how = scene.status || "unknown";
+    if (scene.source && scene.source !== "none") how += " via " + scene.source;
+    var text = kind + " (" + how + ")";
+    // An unknown screen is only useful with its reason: "unknown (unknown)" tells
+    // an operator nothing about whether OCR failed or no rule matched.
+    if (kind === "unknown" && (scene.evidence || []).length) {
+      text += " — " + scene.evidence[0];
+    }
+    if (typeof scene.confidence === "number") {
+      text += " · confidence " + scene.confidence.toFixed(2);
+    }
+    if ((scene.alternatives || []).length) {
+      text += " · alternatives " + scene.alternatives.join(", ");
+    }
+    // The CONFIRMED scene is the durable answer; this frame's candidate is
+    // reported beside it so a pending change never reads as a state change.
+    var confirmed = transition.confirmed || "unknown";
+    text += " · confirmed " + confirmed;
+    if (transition.state && transition.state !== "none") {
+      text += " · " + transition.state;
+      if (transition.state === "pending" || transition.state === "contradicted") {
+        text += " " + (transition.confirmations || 0) + "/" + (transition.required || 0);
+      }
+      if (transition.reason) text += " — " + transition.reason;
+    }
+    if (transition.interrupted) text += " · run restarted after a capture interruption";
+    if ((transition.contradictions || []).length) {
+      text += " · contradiction: " + transition.contradictions[0];
+    }
+    return text;
+  }
+
+  function stateChangeText(change) {
+    var arrow = change.before && change.after
+      ? change.before + " → " + change.after
+      : (change.after || change.before || "");
+    return change.field + ": " + change.kind + (arrow ? " · " + arrow : "") +
+      (change.detail ? " — " + change.detail : "");
+  }
+
+  function stateHintText(status) {
+    if (!status) return "Game state has not been read.";
+    var state = status.state;
+    if (!state) {
+      if (status.last_error) return status.last_error.reason_code + " — " + status.last_error.reason;
+      return "No state has been read. Analysis uses the newest validated observation frame; it never captures a frame of its own.";
+    }
+    if (state.reasons && state.reasons.length) return String(state.reasons[0]);
+    if (!state.profile || !state.profile.matched) {
+      return (state.profile && state.profile.reason) || "No profile matched; the reading is generic.";
+    }
+    return "Reading " + (state.observation.observation_id || "an observation") +
+      " · " + stateCoverageText(state.quality) + ".";
+  }
+
+  function renderStateList(containerId, rows, emptyText) {
+    var box = byId(containerId);
+    if (!box) return;
+    box.innerHTML = "";
+    if (!rows || !rows.length) {
+      box.appendChild(el("p", "muted", emptyText));
+      return;
+    }
+    var list = el("ul", "");
+    rows.forEach(function (row) {
+      var item = el("li", "", row);
+      list.appendChild(item);
+    });
+    box.appendChild(list);
+  }
+
+  function renderGameState(status) {
+    forge.understanding.status = status || null;
+    var badge = byId("forgeStateBadge");
+    if (!badge) return;
+    var state = (status && status.state) || null;
+    var label = state ? String(state.status) : (status && status.analyzing ? "analyzing" : "untested");
+    badge.textContent = label;
+    badge.dataset.state = label;
+    setText("forgeStateHint", stateHintText(status));
+    var facts = byId("forgeStateFacts");
+    if (facts) {
+      facts.innerHTML = "";
+      stateFactRows(status).forEach(function (row) {
+        observationFact(facts, row[0], row[1]);
+      });
+    }
+    renderStateList(
+      "forgeStateHud",
+      stateHudRows(state).map(function (row) {
+        var detail = row.status + (row.value ? " = " + row.value : (row.text ? " = \"" + row.text + "\"" : ""));
+        return row.label + " (" + row.element + "): " + detail + (row.reason ? " — " + row.reason : "");
+      }),
+      state ? "The matched profile declares no interface field for this target." : "No HUD field has been read."
+    );
+    renderStateList(
+      "forgeStateEntities",
+      (state && state.entities || []).map(function (row) {
+        var box = row.box ? " @ " + row.box.x + "," + row.box.y + " " + row.box.width + "×" + row.box.height : "";
+        return "region " + row.entity_id + box + " · kind " + row.kind +
+          (row.overlaps_hud ? " · overlaps a declared HUD region" : "");
+      }),
+      state ? stateEntitySummary(state) + (state.entity_reason ? " — " + state.entity_reason : "") : "No entity has been detected."
+    );
+    renderStateList(
+      "forgeStateChanges",
+      ((state && state.changes) || []).map(stateChangeText),
+      (state && state.tracking && state.tracking.reason) || "Nothing comparable came before this state."
+    );
+    var unknownRows = ((state && state.unknown) || []).map(function (row) {
+      return row.field + ": " + row.status + (row.reason ? " — " + row.reason : "");
+    }).concat(((state && state.unsupported) || []).map(function (row) { return "unsupported: " + row; }));
+    renderStateList(
+      "forgeStateUnknown",
+      unknownRows,
+      state ? "No field was left unstated." : "Nothing has been attempted yet."
+    );
+    var history = byId("forgeStateHistory");
+    if (history) {
+      history.innerHTML = "";
+      var rows = (status && status.history) || [];
+      if (!rows.length) {
+        history.appendChild(el("p", "muted", "No state readings yet."));
+      } else {
+        history.appendChild(el("p", "muted", "Recent readings (newest last). A refusal is reported beside them, not as a state."));
+        var list = el("ul", "");
+        rows.slice(-6).forEach(function (row) {
+          var quality = row.quality || {};
+          list.appendChild(el("li", "",
+            "#" + row.sequence + " · " + row.status + " · " +
+            ((row.profile && row.profile.profile_id) || "no profile") + " · scene " +
+            ((row.scene && row.scene.kind) || "unknown") + " · " +
+            (quality.recognized || 0) + "/" + (quality.declared || 0) + " field(s) · " +
+            (row.entities || []).length + " region(s) · " + formatTime(row.timestamp)));
+        });
+        history.appendChild(list);
+      }
+    }
+  }
+
+  async function loadGameState() {
+    try {
+      var body = await requestJson("/novaforge/state");
+      renderGameState(body);
+    } catch (error) {
+      setText("forgeStateHint", "Game state could not be read: " + String(error.message || error));
+    }
+  }
+
+  async function analyzeGameState() {
+    if (forge.understanding.busy) return null;
+    forge.understanding.busy = true;
+    var button = byId("forgeStateAnalyzeButton");
+    if (button) button.classList.add("loading");
+    try {
+      var payload = {};
+      var profileId = (byId("forgeStateProfile").value || "").trim();
+      if (profileId) payload.profile_id = profileId;
+      var body = await requestJson("/novaforge/state/analyze", payload);
+      // Refresh FIRST: the reload repaints the hint from the status the server
+      // just stored, so a refusal explained before it would be overwritten and
+      // the user would see the previous state's sentence instead of the reason.
+      await loadGameState();
+      // The objective card describes the SAME reading, so a new state must
+      // repaint it too — otherwise two cards disagree about which frame they
+      // are showing. A refusal changes nothing, so the reload is harmless.
+      await loadObjectives();
+      // Knowledge was ingested by THIS reading (if it succeeded), so the card
+      // must repaint too: a stale knowledge card beside a fresh state is the
+      // same disagreement two objective cards once had.
+      await loadKnowledge();
+      if (!body.analyzed) {
+        setText(
+          "forgeStateHint",
+          (body.reason_code ? body.reason_code + " — " : "") +
+            (body.reason || "The reading was refused.")
+        );
+      }
+      return body;
+    } catch (error) {
+      setText("forgeStateHint", "The state reading failed: " + String(error.message || error));
+      return null;
+    } finally {
+      forge.understanding.busy = false;
+      if (button) button.classList.remove("loading");
+    }
+  }
+
+  async function resetGameState() {
+    try {
+      await requestJson("/novaforge/state/reset", {});
+      await loadGameState();
+    } catch (error) {
+      setText("forgeStateHint", "The baseline could not be reset: " + String(error.message || error));
+    }
+  }
+
+  /* ── NF-17: objective understanding ────────────────────────── */
+
+  function objectiveProgressText(progress) {
+    if (!progress) return "no progress evidence";
+    if (progress.kind === "none") return progress.reason || "no progress evidence";
+    var parts = [];
+    if (progress.value !== null && progress.value !== undefined) {
+      parts.push(
+        progress.target !== null && progress.target !== undefined
+          ? progress.value + " / " + progress.target
+          : String(progress.value)
+      );
+    } else if (progress.text) {
+      parts.push(String(progress.text));
+    }
+    if (progress.fraction !== null && progress.fraction !== undefined) {
+      parts.push(Math.round(progress.fraction * 100) + "%");
+    }
+    if (progress.resets) parts.push(progress.resets + " reset(s) observed");
+    if (!parts.length) parts.push(progress.reason || "no numeric progress");
+    return parts.join(" · ");
+  }
+
+  function objectiveRow(objective) {
+    var text = objective.description + " · " + objective.status + " · " +
+      objective.category + (objective.explicit ? " · explicit" : " · inferred") +
+      (objective.source ? " · source " + objective.source : "") +
+      " · " + objectiveProgressText(objective.progress);
+    if (objective.source_text && objective.source_text !== objective.description) {
+      text += ' · read as "' + objective.source_text + '"';
+    }
+    // A counter that could not be read this frame keeps its last KNOWN value,
+    // so the row must say that value is older than the reading. Otherwise a
+    // temporarily obscured counter reads as a current measurement.
+    if (objective.progress && objective.progress.at && objective.last_updated &&
+        objective.progress.at !== objective.last_updated) {
+      text += " · progress last read " + formatTime(objective.progress.at);
+    }
+    var dependencies = objective.dependencies || [];
+    if (dependencies.length) {
+      text += " · requires " + dependencies.map(function (item) {
+        return item.requires + (item.satisfied ? " (met)" : " (unmet)");
+      }).join(", ");
+    }
+    var evidence = (objective.evidence || [])
+      .filter(function (item) { return item.kind !== "objective_text"; })
+      .slice(0, 2)
+      .map(function (item) { return item.summary; });
+    if (evidence.length) text += " [" + evidence.join("; ") + "]";
+    if (objective.reason) text += " — " + objective.reason;
+    return text;
+  }
+
+  function objectiveStatusSummary(objectives) {
+    var counts = {};
+    (objectives || []).forEach(function (item) {
+      counts[item.status] = (counts[item.status] || 0) + 1;
+    });
+    var order = ["in_progress", "active", "discovered", "completed", "failed",
+      "blocked", "not_verifiable", "unknown", "superseded"];
+    var parts = [];
+    order.forEach(function (key) {
+      if (counts[key]) parts.push(counts[key] + " " + key);
+    });
+    return parts.length ? parts.join(" · ") : "none";
+  }
+
+  function objectiveFacts(status) {
+    var state = (status && status.state) || null;
+    var counts = (status && status.counts) || {};
+    var measured = (status && status.measured && status.measured.interpretation_ms) || {};
+    var error = status && status.last_error;
+    var all = state ? (state.objectives || []) : [];
+    // The list shows CURRENT objectives, so the counts beside it must count the
+    // same set; superseded records stay visible only as a separate figure.
+    var current = all.filter(function (item) { return item.status !== "superseded"; });
+    return [
+      ["Game", state ? (state.game || "not named") : "not read"],
+      ["Session", state ? (state.session_id || "none") : "none"],
+      ["Observation", state ? (state.observation_id + " · " + formatTime(state.at)) : "never"],
+      ["Profile", state ? (state.profile_id || "none matched") : "not read"],
+      ["Objectives", state ? String(current.length) : "not read"],
+      ["Statuses", state ? objectiveStatusSummary(current) : "not read"],
+      ["Superseded", all.length === current.length
+        ? "none"
+        : (all.length - current.length) + " kept in history"],
+      ["Restored", status && status.restored
+        ? "history from an earlier run; the current picture is not restored"
+        : "no"],
+      ["Events", state ? String((state.events || []).length) : "not read"],
+      ["Readings", (counts.received || 0) + " read · " + (counts.ignored || 0) +
+        " out of order · " + (counts.duplicates || 0) + " repeated"],
+      ["Interpretation", (measured.average === null || measured.average === undefined)
+        ? "not measured yet"
+        : (measured.last + " ms last · " + measured.average + " ms avg")],
+      ["Last error", error ? (error.reason_code + " — " + error.reason) : "none"],
+    ];
+  }
+
+  function objectiveHint(status) {
+    if (!status) return "No objective has been interpreted yet.";
+    var state = status.state;
+    if (!state) {
+      if (status.last_error) {
+        return status.last_error.reason_code + " — " + status.last_error.reason;
+      }
+      return "No objective has been interpreted. Reading walks the newest validated state " +
+        "through the objective rules; it never captures, plans or acts.";
+    }
+    var diagnostics = state.diagnostics || {};
+    var conflicts = diagnostics.conflicts || [];
+    var unattributed = diagnostics.unattributed || [];
+    if (conflicts.length) return "Conflicting evidence: " + conflicts[0];
+    if (unattributed.length) return unattributed[0];
+    if (!(state.objectives || []).length) {
+      return (state.reasons && state.reasons[0]) ||
+        "No objective was found in this reading.";
+    }
+    var current = (state.objectives || []).filter(function (item) {
+      return item.status !== "superseded";
+    });
+    return current.length + " objective(s) — " + objectiveStatusSummary(current) +
+      " · completion needs explicit evidence, never a vanished objective.";
+  }
+
+  function objectiveEventText(event) {
+    var arrow = event.before && event.after ? event.before + " → " + event.after : "";
+    return event.kind + (arrow ? " · " + arrow : "") +
+      " · " + event.objective_id + (event.reason ? " — " + event.reason : "");
+  }
+
+  function renderObjectives(status) {
+    forge.objectives.status = status || null;
+    var badge = byId("forgeObjectivesBadge");
+    if (!badge) return;
+    var state = (status && status.state) || null;
+    var current = state ? (state.objectives || []).filter(function (item) {
+      return item.status !== "superseded";
+    }) : [];
+    var label = state ? (current.length + " objective(s)") : "untested";
+    badge.textContent = label;
+    badge.dataset.state = state ? String(state.objectives.length ? "read" : "empty") : "untested";
+    setText("forgeObjectivesHint", objectiveHint(status));
+    var facts = byId("forgeObjectivesFacts");
+    if (facts) {
+      facts.innerHTML = "";
+      objectiveFacts(status).forEach(function (row) {
+        observationFact(facts, row[0], row[1]);
+      });
+    }
+    renderStateList(
+      "forgeObjectivesList",
+      current.map(objectiveRow),
+      state ? "No objective is current in this reading." : "No objective has been interpreted."
+    );
+    var diagnostics = (state && state.diagnostics) || {};
+    renderStateList(
+      "forgeObjectivesDiagnostics",
+      [].concat(
+        (diagnostics.conflicts || []).map(function (row) { return "conflict: " + row; }),
+        (diagnostics.dependency_issues || []).map(function (row) { return "dependency: " + row; }),
+        (diagnostics.unattributed || []).map(function (row) { return "unattributed: " + row; }),
+        ((state && state.reasons) || []).map(function (row) { return "reason: " + row; })
+      ),
+      state ? "No conflict or unreadable field was reported." : "Nothing has been attempted yet."
+    );
+    var history = byId("forgeObjectivesHistory");
+    if (history) {
+      history.innerHTML = "";
+      var events = (status && status.events) || [];
+      if (!events.length) {
+        history.appendChild(el("p", "muted", "No objective transition has been recorded."));
+      } else {
+        history.appendChild(el("p", "muted", "Objective history (newest last, bounded)."));
+        var list = el("ul", "");
+        events.slice(-8).forEach(function (row) {
+          list.appendChild(el("li", "", formatTime(row.at) + " · " + objectiveEventText(row)));
+        });
+        history.appendChild(list);
+      }
+    }
+  }
+
+  async function loadObjectives() {
+    try {
+      var body = await requestJson("/novaforge/objectives");
+      renderObjectives(body);
+    } catch (error) {
+      setText("forgeObjectivesHint",
+        "Objectives could not be read: " + String(error.message || error));
+    }
+  }
+
+  async function readObjectives() {
+    if (forge.objectives.busy) return null;
+    forge.objectives.busy = true;
+    var button = byId("forgeObjectivesReadButton");
+    if (button) button.classList.add("loading");
+    try {
+      // Interpretation happens INSIDE the state reading (one capture, one read,
+      // one interpretation), so the shared reading refreshes BOTH cards; a
+      // refusal here means no objective was updated.
+      return await analyzeGameState();
+    } finally {
+      forge.objectives.busy = false;
+      if (button) button.classList.remove("loading");
+    }
+  }
+
+  async function resetObjectives() {
+    try {
+      await requestJson("/novaforge/objectives/reset", {});
+      await loadObjectives();
+    } catch (error) {
+      setText("forgeObjectivesHint",
+        "The objectives could not be reset: " + String(error.message || error));
+    }
+  }
+
+  /* ── NF-18: game knowledge ─────────────────────────────────── */
+
+  function knowledgeGameFromPanel() {
+    var input = byId("forgeKnowledgeGame");
+    var typed = input ? String(input.value || "").trim() : "";
+    if (typed) return typed;
+    var state = forge.understanding.status && forge.understanding.status.state;
+    if (state && state.game) return String(state.game);
+    return forge.knowledge.game || "";
+  }
+
+  function knowledgeRecordRow(record) {
+    var count = record.independent_evidence || 0;
+    var text = record.category + " · " + record.key + " · " + record.status +
+      " · " + count + (count === 1 ? " observation" : " observations");
+    if (record.game_version) text += " · version " + record.game_version;
+    if (record.reason) text += " · " + record.reason;
+    if (record.status === "contradicted" || record.status === "stale") {
+      text += " · needs revalidation";
+    }
+    if (record.updated_at) text += " · updated " + formatTime(record.updated_at);
+    var history = record.history || [];
+    if (history.length) {
+      var last = history[history.length - 1];
+      if (last && last.from && last.to) text += " · " + last.from + " → " + last.to;
+    }
+    return text;
+  }
+
+  function knowledgeFacts(body) {
+    // A card with no reading still states its scope, rather than showing an
+    // empty definition list that could be mistaken for "nothing is stored".
+    body = body || {};
+    var summary = body.summary || {};
+    var status = body.knowledge || {};
+    var session = body.session_memory || {};
+    var error = status.last_error || null;
+    var observed = (session.observations || []).length;
+    var objectives = (session.objectives || []).length;
+    return [
+      ["Game", body.game || "not selected"],
+      ["Records", summary.records === undefined ? "not read" : String(summary.records)],
+      ["Verified", String(summary.verified || 0)],
+      ["Provisional", String(summary.provisional || 0)],
+      ["Contradicted", String(summary.contradicted || 0)],
+      ["Stale", String(summary.stale || 0)],
+      ["Open questions", String(summary.unresolved_questions || 0)],
+      ["Revalidation", (summary.due_for_revalidation || []).length + " due (after " +
+        (summary.revalidate_after_days === undefined ? "a configured period" :
+          summary.revalidate_after_days + " days") + ")"],
+      ["Session memory", observed + " observation(s), " + objectives +
+        " objective reading(s) — not persisted"],
+      ["Persistence", status.persistence || "not reported"],
+      ["Last error", error ? (error.reason_code + " — " + error.reason) : "none"],
+    ];
+  }
+
+  function knowledgeHint(body) {
+    if (!body) {
+      return "No game knowledge has been read. Knowledge is scoped to the game named " +
+        "by a validated state.";
+    }
+    if (body.error) return "Knowledge could not be read: " + body.error;
+    var summary = body.summary || {};
+    var session = body.session_memory || {};
+    if (!body.game) {
+      var games = summary.games || [];
+      return games.length
+        ? "Known games: " + games.join(", ") +
+          ". Name one, or read a state, to see its records."
+        : "No game knowledge is stored yet. Read a state to record only what NF-16 could recognise.";
+    }
+    if (!(summary.records || 0)) {
+      return "No knowledge is stored for " + body.game +
+        " yet. Reading a state records its recognised fields and objectives.";
+    }
+    var text = summary.records + " record(s) · " + (summary.verified || 0) +
+      " verified · " + (summary.provisional || 0) + " provisional · " +
+      (summary.contradicted || 0) + " contradicted · " + (summary.stale || 0) + " stale.";
+    var due = (summary.due_for_revalidation || []).length;
+    if (due) text += " " + due + " due for revalidation.";
+    text += " Session memory is not part of these records.";
+    return text;
+  }
+
+  function knowledgeHistoryRows(records) {
+    var rows = [];
+    (records || []).forEach(function (record) {
+      (record.history || []).forEach(function (event) {
+        rows.push(record.key + " · " + event.from + " → " + event.to +
+          (event.at ? " · " + formatTime(event.at) : "") +
+          (event.reason ? " — " + event.reason : ""));
+      });
+    });
+    return rows.slice(-8);
+  }
+
+  function renderKnowledge(body) {
+    forge.knowledge.body = body || null;
+    var badge = byId("forgeKnowledgeBadge");
+    if (!badge) return;
+    var summary = (body && body.summary) || null;
+    var label = body && body.game
+      ? ((summary && summary.records) || 0) + " record(s)"
+      : "untested";
+    badge.textContent = label;
+    badge.dataset.state = body && body.game ? String((summary && summary.records) || 0) : "untested";
+    setText("forgeKnowledgeHint", knowledgeHint(body));
+    var input = byId("forgeKnowledgeGame");
+    if (input && body && body.game && !String(input.value || "").trim()) {
+      input.value = body.game;
+    }
+    var facts = byId("forgeKnowledgeFacts");
+    if (facts) {
+      facts.innerHTML = "";
+      knowledgeFacts(body).forEach(function (row) {
+        observationFact(facts, row[0], row[1]);
+      });
+    }
+    var records = (body && body.records) || [];
+    var current = records.filter(function (record) { return record.category !== "question"; });
+    var questions = records.filter(function (record) { return record.category === "question"; });
+    renderStateList(
+      "forgeKnowledgeList",
+      current.map(knowledgeRecordRow),
+      body && body.game ? "No knowledge is stored for this game." :
+        "No game is selected; name one or read a state."
+    );
+    renderStateList(
+      "forgeKnowledgeQuestions",
+      questions.map(function (record) {
+        return "open question · " + record.key + " · " + record.status +
+          (record.reason ? " · " + record.reason : "");
+      }),
+      body && body.game ? "No unresolved question is recorded." :
+        "Unresolved questions appear once a game is read."
+    );
+    var due = ((summary && summary.due_for_revalidation) || []).map(function (row) {
+      return "revalidate " + row.key + " · " + row.status + " · " + row.age_days + " day(s) old";
+    });
+    renderStateList(
+      "forgeKnowledgeDue",
+      due,
+      "No record is due for revalidation."
+    );
+    var history = byId("forgeKnowledgeHistory");
+    if (history) {
+      history.innerHTML = "";
+      var rows = knowledgeHistoryRows(records);
+      if (!rows.length) {
+        history.appendChild(el("p", "muted", "No knowledge status has changed yet."));
+      } else {
+        history.appendChild(el("p", "muted", "Knowledge history (newest last, bounded)."));
+        var list = el("ul", "");
+        rows.forEach(function (row) { list.appendChild(el("li", "", row)); });
+        history.appendChild(list);
+      }
+    }
+  }
+
+  async function loadKnowledge(explicitGame) {
+    var game = typeof explicitGame === "string" ? explicitGame.trim() : knowledgeGameFromPanel();
+    forge.knowledge.game = game;
+    if (!game) {
+      renderKnowledge(null);
+      return null;
+    }
+    try {
+      var query = "?game=" + encodeURIComponent(game);
+      var body = await requestJson("/novaforge/knowledge" + query);
+      var listed = await requestJson("/novaforge/knowledge/records" + query + "&limit=60");
+      body.records = listed.records || [];
+      renderKnowledge(body);
+      return body;
+    } catch (error) {
+      renderKnowledge({ game: game, error: String(error.message || error) });
+      return null;
     }
   }
 
@@ -2737,9 +5511,12 @@
     pairs.appendChild(detailRow("Session", String(run.session_id || "starting…")));
     pairs.appendChild(detailRow("Model / policy", "unavailable — " +
       String((run.model && run.model.reason) || "no model is invoked")));
-    pairs.appendChild(detailRow("Objective", run.objective && run.objective.achieved === null
-      ? "not evaluated — " + String(run.objective.reason || "no verifier")
-      : (run.objective && run.objective.achieved ? "achieved" : "not evaluated")));
+    var runObjective = run.objective || {};
+    pairs.appendChild(detailRow("Objective", runObjective.achieved === true
+      ? "achieved — " + String(runObjective.reason || "the verifier read success")
+      : runObjective.decided
+        ? "not achieved — " + String(runObjective.reason || "the verifier decided it was not met")
+        : "not evaluated — " + String(runObjective.reason || "no verifier")));
     box.appendChild(pairs);
 
     var rows = Object.keys(run.metrics || {}).map(function (key) {
@@ -2866,7 +5643,7 @@
       if (rows.length) box.appendChild(benchmarkTable(rows));
       else box.appendChild(el("p", "muted", "This run recorded no metrics (it may not have started)."));
       box.appendChild(el("p", "forge-frame-note",
-        "CPU, memory, GPU/NPU use and objective success are unavailable in NF-04: no per-run probe or verifier exists. They are reported as unavailable, never as zero."));
+        "CPU, memory and GPU/NPU use are unavailable in NF-04: no per-run probe exists. Objective success is reported only when a controlled run's verifier decided one; an undecided run is unavailable, never zero."));
 
       var evidence = run.evidence || {};
       box.appendChild(el("h4", "", "Evidence"));
@@ -3196,6 +5973,10 @@
    */
 
   var EVALUATION_POLL_MS = 1000;
+  var CONTROL_MAX_ACTIONS = 8;
+  var CONTROL_ACTION_KINDS = ["key", "hold", "click", "move"];
+  var TITLE_MODES = ["contains", "equals", "absent"];
+  var GAME_STATE_MODES = ["equals", "contains", "absent", "gte", "lte"];
 
   function evaluationNotice(message, kind) {
     var box = byId("forgeEvaluationNotice");
@@ -3209,6 +5990,666 @@
     box.hidden = false;
     box.className = "forge-notice" + (kind === "error" ? " error" : "");
     box.textContent = message;
+  }
+
+  function evaluationMode() {
+    return forge.evaluation.mode === "control" ? "control" : "observation_only";
+  }
+
+  function evaluationModeText(mode) {
+    return String(mode || "observation_only") === "control"
+      ? "controlled · experimental"
+      : "observation only";
+  }
+
+  function controlPolicy() {
+    var policy = (forge.evaluation.detail || {}).action_policy || {};
+    return policy && typeof policy === "object" ? policy : {};
+  }
+
+  function controlMaxActions(policy) {
+    var steps = Math.floor(Number((policy || {}).max_steps));
+    if (!isFinite(steps) || steps < 1) return CONTROL_MAX_ACTIONS;
+    return Math.min(CONTROL_MAX_ACTIONS, steps);
+  }
+
+  function controlActionSummary(action) {
+    var item = action || {};
+    var kind = String(item.kind || "?");
+    if (kind === "key") {
+      return "key " + String(item.key || "?") + " · " +
+        String(item.duration_ms == null ? 60 : item.duration_ms) + " ms";
+    }
+    if (kind === "hold") {
+      return "hold " + String(item.key || "?") + " for " +
+        String(item.duration_ms == null ? 500 : item.duration_ms) + " ms";
+    }
+    if (kind === "click") {
+      return "click " + String(item.button || "left") + " at " +
+        String(item.x == null ? "?" : item.x) + "," + String(item.y == null ? "?" : item.y);
+    }
+    if (kind === "move") {
+      return "move to " + String(item.x == null ? "?" : item.x) + "," +
+        String(item.y == null ? "?" : item.y);
+    }
+    return "unknown action";
+  }
+
+  function controlObjectiveSummary(objective) {
+    if (!objective || !objective.kind) return "not configured";
+    var kind = String(objective.kind);
+    var mode = String(objective.mode || (kind === "window_title" ? "contains" : "equals"));
+    if (kind === "window_title") {
+      return "title " + mode + " \"" + String(objective.parameter || "") + "\"";
+    }
+    if (kind === "game_state_file") {
+      return String(objective.path || "(no path)") +
+        (objective.pointer ? " · " + String(objective.pointer) : "") + " " + mode +
+        (mode === "absent" ? "" : " \"" + String(objective.parameter || "") + "\"");
+    }
+    return kind;
+  }
+
+  // The verdict is the backend's own outcome, translated — never inferred from
+  // "completed". A missing verdict is "not evaluated"; an undecided one is
+  // "inconclusive"; only a decided outcome names a result.
+  function controlVerdictText(objective) {
+    var block = objective || {};
+    if (block.configured === false || block.available === false) return "not evaluated";
+    var outcome = String(block.outcome || "");
+    if (outcome === "verified_success") return "verified success";
+    if (outcome === "verified_failure") return "verified failure — not achieved";
+    if (outcome === "verification_error") return "verification error";
+    if (outcome === "in_progress") return "inconclusive — no verdict yet";
+    if (block.decided === true && outcome) return outcome;
+    return "inconclusive";
+  }
+
+  function controlVerdictTone(objective) {
+    var outcome = String((objective || {}).outcome || "");
+    if (outcome === "verified_success") return "ok";
+    if (outcome === "verified_failure" || outcome === "verification_error") return "bad";
+    if (outcome === "in_progress" || (objective || {}).decided === false) return "warn";
+    return "muted";
+  }
+
+  function controlStageText(state) {
+    var value = String(state || "pending");
+    if (value === "verified_success") return "verified success";
+    if (value === "verified_failure") return "verified failure — not achieved";
+    if (value === "running") return "in progress";
+    if (value === "not_applicable") return "not applicable";
+    if (value === "not_started") return "not started";
+    if (value === "failed") return "failed";
+    if (value === "refused") return "refused";
+    if (value === "skipped") return "skipped";
+    if (value === "completed") return "completed";
+    if (value === "approved") return "approved";
+    if (value === "issued") return "issued";
+    if (value === "recorded") return "recorded";
+    if (value === "pending") return "pending";
+    return value || "unknown";
+  }
+
+  function controlStageTone(state) {
+    var value = String(state || "");
+    if (value === "verified_success" || value === "completed" || value === "approved" ||
+        value === "issued" || value === "recorded") return "ok";
+    if (value === "verified_failure" || value === "failed" || value === "refused") return "bad";
+    if (value === "running") return "warn";
+    return "muted";
+  }
+
+  // A metric row is the backend's measurement. `available: false` is rendered as
+  // "Unavailable" WITH its reason — never as 0, which would be a measurement the
+  // build did not take.
+  function controlMetricText(run, key) {
+    var row = ((run || {}).metrics || {})[key] || {};
+    if (row.available !== true) {
+      return "Unavailable" + (row.reason ? " — " + String(row.reason) : "");
+    }
+    if (row.value === null || row.value === undefined) {
+      return "Unavailable — no value was recorded";
+    }
+    if (key === "objective_success") {
+      return Number(row.value) === 1 ? "achieved" : "not achieved";
+    }
+    if (key === "completion_time_seconds") return String(row.value) + " s";
+    if (key === "actions_executed") return String(row.value);
+    return String(row.value) + (row.unit ? " " + String(row.unit) : "");
+  }
+
+  function controlObjectiveErrors(objective) {
+    var block = objective || {};
+    var kind = String(block.kind || "");
+    var problems = [];
+    if (kind === "window_title") {
+      if (!String(block.parameter || "").trim()) {
+        problems.push("Enter the title text the verifier must read.");
+      }
+      if (TITLE_MODES.indexOf(String(block.mode || "contains")) < 0) {
+        problems.push("The comparison must be contains, equals or absent.");
+      }
+    } else if (kind === "game_state_file") {
+      var path = String(block.path || "").trim().replace(/\\/g, "/");
+      if (!path) {
+        problems.push("Enter the artifact's path, relative to a declared root.");
+      } else {
+        if (path.charAt(0) === "/" || /^[A-Za-z]:/.test(path)) {
+          problems.push("The artifact path must be relative to a declared root, not absolute.");
+        }
+        if (path.split("/").indexOf("..") >= 0) {
+          problems.push("The artifact path must not contain '..'.");
+        }
+        if (/[*?[\]]/.test(path)) {
+          problems.push("The artifact path must name one file, not a pattern.");
+        }
+      }
+      var mode = String(block.mode || "equals");
+      if (GAME_STATE_MODES.indexOf(mode) < 0) {
+        problems.push("The comparison must be one this verifier supports.");
+      } else if (mode !== "absent" && !String(block.parameter || "").trim()) {
+        problems.push("Enter the value the verifier must compare against.");
+      }
+      var age = block.max_age_seconds;
+      if (age !== null && age !== undefined && age !== "") {
+        var number = Number(age);
+        if (!isFinite(number) || number < 1 || number > 3600) {
+          problems.push("Maximum age must be between 1 and 3600 seconds, or blank.");
+        }
+      }
+    } else {
+      problems.push("Choose an objective kind this host can verify.");
+    }
+    return problems;
+  }
+
+  function controlCoordinate(value) {
+    if (value === null || value === undefined || String(value).trim() === "") return null;
+    var number = Number(value);
+    return isFinite(number) ? number : null;
+  }
+
+  // UI-side validation only. The backend parses, validates and refuses the plan
+  // again, so this list is a courtesy that blocks an obviously bad request — it
+  // is never treated as the authoritative check.
+  function controlPlanErrors(plan, budget, policy) {
+    var actions = Array.isArray(plan) ? plan : [];
+    var limits = policy || {};
+    var problems = [];
+    var maxActions = controlMaxActions(limits);
+    if (!actions.length) problems.push("An action plan needs at least one action.");
+    if (actions.length > maxActions) {
+      problems.push("The plan may contain at most " + maxActions + " actions.");
+    }
+    var budgetNumber = Number(budget);
+    if (budget === null || budget === undefined || budget === "" || !isFinite(budgetNumber)) {
+      problems.push("An action budget is required.");
+    } else if (budgetNumber < actions.length) {
+      problems.push("The action budget (" + budgetNumber + ") is smaller than the plan (" +
+        actions.length + " actions).");
+    } else if (budgetNumber < 1) {
+      problems.push("The action budget must be at least 1.");
+    }
+    var maxHold = Number(limits.max_hold_ms);
+    if (!isFinite(maxHold) || maxHold < 1) maxHold = 2000;
+    var allowedKeys = Array.isArray(limits.allowed_keys) ? limits.allowed_keys : [];
+    var allowedButtons = Array.isArray(limits.allowed_buttons) ? limits.allowed_buttons : [];
+    actions.forEach(function (action, index) {
+      var item = action || {};
+      var label = "Action " + (index + 1);
+      var kind = String(item.kind || "");
+      if (CONTROL_ACTION_KINDS.indexOf(kind) < 0) {
+        problems.push(label + " has an unknown kind.");
+        return;
+      }
+      if (kind === "key" || kind === "hold") {
+        var key = String(item.key || "").trim().toLowerCase();
+        if (!key) problems.push(label + " needs a key.");
+        else if (allowedKeys.length && allowedKeys.indexOf(key) < 0) {
+          problems.push(label + " uses " + key + ", which the action policy does not allow.");
+        }
+        var duration = Number(item.duration_ms);
+        if (!isFinite(duration) || duration < 1 || duration > maxHold) {
+          problems.push(label + " must last between 1 and " + maxHold + " ms.");
+        }
+      }
+      if (kind === "click" || kind === "move") {
+        var x = controlCoordinate(item.x);
+        var y = controlCoordinate(item.y);
+        if (x === null || y === null || x < 0 || y < 0) {
+          problems.push(label + " needs non-negative x and y client-area coordinates.");
+        }
+      }
+      if (kind === "click" && allowedButtons.length &&
+          allowedButtons.indexOf(String(item.button || "left")) < 0) {
+        problems.push(label + " uses a mouse button the policy does not allow.");
+      }
+    });
+    return problems;
+  }
+
+  function controlStartGuard(busy, preflight, run, approved, signatureMatches) {
+    if (busy === true) return "A start is already in flight; wait for it to finish.";
+    if (!preflight || preflight.ready !== true) return "Validate readiness for this exact configuration first.";
+    if (run && run.status === "running") return "An evaluation is already running.";
+    if (signatureMatches === false) return "The configuration changed; validate readiness again.";
+    if (approved !== true) {
+      return String(preflight.mode || "observation_only") === "control"
+        ? "Approve the exact plan before starting it."
+        : "Confirm this exact configuration before starting.";
+    }
+    if (String(preflight.mode || "observation_only") === "control") {
+      if (!((preflight.approval || {}).digest)) {
+        return "No approval digest was issued; validate readiness again.";
+      }
+    }
+    return "";
+  }
+
+  // After an ambiguous start failure, adopt a run that is ALREADY executing this
+  // exact digest. Never re-submit: a second POST is a second execution request.
+  function controlStartRecovery(rows, digest) {
+    var wanted = String(digest || "");
+    if (!wanted) return null;
+    var found = (rows || []).filter(function (row) {
+      return row && row.status === "running" && String(row.plan_digest || "") === wanted;
+    });
+    return found.length ? found[0] : null;
+  }
+
+  // ---- controlled-mode form -------------------------------------------------
+
+  function evaluationObjectiveKind() {
+    var select = byId("forgeEvaluationObjectiveKind");
+    return select ? String(select.value || "window_title") : "window_title";
+  }
+
+  // The comparison list is the VERIFIER's own vocabulary: a window title can be
+  // contains/equals/absent, a JSON value can also be ordered. Offering a mode
+  // the verifier cannot apply would be a control that always fails preflight.
+  function syncEvaluationObjectiveFields() {
+    var file = evaluationObjectiveKind() === "game_state_file";
+    ["forgeEvaluationObjectivePathRow", "forgeEvaluationObjectivePointerRow",
+      "forgeEvaluationObjectiveAgeRow"].forEach(function (id) {
+      var row = byId(id);
+      if (row) row.hidden = !file;
+    });
+    var select = byId("forgeEvaluationObjectiveMode");
+    if (select) {
+      var allowed = file ? GAME_STATE_MODES : TITLE_MODES;
+      var previous = String(select.value || "");
+      select.innerHTML = "";
+      allowed.forEach(function (value) {
+        var option = document.createElement("option");
+        option.value = value;
+        option.textContent = value === "gte" ? "greater than or equal"
+          : value === "lte" ? "less than or equal" : value;
+        select.appendChild(option);
+      });
+      select.value = allowed.indexOf(previous) >= 0 ? previous : allowed[0];
+    }
+    var evidence = byId("forgeEvaluationObjectiveEvidence");
+    if (evidence) {
+      evidence.textContent = file
+        ? "The verifier reads the artifact the target writes; a missing, stale or malformed artifact is reported as such and never counted as success."
+        : "The target's own title is read by the verifier; the action record is never evidence.";
+    }
+  }
+
+  function evaluationPlanAction(kind) {
+    if (kind === "click") return { kind: "click", x: null, y: null, button: "left", note: "" };
+    if (kind === "move") return { kind: "move", x: null, y: null, note: "" };
+    if (kind === "hold") return { kind: "hold", key: "", duration_ms: 500, note: "" };
+    return { kind: "key", key: "", duration_ms: 60, note: "" };
+  }
+
+  function controlPlanNumberField(field) {
+    return field === "duration_ms" || field === "x" || field === "y";
+  }
+
+  function controlPlanInput(action, field, placeholder, options, onEdit) {
+    var input = document.createElement(options && options.select ? "select" : "input");
+    if (!(options && options.select)) {
+      input.type = controlPlanNumberField(field) ? "number" : "text";
+      input.autocomplete = "off";
+      if (placeholder) input.placeholder = placeholder;
+      input.value = action[field] == null ? "" : String(action[field]);
+    }
+    input.className = "cyber-input";
+    if (options && options.select) {
+      (options.values || []).forEach(function (value) {
+        var option = document.createElement("option");
+        option.value = value;
+        option.textContent = value;
+        input.appendChild(option);
+      });
+      input.value = String(action[field] || options.values[0]);
+    }
+    input.addEventListener("input", function () {
+      var value = String(input.value == null ? "" : input.value).trim();
+      action[field] = controlPlanNumberField(field)
+        ? (value === "" ? null : Number(value))
+        : value;
+      // The row's own summary is refreshed in place: a full re-render would
+      // rebuild the inputs and steal focus mid-edit.
+      if (onEdit) onEdit();
+      invalidateEvaluationDigest();
+      updateEvaluationPlanSummary();
+    });
+    if (options && options.select) {
+      input.addEventListener("change", function () {
+        action[field] = String(input.value || options.values[0]);
+        if (onEdit) onEdit();
+        invalidateEvaluationDigest();
+        updateEvaluationPlanSummary();
+      });
+    }
+    return input;
+  }
+
+  function controlPlanField(labelText, node) {
+    var wrap = el("label", "forge-plan-field");
+    wrap.appendChild(el("span", "", labelText));
+    wrap.appendChild(node);
+    return wrap;
+  }
+
+  function controlPlanRow(action, index, policy) {
+    var row = el("div", "forge-plan-row");
+    row.dataset.kind = String(action.kind || "");
+    var head = el("div", "forge-plan-row-head");
+    head.appendChild(el("span", "forge-plan-index", String(index + 1)));
+    head.appendChild(el("span", "forge-plan-kind", String(action.kind || "?")));
+    var summaryNode = el("span", "forge-plan-summary", controlActionSummary(action));
+    head.appendChild(summaryNode);
+    var onEdit = function () {
+      summaryNode.textContent = controlActionSummary(action);
+    };
+    var remove = el("button", "cyber-btn small danger", "Remove");
+    remove.type = "button";
+    remove.addEventListener("click", function () {
+      forge.evaluation.plan.splice(index, 1);
+      invalidateEvaluationDigest();
+      renderEvaluationPlan();
+    });
+    head.appendChild(remove);
+    row.appendChild(head);
+
+    var fields = el("div", "forge-plan-fields");
+    var allowedKeys = Array.isArray(policy.allowed_keys) ? policy.allowed_keys : [];
+    if (action.kind === "key" || action.kind === "hold") {
+      fields.appendChild(controlPlanField("Key", controlPlanInput(
+        action, "key", allowedKeys.length ? allowedKeys[0] : "space",
+        allowedKeys.length ? { select: true, values: allowedKeys } : null, onEdit
+      )));
+      fields.appendChild(controlPlanField("Duration (ms)", controlPlanInput(
+        action, "duration_ms", action.kind === "hold" ? "500" : "60", null, onEdit
+      )));
+    }
+    if (action.kind === "click" || action.kind === "move") {
+      fields.appendChild(controlPlanField("X (client area)",
+        controlPlanInput(action, "x", "0", null, onEdit)));
+      fields.appendChild(controlPlanField("Y (client area)",
+        controlPlanInput(action, "y", "0", null, onEdit)));
+    }
+    if (action.kind === "click") {
+      var buttons = Array.isArray(policy.allowed_buttons) && policy.allowed_buttons.length
+        ? policy.allowed_buttons : ["left"];
+      fields.appendChild(controlPlanField("Button", controlPlanInput(
+        action, "button", "", { select: true, values: buttons }, onEdit
+      )));
+    }
+    row.appendChild(fields);
+    return row;
+  }
+
+  function controlPolicyText(policy) {
+    var limits = policy || {};
+    var parts = [];
+    if (Array.isArray(limits.allowed_keys) && limits.allowed_keys.length) {
+      parts.push("keys " + limits.allowed_keys.join(", "));
+    }
+    if (Array.isArray(limits.allowed_buttons) && limits.allowed_buttons.length) {
+      parts.push("buttons " + limits.allowed_buttons.join(", "));
+    }
+    var maxHold = Number(limits.max_hold_ms);
+    if (isFinite(maxHold) && maxHold > 0) parts.push("hold at most " + maxHold + " ms");
+    parts.push("at most " + controlMaxActions(limits) + " actions per run");
+    return "Declared action policy: " + parts.join(" · ") + ".";
+  }
+
+  function evaluationPlanSummaryText(plan) {
+    var actions = plan || [];
+    if (!actions.length) return "No action is planned yet.";
+    return actions.length + (actions.length === 1 ? " action: " : " actions: ") +
+      actions.map(function (action) { return controlActionSummary(action); }).join(" → ");
+  }
+
+  // UI-side validation is a courtesy; the backend parses and refuses the plan
+  // again, and its refusal is the one the record keeps.
+  function evaluationPlanProblems() {
+    var budget = byId("forgeEvaluationBudget");
+    var plan = forge.evaluation.plan;
+    var policy = controlPolicy();
+    return controlObjectiveErrors(evaluationObjectivePayload()).concat(
+      controlPlanErrors(plan, budget ? budget.value : "", policy)
+    );
+  }
+
+  function updateEvaluationPlanSummary() {
+    var summary = byId("forgeEvaluationPlanSummary");
+    if (summary) summary.textContent = evaluationPlanSummaryText(forge.evaluation.plan);
+    renderEvaluationPlanProblems();
+    updateEvaluationObjectiveState();
+  }
+
+  function renderEvaluationPlanProblems() {
+    var box = byId("forgeEvaluationPlanProblems");
+    if (!box) return;
+    var problems = evaluationPlanProblems();
+    box.innerHTML = "";
+    box.hidden = !problems.length;
+    if (!problems.length) return;
+    var list = el("ul", "");
+    problems.forEach(function (problem) { list.appendChild(el("li", "", problem)); });
+    box.appendChild(list);
+  }
+
+  function updateEvaluationObjectiveState() {
+    var badge = byId("forgeEvaluationObjectiveState");
+    if (!badge) return;
+    if (evaluationMode() !== "control") {
+      badge.textContent = "not evaluated";
+      badge.dataset.ok = "false";
+      return;
+    }
+    var problems = controlObjectiveErrors(evaluationObjectivePayload());
+    badge.textContent = problems.length ? "incomplete" : "configured";
+    badge.dataset.ok = problems.length ? "false" : "true";
+  }
+
+  function renderEvaluationPlan() {
+    var list = byId("forgeEvaluationPlanList");
+    var badge = byId("forgeEvaluationPlanState");
+    var limitsBox = byId("forgeEvaluationPlanLimits");
+    var policy = controlPolicy();
+    var plan = forge.evaluation.plan;
+    if (list) {
+      list.innerHTML = "";
+      plan.forEach(function (action, index) {
+        list.appendChild(controlPlanRow(action, index, policy));
+      });
+      if (!plan.length) {
+        list.appendChild(el("p", "muted",
+          "No action is planned. A controlled run needs at least one operator-authored action."));
+      }
+    }
+    if (badge) {
+      badge.textContent = plan.length + (plan.length === 1 ? " action" : " actions");
+      badge.dataset.ok = plan.length ? "true" : "false";
+    }
+    if (limitsBox) limitsBox.textContent = controlPolicyText(policy);
+    updateEvaluationPlanSummary();
+  }
+
+  // An edit breaks the digest an operator would approve, so the previous
+  // preflight and approval can never be reused for the edited plan.
+  function invalidateEvaluationDigest() {
+    forge.evaluation.preflight = null;
+    forge.evaluation.signature = "";
+    forge.evaluation.approval = null;
+    var approve = byId("forgeEvaluationApprove");
+    if (approve) {
+      approve.checked = false;
+      approve.disabled = true;
+    }
+    var row = byId("forgeEvaluationApprovalRow");
+    if (row) row.hidden = true;
+    updateEvaluationControls();
+  }
+
+  function addEvaluationPlanAction(kind) {
+    var policy = controlPolicy();
+    if (forge.evaluation.plan.length >= controlMaxActions(policy)) {
+      evaluationNotice("The declared policy allows at most " + controlMaxActions(policy) +
+        " actions in one plan.", "error");
+      return;
+    }
+    forge.evaluation.plan.push(evaluationPlanAction(kind));
+    invalidateEvaluationDigest();
+    renderEvaluationPlan();
+  }
+
+  function applyEvaluationMode() {
+    var control = evaluationMode() === "control";
+    var banner = byId("forgeEvaluationControlBanner");
+    if (banner) banner.hidden = !control;
+    var config = byId("forgeEvaluationControlConfig");
+    if (config) config.hidden = !control;
+    var confirmRow = byId("forgeEvaluationConfirmRow");
+    if (confirmRow) confirmRow.hidden = control;
+    var confirm = byId("forgeEvaluationConfirm");
+    if (confirm && control) confirm.checked = false;
+    var approvalRow = byId("forgeEvaluationApprovalRow");
+    if (approvalRow) approvalRow.hidden = true;
+    if (control) {
+      syncEvaluationObjectiveFields();
+      renderEvaluationPlan();
+    }
+    updateEvaluationControls();
+  }
+
+  function setEvaluationMode(mode) {
+    forge.evaluation.mode = String(mode) === "control" ? "control" : "observation_only";
+    var select = byId("forgeEvaluationMode");
+    if (select) select.value = forge.evaluation.mode;
+    forge.evaluation.approval = null;
+    if (evaluationMode() === "control") forge.evaluation.plan = forge.evaluation.plan || [];
+    applyEvaluationMode();
+    invalidateEvaluationPreflight();
+  }
+
+  function controlDigestText(body) {
+    var approval = (body || {}).approval || {};
+    var digest = String(approval.digest || ((body || {}).control || {}).plan_digest || "");
+    if (!digest) return "No digest was issued.";
+    return digest;
+  }
+
+  function renderEvaluationControlPreflight(body) {
+    var control = (body || {}).control;
+    if (!control) return null;
+    var section = el("div", "forge-control-digest");
+    section.appendChild(el("h4", "", "Approved plan"));
+    var pairs = el("div", "forge-benchmark-pairs");
+    pairs.appendChild(detailRow("Objective", controlObjectiveSummary(control.objective)));
+    pairs.appendChild(detailRow("Actions", String((control.actions || []).length) +
+      " · budget " + String((control.limits || {}).max_actions == null
+        ? "?" : (control.limits || {}).max_actions)));
+    pairs.appendChild(detailRow("Target", String((control.target || {}).title || "not resolved") +
+      ((control.target || {}).handle == null ? "" : " · handle " + control.target.handle)));
+    pairs.appendChild(detailRow("Approval", String(((body || {}).approval || {}).digest)
+      ? "issued · single use" : "not issued"));
+    section.appendChild(pairs);
+
+    if ((control.actions || []).length) {
+      var list = el("ol", "forge-note-list");
+      control.actions.forEach(function (action) {
+        list.appendChild(el("li", "", controlActionSummary(action)));
+      });
+      section.appendChild(list);
+    }
+    var digest = controlDigestText(body);
+    var digestRow = el("p", "forge-digest", "Plan digest: " + digest);
+    digestRow.dataset.digest = digest;
+    section.appendChild(digestRow);
+    section.appendChild(el("p", "forge-frame-note",
+      "Approval is bound to this digest and is single-use. Editing the objective, plan, "+
+      "target or limits requires a new validation and a new approval."));
+    if (control.reason) section.appendChild(el("p", "muted", String(control.reason)));
+    return section;
+  }
+
+  function controlStatesTable(control) {
+    var table = el("table", "forge-benchmark-table");
+    var head = el("thead", "");
+    var headRow = el("tr", "");
+    ["Stage", "State", "Reason"].forEach(function (labelText) {
+      headRow.appendChild(el("th", "", labelText));
+    });
+    head.appendChild(headRow);
+    table.appendChild(head);
+    var body = el("tbody", "");
+    ((control || {}).states || []).forEach(function (row) {
+      var tr = el("tr", "");
+      tr.dataset.status = String((row || {}).state || "");
+      tr.appendChild(el("td", "", String((row || {}).stage || "")));
+      tr.appendChild(el("td", "", controlStageText((row || {}).state)));
+      tr.appendChild(el("td", "", String((row || {}).reason || "")));
+      body.appendChild(tr);
+    });
+    table.appendChild(body);
+    return table;
+  }
+
+  function controlStepsTable(control) {
+    var steps = ((control || {}).steps || []);
+    if (!steps.length) return null;
+    var table = el("table", "forge-benchmark-table");
+    var head = el("thead", "");
+    var headRow = el("tr", "");
+    ["#", "Action", "Status", "Reason"].forEach(function (labelText) {
+      headRow.appendChild(el("th", "", labelText));
+    });
+    head.appendChild(headRow);
+    table.appendChild(head);
+    var body = el("tbody", "");
+    steps.forEach(function (step) {
+      var tr = el("tr", "");
+      tr.dataset.status = String((step || {}).status || "");
+      tr.appendChild(el("td", "", String((step || {}).index == null ? "" : step.index)));
+      tr.appendChild(el("td", "", controlActionSummary((step || {}).action)));
+      tr.appendChild(el("td", "", controlStageText((step || {}).status)));
+      tr.appendChild(el("td", "", String((step || {}).reason || "")));
+      body.appendChild(tr);
+    });
+    table.appendChild(body);
+    return table;
+  }
+
+  function controlMetricsTable(run) {
+    var metrics = (run || {}).metrics || {};
+    var keys = Object.keys(metrics);
+    if (!keys.length) return null;
+    return benchmarkTable(keys.map(function (key) {
+      var row = Object.assign({}, metrics[key] || {}, { label: key });
+      return {
+        label: key,
+        metric: Object.assign(benchmarkMetric(row), { text: controlMetricText(run, key) }),
+        source: String((metrics[key] || {}).source || ""),
+      };
+    }));
   }
 
   function evaluationGame() {
@@ -3228,6 +6669,48 @@
     }) || null;
   }
 
+  function evaluationObjectivePayload() {
+    var kind = byId("forgeEvaluationObjectiveKind");
+    var mode = byId("forgeEvaluationObjectiveMode");
+    var parameter = byId("forgeEvaluationObjectiveParameter");
+    var path = byId("forgeEvaluationObjectivePath");
+    var pointer = byId("forgeEvaluationObjectivePointer");
+    var age = byId("forgeEvaluationObjectiveAge");
+    var objective = {
+      kind: kind ? String(kind.value || "") : "",
+      mode: mode ? String(mode.value || "") : "contains",
+      parameter: parameter ? String(parameter.value || "").trim() : "",
+    };
+    if (objective.kind === "game_state_file") {
+      objective.path = path ? String(path.value || "").trim() : "";
+      objective.pointer = pointer ? String(pointer.value || "").trim() : "";
+      objective.max_age_seconds = age && String(age.value || "").trim() !== ""
+        ? Number(age.value)
+        : null;
+    }
+    return objective;
+  }
+
+  // The payload carries ONLY the fields the action's own kind defines, so a
+  // stale coordinate from a previously-selected kind cannot ride along.
+  function evaluationPlanPayload() {
+    return forge.evaluation.plan.map(function (action) {
+      var kind = String((action || {}).kind || "");
+      var item = {
+        kind: kind,
+        button: String(action.button || "left"),
+        duration_ms: Number(action.duration_ms == null ? 60 : action.duration_ms),
+        note: String(action.note || ""),
+      };
+      if (kind === "key" || kind === "hold") item.key = String(action.key || "");
+      if (kind === "click" || kind === "move") {
+        item.x = controlCoordinate(action.x);
+        item.y = controlCoordinate(action.y);
+      }
+      return item;
+    });
+  }
+
   function evaluationPayload() {
     var game = evaluationGame();
     var scenario = evaluationScenario();
@@ -3237,7 +6720,8 @@
     var notes = byId("forgeEvaluationNotes");
     var offline = byId("forgeEvaluationOffline");
     var baseline = byId("forgeEvaluationBaseline");
-    return {
+    var budget = byId("forgeEvaluationBudget");
+    var payload = {
       game_id: game ? game.game_id : "",
       game_version: game ? game.version : null,
       scenario_id: scenario ? scenario.scenario_id : "",
@@ -3248,34 +6732,50 @@
       notes: notes ? String(notes.value || "").trim() : "",
       confirm_offline: offline ? offline.checked === true : false,
       baseline_id: baseline ? String(baseline.value || "") : "",
+      mode: evaluationMode(),
     };
+    if (payload.mode === "control") {
+      payload.objective = evaluationObjectivePayload();
+      payload.action_plan = evaluationPlanPayload();
+      payload.max_actions = budget && String(budget.value || "").trim() !== ""
+        ? Number(budget.value)
+        : null;
+      // The backend's own defaults, named here so the digest covers what will
+      // actually run rather than whatever the server would have chosen.
+      payload.action_interval_seconds = 0.5;
+      payload.verify_timeout_seconds = 15;
+    }
+    return payload;
   }
 
   function evaluationSignature() {
     var data = evaluationPayload();
     // The baseline choice does not change readiness, so selecting one must not
-    // force a new validation; the configuration and offline declaration do.
+    // force a new validation; the configuration, mode, objective and plan do.
     delete data.baseline_id;
     return JSON.stringify(data);
   }
 
   // Start needs a PASSING readiness verdict for THIS configuration, no active
-  // run, and the operator's explicit confirmation. Absence of a token is never
-  // treated as consent.
+  // run, and the operator's explicit consent (for a controlled run: approval of
+  // the exact digest). Absence of either is never treated as consent.
   function evaluationCanStart(preflight, run, confirmed, signatureMatches) {
-    return Boolean(
-      preflight && preflight.ready === true &&
-      !(run && run.status === "running") &&
-      confirmed === true &&
-      signatureMatches !== false
-    );
+    return controlStartGuard(false, preflight, run, confirmed, signatureMatches) === "";
   }
 
   function evaluationStatusText(run) {
     if (!run) return "no evaluation";
     var status = String(run.status || "unknown");
+    var control = String(run.mode || "observation_only") === "control";
     if (status === "running") return "running";
     if (status === "completed") {
+      if (control) {
+        // A full record carries `objective.decided`; a list row carries
+        // `objective_verified`. Reading both keeps a verified success from
+        // rendering as "inconclusive" just because the row is a summary.
+        var decided = (run.objective || {}).decided === true || run.objective_verified === true;
+        return decided ? "completed · objective verified" : "completed · objective inconclusive";
+      }
       return run.valid ? "completed · data complete" : "completed · invalid";
     }
     if (status === "unsupported") return "unsupported · not run";
@@ -3326,23 +6826,38 @@
     return "Compatible with the baseline · " + benchmarkVerdictText(comparison.verdict);
   }
 
+  function evaluationControlPreflight() {
+    var preflight = forge.evaluation.preflight;
+    return preflight && String(preflight.mode || "") === "control" ? preflight : null;
+  }
+
   function updateEvaluationControls() {
     var start = byId("forgeEvaluationStartButton");
     var cancel = byId("forgeEvaluationCancelButton");
     var report = byId("forgeEvaluationReportButton");
     var exportButton = byId("forgeEvaluationExportButton");
     var confirm = byId("forgeEvaluationConfirm");
+    var approve = byId("forgeEvaluationApprove");
+    var approvalRow = byId("forgeEvaluationApprovalRow");
     var run = forge.evaluation.run;
+    var controlPreflight = evaluationControlPreflight();
+    var approved = approve ? approve.checked === true : false;
+    var consent = evaluationMode() === "control"
+      ? approved
+      : (confirm ? confirm.checked === true : false);
+    var signatureMatches = forge.evaluation.signature === evaluationSignature();
+    var reason = controlStartGuard(
+      forge.evaluation.busy, forge.evaluation.preflight, run, consent, signatureMatches
+    );
+    var canStart = evaluationCanStart(
+      forge.evaluation.preflight, run, consent, signatureMatches
+    );
+    if (approvalRow) approvalRow.hidden = !(evaluationMode() === "control" && controlPreflight);
+    if (approve) approve.disabled = !(controlPreflight && controlPreflight.ready === true);
     if (start) {
-      start.disabled = !evaluationCanStart(
-        forge.evaluation.preflight,
-        run,
-        confirm ? confirm.checked === true : false,
-        forge.evaluation.signature === evaluationSignature()
-      );
-      start.title = forge.evaluation.preflight && forge.evaluation.preflight.ready
-        ? (confirm && confirm.checked ? "Start this validated evaluation" : "Confirm the evaluation first")
-        : "Validate readiness against a live window first";
+      start.disabled = !canStart || forge.evaluation.busy === true;
+      start.textContent = evaluationMode() === "control" ? "Approve And Run" : "Start Evaluation";
+      start.title = reason || "Start this validated evaluation";
     }
     if (cancel) cancel.disabled = !(run && run.status === "running");
     if (report) report.disabled = !(run && run.status !== "running");
@@ -3352,6 +6867,15 @@
   function invalidateEvaluationPreflight() {
     forge.evaluation.preflight = null;
     forge.evaluation.signature = "";
+    forge.evaluation.approval = null;
+    forge.evaluation.control = null;
+    var approve = byId("forgeEvaluationApprove");
+    if (approve) approve.checked = false;
+    var state = byId("forgeEvaluationObjectiveState");
+    if (state) {
+      state.textContent = evaluationMode() === "control" ? "not validated" : "not evaluated";
+      state.dataset.ok = "false";
+    }
     var box = byId("forgeEvaluationPreflight");
     if (box) {
       box.innerHTML = "";
@@ -3403,7 +6927,7 @@
         body.controllable_count + " controllable";
       badge.dataset.ok = "true";
       if (!body.controllable_count) {
-        evaluationNotice("No environment is controllable in this build: every runnable entry is observation-only and no objective verifier exists.");
+        evaluationNotice("No environment is controllable on this host yet: a controlled run needs a Guardian-enforced injector and a ready objective verifier. Observation-only entries can still be run.");
       }
     } catch (error) {
       badge.textContent = "unavailable";
@@ -3463,8 +6987,13 @@
     var badge = el("span", "forge-badge", String(detail.status));
     badge.dataset.ok = detail.runnable ? "true" : "false";
     head.appendChild(badge);
+    var declaresControl = (detail.evaluation_modes || []).indexOf("control") >= 0;
     head.appendChild(el("span", "forge-benchmark-version", "v" + String(detail.version) +
-      " · " + (detail.control_capable ? "controllable" : "observation only")));
+      " · " + (detail.control_capable
+        ? "controllable on this host"
+        : declaresControl
+          ? "control declared — unavailable on this host"
+          : "observation only")));
     box.appendChild(head);
     box.appendChild(el("p", detail.runnable ? "" : "forge-benchmark-unsupported",
       String(detail.status_reason || "No compatibility reason was recorded.")));
@@ -3517,6 +7046,8 @@
       forge.evaluation.detail = detail;
       renderEvaluationGameDetail(detail);
       renderEvaluationScenarios(detail.scenarios || [], "");
+      // The plan editor and its limits are the ENVIRONMENT's declared policy.
+      if (evaluationMode() === "control") renderEvaluationPlan();
       var offlineRow = byId("forgeEvaluationOfflineRow");
       if (offlineRow) offlineRow.hidden = !(detail.offline && detail.offline.confirmation_required);
       var offline = byId("forgeEvaluationOffline");
@@ -3621,6 +7152,8 @@
       pairs.appendChild(detailRow("Measured", body.target.width + " × " + body.target.height + " px"));
       box.appendChild(pairs);
     }
+    var control = renderEvaluationControlPreflight(body);
+    if (control) box.appendChild(control);
     renderEvaluationBaseline(body.baseline);
     if (body.note) box.appendChild(el("p", "forge-frame-note", String(body.note)));
   }
@@ -3636,6 +7169,12 @@
       var body = await requestJson("/novaforge/evaluations/preflight", evaluationPayload());
       forge.evaluation.preflight = body;
       forge.evaluation.signature = body.ready ? evaluationSignature() : "";
+      // A new validation mints a new digest, so a tick from the previous one
+      // must never carry over as consent for this one.
+      if (String(body.mode || "") === "control") {
+        var approve = byId("forgeEvaluationApprove");
+        if (approve) approve.checked = false;
+      }
       renderEvaluationPreflight(body);
       evaluationNotice(body.ready ? "" : "Readiness refused the evaluation; the blocking checks are listed above.",
         body.ready ? "" : "error");
@@ -3654,21 +7193,66 @@
     var identity = (forge.evaluation.preflight || {}).identity || {};
     if (identity.handle != null) payload.expected_handle = identity.handle;
     if (identity.pid != null) payload.expected_pid = identity.pid;
+    if (payload.mode === "control") {
+      // The digest is the approval: echoing a digest the operator never saw is
+      // impossible because the preflight response is the only source of it.
+      payload.approval_digest = String(
+        ((forge.evaluation.preflight || {}).approval || {}).digest || ""
+      );
+    }
     return payload;
+  }
+
+  // A failed start may still have reached the server. Adopt a run that is
+  // ALREADY executing this exact digest instead of re-posting the plan — a
+  // second POST would be a second execution request, not a retry.
+  async function recoverEvaluationStart(digest) {
+    if (!digest) return false;
+    try {
+      var body = await requestJson("/novaforge/evaluations?limit=25");
+      forge.evaluation.history = body.evaluations || [];
+      var running = controlStartRecovery(forge.evaluation.history, digest);
+      if (!running) return false;
+      forge.evaluation.evaluationId = running.id;
+      forge.evaluation.run = running;
+      forge.evaluation.runToken += 1;
+      renderEvaluationRun(running, true);
+      updateEvaluationControls();
+      pollEvaluation(running.id, forge.evaluation.runToken);
+      evaluationNotice("The start response was lost, but this digest is already running as " +
+        String(running.id) + "; the panel adopted that run instead of starting a second one.");
+      return true;
+    } catch (error) {
+      return false;
+    }
   }
 
   async function startEvaluation() {
     var confirm = byId("forgeEvaluationConfirm");
-    if (!evaluationCanStart(
+    var approve = byId("forgeEvaluationApprove");
+    var control = evaluationMode() === "control";
+    var consent = control
+      ? (approve ? approve.checked === true : false)
+      : (confirm ? confirm.checked === true : false);
+    var reason = controlStartGuard(
+      forge.evaluation.busy,
       forge.evaluation.preflight,
       forge.evaluation.run,
-      confirm ? confirm.checked === true : false,
+      consent,
       forge.evaluation.signature === evaluationSignature()
-    )) {
-      evaluationNotice("Validate readiness and confirm this exact configuration before starting.", "error");
+    );
+    if (reason) {
+      evaluationNotice(reason, "error");
       return;
     }
-    evaluationNotice("Starting the bounded observation session…");
+    var digest = control
+      ? String(((forge.evaluation.preflight || {}).approval || {}).digest || "")
+      : "";
+    forge.evaluation.busy = true;
+    updateEvaluationControls();
+    evaluationNotice(control
+      ? "Starting the approved plan through the Guardian…"
+      : "Starting the bounded observation session…");
     try {
       var run = await requestJson("/novaforge/evaluations", evaluationStartPayload());
       forge.evaluation.evaluationId = run.id;
@@ -3679,10 +7263,21 @@
       updateEvaluationControls();
       loadEvaluationHistory();
       pollEvaluation(run.id, forge.evaluation.runToken);
-      evaluationNotice("Evaluation started. No gameplay input is sent and no objective is verified.");
+      evaluationNotice(control
+        ? "Controlled evaluation started. Only the approved actions run; the verdict is the verifier's own reading of the target, and this panel does not claim one earlier."
+        : "Evaluation started. No gameplay input is sent and no objective is verified.");
     } catch (error) {
-      evaluationNotice("The evaluation could not start: " + requestErrorMessage(error), "error");
+      var adopted = control ? await recoverEvaluationStart(digest) : false;
+      if (!adopted) {
+        evaluationNotice("The evaluation could not start: " + requestErrorMessage(error), "error");
+      }
+      // An approval is single-use, so a start that may have consumed it can
+      // never be retried on the same digest; a fresh validation is required.
+      if (control) invalidateEvaluationDigest();
       loadEvaluationHistory();
+    } finally {
+      forge.evaluation.busy = false;
+      updateEvaluationControls();
     }
   }
 
@@ -3753,15 +7348,43 @@
       ? "The observation is active; evidence is finalized when it ends."
       : "No reason was recorded."))));
 
+    var control = String(run.mode || "") === "control";
+    var block = run.control || {};
     var pairs = el("div", "forge-benchmark-pairs");
-    pairs.appendChild(detailRow("Mode", String(run.mode || "observation_only")));
+    pairs.appendChild(detailRow("Mode", evaluationModeText(run.mode)));
     pairs.appendChild(detailRow("Benchmark run", String(run.benchmark_run_id || "not started")));
     pairs.appendChild(detailRow("Session", String(run.session_id || "not started")));
     pairs.appendChild(detailRow("Baseline role", String((run.baseline || {}).role || "—")));
-    pairs.appendChild(detailRow("Objective", "not evaluated — " +
-      String((run.objective || {}).reason || "no verifier")));
+    pairs.appendChild(detailRow("Objective", control
+      ? controlVerdictText(run.objective)
+      : "not evaluated — " + String((run.objective || {}).reason || "no verifier")));
+    if (control) {
+      pairs.appendChild(detailRow("Plan digest", String(block.plan_digest || "not recorded")));
+      pairs.appendChild(detailRow("Control state", controlStageText(block.state)));
+      pairs.appendChild(detailRow("Actions recorded", String((block.steps || []).length) +
+        " · budget " + String((block.limits || {}).max_actions == null
+          ? "?" : (block.limits || {}).max_actions)));
+    }
     pairs.appendChild(detailRow("Duration", formatDuration(run.duration_seconds)));
     box.appendChild(pairs);
+    if (control) {
+      var verdict = el("p", "forge-verdict", controlVerdictText(run.objective) + " — " +
+        String((run.objective || {}).reason || "no reason recorded"));
+      verdict.dataset.tone = controlVerdictTone(run.objective);
+      box.appendChild(verdict);
+      box.appendChild(el("h4", "", "Control stages"));
+      box.appendChild(controlStatesTable(block));
+      var steps = controlStepsTable(block);
+      if (steps) {
+        box.appendChild(el("h4", "", "Approved actions"));
+        box.appendChild(steps);
+      }
+      var metrics = controlMetricsTable(run);
+      if (metrics) {
+        box.appendChild(el("h4", "", "Measured metrics"));
+        box.appendChild(metrics);
+      }
+    }
     box.appendChild(el("p", "forge-frame-note", evaluationComparisonText(run.comparison)));
 
     box.appendChild(el("p", "forge-frame-note",
@@ -3894,18 +7517,60 @@
       String(report.reason || "No reason was recorded.")));
     box.appendChild(el("p", "", String(report.note || "")));
 
+    var control = String(report.mode || "") === "control";
     var pairs = el("div", "forge-benchmark-pairs");
     var compatibility = report.compatibility || {};
     pairs.appendChild(detailRow("Compatibility", String(compatibility.status || "not stated") +
       " — " + String(compatibility.reason || "no reason")));
-    pairs.appendChild(detailRow("Mode", String(report.mode || "observation_only")));
-    pairs.appendChild(detailRow("Objective verified", "no — " +
-      String((report.objective || {}).reason || "no verifier")));
+    pairs.appendChild(detailRow("Mode", evaluationModeText(report.mode)));
+    pairs.appendChild(detailRow("Objective verified", control
+      ? controlVerdictText(report.objective)
+      : "no — " + String((report.objective || {}).reason || "no verifier")));
     pairs.appendChild(detailRow("Gameplay control exercised", report.real_gameplay_control_exercised ? "yes" : "no"));
+    if (control) {
+      pairs.appendChild(detailRow("Plan digest", String(report.plan_digest || "not recorded")));
+      pairs.appendChild(detailRow("Approval", String((report.approval || {}).digest)
+        ? "issued for this digest" : "not recorded"));
+      pairs.appendChild(detailRow("Verdict", String(report.verdict || controlVerdictText(report.objective))));
+      pairs.appendChild(detailRow("Objective", controlObjectiveSummary(
+        ((report.control || {}).objective) || (report.objective || {}).objective
+      )));
+    }
     pairs.appendChild(detailRow("Benchmark run", String(report.benchmark_run_id || "not started")));
     pairs.appendChild(detailRow("Session", String(report.session_id || "not started")));
     pairs.appendChild(detailRow("Readiness", readinessCountsText(report.readiness)));
     box.appendChild(pairs);
+
+    if (control) {
+      // The verdict is rendered as the VERIFIER's reading, with its reason, and
+      // never as a consequence of the actions having executed.
+      var verdictLine = el("p", "forge-verdict",
+        String(report.verdict || controlVerdictText(report.objective)) + " — " +
+        String((report.objective || {}).reason || "no reason recorded"));
+      verdictLine.dataset.tone = controlVerdictTone(report.objective);
+      box.appendChild(verdictLine);
+      box.appendChild(el("h4", "", "Control stages"));
+      box.appendChild(controlStatesTable(report.control));
+      var executedSteps = controlStepsTable(report.control);
+      if (executedSteps) {
+        box.appendChild(el("h4", "", "Approved actions"));
+        box.appendChild(executedSteps);
+      }
+      var controlMetrics = controlMetricsTable(report);
+      if (controlMetrics) {
+        box.appendChild(el("h4", "", "Measured metrics"));
+        box.appendChild(controlMetrics);
+      }
+      var verifierEvidence = ((report.objective || {}).evidence || []);
+      if (verifierEvidence.length) {
+        box.appendChild(el("h4", "", "Verifier evidence"));
+        var evidenceList = el("ul", "forge-note-list");
+        verifierEvidence.forEach(function (row) {
+          evidenceList.appendChild(el("li", "", String(row)));
+        });
+        box.appendChild(evidenceList);
+      }
+    }
 
     box.appendChild(el("h4", "", "Baseline"));
     box.appendChild(el("p", "", evaluationComparisonText(report.comparison)));
@@ -3989,6 +7654,7 @@
   }
 
   function openEvaluations() {
+    applyEvaluationMode();
     evaluationLoadWindows();
     if (!forge.evaluation.games.length) loadEvaluationRegistry();
     loadEvaluationHistory();
@@ -4970,6 +8636,399 @@
     if (forge.coach.experimentId) loadCoachExperiment(forge.coach.experimentId);
   }
 
+  /* ── NF-12: Game Library ───────────────────────────────────── */
+  //
+  // The tab is a CLIENT of the NF-11 service. Every row, count, status and
+  // reason comes from /novaforge/library; the panel never re-derives whether a
+  // game is installed, running or tested. A launch has two steps on purpose:
+  // the first request only previews (and mints the server's token), the second
+  // approves that exact plan. The four pipeline facts — requested, process,
+  // window, verified — are painted from the response, so a started command can
+  // never look like a verified launch, and a verified launch never implies
+  // that capture works.
+
+  var GAME_STATUS = {
+    INSTALLED_AND_LAUNCHABLE: { label: "installed · launchable", tone: "good" },
+    ALREADY_RUNNING: { label: "already running", tone: "muted" },
+    INSTALLED_BUT_LAUNCH_FAILED: { label: "launch failed", tone: "bad" },
+    NOT_FOUND_ON_INTERNAL_STORAGE: { label: "not found", tone: "muted" },
+    REQUIRES_LAUNCHER_OR_RUNTIME: { label: "needs a runtime", tone: "warn" },
+    AMBIGUOUS_MATCH: { label: "ambiguous", tone: "warn" },
+    LAUNCH_REFUSED: { label: "refused", tone: "warn" },
+    NOT_TESTED: { label: "not tested", tone: "muted" },
+  };
+
+  function gameStatusLabel(status) {
+    var row = GAME_STATUS[String(status || "")];
+    if (row) return row.label;
+    return String(status || "unknown").replace(/_/g, " ").toLowerCase();
+  }
+
+  function gameStatusTone(status) {
+    var row = GAME_STATUS[String(status || "")];
+    return row ? row.tone : "muted";
+  }
+
+  // Pure translation of the backend's four booleans into the words the panel
+  // shows. Exported so a Node test can assert that "process started" is never
+  // rendered as "verified".
+  function gameStageText(stages) {
+    var s = stages || {};
+    return {
+      requested: s.launch_requested ? "Launch requested and approved." : "No launch requested.",
+      process: s.process_started ? "A process started." : "No process started.",
+      window: s.window_detected ? "A window appeared." : "No window was detected.",
+      verified: s.launch_verified
+        ? "Launch verified against the process and window."
+        : "Launch NOT verified.",
+    };
+  }
+
+  function memoryText(memory) {
+    if (!memory) return "";
+    if (!memory.available) {
+      return "Resource gate: memory could not be read (" + String(memory.reason || "no measurement") +
+        "); the check was skipped rather than pretended.";
+    }
+    var snapshot = memory.snapshot || {};
+    var parts = [];
+    if (typeof snapshot.free_gb === "number") parts.push(snapshot.free_gb.toFixed(2) + " GB free");
+    if (typeof snapshot.used_percent === "number") parts.push(snapshot.used_percent.toFixed(0) + "% used");
+    return (memory.ok ? "Resource gate passed" : "Resource gate REFUSED") +
+      (parts.length ? ": " + parts.join(", ") : "") +
+      (memory.reason ? " — " + String(memory.reason) : "");
+  }
+
+  function libraryNotice(message, kind) {
+    var box = byId("forgeLibraryNotice");
+    if (!box) return;
+    if (!message) {
+      box.hidden = true;
+      box.textContent = "";
+      box.className = "forge-notice";
+      return;
+    }
+    box.hidden = false;
+    box.className = "forge-notice" + (kind === "error" ? " error" : "");
+    box.textContent = message;
+  }
+
+  function setLibraryState(text, tone) {
+    var badge = byId("forgeLibraryState");
+    if (!badge) return;
+    badge.textContent = text;
+    badge.dataset.state = tone || "";
+  }
+
+  function setLaunchStage(id, text, tone) {
+    var node = byId(id);
+    if (!node) return;
+    node.textContent = text;
+    node.dataset.tone = tone || "";
+  }
+
+  function renderLaunchStages(stages) {
+    var text = gameStageText(stages);
+    var s = stages || {};
+    setLaunchStage("forgeLaunchStageRequested", text.requested, s.launch_requested ? "good" : "");
+    setLaunchStage("forgeLaunchStageProcess", text.process, s.process_started ? "good" : "");
+    setLaunchStage("forgeLaunchStageWindow", text.window, s.window_detected ? "good" : "");
+    setLaunchStage("forgeLaunchStageVerified", text.verified, s.launch_verified ? "good" : "warn");
+  }
+
+  function renderObservation(observation) {
+    var box = byId("forgeLibraryObservation");
+    if (!box) return;
+    if (!observation) {
+      box.textContent = "Observation has not been checked.";
+      return;
+    }
+    box.textContent = (observation.available
+      ? "Frame capture is available on this host. "
+      : "Frame capture is unavailable" + (observation.reason ? ": " + String(observation.reason) : "") + ". ") +
+      String(observation.note || "");
+  }
+
+  function libraryCounts(payload) {
+    var parts = [];
+    var counts = payload.counts || {};
+    Object.keys(counts).sort().forEach(function (status) {
+      if (!counts[status]) return;
+      parts.push(counts[status] + " " + gameStatusLabel(status));
+    });
+    var total = typeof payload.total === "number" ? payload.total : (payload.entries || []).length;
+    var shown = typeof payload.matched === "number" ? payload.matched : total;
+    var head = shown + " of " + total + " discovered title" + (total === 1 ? "" : "s");
+    return head + (parts.length ? " · " + parts.join(" · ") : "") +
+      (payload.query ? " · filtered by \"" + payload.query + "\"" : "");
+  }
+
+  function libraryRow(row, owned) {
+    var artifact = row.artifact || {};
+    var item = el("li", "forge-library-row");
+    item.dataset.status = String(row.status || "");
+    var head = el("div", "forge-library-head");
+    head.appendChild(el("strong", "forge-library-title", String(row.title || "unknown")));
+    head.appendChild(coachChip(gameStatusLabel(row.status), gameStatusTone(row.status)));
+    if (row.tested) head.appendChild(coachChip("launch-tested", "good"));
+    item.appendChild(head);
+    var evidence = artifact.launch_target
+      ? String(artifact.source || "unknown") + " · " + String(artifact.launch_target)
+      : (artifact.source ? String(artifact.source) + " · no verified target" : "no verified artifact");
+    item.appendChild(el("p", "forge-library-evidence", evidence));
+    if (row.reason) item.appendChild(el("p", "forge-library-reason", String(row.reason)));
+    var actions = el("div", "button-row");
+    var hasActions = false;
+    if (row.status === "INSTALLED_AND_LAUNCHABLE") {
+      var launch = el("button", "cyber-btn small primary", row.tested ? "Launch Again" : "Preview Launch");
+      launch.type = "button";
+      launch.dataset.launchGame = String(row.title || "");
+      actions.appendChild(launch);
+      hasActions = true;
+    }
+    if (row.status === "ALREADY_RUNNING") {
+      var attach = el("button", "cyber-btn small", "Attach");
+      attach.type = "button";
+      attach.dataset.attachGame = String(row.title || "");
+      actions.appendChild(attach);
+      hasActions = true;
+    }
+    if (owned && owned.name === row.title) {
+      var close = el("button", "cyber-btn small danger", "Close (test-launched)");
+      close.type = "button";
+      close.dataset.closeGame = String(owned.launch_id || "");
+      actions.appendChild(close);
+      hasActions = true;
+    }
+    if (hasActions) item.appendChild(actions);
+    return item;
+  }
+
+  function renderLibrary(payload) {
+    var list = byId("forgeLibraryList");
+    if (!list) return;
+    list.innerHTML = "";
+    var badge = byId("forgeLibraryBadge");
+    if (badge) badge.textContent = String((payload.entries || []).length) + " shown";
+    var counts = byId("forgeLibraryCounts");
+    if (counts) counts.textContent = libraryCounts(payload);
+    var limits = byId("forgeLibraryLimits");
+    if (limits) {
+      limits.innerHTML = "";
+      (payload.limitations || []).forEach(function (line) { limits.appendChild(el("li", "", String(line))); });
+      if (!(payload.limitations || []).length) limits.appendChild(el("li", "muted", "No limitations reported."));
+    }
+    var closeButton = byId("forgeLibraryCloseButton");
+    if (closeButton) {
+      closeButton.disabled = !payload.owned;
+      closeButton.textContent = payload.owned
+        ? "Close " + String((payload.owned || {}).name || "test-launched game")
+        : "Close Test-Launched Game";
+    }
+    var rows = payload.entries || [];
+    if (!rows.length) {
+      list.appendChild(el("li", "muted", payload.query
+        ? "No discovered title matches \"" + payload.query + "\"."
+        : "No game was discovered on this machine's internal fixed drives."));
+      return;
+    }
+    rows.forEach(function (row) { list.appendChild(libraryRow(row, payload.owned)); });
+  }
+
+  function renderGamePlan(plan) {
+    var box = byId("forgeLibraryResult");
+    if (!box) return;
+    box.innerHTML = "";
+    setLibraryState(String(plan.status || "planned"), plan.approval && plan.approval.token ? "waiting" : "blocked");
+    box.appendChild(el("p", "forge-library-summary", String(plan.summary || "")));
+    var steps = plan.steps || [];
+    if (steps.length) {
+      var list = el("ol", "action-steps");
+      steps.forEach(function (step) { list.appendChild(el("li", "", String(step))); });
+      box.appendChild(list);
+    }
+    if (plan.memory) box.appendChild(el("p", "forge-limit-hint", memoryText(plan.memory)));
+    if (plan.candidates && plan.candidates.length) {
+      var candidates = el("ul", "forge-roadmap-list");
+      plan.candidates.forEach(function (row) {
+        candidates.appendChild(el("li", "", String(row.title || "unknown") + " — " + gameStatusLabel(row.status)));
+      });
+      box.appendChild(candidates);
+    }
+    if (plan.approval && plan.approval.token) {
+      var row = el("div", "button-row");
+      var approve = el("button", "cyber-btn primary", "Approve & Launch");
+      approve.type = "button";
+      approve.id = "forgeLaunchApproveButton";
+      approve.addEventListener("click", function () { approvePlannedGame(); });
+      var cancel = el("button", "cyber-btn", "Cancel");
+      cancel.type = "button";
+      cancel.addEventListener("click", function () { forge.library.plan = null; renderLibraryIdle(); });
+      row.appendChild(approve);
+      row.appendChild(cancel);
+      box.appendChild(row);
+    }
+    renderLaunchStages(plan.stages || {});
+    renderObservation(plan.observation);
+  }
+
+  function renderGameResult(result) {
+    var box = byId("forgeLibraryResult");
+    if (!box) return;
+    box.innerHTML = "";
+    setLibraryState(String(result.status || "result"), result.stages && result.stages.launch_verified ? "good" : "warn");
+    box.appendChild(el("p", "forge-library-summary", String(result.summary || "")));
+    var launch = (result.game || {}).launch || {};
+    if (launch.pid) {
+      var facts = el("dl", "forge-frame-meta");
+      [["Process", String(launch.process_name || "") + " (pid " + String(launch.pid) + ")"],
+        ["Started", String(launch.start_time || "not recorded")],
+        ["Window", String(launch.window || "none detected")],
+        ["Verification", String(launch.verification || "")]].forEach(function (pair) {
+        var wrap = document.createElement("div");
+        wrap.appendChild(el("dt", "", pair[0]));
+        wrap.appendChild(el("dd", "", pair[1]));
+        facts.appendChild(wrap);
+      });
+      box.appendChild(facts);
+    }
+    if (result.closed) {
+      box.appendChild(el("p", "forge-limit-hint", "The test-launched process exited; the ownership claim was released."));
+    }
+    renderLaunchStages(result.stages || {});
+    renderObservation(result.observation);
+  }
+
+  function renderLibraryIdle() {
+    var box = byId("forgeLibraryResult");
+    if (!box) return;
+    box.innerHTML = "";
+    box.appendChild(el("p", "muted",
+      "Choose a launchable game to preview the exact installation, target and resource gate. Nothing starts until you approve the preview."));
+    setLibraryState("idle", "");
+    renderLaunchStages({});
+  }
+
+  function libraryRequestStillCurrent(token) {
+    return token === forge.library.token;
+  }
+
+  async function loadLibrary() {
+    var input = byId("forgeLibrarySearch");
+    if (input) forge.library.query = String(input.value || "");
+    var token = ++forge.library.token;
+    try {
+      var payload = await requestJson("/novaforge/library?q=" + encodeURIComponent(forge.library.query));
+      if (!libraryRequestStillCurrent(token)) return;
+      forge.library.payload = payload;
+      if (!payload.available) {
+        libraryNotice(String(payload.reason || "The catalog is not available."), "error");
+        var list = byId("forgeLibraryList");
+        if (list) { list.innerHTML = ""; list.appendChild(el("li", "muted", String(payload.reason || "No catalog."))); }
+        return;
+      }
+      renderLibrary(payload);
+    } catch (error) {
+      if (!libraryRequestStillCurrent(token)) return;
+      libraryNotice("The game catalog could not be read: " + requestErrorMessage(error), "error");
+    }
+  }
+
+  async function planLibraryGame(name) {
+    if (forge.library.busy) return;
+    forge.library.busy = true;
+    try {
+      var plan = await requestJson("/novaforge/library/launch", { command: "launch " + name });
+      forge.library.plan = plan;
+      renderGamePlan(plan);
+      libraryNotice(plan.approval && plan.approval.token
+        ? "Preview ready for " + String(plan.target || name) + ". Nothing has started yet."
+        : String(plan.summary || "This game cannot be launched."),
+        plan.approval && plan.approval.token ? "" : "error");
+    } catch (error) {
+      libraryNotice("The launch preview was refused: " + requestErrorMessage(error), "error");
+    } finally {
+      forge.library.busy = false;
+    }
+  }
+
+  async function approvePlannedGame() {
+    var plan = forge.library.plan;
+    if (!plan || !plan.approval || !plan.approval.token) return;
+    if (forge.library.busy) return;
+    forge.library.busy = true;
+    setLibraryState("launching", "waiting");
+    try {
+      var result = await requestJson("/novaforge/library/launch", {
+        command: plan.command,
+        approval_token: plan.approval.token,
+      });
+      forge.library.plan = null;
+      forge.library.result = result;
+      renderGameResult(result);
+      libraryNotice(result.summary || "The launch finished.",
+        result.stages && result.stages.launch_verified ? "" : "error");
+      loadLibrary();
+    } catch (error) {
+      libraryNotice("The launch did not run: " + requestErrorMessage(error), "error");
+    } finally {
+      forge.library.busy = false;
+    }
+  }
+
+  async function closeOwnedGame(launchId) {
+    if (forge.library.busy) return;
+    forge.library.busy = true;
+    try {
+      var outcome = await requestJson("/novaforge/library/close",
+        launchId ? { launch_id: String(launchId) } : {});
+      var box = byId("forgeLibraryResult");
+      if (box) {
+        box.innerHTML = "";
+        box.appendChild(el("p", "forge-library-summary", String(outcome.summary || outcome.reason || "")));
+      }
+      setLibraryState(String(outcome.status || "closed"), outcome.closed ? "good" : "warn");
+      renderLaunchStages({});
+      renderObservation(outcome.observation);
+      libraryNotice(outcome.closed
+        ? "The test-launched process exited; the ownership claim was released."
+        : String(outcome.reason || "No owned game was closed."),
+        outcome.closed ? "" : "error");
+      loadLibrary();
+    } catch (error) {
+      libraryNotice("The close was refused: " + requestErrorMessage(error), "error");
+    } finally {
+      forge.library.busy = false;
+    }
+  }
+
+  async function attachLibraryGame(name) {
+    try {
+      var outcome = await requestJson("/novaforge/library/attach", { name: String(name || "") });
+      var box = byId("forgeLibraryResult");
+      if (box) {
+        box.innerHTML = "";
+        box.appendChild(el("p", "forge-library-summary", String(outcome.summary || outcome.reason || "")));
+        var running = outcome.running || ((outcome.entry || {}).running) || {};
+        if (running.pid) {
+          box.appendChild(el("p", "forge-library-evidence",
+            String(running.name || "") + " · pid " + String(running.pid) +
+            (running.window ? " · window " + String(running.window) : " · no window") +
+            " · owned by the operator, never closed here"));
+        }
+      }
+      setLibraryState(String(outcome.status || "attached"), outcome.attached ? "good" : "warn");
+      renderLaunchStages({});
+      renderObservation(outcome.observation);
+    } catch (error) {
+      libraryNotice("The running instance could not be read: " + requestErrorMessage(error), "error");
+    }
+  }
+
+  function openLibrary() {
+    loadLibrary();
+  }
+
   /* ── Tabs and wiring ───────────────────────────────────────── */
 
   function switchTab(viewId) {
@@ -4985,6 +9044,7 @@
       view.hidden = !selected;
     });
     if (viewId === "forgeHistoryView") loadHistory();
+    if (viewId === "forgeLibraryView") openLibrary();
     if (viewId === "forgeBenchmarkView") openBenchmarks();
     if (viewId === "forgeEvaluationView") openEvaluations();
     if (viewId === "forgeTimelineView") openTimeline();
@@ -5005,6 +9065,84 @@
       field.addEventListener("change", invalidateValidation);
     });
 
+    var librarySearch = byId("forgeLibrarySearch");
+    if (librarySearch) {
+      var libraryTimer = null;
+      librarySearch.addEventListener("input", function () {
+        if (libraryTimer) clearTimeout(libraryTimer);
+        libraryTimer = setTimeout(loadLibrary, 250);
+      });
+      librarySearch.addEventListener("keydown", function (event) {
+        if (event.key === "Enter") {
+          if (libraryTimer) clearTimeout(libraryTimer);
+          loadLibrary();
+        }
+      });
+    }
+    if (byId("forgeLibraryRefreshButton")) {
+      byId("forgeLibraryRefreshButton").addEventListener("click", loadLibrary);
+    }
+    if (byId("forgeLibraryCloseButton")) {
+      byId("forgeLibraryCloseButton").addEventListener("click", function () { closeOwnedGame(""); });
+    }
+    if (byId("forgeLibraryList")) {
+      // One delegation for every row: a row's buttons are rebuilt on each
+      // catalog read, so per-row listeners would leak as the list refreshes.
+      byId("forgeLibraryList").addEventListener("click", function (event) {
+        var target = event.target;
+        if (!target || typeof target.closest !== "function") return;
+        var launch = target.closest("[data-launch-game]");
+        if (launch) { planLibraryGame(launch.dataset.launchGame); return; }
+        var attach = target.closest("[data-attach-game]");
+        if (attach) { attachLibraryGame(attach.dataset.attachGame); return; }
+        var close = target.closest("[data-close-game]");
+        if (close) closeOwnedGame(close.dataset.closeGame);
+      });
+    }
+
+    // NF-15: observation controls. Each posts to the observer's own route; the
+    // response is the authoritative state and is rendered as-is.
+    if (byId("forgeObservationStart")) {
+      byId("forgeObservationStart").addEventListener("click", startObservation);
+      byId("forgeObservationPause").addEventListener("click", pauseObservation);
+      byId("forgeObservationResume").addEventListener("click", resumeObservation);
+      byId("forgeObservationStop").addEventListener("click", stopObservation);
+      byId("forgeObservationOnce").addEventListener("click", observeOnce);
+      byId("forgeObservationRefresh").addEventListener("click", function () {
+        loadObservationStatus();
+        loadObservationLadder();
+      });
+    }
+
+    // NF-16: the state reader is on demand. Nothing here polls a reading; a
+    // refresh re-reads the LAST result, and Analyze is the only door to a new
+    // one.
+    if (byId("forgeStateAnalyzeButton")) {
+      byId("forgeStateAnalyzeButton").addEventListener("click", analyzeGameState);
+      byId("forgeStateRefreshButton").addEventListener("click", loadGameState);
+      byId("forgeStateResetButton").addEventListener("click", resetGameState);
+    }
+
+    // NF-17: the objectives card reads what NF-16 last interpreted. Reading
+    // posts the same state analysis (one capture, one read, one interpretation)
+    // so the two cards never disagree about which frame they describe.
+    if (byId("forgeObjectivesReadButton")) {
+      byId("forgeObjectivesReadButton").addEventListener("click", readObjectives);
+      byId("forgeObjectivesRefreshButton").addEventListener("click", loadObjectives);
+      byId("forgeObjectivesResetButton").addEventListener("click", resetObjectives);
+    }
+
+    // NF-18: the knowledge card is READ-ONLY. It retrieves what validated
+    // readings stored; it never records an observation from a click.
+    if (byId("forgeKnowledgeRefreshButton")) {
+      byId("forgeKnowledgeRefreshButton").addEventListener("click", function () {
+        loadKnowledge();
+      });
+      byId("forgeKnowledgeGame").addEventListener("change", function () {
+        loadKnowledge();
+      });
+    }
+
     byId("forgeRefreshWindowsButton").addEventListener("click", loadWindows);
     byId("forgeSaveMissionButton").addEventListener("click", saveMission);
     byId("forgeValidateButton").addEventListener("click", validateMission);
@@ -5019,6 +9157,11 @@
     // the proposal the panel planned, never a rebuilt action.
     byId("forgeObjectiveSaveButton").addEventListener("click", function () { setObjectiveFromPanel(); });
     byId("forgeVerifyButton").addEventListener("click", function () { verifyFromPanel(); });
+    byId("forgeObjectiveKind").addEventListener("change", syncObjectiveFields);
+    syncObjectiveFields();
+    byId("forgeLoopRunButton").addEventListener("click", function () { runLoopFromPanel(); });
+    byId("forgeLoopCancelButton").addEventListener("click", function () { cancelLoopFromPanel(); });
+    byId("forgeDescribeFrame").addEventListener("click", function () { describeFrameFromPanel(); });
     byId("forgeActionPlanButton").addEventListener("click", function () { planActionFromPanel(); });
     byId("forgeActionRunButton").addEventListener("click", function () { runActionFromPanel(); });
     ["forgeActionKind", "forgeActionKey", "forgeActionPoint"].forEach(function (id) {
@@ -5032,6 +9175,35 @@
         renderGameplay(forge.current);
       });
     });
+    // NF-19: one bounded input action at a time; the card's buttons are enabled
+    // only from the server's own gate decision, never from the session state.
+    if (byId("forgeControlRunButton")) {
+      byId("forgeControlRunButton").addEventListener("click", function () { sendControlAction(); });
+      byId("forgeControlCancelButton").addEventListener("click", function () { cancelControlAction(); });
+      byId("forgeControlReleaseButton").addEventListener("click", function () { releaseControlInputs(); });
+      byId("forgeControlKind").addEventListener("change", syncControlFields);
+      syncControlFields();
+    }
+    // NF-20: build/approve/execute/cancel/replan. Build and Execute are
+    // separate presses on purpose: planning never sends input.
+    if (byId("forgePlanBuildButton")) {
+      byId("forgePlanBuildButton").addEventListener("click", function () { buildPlan(); });
+      byId("forgePlanExecuteButton").addEventListener("click", function () { executePlan(); });
+      byId("forgePlanReplanButton").addEventListener("click", function () { replanPlan(); });
+      byId("forgePlanCancelButton").addEventListener("click", function () { cancelPlan(); });
+    }
+    // NF-22: start (with the operator's approval), pause, resume, cancel and one
+    // answer per parked plan. Start is the only control that can lead to input
+    // being sent, and it is disabled whenever a run already holds the session.
+    if (byId("forgeAutonomyStartButton")) {
+      byId("forgeAutonomyStartButton").addEventListener("click", function () { startAutonomy(); });
+      byId("forgeAutonomyPauseButton").addEventListener("click", function () { pauseAutonomy(); });
+      byId("forgeAutonomyResumeButton").addEventListener("click", function () { resumeAutonomy(); });
+      byId("forgeAutonomyCancelButton").addEventListener("click", function () { cancelAutonomy(); });
+      byId("forgeAutonomyApproveButton").addEventListener("click", function () { answerAutonomy(true); });
+      byId("forgeAutonomyRejectButton").addEventListener("click", function () { answerAutonomy(false); });
+      byId("forgeAutonomyRefreshButton").addEventListener("click", loadAutonomy);
+    }
     byId("forgeHistoryRefreshButton").addEventListener("click", loadHistory);
 
     // NF-04 Benchmark Lab controls. Every edit invalidates the current
@@ -5073,6 +9245,43 @@
         updateEvaluationControls();
       });
       byId("forgeEvaluationConfirm").addEventListener("change", updateEvaluationControls);
+      byId("forgeEvaluationApprove").addEventListener("change", updateEvaluationControls);
+
+      // Controlled mode: the mode, objective and plan are all DIGEST inputs, so
+      // any edit drops the previous validation and the previous approval.
+      if (byId("forgeEvaluationMode")) {
+        byId("forgeEvaluationMode").addEventListener("change", function () {
+          setEvaluationMode(byId("forgeEvaluationMode").value);
+        });
+        byId("forgeEvaluationObjectiveKind").addEventListener("change", function () {
+          syncEvaluationObjectiveFields();
+          updateEvaluationObjectiveState();
+          invalidateEvaluationDigest();
+        });
+        ["forgeEvaluationObjectiveMode", "forgeEvaluationObjectiveParameter",
+          "forgeEvaluationObjectivePath", "forgeEvaluationObjectivePointer",
+          "forgeEvaluationObjectiveAge", "forgeEvaluationBudget"].forEach(function (id) {
+          var field = byId(id);
+          field.addEventListener("input", function () {
+            updateEvaluationObjectiveState();
+            updateEvaluationPlanSummary();
+            invalidateEvaluationDigest();
+          });
+          field.addEventListener("change", function () {
+            updateEvaluationObjectiveState();
+            updateEvaluationPlanSummary();
+            invalidateEvaluationDigest();
+          });
+        });
+        [["forgeEvaluationPlanAddKey", "key"], ["forgeEvaluationPlanAddHold", "hold"],
+          ["forgeEvaluationPlanAddClick", "click"], ["forgeEvaluationPlanAddMove", "move"]
+        ].forEach(function (pair) {
+          byId(pair[0]).addEventListener("click", function () { addEvaluationPlanAction(pair[1]); });
+        });
+        renderEvaluationPlan();
+        applyEvaluationMode();
+      }
+
       byId("forgeEvaluationPreflightButton").addEventListener("click", preflightEvaluation);
       byId("forgeEvaluationStartButton").addEventListener("click", startEvaluation);
       byId("forgeEvaluationCancelButton").addEventListener("click", cancelEvaluation);
@@ -5152,13 +9361,30 @@
 
     // A terminal session is not polled; resuming the tab refetches the record.
     document.addEventListener("visibilitychange", function () {
-      if (!document.hidden && forge.sessionId && forge.activeId) refreshSession();
+      if (document.hidden) return;
+      if (forge.sessionId && forge.activeId) refreshSession();
+      loadObservationStatus();
+      loadGameState();
+      loadObjectives();
+      loadKnowledge();
     });
     byId("forgeFrame").addEventListener("error", function () {
       liveError("The captured frame could not be displayed.");
     });
 
     loadStatus();
+    loadObservationStatus();
+    loadObservationLadder();
+    loadGameState();
+    loadObjectives();
+    loadKnowledge();
+    loadLoopCapability();
+    // NF-19: the card starts honest — no session has been read, so nothing can
+    // be sent. It is never left on its "checking…" placeholder.
+    renderControl(null);
+    // NF-20: same rule for the plan card — no plan was read, so Build stays
+    // disabled until a session's own gate says planning is possible.
+    renderPlan(null);
     loadMission().then(loadWindows);
     loadHistory();
   }
@@ -5166,6 +9392,12 @@
   window.setupNovaForge = setupNovaForge;
   window.NovaForgeLogic = {
     frameFreshness: frameFreshness,
+    frameLiveState: frameLiveState,
+    sourceLabel: sourceLabel,
+    backendLabel: backendLabel,
+    validationLabel: validationLabel,
+    targetVisibilityLabel: targetVisibilityLabel,
+    targetLine: targetLine,
     frameStillCurrent: frameStillCurrent,
     responseStillCurrent: responseStillCurrent,
     saveOutcome: saveOutcome,
@@ -5195,6 +9427,46 @@
     benchmarkDeltaText: benchmarkDeltaText,
     evaluationCanStart: evaluationCanStart,
     evaluationStatusText: evaluationStatusText,
+    // NF-17: the objective rows and the progress sentence are pure functions,
+    // so a Node test can assert what a panel shows without a DOM.
+    // NF-24: the scene sentence is what the card shows, so a Node test asserts
+    // exactly it rather than scraping rendered markup.
+    stateSceneText: stateSceneText,
+    objectiveProgressText: objectiveProgressText,
+    objectiveRow: objectiveRow,
+    objectiveStatusSummary: objectiveStatusSummary,
+    objectiveFacts: objectiveFacts,
+    objectiveHint: objectiveHint,
+    objectiveEventText: objectiveEventText,
+    // NF-18: knowledge rows, facts and the scope sentence are pure functions, so
+    // a Node test can assert exactly what the card will show.
+    knowledgeRecordRow: knowledgeRecordRow,
+    knowledgeFacts: knowledgeFacts,
+    knowledgeHint: knowledgeHint,
+    knowledgeHistoryRows: knowledgeHistoryRows,
+    // Controlled-evaluation decisions are exported so a Node test can drive
+    // them directly: guard, recovery, verdict translation and plan validation.
+    controlStartGuard: controlStartGuard,
+    controlStartRecovery: controlStartRecovery,
+    controlVerdictText: controlVerdictText,
+    controlVerdictTone: controlVerdictTone,
+    controlObjectiveSummary: controlObjectiveSummary,
+    controlActionSummary: controlActionSummary,
+    controlPlanErrors: controlPlanErrors,
+    controlObjectiveErrors: controlObjectiveErrors,
+    controlMetricText: controlMetricText,
+    controlStageText: controlStageText,
+    controlPolicyText: controlPolicyText,
+    evaluationPlanSummaryText: evaluationPlanSummaryText,
+    evaluationPlanAction: evaluationPlanAction,
+    evaluationMode: evaluationMode,
+    evaluationModeText: evaluationModeText,
+    renderEvaluationPlan: renderEvaluationPlan,
+    renderEvaluationRun: renderEvaluationRun,
+    evaluationState: function () { return forge.evaluation; },
+    applyEvaluationMode: applyEvaluationMode,
+    setEvaluationMode: setEvaluationMode,
+    syncEvaluationObjectiveFields: syncEvaluationObjectiveFields,
     readinessStateText: readinessStateText,
     readinessCountsText: readinessCountsText,
     evaluationBaselineText: evaluationBaselineText,
@@ -5230,5 +9502,71 @@
     renderTimelineCompare: renderTimelineCompare,
     renderTimelineMeta: renderTimelineMeta,
     timelineState: function () { return forge.timeline; },
+    // NF-08: the loop's renderer and status translation are exported so a DOM
+    // test asserts on the nodes built for a completed, refused and unavailable
+    // loop, not on the source text that builds them.
+    loopStatusText: loopStatusText,
+    // NF-12: the library's status/stage translation is pure, so a Node test can
+    // assert that a started process is never described as a verified launch.
+    // NF-15: the observation card's pure decisions are exported so a DOM test
+    // can assert that a paused or stale observation never presents its last
+    // frame as a live feed, and that no unmeasured figure prints as zero.
+    observationControls: observationControls,
+    observationLiveState: observationLiveState,
+    observationLadderHeadline: observationLadderHeadline,
+    observationLadderRows: observationLadderRows,
+    observationStageStateText: observationStageStateText,
+    observationFreshness: observationFreshness,
+    observationReasonText: observationReasonText,
+    observationRateText: observationRateText,
+    observationLatencyText: observationLatencyText,
+    observationDelayText: observationDelayText,
+    observationTargetText: observationTargetText,
+    observationWindowText: observationWindowText,
+    observationFactRows: observationFactRows,
+    renderObservationStatus: renderObservationStatus,
+    observationState: function () { return forge.observation; },
+    // NF-16: the state card's pure translations are exported so a Node test can
+    // assert that a missing field reads as absent, never as a zero or a fact.
+    stateFactRows: stateFactRows,
+    stateHudRows: stateHudRows,
+    stateChangeText: stateChangeText,
+    stateEntitySummary: stateEntitySummary,
+    stateCoverageText: stateCoverageText,
+    stateProfileText: stateProfileText,
+    stateHintText: stateHintText,
+    renderGameState: renderGameState,
+    gameStatusLabel: gameStatusLabel,
+    gameStatusTone: gameStatusTone,
+    gameStageText: gameStageText,
+    memoryText: memoryText,
+    renderLoop: renderLoop,
+    renderTrialHistory: renderTrialHistory,
+    refreshTrialHistory: refreshTrialHistory,
+    trialOutcomeText: trialOutcomeText,
+    loadLoopCapability: loadLoopCapability,
+    describeFrameFromPanel: describeFrameFromPanel,
+    renderVisionInterpretation: renderVisionInterpretation,
+    objectivePayload: objectivePayload,
+    // NF-22: the autonomous card's own decisions and its fact list are pure, so
+    // a Node test asserts the button states and the labels the operator sees
+    // (start only without a run, approval only while parked, never a live badge
+    // over simulated evidence) without a browser.
+    autonomyView: autonomyView,
+    autonomyFactList: autonomyFactList,
+    autonomyRun: autonomyRun,
+    autonomyBudgets: autonomyBudgets,
+    autonomyState: function () { return forge.autonomy; },
+    renderAutonomy: renderAutonomy,
+    // NF-19: the control card's pure decisions and request builder, so a Node
+    // test asserts that a blocked gate disables sending and that a half point
+    // is omitted rather than guessed.
+    inputControlState: inputControlState,
+    planView: planView,
+    renderPlan: renderPlan,
+    controlPayloadFor: controlPayloadFor,
+    controlState: function () { return forge.control; },
+    syncObjectiveFields: syncObjectiveFields,
+    loopState: function () { return forge.loop; },
   };
 })();

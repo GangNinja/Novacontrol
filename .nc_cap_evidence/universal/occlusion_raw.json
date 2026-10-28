@@ -1,0 +1,352 @@
+{
+  "target": "NC CAPTURE OCCLUSION TARGET",
+  "cover_with": "Freebuff",
+  "phases": {
+    "foreground": [
+      {
+        "index": 0,
+        "ok": true,
+        "backend": "printwindow",
+        "source": "window_surface",
+        "content": "valid",
+        "livable": true,
+        "reason": "",
+        "latency_ms": 429.0,
+        "width": 1240,
+        "height": 840,
+        "hash": "0b1342e5ab0678db",
+        "attempts": [
+          {
+            "backend": "printwindow",
+            "source": "window_surface",
+            "ok": true,
+            "reason": "valid"
+          }
+        ]
+      },
+      {
+        "index": 1,
+        "ok": true,
+        "backend": "printwindow",
+        "source": "window_surface",
+        "content": "valid",
+        "livable": true,
+        "reason": "",
+        "latency_ms": 59.9,
+        "width": 1240,
+        "height": 840,
+        "hash": "0d69d5535f741426",
+        "attempts": [
+          {
+            "backend": "printwindow",
+            "source": "window_surface",
+            "ok": true,
+            "reason": "valid"
+          }
+        ]
+      },
+      {
+        "index": 2,
+        "ok": true,
+        "backend": "printwindow",
+        "source": "window_surface",
+        "content": "valid",
+        "livable": true,
+        "reason": "",
+        "latency_ms": 59.2,
+        "width": 1240,
+        "height": 840,
+        "hash": "8b715418ec0ec6c7",
+        "attempts": [
+          {
+            "backend": "printwindow",
+            "source": "window_surface",
+            "ok": true,
+            "reason": "valid"
+          }
+        ]
+      },
+      {
+        "index": 3,
+        "ok": true,
+        "backend": "printwindow",
+        "source": "window_surface",
+        "content": "valid",
+        "livable": true,
+        "reason": "",
+        "latency_ms": 66.7,
+        "width": 1240,
+        "height": 840,
+        "hash": "92aca9a781188e89",
+        "attempts": [
+          {
+            "backend": "printwindow",
+            "source": "window_surface",
+            "ok": true,
+            "reason": "valid"
+          }
+        ]
+      },
+      {
+        "index": 4,
+        "ok": true,
+        "backend": "printwindow",
+        "source": "window_surface",
+        "content": "valid",
+        "livable": true,
+        "reason": "",
+        "latency_ms": 67.4,
+        "width": 1240,
+        "height": 840,
+        "hash": "259005ec3639e5de",
+        "attempts": [
+          {
+            "backend": "printwindow",
+            "source": "window_surface",
+            "ok": true,
+            "reason": "valid"
+          }
+        ]
+      }
+    ],
+    "covered": [
+      {
+        "index": 0,
+        "ok": true,
+        "backend": "printwindow",
+        "source": "window_surface",
+        "content": "valid",
+        "livable": true,
+        "reason": "",
+        "latency_ms": 74.7,
+        "width": 1240,
+        "height": 840,
+        "hash": "ff70b339fff3cc51",
+        "attempts": [
+          {
+            "backend": "printwindow",
+            "source": "window_surface",
+            "ok": true,
+            "reason": "valid"
+          }
+        ]
+      },
+      {
+        "index": 1,
+        "ok": true,
+        "backend": "printwindow",
+        "source": "window_surface",
+        "content": "valid",
+        "livable": true,
+        "reason": "",
+        "latency_ms": 72.9,
+        "width": 1240,
+        "height": 840,
+        "hash": "28cdd33397090ead",
+        "attempts": [
+          {
+            "backend": "printwindow",
+            "source": "window_surface",
+            "ok": true,
+            "reason": "valid"
+          }
+        ]
+      },
+      {
+        "index": 2,
+        "ok": true,
+        "backend": "printwindow",
+        "source": "window_surface",
+        "content": "valid",
+        "livable": true,
+        "reason": "",
+        "latency_ms": 80.3,
+        "width": 1240,
+        "height": 840,
+        "hash": "45384e269757e566",
+        "attempts": [
+          {
+            "backend": "printwindow",
+            "source": "window_surface",
+            "ok": true,
+            "reason": "valid"
+          }
+        ]
+      },
+      {
+        "index": 3,
+        "ok": true,
+        "backend": "printwindow",
+        "source": "window_surface",
+        "content": "valid",
+        "livable": true,
+        "reason": "",
+        "latency_ms": 82.3,
+        "width": 1240,
+        "height": 840,
+        "hash": "6cd8de38cef08a97",
+        "attempts": [
+          {
+            "backend": "printwindow",
+            "source": "window_surface",
+            "ok": true,
+            "reason": "valid"
+          }
+        ]
+      },
+      {
+        "index": 4,
+        "ok": true,
+        "backend": "printwindow",
+        "source": "window_surface",
+        "content": "valid",
+        "livable": true,
+        "reason": "",
+        "latency_ms": 86.6,
+        "width": 1240,
+        "height": 840,
+        "hash": "f1a8a8f27b216067",
+        "attempts": [
+          {
+            "backend": "printwindow",
+            "source": "window_surface",
+            "ok": true,
+            "reason": "valid"
+          }
+        ]
+      }
+    ],
+    "restored": [
+      {
+        "index": 0,
+        "ok": true,
+        "backend": "printwindow",
+        "source": "window_surface",
+        "content": "valid",
+        "livable": true,
+        "reason": "",
+        "latency_ms": 77.4,
+        "width": 1240,
+        "height": 840,
+        "hash": "7ba3d91682cb1966",
+        "attempts": [
+          {
+            "backend": "printwindow",
+            "source": "window_surface",
+            "ok": true,
+            "reason": "valid"
+          }
+        ]
+      },
+      {
+        "index": 1,
+        "ok": true,
+        "backend": "printwindow",
+        "source": "window_surface",
+        "content": "valid",
+        "livable": true,
+        "reason": "",
+        "latency_ms": 72.0,
+        "width": 1240,
+        "height": 840,
+        "hash": "8fc0c0f52d3b84e0",
+        "attempts": [
+          {
+            "backend": "printwindow",
+            "source": "window_surface",
+            "ok": true,
+            "reason": "valid"
+          }
+        ]
+      }
+    ]
+  },
+  "geometry": {
+    "title": "NC CAPTURE OCCLUSION TARGET",
+    "handle": 4065532,
+    "pid": 12536,
+    "bounds": [
+      240,
+      240,
+      1480,
+      1080
+    ],
+    "client": [
+      16,
+      62,
+      1208,
+      762
+    ],
+    "foreground": true,
+    "minimized": false,
+    "visible": true,
+    "scale": 1.0
+  },
+  "focus_cover": "{\"handle\":2359988,\"title\":\"Freebuff Desktop\",\"pid\":3800,\"valid\":true,\"minimized\":false,\"maximized\":false,\"visible\":true,\"foreground\":true,\"bounds\":[0,0,1440,852],\"client\":[1440,852],\"style\":\"0x14C70000\"}",
+  "geometry_covered": {
+    "foreground": false,
+    "minimized": false,
+    "bounds": [
+      240,
+      240,
+      1480,
+      1080
+    ]
+  },
+  "covered_crop": {
+    "ok": true,
+    "source": "window_crop",
+    "error": "",
+    "verdict": {
+      "capture_ok": true,
+      "target_visible": true,
+      "fresh": false,
+      "content_ok": false,
+      "livable": false,
+      "reason": "The target is not foreground, so a desktop crop of its rectangle may contain another window. Use a window-surface backend instead.",
+      "content": "not_target",
+      "backend": "gdi_display",
+      "source": "window_crop",
+      "limitations": []
+    }
+  },
+  "minimize": {
+    "handle": 4065532,
+    "title": "NC CAPTURE OCCLUSION TARGET",
+    "minimized": true,
+    "visible": true
+  },
+  "geometry_minimized": {
+    "foreground": false,
+    "minimized": true,
+    "bounds": [
+      -64000,
+      -64000,
+      -63372,
+      -63900
+    ]
+  },
+  "minimized_capture": {
+    "ok": false,
+    "code": "target_minimized",
+    "reason": "The target window is minimized; no capture backend can render it.",
+    "attempts": [],
+    "file_exists": false
+  },
+  "restore": {
+    "handle": 4065532,
+    "title": "NC CAPTURE OCCLUSION TARGET",
+    "minimized": false,
+    "visible": true
+  },
+  "worker": {
+    "spawns": 1,
+    "frames": 13
+  },
+  "close": {
+    "handle": 4065532,
+    "title": "",
+    "minimized": false,
+    "visible": false
+  }
+}

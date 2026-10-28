@@ -1,0 +1,154 @@
+{
+  "target": "Freedom Fighters",
+  "router_wired": true,
+  "capture_capabilities": {
+    "available": true,
+    "reason": "",
+    "backends": [
+      {
+        "backend": "printwindow",
+        "captures": "window_surface",
+        "unfocused": true,
+        "occluded": true,
+        "minimized": false,
+        "requires_foreground": false,
+        "notes": "PrintWindow with PW_RENDERFULLCONTENT. Captures the window's own surface even while it is covered, but some DirectX renderers answer black; every frame is blank-checked.",
+        "available": true,
+        "unavailable_reason": ""
+      },
+      {
+        "backend": "gdi_display",
+        "captures": "display",
+        "unfocused": false,
+        "occluded": false,
+        "minimized": false,
+        "requires_foreground": true,
+        "notes": "GDI CopyFromScreen of the primary display, cropped to the window. Cannot see a covered or minimized window; only valid while the target is foreground.",
+        "available": true,
+        "unavailable_reason": ""
+      }
+    ]
+  },
+  "desktop_runner": "LocalDesktopRunner",
+  "validation": {
+    "valid": true,
+    "errors": [],
+    "target": {
+      "title": "Freedom Fighters",
+      "handle": 1509554,
+      "pid": 28600,
+      "bounds": [
+        0,
+        0,
+        2880,
+        1800
+      ],
+      "client": [
+        0,
+        0,
+        2880,
+        1800
+      ],
+      "width": 2880,
+      "height": 1800,
+      "scale": 2.0,
+      "foreground": true,
+      "minimized": false,
+      "visible": true
+    }
+  },
+  "session": {
+    "state": "RUNNING",
+    "pause_reason": "",
+    "frames_recorded": 6,
+    "observations": 6,
+    "errors": []
+  },
+  "frames": [
+    {
+      "seq": 1,
+      "backend": "printwindow",
+      "source": "window_surface",
+      "content": "valid",
+      "livable": true,
+      "capture_ok": true,
+      "fresh": true,
+      "width": 2880,
+      "height": 1800,
+      "capture_ms": 176.0,
+      "age_ms": 1.1,
+      "stale": false
+    },
+    {
+      "seq": 2,
+      "backend": "printwindow",
+      "source": "window_surface",
+      "content": "valid",
+      "livable": true,
+      "capture_ok": true,
+      "fresh": true,
+      "width": 2880,
+      "height": 1800,
+      "capture_ms": 144.0,
+      "age_ms": 1.6,
+      "stale": false
+    },
+    {
+      "seq": 3,
+      "backend": "printwindow",
+      "source": "window_surface",
+      "content": "valid",
+      "livable": true,
+      "capture_ok": true,
+      "fresh": true,
+      "width": 2880,
+      "height": 1800,
+      "capture_ms": 176.0,
+      "age_ms": 5.5,
+      "stale": false
+    },
+    {
+      "seq": 4,
+      "backend": "printwindow",
+      "source": "window_surface",
+      "content": "valid",
+      "livable": true,
+      "capture_ok": true,
+      "fresh": true,
+      "width": 2880,
+      "height": 1800,
+      "capture_ms": 132.0,
+      "age_ms": 33.4,
+      "stale": false
+    },
+    {
+      "seq": 5,
+      "backend": "printwindow",
+      "source": "window_surface",
+      "content": "valid",
+      "livable": true,
+      "capture_ok": true,
+      "fresh": true,
+      "width": 2880,
+      "height": 1800,
+      "capture_ms": 152.0,
+      "age_ms": 28.5,
+      "stale": false
+    },
+    {
+      "seq": 6,
+      "backend": "printwindow",
+      "source": "window_surface",
+      "content": "valid",
+      "livable": true,
+      "capture_ok": true,
+      "fresh": true,
+      "width": 2880,
+      "height": 1800,
+      "capture_ms": 117.0,
+      "age_ms": 66.7,
+      "stale": false
+    }
+  ],
+  "status_capabilities": {}
+}

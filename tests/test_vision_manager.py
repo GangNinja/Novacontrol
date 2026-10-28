@@ -156,6 +156,48 @@ class VisionProviderBoundaryTests(unittest.TestCase):
         self.assertIn("ollama", wrapped.name)
         self.assertEqual(wrapped.model, "qwen3-vl:4b")
 
+    def test_a_structured_call_stays_on_the_multimodal_surface(self) -> None:
+        """A JSON request must not be rerouted to Ollama's native endpoint.
+
+        The native endpoint takes a text ``content`` plus an ``images`` list;
+        this wrapper sends OpenAI content BLOCKS with an ``image_url``, so the
+        ``json_mode`` hint (which selects the native path) would strip the
+        image from the call. Structuredness is expressed with
+        ``response_format`` on the compatible surface instead, and an
+        unstructured call sends neither field.
+        """
+        import asyncio
+        from tempfile import TemporaryDirectory
+
+        from PIL import Image
+
+        from novacontrol.integrations.llm import OpenAICompatibleLLMProvider
+
+        seen: list[dict[str, object]] = []
+
+        class Recorder(OpenAICompatibleLLMProvider):
+            async def complete(self, messages, **kwargs):  # type: ignore[override]
+                seen.append(dict(kwargs))
+                return '{"description": "a window"}'
+
+        provider = Recorder(
+            name="vision:ollama",
+            base_url="http://localhost:11434",
+            api_key="x",
+            model="qwen3-vl:4b",
+        )
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "frame.png"
+            Image.new("RGB", (64, 64), (240, 240, 240)).save(path)
+            wrapped = build_vision_provider(provider)
+            asyncio.run(wrapped.see(prompt="describe", image_path=str(path), structured=True))
+            asyncio.run(wrapped.see(prompt="describe", image_path=str(path)))
+
+        self.assertEqual(seen[0].get("response_format"), {"type": "json_object"})
+        self.assertNotIn("json_mode", seen[0])
+        self.assertNotIn("response_format", seen[1])
+        self.assertNotIn("json_mode", seen[1])
+
 
 class OcrEngineTests(unittest.TestCase):
     """OCR is a named engine, and the shipped one reuses what already existed."""

@@ -773,10 +773,11 @@ class NovaForgeCoach:
             },
             "experiments": self._experiment_status(),
             "limits": [
-                "No objective verifier exists: no analysis and no experiment can claim a "
-                "gameplay improvement, a score, or a completed objective.",
-                "No action path exists: findings about actions, policies or in-game "
-                "decisions cannot be produced from this build's evidence.",
+                "An analysis or an experiment states that a gameplay objective was achieved "
+                "ONLY when the session record carries a decided verdict from the independent "
+                "verifier; it never infers a score or a win from an observation.",
+                "Actions are injected only through an approved, digest-bound proposal, so a "
+                "finding about an action describes what was recorded, never a strategy.",
                 "Analysis reads recorded evidence; it cannot observe a live session.",
                 "A session with no recorded events, frames or telemetry answers "
                 "insufficient_evidence rather than diagnosing from nothing.",
@@ -1444,30 +1445,133 @@ def analyse_session(
     if evaluation:
         findings.extend(_evaluation_findings(subject, evaluation, benchmark))
 
-    # -- structural limits -------------------------------------------------
-    findings.append(
-        _finding(
-            subject=subject,
-            category="objective_verifier_missing",
-            title="No objective was verified by this session",
-            severity="info",
-            severity_basis=(
-                "This build has no objective verifier, so no finding and no experiment may "
-                "claim that an objective was achieved."
-            ),
-            kind="observed",
-            confidence="strong",
-            confidence_basis="The capability registry states that no verifier exists.",
-            explanation=(
-                "Completion means the observation recorded its required data; it is never a "
-                "won objective or a gameplay score."
-            ),
-            evidence=_refs({"kind": "capability", "name": "objective_verification", "available": False}),
-            alternatives=(),
-            limitations=("A future phase with a real verifier would add this finding as a "
-                         "measurable result instead of a limitation.",),
+    # -- the session's own objective verdict --------------------------------
+    # NF-07 added an independent objective verifier, so "no verifier exists in
+    # this build" is no longer a true statement about the capability. What an
+    # analysis can state is what THIS session's record holds, and the three
+    # cases are reported separately: a decided verdict (quoted, with the
+    # verifier's own evidence), a configured objective nobody has decided, and
+    # no objective at all. A verified success must never be described as
+    # unverified, and a completed observation is still never a won game.
+    verification = _mapping(getattr(record, "verification", {}) or {})
+    objective = getattr(record, "objective", None)
+    outcome = str(verification.get("outcome") or "")
+    decided = bool(verification.get("decided")) or outcome in {
+        "verified_success",
+        "verified_failure",
+    }
+    if decided:
+        success = outcome == "verified_success"
+        findings.append(
+            _finding(
+                subject=subject,
+                category="objective_verified" if success else "objective_failed",
+                title=(
+                    "The session's objective was verified as SUCCESS"
+                    if success
+                    else "The session's objective was verified as FAILURE"
+                ),
+                severity="info",
+                severity_basis=(
+                    "An independent verifier read the target and returned a decided outcome; "
+                    "this is a recorded result, not an inference from the actions sent."
+                ),
+                kind="observed",
+                confidence="strong",
+                confidence_basis=(
+                    "The session record carries the verifier's outcome, reason and evidence."
+                ),
+                explanation=str(verification.get("reason") or ""),
+                evidence=_refs(
+                    *[
+                        _event_ref(event)
+                        for event in event_objects
+                        if event.type == "objective.verified"
+                    ][:2],
+                    {
+                        "kind": "objective_verification",
+                        "session_id": session_id,
+                        "outcome": outcome,
+                    },
+                ),
+                alternatives=(),
+                limitations=(
+                    "The verdict describes what the verifier can observe; it is not a "
+                    "measure of play quality beyond that objective.",
+                ),
+            )
         )
-    )
+    elif objective is not None:
+        findings.append(
+            _finding(
+                subject=subject,
+                category="objective_unverified",
+                title="An objective was configured but never decided",
+                severity="info",
+                severity_basis=(
+                    "A configured objective with no decided verdict means the record cannot "
+                    "say whether it was met; neither can an analysis."
+                ),
+                kind="observed",
+                confidence="strong",
+                confidence_basis="The session record carries the definition and no verdict.",
+                explanation=(
+                    "Completion means the observation recorded its required data; it is never "
+                    "a won objective or a gameplay score."
+                ),
+                evidence=_refs(
+                    {
+                        "kind": "record",
+                        "record": "session",
+                        "id": session_id,
+                        "field": "objective",
+                    },
+                    *[
+                        _event_ref(event)
+                        for event in event_objects
+                        if event.type == "objective.configured"
+                    ][:1],
+                ),
+                alternatives=(),
+                limitations=(
+                    "No verifier verdict was recorded for this session, so its outcome stays "
+                    "open rather than assumed.",
+                ),
+            )
+        )
+    else:
+        findings.append(
+            _finding(
+                subject=subject,
+                category="objective_verifier_missing",
+                title="No objective was verified by this session",
+                severity="info",
+                severity_basis=(
+                    "This session configured no checkable objective, so no finding and no "
+                    "experiment may claim that an objective was achieved."
+                ),
+                kind="observed",
+                confidence="strong",
+                confidence_basis="The session record carries no objective definition.",
+                explanation=(
+                    "Completion means the observation recorded its required data; it is never "
+                    "a won objective or a gameplay score."
+                ),
+                evidence=_refs(
+                    {
+                        "kind": "record",
+                        "record": "session",
+                        "id": session_id,
+                        "field": "objective",
+                    }
+                ),
+                alternatives=(),
+                limitations=(
+                    "Configure and verify an objective on the session to turn this "
+                    "limitation into a measurable result.",
+                ),
+            )
+        )
 
     findings = findings[:MAX_FINDINGS]
     recommendations = _recommendations_for(findings, subject, status_index)
@@ -1745,13 +1849,29 @@ def _earliest_recoverable_error(
         candidate = event
         break
     if candidate is None:
+        # Whether a clean run WAS a success is the objective verifier's answer, not
+        # this function's. When the session carries a decided verdict it is quoted
+        # here; when it does not, the absence of failures still is not a success.
+        verdict = next(
+            (
+                item
+                for item in findings
+                if item.category in {"objective_verified", "objective_failed"}
+            ),
+            None,
+        )
         return {
             "available": False,
             "candidate": None,
             "reason": (
                 "No failure signature was recorded, so there is no earliest recoverable "
-                "error to name. That is not the same as success: no objective verifier "
-                "exists in this build."
+                f"error to name. The objective outcome is recorded separately ({verdict.title})."
+                if verdict is not None
+                else (
+                    "No failure signature was recorded, so there is no earliest recoverable "
+                    "error to name. That is not the same as success: no objective verifier "
+                    "has produced a decided verdict for this session."
+                )
             ),
             "later_symptoms": [],
             "counter_evidence": [],
@@ -1897,8 +2017,9 @@ def _analysis_limitations(
     limitations = [
         "An analysis reads recorded evidence; it cannot observe a live session and it "
         "modifies no record.",
-        "No objective verifier exists in this build, so no analysis states that a goal "
-        "was achieved, a game was played well, or a score changed.",
+        "An analysis states that a goal was achieved only when the session record carries "
+        "a decided verdict from the objective verifier; it never infers play quality or a "
+        "score from an observation.",
         "Temporal order alone never establishes causation; a hypothesis is labelled as one.",
     ]
     if not recorded_timeline:

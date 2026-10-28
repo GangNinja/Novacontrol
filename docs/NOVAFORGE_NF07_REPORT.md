@@ -148,6 +148,22 @@ Every new test was mutation-checked: reverting its fix makes it fail (`_desynced
 → worker desync test fails; `begin_session` counter reset removal → cleanup test fails;
 `reset_abort` removal → next-session test fails).
 
+### 5.5 Controlled evaluation over HTTP (2026-10-21)
+
+`scripts/novaforge_controlled_evaluation_acceptance.py` closes the gap between "the manager can do it" and
+"an operator can do it over the API". It starts its own server on a free loopback port in a disposable
+working directory, launches the disposable harness, and drives the whole chain: preflight → digest-bound
+approval → refusal of a start with no digest and of another plan's digest (both `422`, zero benchmark runs)
+→ approved start → one Guardian-gated key → the harness retitles → `completed`, `valid`,
+`verified_success` → report and timeline evidence resolved.
+
+Observed: `objective_success 1.0`, `actions_executed 1`, one `executed` step with `remaining_actions 0`,
+control states `execution: completed` / `verification: verified_success` / `cleanup: completed`, and the
+report's `objective_verified: true` with `real_gameplay_control_exercised: true`. **15/15 steps, exit 0,
+five consecutive runs.** The run found and now pins two defects (a console window stealing the foreground
+from the target, and a race against the session's own target confirmation); both are written up as D6 in
+`docs/NOVAFORGE_NF07_INTEGRATION_GAP_AUDIT.md` §12.
+
 ## 6. What this build still cannot do — stated, not hidden
 
 * Only a **window-title** objective is checkable. A session with no objective never
@@ -156,8 +172,10 @@ Every new test was mutation-checked: reverting its fix makes it fail (`_desynced
   refused by policy rather than approximated.
 * Nothing launches a game, and no capture or control of a protected/anti-cheat process is
   attempted.
-* NF-04/NF-05/NF-06 (benchmark lab, game evaluation, coach) remain observation-only — an
-  evaluation run sends no input and claims no objective.
+* NF-04's observation scenarios still send no input and configure no objective. NF-05 can
+  now run a **controlled evaluation** (an operator-authored, digest-approved plan against
+  the disposable artifact harness) and record the session's real verdict; it still has no
+  planner, so it cannot choose an action or score autonomous play. NF-06 remains read-only.
 
 ## 7. Verdicts
 

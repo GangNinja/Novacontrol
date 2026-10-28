@@ -7,12 +7,14 @@ import asyncio
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 from conftest import AllowGateway
 from novacontrol.core.events import Event, EventBus
@@ -505,6 +507,21 @@ class DesktopModelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(d["actions"]), 1)
 
 
+class ProcessIdentityProbeTests(unittest.IsolatedAsyncioTestCase):
+    """A host that cannot read a pid says so; it never claims the process exited."""
+
+    async def test_a_host_without_the_probe_raises_instead_of_reporting_gone(self) -> None:
+        runner = LocalDesktopRunner()
+        with mock.patch("novacontrol.desktop.controller.sys.platform", "linux"):
+            with self.assertRaises(RuntimeError):
+                await runner.process_identity(4321)
+
+    async def test_an_unusable_pid_is_still_none_not_an_error(self) -> None:
+        runner = LocalDesktopRunner()
+        self.assertIsNone(await runner.process_identity(0))
+        self.assertIsNone(await runner.process_identity("not-a-pid"))
+
+
 # ---------------------------------------------------------------------------
 # Post-execution verification (JARVIS must not report success that never happened)
 # ---------------------------------------------------------------------------
@@ -861,6 +878,78 @@ class JarvisDesktopCommandTests(unittest.TestCase):
         self.assertEqual(captured["args"][0], "explorer")
         self.assertEqual(captured["args"][1], "shell:AppsFolder\\App_abc!App")
 
+    def test_a_path_launch_starts_an_exe_from_its_own_directory(self) -> None:
+        """NF-23 measured defect: a path launched with the inherited cwd.
+
+        Freedom Fighters resolves `Scenes\\` and its `.wav` bank beside the
+        executable; started from the application's directory it exited in under
+        a second with no window, and from its own directory it opens normally.
+        Explorer's own behaviour — the executable's folder as the working
+        directory — is therefore the contract for an `.exe` target.
+        """
+        import subprocess as sp
+        import tempfile
+        import unittest.mock
+
+        with tempfile.TemporaryDirectory() as folder:
+            exe = Path(folder) / "Freedom.Exe"
+            exe.write_bytes(b"MZ")
+            runner = LocalDesktopRunner()
+            captured: dict[str, object] = {}
+            real_popen = sp.Popen
+
+            def fake_popen(args, **kwargs):
+                captured["args"] = list(args)
+                captured["cwd"] = kwargs.get("cwd")
+                return real_popen([sys.executable, "-c", "pass"], stdout=sp.DEVNULL)
+
+            async def run():
+                with unittest.mock.patch.object(
+                    LocalDesktopRunner, "_resolve_app_target",
+                    staticmethod(lambda t: str(exe)),
+                ), unittest.mock.patch(
+                    "sys.platform", "win32"
+                ), unittest.mock.patch(
+                    "novacontrol.desktop.controller.subprocess.Popen",
+                    side_effect=fake_popen,
+                ):
+                    return await runner._launch_open("freedom fighters")
+
+            asyncio.run(run())
+
+        self.assertEqual(captured["cwd"], str(exe.parent))
+        self.assertEqual(captured["args"], ["cmd", "/c", "start", "", str(exe)])
+
+    def test_a_uri_launch_keeps_the_inherited_directory(self) -> None:
+        """A URI (and any non-exe) target resolves its own directory."""
+        import subprocess as sp
+        import unittest.mock
+
+        runner = LocalDesktopRunner()
+        captured: dict[str, object] = {}
+        real_popen = sp.Popen
+
+        def fake_popen(args, **kwargs):
+            captured["args"] = list(args)
+            captured["cwd"] = kwargs.get("cwd")
+            return real_popen([sys.executable, "-c", "pass"], stdout=sp.DEVNULL)
+
+        async def run():
+            with unittest.mock.patch.object(
+                LocalDesktopRunner, "_resolve_app_target",
+                staticmethod(lambda t: "steam://open/main"),
+            ), unittest.mock.patch(
+                "sys.platform", "win32"
+            ), unittest.mock.patch(
+                "novacontrol.desktop.controller.subprocess.Popen",
+                side_effect=fake_popen,
+            ):
+                return await runner._launch_open("steam")
+
+        asyncio.run(run())
+        self.assertIsNone(captured["cwd"])
+        self.assertEqual(captured["args"], ["cmd", "/c", "start", "", "steam://open/main"])
+
     def test_web_search_plan_carries_query(self) -> None:
         from novacontrol.desktop.controller import DesktopAutomationController
         from novacontrol.desktop.models import DesktopAction, DesktopActionType
@@ -1074,6 +1163,73 @@ class CaptureWorkerProtocolTests(unittest.IsolatedAsyncioTestCase):
         stats = await worker.stats()
         self.assertEqual(stats.working_set_bytes, 4096)
         self.assertEqual(stats.cpu_ms, 12)
+
+
+class SpawnedHelpersCreateNoConsoleWindowTests(unittest.IsolatedAsyncioTestCase):
+    """A console flashed by a helper takes the foreground from the guarded target.
+
+    Observed live: the capture worker started on a session's first frame, its
+    new console window took focus, and the Guardian then DENIED the first
+    approved key with "the target is not the foreground window" -- a refusal
+    caused by the probe, not by the plan. Both helpers speak pipes, so neither
+    needs a console at all.
+    """
+
+    async def test_the_capture_worker_is_spawned_without_a_console(self) -> None:
+        stdout = asyncio.StreamReader()
+        stdout.feed_data(b"ready 800x600\n")
+        stdout.feed_eof()
+        stderr = asyncio.StreamReader()
+        stderr.feed_eof()
+
+        class _Process:
+            returncode = 0
+            stdin = None
+
+            def __init__(self) -> None:
+                self.stdout = stdout
+                self.stderr = stderr
+
+        captured: dict[str, object] = {}
+
+        async def fake_exec(*args: object, **kwargs: object) -> _Process:
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return _Process()
+
+        worker = PersistentScreenCapture(arguments=("-NoProfile", "-Command", "noop"))
+        self.addCleanup(worker.aclose)
+        with mock.patch("asyncio.create_subprocess_exec", fake_exec):
+            self.assertTrue(await worker.ensure_started())
+        kwargs = captured["kwargs"]
+        assert isinstance(kwargs, dict)
+        self.assertEqual(
+            kwargs.get("creationflags"), getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        )
+
+    async def test_window_probes_run_without_a_console(self) -> None:
+        captured: dict[str, object] = {}
+
+        class _Process:
+            returncode = 0
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                return b"probe ok", b""
+
+        async def fake_exec(*args: object, **kwargs: object) -> _Process:
+            captured["kwargs"] = kwargs
+            return _Process()
+
+        runner = LocalDesktopRunner()
+        with mock.patch("asyncio.create_subprocess_exec", fake_exec):
+            output = await runner._powershell("Write-Output 'probe ok'")
+
+        self.assertEqual(output, "probe ok")
+        kwargs = captured["kwargs"]
+        assert isinstance(kwargs, dict)
+        self.assertEqual(
+            kwargs.get("creationflags"), getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        )
 
 
 class FakeCapture:

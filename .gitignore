@@ -36,3 +36,11 @@ token.txt
 # Generated Build artifacts (Build tab "Save to disk")
 build_workspace/
 /.codex-audit-temp/
+# NF-23…NF-26 verification session artifacts. The probe scripts and the raw JSON
+# numbers are kept because the reports cite them by path; the logs, frame dumps
+# and rendered PNGs they produced are not (they are tens of megabytes).
+.nc23_tmp/**/*.log
+.nc23_tmp/out/
+.nc24_tmp/**/*.log
+.nc_cap_evidence/**/*.png
+.nc_audit_full.log

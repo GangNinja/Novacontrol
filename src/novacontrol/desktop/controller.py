@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import os
@@ -960,11 +960,31 @@ class LocalDesktopRunner:
 
     async def _launch_open(self, target: str) -> int:
         resolved = self._resolve_app_target(target)
+        # An executable is started with ITS OWN directory as the working
+        # directory — which is exactly what Explorer does, and what a title that
+        # resolves its assets relative to its folder needs. Measured in NF-23: a
+        # path launched from this process's directory produced a process that
+        # exited in under a second with no window (Freedom Fighters loads
+        # `Scenes\` and a `.wav` bank beside its exe); started from the game's
+        # own directory it opens normally. Shell targets, URIs and `.lnk`
+        # shortcuts resolve their own directory, so they keep the inherited cwd.
+        cwd: str | None = None
+        candidate = Path(str(resolved))
+        try:
+            if (
+                candidate.is_absolute()
+                and candidate.suffix.lower() == ".exe"
+                and candidate.parent.is_dir()
+            ):
+                cwd = str(candidate.parent)
+        except OSError:  # an unreadable path simply keeps the inherited cwd
+            cwd = None
         if sys.platform.startswith("win"):
             process = subprocess.Popen(
                 _window_launch_command(resolved),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                cwd=cwd,
             )
         elif sys.platform == "darwin":
             process = subprocess.Popen(
@@ -985,6 +1005,13 @@ class LocalDesktopRunner:
             "powershell", "-NoProfile", "-Command", script,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            # Window enumeration, geometry probes and typing all run here, and
+            # several of them execute WHILE a game session is being guarded. A
+            # console window created for the probe takes the foreground, which
+            # makes the Guardian deny the very action the probe was preparing
+            # for ("the target is not the foreground window"). The script's
+            # output is on stdout, so it needs no console at all.
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         stdout, _ = await asyncio.wait_for(process.communicate(), timeout=timeout)
         return stdout.decode("utf-8", errors="replace")
@@ -1004,15 +1031,46 @@ class LocalDesktopRunner:
         except Exception:
             return None
 
-    async def capture_screen(self, save_path: str = "screenshot.png") -> Mapping[str, Any]:
+    async def capture_screen(
+        self, save_path: str = "screenshot.png", *, thumbnail: bool = False
+    ) -> Mapping[str, Any]:
         """Public capture seam for callers outside this module (NovaForge, perception).
 
         Same verified path as every other screenshot — the persistent worker, the
         one-shot fallback, and the freshness check — so there is ONE answer to
         "was this frame captured now?". ``_take_screenshot`` stays private; this
         wrapper exists so a subsystem never reaches into it by name.
+
+        ``thumbnail=True`` also asks the worker for the 48x27 paint read beside
+        the frame, so a caller that has to JUDGE the pixels does not decode a
+        5.2 MP PNG to do it. The result carries its path as ``thumbnail``.
         """
-        return await self._take_screenshot(save_path)
+        return await self._take_screenshot(save_path, thumbnail=thumbnail)
+
+    async def capture_window(
+        self, handle: int, save_path: str = "screenshot.png", *, thumbnail: bool = False
+    ) -> Any:
+        # NOTE for callers: the thumbnail describes THE WINDOW as PrintWindow
+        # rendered it, which is exactly the frame's region, so it is safe to
+        # judge the frame with. The display seam's side car would describe the
+        # whole screen instead — a different region — which is why the
+        # display-crop backend never uses one.
+        """Capture one window's OWN surface, via ``PrintWindow``.
+
+        The seam NovaForge's window-surface backend drives: it asks the window to
+        render itself, which is the only wired source that can still see the
+        target while another window covers it. The worker reports a minimized
+        window as a refusal rather than a black frame, and the caller's content
+        validation still judges the pixels — a renderer that will not answer
+        PrintWindow is reported, not shown as live.
+
+        ``thumbnail=True`` writes the 48x27 paint read beside the frame; the
+        result carries its path, so validation reads 3888 bytes instead of
+        decoding the frame it is judging.
+        """
+        return await self._capture_worker().capture_window(
+            int(handle), save_path, thumbnail=thumbnail
+        )
 
     async def window_geometry(self, title: str) -> WindowGeometry | None:
         """Public geometry seam: resolve the window whose title contains ``title``.
@@ -1032,6 +1090,283 @@ class LocalDesktopRunner:
         the distinction is preserved rather than flattened to an empty list.
         """
         return await self._window_lines()
+
+    # -- game catalog seams (NovaForge game discovery) ----------------------
+
+    async def process_identity(self, pid: int) -> dict[str, Any] | None:
+        """Read one pid's identity, or ``None`` when that process is not running.
+
+        The same ``StartTime`` a launch record pins, so a reused pid is a
+        DIFFERENT process and an observation can refuse it. A probe that cannot
+        run raises instead of returning ``None``: the caller reports that as
+        "unknown", which is not the same answer as "the game exited".
+        """
+        try:
+            wanted = int(pid)
+        except (TypeError, ValueError):
+            return None
+        if wanted <= 0:
+            return None
+        if not sys.platform.startswith("win"):
+            # "Cannot tell" must never be reported as "the process is gone": a
+            # caller (NF-15's observer) treats ``None`` as an exited process.
+            raise RuntimeError(
+                "Process identity is only readable on Windows; this host cannot tell."
+            )
+        script = (
+            "try { $p = Get-Process -Id "
+            + str(wanted)
+            + " -ErrorAction Stop;"
+            "  $s = ''; try { $s = $p.StartTime.ToUniversalTime().ToString('o') } catch {}"
+            "  $p.Id.ToString() + '|' + $p.ProcessName + '|' + $s"
+            "} catch { '' }"
+        )
+        out = await self._powershell(script, timeout=8)
+        line = next((item for item in out.splitlines() if item.strip()), "")
+        parts = line.split("|")
+        if len(parts) < 3 or not parts[0].strip().isdigit():
+            return None
+        return {
+            "pid": int(parts[0].strip()),
+            "name": parts[1].strip(),
+            "start_time": parts[2].strip(),
+        }
+
+    def installed_steam_games(self) -> list[dict[str, str]]:
+        """Every Steam-visible installed title with the install it names.
+
+        The SAME reader the launch resolver uses (``_steam_manifest_entries``),
+        so "is it installed" and "can it be launched" can never disagree. A row
+        whose directory is missing is returned with ``install_exists=false``
+        rather than dropped.
+        """
+        return _steam_manifest_entries()
+
+    def installed_app_targets(self) -> dict[str, str]:
+        """Start Menu shortcuts and App Paths entries (the app index).
+
+        The same index ``open <app>`` resolves through, reused instead of a
+        second shortcut scanner. Entries may point at files that no longer
+        exist; the catalogue verifies each target before treating it as an
+        installation.
+        """
+        return dict(_app_index())
+
+    async def game_processes(self, names: Sequence[str]) -> list[dict[str, Any]]:
+        """Running processes matching ``names``, with identity and window.
+
+        One probe for every pattern, not one per name: discovery asks about a
+        dozen titles at once and a process-per-title read would be slow enough
+        to look like a hang. ``start_time`` is what makes a PID an identity
+        (a reused PID is a different process); ``path`` is the executable the
+        process is actually running, which is how a non-Steam install is
+        discovered from a RUNNING instance rather than a guess.
+        """
+        wanted = [str(name).strip() for name in names if str(name).strip()]
+        if not wanted or not sys.platform.startswith("win"):
+            return []
+        filters = " -or ".join(
+            "$_.ProcessName -like '*" + name.replace("'", "''") + "*'" for name in wanted
+        )
+        script = (
+            "Get-Process | Where-Object {" + filters + "} | ForEach-Object {"
+            "  $s = ''; try { $s = $_.StartTime.ToUniversalTime().ToString('o') } catch {}"
+            "  $w = ''; try { $w = $_.MainWindowTitle } catch {}"
+            "  $p = ''; try { $p = $_.Path } catch {}"
+            "  $_.Id.ToString() + '|' + $_.ProcessName + '|' + $s + '|' + $w + '|' + $p"
+            "}"
+        )
+        try:
+            out = await self._powershell(script, timeout=15)
+        except Exception:  # noqa: BLE001 - an unreadable probe is an empty answer
+            return []
+        rows: list[dict[str, Any]] = []
+        for line in out.splitlines():
+            parts = line.split("|")
+            if len(parts) < 5 or not parts[0].strip().isdigit():
+                continue
+            rows.append(
+                {
+                    "pid": int(parts[0].strip()),
+                    "name": parts[1].strip(),
+                    "start_time": parts[2].strip(),
+                    "window": parts[3].strip(),
+                    "path": parts[4].strip(),
+                }
+            )
+        return rows
+
+    async def game_processes_under(self, directories: Sequence[str]) -> list[dict[str, Any]]:
+        """Running processes whose executable lives UNDER one of these folders.
+
+        The name probe cannot answer "did the game start" for a title whose
+        executable is an abbreviation: Shadow Fight Arena installs ``SFA.exe``,
+        which matches no fragment of its name. The install directory is the
+        identity that does exist, so a process running from inside it is
+        evidence the launch produced a game process — the same evidence Steam's
+        own manifest recorded when the files were installed.
+        """
+        dirs = [str(item).strip() for item in directories if str(item).strip()]
+        if not dirs or not sys.platform.startswith("win"):
+            return []
+        def quote(value: str) -> str:
+            return "'" + value.replace("'", "''") + "'"
+
+        roots = ", ".join(quote(item.rstrip("\\") + "\\") for item in dirs)
+        script = (
+            f"$dirs = @({roots});"
+            "Get-Process | Where-Object {"
+            "  $p = $null; try { $p = $_.Path } catch {}"
+            "  $hit = $false;"
+            "  if ($p) { foreach ($d in $dirs) {"
+            "    if ($p.StartsWith($d, [System.StringComparison]::OrdinalIgnoreCase))"
+            "    { $hit = $true; break } } }"
+            "  $hit"
+            "} | ForEach-Object {"
+            "  $s = ''; try { $s = $_.StartTime.ToUniversalTime().ToString('o') } catch {}"
+            "  $w = ''; try { $w = $_.MainWindowTitle } catch {}"
+            "  $p = ''; try { $p = $_.Path } catch {}"
+            "  $_.Id.ToString() + '|' + $_.ProcessName + '|' + $s + '|' + $w + '|' + $p"
+            "}"
+        )
+        try:
+            out = await self._powershell(script, timeout=20)
+        except Exception:  # noqa: BLE001 - an unreadable probe is an empty answer
+            return []
+        rows: list[dict[str, Any]] = []
+        for line in out.splitlines():
+            parts = line.split("|")
+            if len(parts) < 5 or not parts[0].strip().isdigit():
+                continue
+            rows.append(
+                {
+                    "pid": int(parts[0].strip()),
+                    "name": parts[1].strip(),
+                    "start_time": parts[2].strip(),
+                    "window": parts[3].strip(),
+                    "path": parts[4].strip(),
+                }
+            )
+        return rows
+
+    async def memory_snapshot(self) -> dict[str, Any]:
+        """Physical memory, as a measured value or an explicit "cannot tell".
+
+        psutil when it is installed; the WMI operatingsystem class otherwise.
+        A figure that was not measured stays ``None`` — never 0.0 — because the
+        launch guard must not read "unknown" as "no memory left".
+        """
+        try:
+            import psutil
+
+            memory = psutil.virtual_memory()
+            return {
+                "available": True,
+                "source": "psutil",
+                "total_gb": round(memory.total / (1024**3), 2),
+                "free_gb": round(memory.available / (1024**3), 2),
+                "used_percent": round(memory.percent, 1),
+            }
+        except ImportError:
+            pass
+        except Exception as exc:  # noqa: BLE001 - a broken probe is not a figure
+            return {
+                "available": False,
+                "source": "psutil",
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
+        if not sys.platform.startswith("win"):
+            return {"available": False, "source": "", "reason": "No memory probe on this host."}
+        try:
+            out = await self._powershell(
+                "$os = Get-CimInstance Win32_OperatingSystem;"
+                "$total = [double]$os.TotalVisibleMemorySize * 1024;"
+                "$free = [double]$os.FreePhysicalMemory * 1024;"
+                "'{0:N2}|{1:N2}|{2:N1}' -f ($total/1GB), ($free/1GB), (($total-$free)/$total*100)",
+                timeout=10,
+            )
+            total, free, used = (float(part) for part in out.strip().split("|"))
+            return {
+                "available": True,
+                "source": "cim",
+                "total_gb": round(total, 2),
+                "free_gb": round(free, 2),
+                "used_percent": round(used, 1),
+            }
+        except Exception as exc:  # noqa: BLE001 - cannot tell is a real answer
+            return {
+                "available": False,
+                "source": "cim",
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
+
+    async def launch_game_target(
+        self, *, kind: str, target: str, name: str = ""
+    ) -> dict[str, Any]:
+        """Start a game through the launcher that OWNS it — no verification.
+
+        ``kind='steam'`` issues Steam's own deep link (the app id comes from a
+        manifest, never from user text); ``kind='path'`` opens a file that is
+        already an absolute, existing ``.exe``/``.lnk`` on internal storage.
+        Verifying that a process and window appeared is the CALLER's job: the
+        shell's PID is not the game's PID, and reporting it as one would be a
+        fabricated identity.
+        """
+        if kind == "steam":
+            app_id = str(target).strip()
+            if not app_id.isdigit():
+                raise ValueError("A Steam app id must be numeric.")
+            if not sys.platform.startswith("win"):
+                raise ValueError("Steam deep-link launch requires Windows.")
+            uri = f"steam://rungameid/{app_id}"
+            process = subprocess.Popen(
+                ["cmd", "/c", "start", "", uri],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            await asyncio.sleep(0.5)
+            return {
+                "adapter": "local-desktop",
+                "action": "game_launch",
+                "game": name,
+                "uri": uri,
+                "shell_pid": process.pid,
+                "verified": False,
+                "note": "Launch issued; a game process and window still have to be observed.",
+            }
+        if kind == "path":
+            path = Path(str(target))
+            if not path.is_absolute() or not path.is_file():
+                raise ValueError(
+                    f"Refusing to launch {str(target)!r}: it is not an absolute path to an "
+                    "existing file."
+                )
+            if path.suffix.lower() not in {".exe", ".lnk"}:
+                raise ValueError(
+                    f"Refusing to launch {path.name!r}: only .exe and .lnk targets are allowed."
+                )
+            pid = await self._launch_open(str(path))
+            await asyncio.sleep(0.5)
+            return {
+                "adapter": "local-desktop",
+                "action": "game_launch",
+                "game": name,
+                "target": str(path),
+                "shell_pid": pid,
+                "verified": False,
+                "note": "Launch issued; a game process and window still have to be observed.",
+            }
+        raise ValueError(f"Unsupported game launch kind: {kind!r}")
+
+    async def close_game_window(self, title: str) -> dict[str, Any]:
+        """Ask the game's window to close (WM_CLOSE) — never a process kill.
+
+        The same graceful path STOP_APP uses, so a game gets its normal exit
+        (and its own save prompts). A windowless launcher process is not
+        reachable this way; the caller reports that rather than killing it.
+        """
+        return dict(await self._stop_app(title))
 
     async def _wait_for_window(
         self, target: str, *, resolved: str | None = None, timeout_seconds: float = 8.0
@@ -1626,7 +1961,9 @@ class LocalDesktopRunner:
                 "exit_code": process.returncode,
             }
 
-    async def _take_screenshot(self, save_path: str = "screenshot.png") -> Mapping[str, Any]:
+    async def _take_screenshot(
+        self, save_path: str = "screenshot.png", *, thumbnail: bool = False
+    ) -> Mapping[str, Any]:
         """Capture a FRESH screenshot and report whether the frame is real.
 
         Two process models, one capture program (``desktop/capture.py``). The
@@ -1657,12 +1994,23 @@ class LocalDesktopRunner:
         # platform gate only decides whether a DEFAULT worker can be started
         # here. Gating the injected one made every fake-capture screenshot test
         # fail on Linux for a reason that had nothing to do with screenshots.
+        thumbnail_path = ""
         if self._screen_capture is not None or capture_supported_here():
             worker = self._capture_worker()
-            result = await worker.capture(str(saved_path))
+            # The un-thumbnailed call stays EXACTLY the historical shape: an
+            # injected worker written before this option keeps working, and the
+            # side car is only ever asked for on purpose.
+            result = (
+                await worker.capture(str(saved_path), thumbnail=True)
+                if thumbnail
+                else await worker.capture(str(saved_path))
+            )
             if result.ok:
                 # Only the arm that ACTUALLY produced the frame is reported.
                 persistent = bool(result.persistent)
+                # Only the arm that produced the frame can have written the side
+                # car; the one-shot fallback below leaves it empty.
+                thumbnail_path = result.thumbnail
             else:
                 # The worker is unavailable or unwell: fall back rather than
                 # fail a screenshot. The reason travels with the result.
@@ -1690,6 +2038,10 @@ class LocalDesktopRunner:
             "adapter": "local-desktop",
             "action": "take_screenshot",
             "path": str(saved_path),
+            # The 48x27 paint side car written beside this frame, when one was
+            # requested. Empty means the caller must decode the frame to judge
+            # its paint.
+            "thumbnail": thumbnail_path,
             "exists": exists,
             "size_bytes": size_bytes,
             # Frame provenance: what produced it, when it was requested, and
@@ -2079,58 +2431,122 @@ _STEAM_APP_IDS: dict[str, str] = {
 }
 
 
+def _steam_manifest_entries() -> list[dict[str, str]]:
+    """One row per installed Steam title, with the install it names.
+
+    The single Steam reader: app manifests from every library Steam declares
+    (registry `SteamPath` plus `libraryfolders.vdf`). ``install_dir`` is
+    ``common/<installdir>`` and ``executable`` is only filled when an ``.exe``
+    in that directory actually has the title in its name — a guessed executable
+    would be evidence of nothing. A manifest whose directory is gone (an
+    unmounted library) is still returned with ``install_exists=False`` so the
+    caller can report the truth instead of pretending the title vanished.
+    """
+    entries: list[dict[str, str]] = []
+    if not sys.platform.startswith("win"):
+        return entries
+    import os
+
+    candidates: list[Path] = [
+        Path(os.environ.get("PROGRAMFILES(X86)", "C:\\Program Files (x86)"))
+        / "Steam" / "steamapps",
+        Path(os.environ.get("PROGRAMFILES", "C:\\Program Files")) / "Steam" / "steamapps",
+    ]
+    # The registry is the truth for custom install drives ('E:\\steam',
+    # per-user installs) — HKCU\\Software\\Valve\\Steam\\SteamPath.
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\\Valve\\Steam") as key:
+            steam_path, _kind = winreg.QueryValueEx(key, "SteamPath")
+            if steam_path:
+                candidates.insert(0, Path(steam_path.replace("/", "\\")) / "steamapps")
+    except OSError:
+        pass  # no Steam registry entry; env-path candidates still apply
+    # Extra libraries live in libraryfolders.vdf — parse them so games on
+    # other drives are found too. A library on a drive that is not mounted
+    # simply does not exist on disk; the manifest check below reports that.
+    for base in list(candidates):
+        vdf = base.parent / "steamapps" / "libraryfolders.vdf"
+        if vdf.exists():
+            try:
+                for match in re.finditer(r'"path"\s+"([^"]+)"', vdf.read_text(encoding="utf-8", errors="replace")):
+                    candidates.append(Path(match.group(1).replace("\\\\", "\\")) / "steamapps")
+            except OSError:
+                pass
+    seen: set[str] = set()
+    for folder in candidates:
+        try:
+            manifests = sorted(folder.glob("appmanifest_*.acf"))
+        except OSError:
+            continue
+        for manifest in manifests:
+            try:
+                text = manifest.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            id_match = re.search(r'"appid"\s+"(\d+)"', text)
+            name_match = re.search(r'"name"\s+"([^"]+)"', text)
+            if not (id_match and name_match):
+                continue
+            app_id = id_match.group(1)
+            if app_id in seen:
+                continue
+            seen.add(app_id)
+            name = name_match.group(1).strip()
+            dir_match = re.search(r'"installdir"\s+"([^"]+)"', text)
+            install = (
+                folder / "common" / dir_match.group(1).strip() if dir_match else folder / "common"
+            )
+            executable = _steam_executable(install, name)
+            entries.append(
+                {
+                    "app_id": app_id,
+                    "name": name,
+                    "install_dir": str(install),
+                    "install_exists": "true" if install.is_dir() else "false",
+                    "executable": executable,
+                    "library": str(folder),
+                }
+            )
+    return entries
+
+
+def _steam_executable(install: Path, name: str) -> str:
+    """The install's own exe, matched by NAME — never a guessed binary."""
+    if not install.is_dir():
+        return ""
+    wanted = _norm_label(name)
+    tokens = {word for word in wanted.split() if len(word) > 3}
+    try:
+        candidates = [item for item in install.glob("*.exe") if item.is_file()][:40]
+    except OSError:
+        return ""
+    for exe in candidates:
+        stem = _norm_label(exe.stem)
+        if stem and (stem in wanted or wanted in stem):
+            return str(exe)
+    for exe in candidates:
+        stem = _norm_label(exe.stem)
+        if tokens and any(word in stem for word in tokens):
+            return str(exe)
+    return ""
+
+
 def _installed_steam_games() -> dict[str, str]:
     """Games actually installed on this machine: spoken name -> Steam AppID.
 
-    Reads Steam's own appmanifest_*.acf files from the standard library
-    locations. This is what makes 'launch <any installed game>' work without a
-    hard-coded table: Steam records the exact appid and display name for every
-    installed title. Cached once per process — installs don't change mid-run.
-    Returns {} on any failure (no Steam, unusual layout) — callers fall back.
+    Built from the ONE Steam reader (:func:`_steam_manifest_entries`), so the
+    launch resolver and the discovery catalogue can never disagree about what
+    Steam has installed. Cached once per process — installs don't change
+    mid-run.
     """
     global _installed_games_cache  # noqa: PLW0603
     if _installed_games_cache is not None:
         return _installed_games_cache
     games: dict[str, str] = {}
-    if sys.platform.startswith("win"):
-        import os
-
-        candidates: list[Path] = [
-            Path(os.environ.get("PROGRAMFILES(X86)", "C:\\Program Files (x86)"))
-            / "Steam" / "steamapps",
-            Path(os.environ.get("PROGRAMFILES", "C:\\Program Files")) / "Steam" / "steamapps",
-        ]
-        # The registry is the truth for custom install drives ('E:\\steam',
-        # per-user installs) — HKCU\\Software\\Valve\\Steam\\SteamPath.
-        try:
-            import winreg
-
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\\Valve\\Steam") as key:
-                steam_path, _kind = winreg.QueryValueEx(key, "SteamPath")
-                if steam_path:
-                    candidates.insert(0, Path(steam_path.replace("/", "\\")) / "steamapps")
-        except OSError:
-            pass  # no Steam registry entry; env-path candidates still apply
-        # Extra libraries live in libraryfolders.vdf — parse them so games on
-        # other drives are found too.
-        for base in list(candidates):
-            vdf = base.parent / "steamapps" / "libraryfolders.vdf"
-            if vdf.exists():
-                try:
-                    for match in re.finditer(r'"path"\s+"([^"]+)"', vdf.read_text(encoding="utf-8", errors="replace")):
-                        candidates.append(Path(match.group(1).replace("\\\\", "\\")) / "steamapps")
-                except OSError:
-                    pass
-        for folder in candidates:
-            try:
-                for manifest in folder.glob("appmanifest_*.acf"):
-                    text = manifest.read_text(encoding="utf-8", errors="replace")
-                    id_match = re.search(r'"appid"\s+"(\d+)"', text)
-                    name_match = re.search(r'"name"\s+"([^"]+)"', text)
-                    if id_match and name_match:
-                        games[name_match.group(1).strip().lower()] = id_match.group(1)
-            except OSError:
-                continue
+    for entry in _steam_manifest_entries():
+        games[str(entry["name"]).strip().lower()] = str(entry["app_id"])
     _installed_games_cache = games
     return games
 

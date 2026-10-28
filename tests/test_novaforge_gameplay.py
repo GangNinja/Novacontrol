@@ -23,6 +23,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
+from PIL import Image
+
 from novacontrol.desktop.input import WindowGeometry
 from novacontrol.novaforge import (
     ActionKind,
@@ -36,6 +38,7 @@ from novacontrol.novaforge import (
     ObjectiveKind,
     ObjectiveOutcome,
     ObjectiveRegistry,
+    OcrTextVerifier,
     ScreenInput,
     SessionState,
     WindowTitleVerifier,
@@ -356,6 +359,139 @@ class WindowTitleVerifierTests(unittest.TestCase):
         self.assertFalse(kinds["unsupported"])
 
 
+# ── OCR verification: read the screen, and never invent a confidence ────────
+
+
+def ocr_frame(**overrides: Any) -> dict[str, Any]:
+    """The reading an OCR frame probe returns, with honest defaults.
+
+    Windows' OCR exposes words but no per-word confidence, so the default is
+    ``confidence: None`` with ``confidence_reported: false`` — the shape the
+    real probe produces.
+    """
+    frame: dict[str, Any] = {
+        "available": True,
+        "fresh": True,
+        "captured_at": "2026-10-21T10:00:00+00:00",
+        "age_seconds": 0.4,
+        "path": "C:/frames/000001.png",
+        "text": "RECEIVED 1 KEY(S)",
+        "words": [
+            {"text": "RECEIVED", "line": 0, "x": 10, "y": 10, "width": 80, "height": 20},
+            {"text": "1", "line": 0, "x": 95, "y": 10, "width": 10, "height": 20},
+            {"text": "KEY(S)", "line": 0, "x": 110, "y": 10, "width": 55, "height": 20},
+        ],
+        "confidence": None,
+        "confidence_reported": False,
+        "engine": "windows.media.ocr",
+        "reason": "",
+    }
+    frame.update(overrides)
+    return frame
+
+
+class OcrTextVerifierTests(unittest.TestCase):
+    def verifier(self, reading: Any) -> OcrTextVerifier:
+        async def probe(_handle: int) -> Any:
+            if isinstance(reading, Exception):
+                raise reading
+            return reading
+
+        return OcrTextVerifier(probe=probe)
+
+    def check(
+        self, definition: ObjectiveDefinition, reading: Any
+    ) -> ObjectiveVerification:
+        return asyncio.run(self.verifier(reading).verify(definition, handle=HANDLE, pid=PID))
+
+    def objective(self, **payload: Any) -> ObjectiveDefinition:
+        return ObjectiveDefinition.from_payload({"kind": "ocr_text", **payload})
+
+    def test_recognised_text_decides_success_and_failure(self) -> None:
+        success = self.check(self.objective(parameter="received 1 key"), ocr_frame())
+        self.assertIs(success.outcome, ObjectiveOutcome.VERIFIED_SUCCESS)
+        self.assertIs(success.achieved, True)
+        self.assertIsNone(success.confidence, "the engine reported none; do not invent one")
+        self.assertEqual(success.evidence[0].method, "ocr_text")
+        failure = self.check(self.objective(parameter="LEVEL COMPLETE"), ocr_frame())
+        self.assertIs(failure.outcome, ObjectiveOutcome.VERIFIED_FAILURE)
+        self.assertIs(failure.achieved, False)
+
+    def test_equals_and_absent_modes(self) -> None:
+        exact = self.check(
+            self.objective(parameter="Received 1 Key(S)", mode="equals"), ocr_frame()
+        )
+        self.assertIs(exact.achieved, True)
+        absent = self.check(
+            self.objective(parameter="GAME OVER", mode="absent"), ocr_frame()
+        )
+        self.assertIs(absent.achieved, True)
+        still_there = self.check(
+            self.objective(parameter="KEY(S)", mode="absent"), ocr_frame()
+        )
+        self.assertIs(still_there.achieved, False)
+
+    def test_a_stale_frame_is_unknown(self) -> None:
+        result = self.check(self.objective(parameter="received"), ocr_frame(age_seconds=30.0))
+        self.assertIs(result.outcome, ObjectiveOutcome.UNKNOWN)
+        self.assertIsNone(result.achieved)
+        unfresh = self.check(self.objective(parameter="received"), ocr_frame(fresh=False))
+        self.assertIs(unfresh.outcome, ObjectiveOutcome.UNKNOWN)
+
+    def test_an_unavailable_engine_is_unsupported(self) -> None:
+        result = self.check(
+            self.objective(parameter="received"),
+            ocr_frame(available=False, reason="no OCR language pack"),
+        )
+        self.assertIs(result.outcome, ObjectiveOutcome.UNSUPPORTED)
+        self.assertIn("no OCR language pack", result.reason)
+
+    def test_a_low_confidence_reading_never_decides(self) -> None:
+        result = self.check(
+            self.objective(parameter="received"),
+            ocr_frame(confidence=0.2, confidence_reported=True),
+        )
+        self.assertIs(result.outcome, ObjectiveOutcome.UNKNOWN)
+        self.assertIsNone(result.achieved)
+
+    def test_absence_is_unknown_when_nothing_was_read_and_nothing_was_measured(self) -> None:
+        result = self.check(
+            self.objective(parameter="GAME OVER", mode="absent"),
+            ocr_frame(text="", words=[]),
+        )
+        self.assertIs(result.outcome, ObjectiveOutcome.UNKNOWN)
+        self.assertIsNone(result.achieved)
+
+    def test_a_region_bounds_the_evidence(self) -> None:
+        frame = ocr_frame(
+            words=[
+                {"text": "READY", "line": 0, "x": 400, "y": 400, "width": 40, "height": 10},
+                {"text": "ELSEWHERE", "line": 1, "x": 5, "y": 5, "width": 60, "height": 10},
+            ]
+        )
+        inside = self.check(
+            self.objective(parameter="READY", region="350,350,200,100"), frame
+        )
+        self.assertIs(inside.achieved, True)
+        outside = self.check(
+            self.objective(parameter="READY", region="0,0,100,50"), frame
+        )
+        self.assertIs(outside.achieved, False)
+
+    def test_a_raising_or_silent_probe_is_unknown(self) -> None:
+        raised = self.check(self.objective(parameter="received"), RuntimeError("OCR died"))
+        self.assertIs(raised.outcome, ObjectiveOutcome.UNKNOWN)
+        silent = self.check(self.objective(parameter="received"), None)
+        self.assertIs(silent.outcome, ObjectiveOutcome.UNKNOWN)
+
+    def test_registry_reports_ocr_as_available_only_with_a_probe(self) -> None:
+        registry = ObjectiveRegistry(verifiers=(self.verifier(ocr_frame()),))
+        kinds = {row["kind"]: row for row in registry.availability()}
+        self.assertTrue(kinds["ocr_text"]["available"])
+        self.assertIn("OcrTextVerifier", kinds["ocr_text"]["verifier"])
+        self.assertEqual(registry.available_kinds(), ["ocr_text"])
+
+
 # ── Manager: enforcement at execution, not at display ──────────────────────
 
 FakeWindow = WindowGeometry
@@ -370,7 +506,7 @@ class FakeDesktop:
 
     async def capture(self, path: str) -> dict[str, Any]:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+        Image.new("RGB", (1200, 800), (12, 18, 30)).save(path, format="PNG")
         self.captures += 1
         return {"ok": True, "path": path, "fresh": True, "width": 1000, "height": 600,
                 "elapsed_ms": 1.0, "size_bytes": 72, "source": "window_crop", "mode": "window"}
@@ -431,6 +567,93 @@ class ManagerGameplayTests(unittest.IsolatedAsyncioTestCase):
 
     async def plan(self, action: dict[str, Any]) -> dict[str, Any]:
         return self.manager.plan_action(self.record.session_id, action)
+
+    async def test_a_retitled_window_is_the_same_target_not_a_lost_one(self) -> None:
+        """The objective this build verifies is met BY a title change.
+
+        The observation loop used to resolve its target through the TITLE it
+        pinned, so the harness retitling itself to ``... READY`` — exactly what
+        meeting a ``window_title`` objective looks like — read as "the target
+        window closed": the session paused one tick after the action that met
+        the objective and could never reach COMPLETED. Identity is handle + pid;
+        the label has to be allowed to change.
+        """
+        await self.start()
+        # A title lookup that RESOLVES BY TITLE, as the production seam does: it
+        # cannot find the window once the label changes, which is exactly the
+        # condition the handle probe has to survive.
+        desktop = self.desktop
+
+        async def by_title(title: str) -> Any:
+            window = desktop.window
+            if window is None or title.lower() not in window.title.lower():
+                return None
+            return window
+
+        self.manager.geometry = by_title
+        retitled = "NC FORGE HARNESS - READY"
+        # The app retitles itself: the same handle and pid, a new label.
+        self.desktop.window = geometry(title=retitled)
+        self.probe_window = geometry(title=retitled)
+        await asyncio.sleep(0.3)
+
+        self.assertFalse(self.record.pause_reason, self.record.pause_reason)
+        self.assertEqual(self.record.state, SessionState.RUNNING)
+        self.assertEqual(self.record.target.title, retitled)
+        self.assertTrue(self.record.target_validated)
+
+    async def test_a_verified_objective_completes_a_paused_session(self) -> None:
+        """A decided verdict is about the window, not about the loop's state.
+
+        A session the loop had paused (an operator pause, or a window it briefly
+        could not measure) has still met an objective the verifier can read, and
+        PAUSED -> STOPPING -> COMPLETED is a legal close. Leaving it open would
+        record ``achieved: true`` on a session that never completed.
+        """
+        await self.start()
+        self.manager.set_objective(
+            self.record.session_id, {"kind": "window_title", "parameter": "READY"}
+        )
+        await self.manager.pause(self.record.session_id)
+        self.assertEqual(self.record.state, SessionState.PAUSED)
+        self.probe_window = geometry(title="NC FORGE HARNESS - READY")
+
+        verdict = await self.manager.verify_objective(self.record.session_id)
+
+        self.assertEqual(verdict["outcome"], ObjectiveOutcome.VERIFIED_SUCCESS.value)
+        self.assertEqual(self.record.state, SessionState.COMPLETED)
+        self.assertEqual(self.record.end_reason, "objective_verified")
+
+    async def test_a_completed_session_is_not_rewritten_by_the_time_limit(self) -> None:
+        """Closing on a verified objective ends the run; the limit is for open runs.
+
+        The loop outlived the finalize that ``verify_objective`` performs, and
+        because finalize clears the monotonic origin the time limit then fired on
+        the FINISHED record: ``end_reason`` became ``time_limit`` and an error
+        said the objective was NOT verified, on a session whose objective had
+        just been verified. Both halves are pinned here.
+        """
+        await self.start(time_limit_seconds=1)
+        self.manager.set_objective(
+            self.record.session_id, {"kind": "window_title", "parameter": "READY"}
+        )
+        self.probe_window = geometry(title="NC FORGE HARNESS - READY")
+        verdict = await self.manager.verify_objective(self.record.session_id)
+        self.assertEqual(verdict["outcome"], ObjectiveOutcome.VERIFIED_SUCCESS.value)
+        self.assertEqual(self.record.state, SessionState.COMPLETED)
+
+        await asyncio.sleep(1.6)  # well past the configured limit
+
+        self.assertEqual(self.record.state, SessionState.COMPLETED)
+        self.assertEqual(self.record.end_reason, "objective_verified")
+        self.assertFalse(
+            [
+                error
+                for error in self.record.errors
+                if "NOT verified" in str(error.get("message", ""))
+            ],
+            self.record.errors,
+        )
 
     async def test_a_proposal_sends_nothing_and_a_matching_digest_executes(self) -> None:
         record = await self.start()

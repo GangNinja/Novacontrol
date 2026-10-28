@@ -126,6 +126,7 @@ def _build_dashboard_window(**qt: Any) -> Any:
             self.tabs.addTab(self._build_chat_tab(), DashboardTab.CHAT.label)
             self.tabs.addTab(self._build_intelligence_tab(), DashboardTab.INTELLIGENCE.label)
             self.tabs.addTab(self._build_explore_tab(), DashboardTab.EXPLORE.label)
+            self.tabs.addTab(self._build_novaforge_tab(), DashboardTab.NOVAFORGE.label)
             self.tabs.addTab(self._build_demos_tab(), DashboardTab.DEMOS.label)
             self.tabs.addTab(self._build_automation_tab(), DashboardTab.AUTOMATION.label)
             self.tabs.addTab(self._build_tasks_tab(), DashboardTab.TASKS.label)
@@ -136,13 +137,27 @@ def _build_dashboard_window(**qt: Any) -> Any:
             self.tabs.addTab(self._build_logs_tab(), DashboardTab.LOGS.label)
             self.tabs.addTab(self._build_performance_tab(), DashboardTab.PERFORMANCE.label)
             layout.addWidget(self.tabs, stretch=1)
+            self.tabs.currentChanged.connect(self._on_tab_changed)
 
             self.setCentralWidget(root)
             self.refresh_status()
 
         def closeEvent(self, event: Any) -> None:
+            # Restore an embedded game BEFORE the dashboard's native windows are
+            # destroyed, or the game would be left parented to a dead handle.
+            # Detaching never closes the game; it stays the operator's process.
+            panel = getattr(self, "game_panel", None)
+            if panel is not None:
+                panel.shutdown()
             _run(self.nova.stop())
             event.accept()
+
+        def _on_tab_changed(self, index: int) -> None:
+            if self.tabs.tabText(index) != DashboardTab.NOVAFORGE.label:
+                return
+            panel = getattr(self, "game_panel", None)
+            if panel is not None:
+                panel.ensure_loaded()
 
         def _build_header(self) -> Any:
             box = QGroupBox("NovaControl Dashboard")
@@ -280,6 +295,18 @@ def _build_dashboard_window(**qt: Any) -> Any:
             layout.addLayout(form)
             layout.addWidget(run)
             layout.addWidget(self.explore_output, stretch=1)
+            return widget
+
+        def _build_novaforge_tab(self) -> Any:
+            """The embedded-game workspace: NF-12's library plus a native surface."""
+            from novacontrol.gui.game_host import GameHostPanel
+
+            widget = QWidget()
+            layout = QVBoxLayout(widget)
+            self.game_panel = GameHostPanel(
+                self.nova, _run, log=self._log, parent=widget
+            )
+            layout.addWidget(self.game_panel, stretch=1)
             return widget
 
         def _build_demos_tab(self) -> Any:

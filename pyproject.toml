@@ -133,3 +133,14 @@ ignore_missing_imports = true
 module = ["novacontrol.database.models", "novacontrol.database.engine"]
 disallow_untyped_decorators = false
 disallow_subclassing_any = false
+
+# PySide6 is an optional extra as well, and it is the one that makes the two
+# type-check environments disagree: CI installs only `.[dev]`, where the Qt
+# base classes degrade to Any and every Qt subclass is a `Subclassing Any`
+# error, while locally PySide6 IS installed and the same subclass is real, so
+# the `# type: ignore[misc]` CI requires is an unused-ignore error. No pragma
+# is correct in both, so the module-level relaxation the sqlalchemy override
+# above uses is applied to the two GUI modules that subclass Qt.
+[[tool.mypy.overrides]]
+module = ["novacontrol.gui.app", "novacontrol.gui.game_host"]
+disallow_subclassing_any = false

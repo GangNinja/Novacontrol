@@ -85,8 +85,12 @@ _VK: dict[str, int] = {
     "insert": 0x2D, "delete": 0x2E,
     "shift": 0x10, "ctrl": 0x11, "control": 0x11, "alt": 0x12, "menu": 0x12,
     "pause": 0x13, "capslock": 0x14, "numlock": 0x90, "scrolllock": 0x91,
-    # letters and digits
-    **{chr(code): code for code in range(ord("A"), ord("Z") + 1)},
+    # Letters and digits. The keys must be LOWERCASE: ``normalize_key``
+    # lowercases every name before lookup, so an uppercase ``"A".."Z"`` table
+    # left most letters (b, r, q, …) unknown to the validator while a, s, d, w
+    # only worked because they were listed again below. NF-10's stage task is
+    # what exposed it — the second action in the task names "b".
+    **{chr(code).lower(): code for code in range(ord("A"), ord("Z") + 1)},
     **{str(digit): 0x30 + digit for digit in range(10)},
     # function keys
     **{f"f{index}": 0x6F + index for index in range(1, 25)},
@@ -200,6 +204,17 @@ class InputGuard:
         """Names still held down, in press order."""
         return tuple(item.name for item in self._held if not item.released)
 
+    def held_items(self) -> tuple[tuple[str, str], ...]:
+        """(kind, name) pairs still held down, in press order.
+
+        ``held`` alone cannot tell the ``left`` ARROW key from the ``left``
+        mouse button, so callers that report input state need the pair. A
+        release that failed stays held: reporting it is the point.
+        """
+        return tuple(
+            (item.kind, item.name) for item in self._held if not item.released
+        )
+
     async def press_button(self, button: MouseButton | str) -> None:
         self.abort.check("pressing a mouse button")
         await self._press("button", _button_name(button))
@@ -302,6 +317,12 @@ class WindowGeometry:
     clickable content). ``scale`` is the window's DPI scale as a multiplier
     (1.0 = 96 DPI, 2.0 = 200%), so a coordinate measured on a screenshot taken
     at a different scale can be converted rather than trusted blindly.
+
+    ``minimized`` and ``visible`` are reported separately from identity. A
+    minimized exclusive-fullscreen game still has the same handle and pid, but
+    its window is at the off-screen ``-16000`` placeholder and the desktop is
+    what a screen capture would see. Callers must not treat that as a live
+    frame of the target.
     """
 
     handle: int
@@ -316,6 +337,8 @@ class WindowGeometry:
     pid: int = 0
     scale: float = 1.0
     foreground: bool = False
+    minimized: bool = False
+    visible: bool = True
 
     @property
     def width(self) -> int:
@@ -363,6 +386,8 @@ class WindowGeometry:
             },
             "scale": self.scale,
             "foreground": self.foreground,
+            "minimized": self.minimized,
+            "visible": self.visible,
         }
 
 

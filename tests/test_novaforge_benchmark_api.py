@@ -88,9 +88,11 @@ class BenchmarkCatalogApiTests(_BenchmarkApiFixture):
     def test_catalog_lists_supported_and_unsupported_scenarios(self) -> None:
         body = self._get_ok("/novaforge/benchmarks/scenarios")
         by_id = {item["scenario_id"]: item for item in body["scenarios"]}
-        self.assertEqual(body["supported_count"], 3)
+        self.assertEqual(body["supported_count"], 4)
         self.assertEqual(body["unsupported_count"], 1)
         self.assertTrue(by_id["observation-baseline"]["supported"])
+        self.assertTrue(by_id["controlled-objective"]["supported"])
+        self.assertTrue(by_id["controlled-objective"]["objective_required"])
         self.assertFalse(by_id["gameplay-objective"]["supported"])
         self.assertTrue(body["metric_catalog"])
 
@@ -129,7 +131,7 @@ class BenchmarkCatalogApiTests(_BenchmarkApiFixture):
         )
         self.assertFalse(body["valid"])
         self.assertIsNone(body["config"])
-        self.assertTrue(any("no decision pipeline" in item for item in body["errors"]))
+        self.assertTrue(any("decision pipeline" in item for item in body["errors"]))
 
     def test_start_rejects_invalid_configuration_with_422(self) -> None:
         response = self._client.post(
@@ -150,7 +152,7 @@ class BenchmarkCatalogApiTests(_BenchmarkApiFixture):
             json={"scenario_id": "gameplay-objective", "target_title": "NC FORGE TEST"},
         )
         self.assertEqual(response.status_code, 422)
-        self.assertIn("no decision pipeline", response.json()["detail"])
+        self.assertIn("decision pipeline", response.json()["detail"])
         self.assertEqual(self._get_ok("/novaforge/benchmarks/runs")["count"], 0)
 
     def test_unknown_run_and_cancel_are_404(self) -> None:
@@ -178,7 +180,9 @@ class BenchmarkRunApiTests(_BenchmarkApiFixture):
         self.assertTrue(finished["valid"])
         self.assertGreater(finished["metrics"]["frames"]["value"], 0)
         self.assertIsNone(finished["objective"]["achieved"])
-        self.assertFalse(finished["objective"]["verifier"]["available"])
+        self.assertFalse(finished["objective"]["configured"])
+        self.assertFalse(finished["objective"]["decided"])
+        self.assertEqual(finished["objective"]["outcome"], "unsupported")
         self.assertTrue(finished["evidence"]["frames"])
         self.assertIn(
             f"/novaforge/sessions/{finished['session_id']}/timeline",

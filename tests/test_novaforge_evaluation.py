@@ -14,6 +14,7 @@ Two properties are pinned repeatedly on purpose:
 from __future__ import annotations
 
 import asyncio
+import platform
 import time
 import unittest
 from dataclasses import replace
@@ -83,17 +84,57 @@ def _checks(**overrides: Any) -> dict[str, Any]:
 
 class GameRegistryTests(unittest.TestCase):
     def test_the_catalog_is_honest_about_control_and_launch(self) -> None:
+        """Declared capability is not live capability, and neither is a launch claim.
+
+        The catalog with no runtime attached reports what each environment
+        REQUIRES. Only the disposable artifact harness declares a control mode;
+        the observation environments still declare none, and no entry anywhere
+        claims NovaForge can launch a target.
+        """
         catalog = game_catalog()
-        self.assertEqual(catalog["controllable_count"], 0)
+        self.assertEqual(catalog["capabilities_source"], "declared")
         self.assertEqual(catalog["observation_only_count"], 2)
-        self.assertEqual(catalog["runnable_count"], 2)
-        self.assertIn("never that a game objective was achieved", catalog["note"])
+        self.assertEqual(catalog["runnable_count"], 3)
+        self.assertIn("DECLARED capabilities", catalog["note"])
+        by_id = {item["game_id"]: item for item in catalog["games"]}
+        self.assertEqual(catalog["controllable_count"], 1)
+        self.assertTrue(by_id["artifact-harness"]["control_capable"])
+        self.assertIn("control", by_id["artifact-harness"]["evaluation_modes"])
+        for game_id in ("disposable-window", "offline-game-window"):
+            with self.subTest(game=game_id):
+                self.assertNotIn("control", by_id[game_id]["evaluation_modes"])
+                self.assertFalse(by_id[game_id]["control_capable"])
         for record in catalog["games"]:
             with self.subTest(game=record["game_id"]):
                 self.assertFalse(record["launch"]["available"])
-                self.assertFalse(record["objective_verification"]["available"])
-                self.assertTrue(record["objective_verification"]["reason"])
-                self.assertNotIn("control", record["evaluation_modes"])
+                self.assertTrue(record["launch"]["reason"])
+        self.assertFalse(by_id["disposable-window"]["objective_verification"]["available"])
+        self.assertTrue(by_id["artifact-harness"]["objective_verification"]["available"])
+
+    def test_the_live_overlay_replaces_declarations_and_never_inherits_them(self) -> None:
+        """A host without an injector is not controllable, whatever the record declares."""
+        catalog = game_catalog(
+            runtime={
+                "capture": {"available": True, "reason": ""},
+                "action_execution": {
+                    "available": False,
+                    "reason": "No gameplay injector is wired; no input can be sent.",
+                },
+                "objective_verification": {
+                    "available": False,
+                    "kinds": [],
+                    "ready_kinds": [],
+                    "reason": "No objective verifier is ready on this host.",
+                },
+            }
+        )
+        self.assertEqual(catalog["capabilities_source"], "runtime")
+        self.assertEqual(catalog["controllable_count"], 0)
+        harness = next(item for item in catalog["games"] if item["game_id"] == "artifact-harness")
+        self.assertFalse(harness["control_capable"])
+        self.assertFalse(harness["input"]["available"])
+        self.assertTrue(harness["input"]["reason"])
+        self.assertTrue(harness["declared"]["input"]["available"], "the declaration is kept for reading")
 
     def test_every_registry_record_is_internally_consistent(self) -> None:
         for record in SCENARIOS:
@@ -153,11 +194,13 @@ class ReadinessTests(unittest.TestCase):
         self.assertEqual(verifier["status"], "unavailable")
         self.assertFalse(verifier["required"])
 
-    def test_the_readiness_check_set_is_the_declared_fourteen(self) -> None:
-        """The report names fourteen checks; this is where that stays true.
+    def test_the_readiness_check_set_is_the_declared_fifteen(self) -> None:
+        """The report names fifteen checks; this is where that stays true.
 
         The order is the order the panel renders, and the counts are the verdict
         a reader quotes, so neither an added nor a dropped check may pass unseen.
+        ``platform_support`` is required because a Windows-only harness on Linux
+        must refuse BEFORE an observation starts, not after it fails.
         """
         summary = _checks()
         self.assertEqual(
@@ -165,6 +208,7 @@ class ReadinessTests(unittest.TestCase):
             [
                 "compatibility",
                 "evaluation_mode",
+                "platform_support",
                 "target_identity",
                 "target_uniqueness",
                 "capture",
@@ -179,10 +223,22 @@ class ReadinessTests(unittest.TestCase):
                 "conflicts",
             ],
         )
-        self.assertEqual(sum(summary["counts"].values()), 14)
-        self.assertEqual(summary["counts"]["pass"], 13)
+        self.assertEqual(sum(summary["counts"].values()), 15)
+        self.assertEqual(summary["counts"]["pass"], 14)
         self.assertEqual(summary["counts"]["fail"], 0)
         self.assertEqual(summary["counts"]["unavailable"], 1)
+
+    def test_a_windows_only_environment_is_refused_on_an_unsupported_system(self) -> None:
+        game = resolve_game("artifact-harness")
+        assert game is not None
+        self.assertEqual(game.supported_systems, ("Windows",))
+        # A system no host can be: the assertion must not depend on which OS
+        # runs this suite (Windows CI and ubuntu CI must agree).
+        summary = _checks(game=game, supported_systems=["NoSuchOS"])
+        self.assertFalse(summary["ready"])
+        self.assertIn("platform_support", summary["blocking"])
+        row = next(item for item in summary["checks"] if item["id"] == "platform_support")
+        self.assertIn("cannot run on", row["reason"])
 
     def test_an_unidentified_target_blocks(self) -> None:
         summary = _checks(target={"title": "NC FORGE TEST"})
@@ -211,7 +267,8 @@ class ReadinessTests(unittest.TestCase):
         self.assertIn("evaluation_mode", summary["blocking"])
         self.assertIn("input_capability", summary["blocking"])
         mode = next(item for item in summary["checks"] if item["id"] == "evaluation_mode")
-        self.assertIn("Only observation_only is available", mode["reason"])
+        self.assertIn("is not one of them", mode["reason"])
+        self.assertIn("observation_only", mode["reason"])
 
     def test_offline_confirmation_is_required_for_a_game_window(self) -> None:
         game = resolve_game("offline-game-window")
@@ -238,7 +295,7 @@ class ReadinessTests(unittest.TestCase):
     def test_an_unavailable_verifier_never_makes_a_run_successful(self) -> None:
         summary = _checks()
         verifier = next(item for item in summary["checks"] if item["id"] == "objective_verification")
-        self.assertIn("No objective verifier", verifier["reason"])
+        self.assertIn("configures no objective", verifier["reason"])
         self.assertTrue(summary["ready"], "an unavailable verifier is not a required failure")
 
 
@@ -259,6 +316,8 @@ class _EvaluationFixture(unittest.IsolatedAsyncioTestCase):
             geometry=self.desktop.geometry,
             window_lines=self.desktop.window_lines,
             release_inputs=self.desktop.release,
+            action_input=self._action_input(),
+            objective_probe=self._objective_probe(),
             capture_supported=True,
             frame_interval=0.05,
             pause_timeout=0.5,
@@ -271,6 +330,14 @@ class _EvaluationFixture(unittest.IsolatedAsyncioTestCase):
         self.lab = NovaForgeEvaluationLab(
             benchmark=self.benchmark, store=self.store, publish=publish
         )
+
+    def _action_input(self) -> Any:
+        """The injector seam; an observation-only evaluation wires none."""
+        return None
+
+    def _objective_probe(self) -> Any:
+        """The verifier's window probe; an observation-only evaluation wires none."""
+        return None
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -298,7 +365,7 @@ class EvaluationPreflightTests(_EvaluationFixture):
         self.assertEqual(result["identity"]["handle"], self.desktop.window.handle)
         self.assertEqual(result["identity"]["pid"], self.desktop.window.pid)
         self.assertFalse(result["baseline"]["available"])
-        self.assertIn("first completed evaluation", result["baseline"]["reason"])
+        self.assertIn("first completed one becomes the baseline", result["baseline"]["reason"])
         self.assertIsNone(self.manager.active())
         self.assertEqual(self.benchmark.history()["count"], 0)
         self.assertEqual(self.lab.history()["count"], 0)
@@ -349,7 +416,7 @@ class EvaluationLifecycleTests(_EvaluationFixture):
         self.assertFalse(finished["objective"]["verified"])
         self.assertIsNone(finished["objective"]["achieved"])
         self.assertTrue(finished["objective"]["data_complete"])
-        self.assertIn("never that the game objective was achieved", finished["objective"]["reason"])
+        self.assertIn("never that a game objective was achieved", finished["objective"]["reason"])
         self.assertTrue(finished["benchmark_run_id"])
         self.assertTrue(finished["session_id"])
         self.assertTrue(finished["evidence"]["timeline"].startswith("/novaforge/sessions/"))
@@ -455,7 +522,7 @@ class EvaluationLifecycleTests(_EvaluationFixture):
         self.assertEqual(rows[0]["status"], "invalid")
         self.assertEqual(rows[0]["mode"], "control")
         self.assertEqual(self.lab.report(rows[0]["id"])["mode"], "control")
-        self.assertIn("Only observation_only is available", rows[0]["reason"])
+        self.assertIn("is not one of them", rows[0]["reason"])
         self.assertEqual(self.benchmark.history()["count"], 0, "nothing was started")
         # A value that is not a mode cannot be stored as one; the refusal reason
         # is where that caller's mistake is named.
@@ -594,7 +661,305 @@ class EvaluationLifecycleTests(_EvaluationFixture):
         assert game is not None and scenario is not None
         limitations = evaluation_limitations(game, scenario)
         self.assertTrue(any("never means a game objective" in item for item in limitations))
-        self.assertTrue(any("gameplay input" in item.lower() for item in limitations))
+        self.assertTrue(any("sends no input" in item for item in limitations))
+        control = evaluation_limitations(game, scenario, mode="control")
+        self.assertTrue(any("operator-authored" in item for item in control))
+        self.assertTrue(any("inconclusive" in item for item in control))
+
+
+class _RetitlingInput:
+    """An injector that meets a title objective when the planned key arrives."""
+
+    def __init__(self) -> None:
+        self.presses: list[str] = []
+        self.releases: list[str] = []
+        self.moves: list[tuple[int, int]] = []
+        self.on_press: Any = None
+
+    async def press(self, kind: str, name: str) -> None:
+        self.presses.append(f"{kind}:{name}")
+        if self.on_press is not None:
+            self.on_press()
+
+    async def release(self, kind: str, name: str) -> None:
+        self.releases.append(f"{kind}:{name}")
+
+    async def move(self, x: int, y: int) -> None:
+        self.moves.append((x, y))
+
+
+class _StubSession:
+    """Only the fields the control runner's target wait reads."""
+
+    def __init__(
+        self, *, validated: bool = False, state: str = "RUNNING", pause_reason: str = ""
+    ) -> None:
+        self.target_validated = validated
+        self.state = type("_State", (), {"value": state})()
+        self.pause_reason = pause_reason
+
+
+class _StubManager:
+    """A manager whose session reads are scripted; nothing else is reachable."""
+
+    def __init__(self, sessions: list[Any]) -> None:
+        self._sessions = list(sessions)
+        self.calls = 0
+
+    def get(self, session_id: str) -> Any:
+        self.calls += 1
+        if len(self._sessions) > 1:
+            return self._sessions.pop(0)
+        return self._sessions[0] if self._sessions else None
+
+
+class ControlTargetValidationTests(_EvaluationFixture):
+    """A control plan may not act before the session confirms its own target.
+
+    The race this pins: the benchmark reports its session id as soon as the
+    session exists, while the observation loop confirms the window on its first
+    tick. Executing immediately was refused by the Guardian with "the observation
+    loop has not confirmed the target identity" -- a refusal caused by timing,
+    not by the plan.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._manager = self.lab.manager
+
+    def tearDown(self) -> None:
+        self.lab.manager = self._manager  # type: ignore[assignment]
+        super().tearDown()
+
+    async def test_it_waits_for_the_confirmation_instead_of_acting_first(self) -> None:
+        stub = _StubManager(
+            [
+                _StubSession(validated=False),
+                _StubSession(validated=False),
+                _StubSession(validated=True),
+            ]
+        )
+        self.lab.manager = stub  # type: ignore[assignment]
+        self.assertEqual(await self.lab._await_target_validated("s-1"), "")
+        self.assertGreaterEqual(stub.calls, 3)
+
+    async def test_a_paused_session_reports_why_it_cannot_be_driven(self) -> None:
+        stub = _StubManager([_StubSession(state="PAUSED", pause_reason="target_lost")])
+        self.lab.manager = stub  # type: ignore[assignment]
+        reason = await self.lab._await_target_validated("s-2")
+        self.assertIn("paused", reason.lower())
+        self.assertIn("target_lost", reason)
+
+    async def test_a_vanished_session_is_refused_with_a_reason(self) -> None:
+        self.lab.manager = _StubManager([])  # type: ignore[assignment]
+        reason = await self.lab._await_target_validated("s-3")
+        self.assertIn("disappeared", reason.lower())
+
+    async def test_the_wait_is_bounded_and_reports_a_timeout(self) -> None:
+        import novacontrol.novaforge.evaluation as evaluation_module
+
+        original = evaluation_module.TARGET_VALIDATION_WAIT_SECONDS
+        evaluation_module.TARGET_VALIDATION_WAIT_SECONDS = 0.2
+        try:
+            stub = _StubManager([_StubSession(validated=False)])
+            self.lab.manager = stub  # type: ignore[assignment]
+            started = time.monotonic()
+            reason = await self.lab._await_target_validated("s-4")
+            elapsed = time.monotonic() - started
+        finally:
+            evaluation_module.TARGET_VALIDATION_WAIT_SECONDS = original
+        self.assertIn("did not confirm", reason.lower())
+        self.assertLess(elapsed, 3.0)
+
+
+@unittest.skipUnless(platform.system() == "Windows", "the artifact harness is Windows-only")
+class ControlEvaluationTests(_EvaluationFixture):
+    """NF-05 drives the NF-07 action path: one plan, one verdict, one record.
+
+    The harness is the disposable environment this build really can control: an
+    operator-authored plan, approved by digest, executed through the Guardian,
+    with the verdict read from the window rather than from the action log.
+    """
+
+    def setUp(self) -> None:
+        self.input = _RetitlingInput()
+        super().setUp()
+        self.input.on_press = self._meet_objective
+
+    def _meet_objective(self) -> None:
+        if self.desktop.window is not None:
+            self.desktop.window.title = "NC FORGE TEST - READY"
+
+    def _action_input(self) -> Any:
+        return self.input
+
+    def _objective_probe(self) -> Any:
+        async def probe(_handle: int) -> Any:
+            return self.desktop.window
+
+        return probe
+
+    def _control_request(self, **overrides: Any) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "game_id": "artifact-harness",
+            "scenario_id": "controlled-objective",
+            "target_title": "NC FORGE TEST",
+            "duration_seconds": 6,
+            "frame_interval_seconds": 0.25,
+            "verify_timeout_seconds": 3,
+            "confirm": True,
+            "mode": "control",
+            "objective": {"kind": "window_title", "parameter": "READY"},
+            "action_plan": [{"kind": "key", "key": "w"}],
+            "max_actions": 1,
+        }
+        payload.update(overrides)
+        return payload
+
+    async def test_an_approved_plan_executes_and_records_a_verified_verdict(self) -> None:
+        request = self._control_request()
+        preflight = await self.lab.preflight(request)
+        self.assertTrue(preflight["ready"], preflight["blocking"])
+        self.assertEqual(preflight["mode"], "control")
+        self.assertEqual(preflight["control"]["state"], "ready")
+        approval = preflight["approval"]
+        self.assertTrue(approval["digest"])
+        self.assertEqual(approval["digest"], preflight["control"]["plan_digest"])
+
+        record = await self.lab.start({**request, "approval_digest": approval["digest"]})
+        self.assertEqual(record["mode"], "control")
+        self.assertEqual(record["status"], "running")
+        finished = await self._wait_terminal(record["id"], timeout=20.0)
+
+        self.assertEqual(finished["status"], "completed", finished["reason"])
+        self.assertTrue(finished["valid"], finished["reason"])
+        self.assertTrue(finished["objective"]["configured"])
+        self.assertTrue(finished["objective"]["decided"])
+        self.assertTrue(finished["objective"]["verified"])
+        self.assertTrue(finished["objective"]["achieved"])
+        self.assertEqual(finished["objective"]["outcome"], "verified_success")
+        self.assertIsNotNone(finished["objective"]["completion_time_seconds"])
+        self.assertEqual(finished["metrics"]["objective_success"]["value"], 1.0)
+        self.assertEqual(finished["metrics"]["actions_executed"]["value"], 1.0)
+
+        control = finished["control"]
+        self.assertEqual(control["verdict"], "verified_success")
+        self.assertEqual(control["state"], "verified")
+        self.assertEqual([step["status"] for step in control["steps"]], ["executed"])
+        states = {row["stage"]: row["state"] for row in control["states"]}
+        self.assertEqual(states["execution"], "completed")
+        self.assertEqual(states["verification"], "verified_success")
+        self.assertEqual(states["cleanup"], "completed")
+        # A decided run refused nothing; the stage is closed, not left "pending"
+        # for a reader to wonder what is still owed on a finished evaluation.
+        self.assertEqual(states["refusal"], "not_applicable")
+
+        session = self.manager.get(finished["session_id"])
+        assert session is not None
+        self.assertEqual(session.state.value, "COMPLETED")
+        self.assertEqual(session.end_reason, "objective_verified")
+        self.assertEqual(session.actions_executed, 1)
+        self.assertEqual(self.input.presses, ["key:w"])
+        self.assertEqual(self.input.releases, ["key:w"])
+
+        report = self.lab.report(finished["id"])
+        self.assertTrue(report["objective_verified"])
+        self.assertEqual(report["mode"], "control")
+
+    async def test_start_without_the_approval_digest_sends_nothing(self) -> None:
+        request = self._control_request()
+        preflight = await self.lab.preflight(request)
+        self.assertTrue(preflight["ready"], preflight["blocking"])
+        with self.assertRaises(EvaluationError):
+            await self.lab.start(request)
+        self.assertIsNone(self.manager.active())
+        self.assertEqual(self.input.presses, [])
+        rows = self.lab.history()["evaluations"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "invalid")
+        self.assertIn("approval", rows[0]["reason"].lower())
+
+    async def test_an_approval_for_a_different_plan_is_refused(self) -> None:
+        request = self._control_request()
+        preflight = await self.lab.preflight(request)
+        self.assertTrue(preflight["ready"], preflight["blocking"])
+        digest = preflight["approval"]["digest"]
+        changed = self._control_request(action_plan=[{"kind": "key", "key": "enter"}])
+        with self.assertRaises(EvaluationError):
+            await self.lab.start({**changed, "approval_digest": digest})
+        self.assertIsNone(self.manager.active())
+        self.assertEqual(self.input.presses, [])
+        rows = self.lab.history()["evaluations"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "invalid")
+        self.assertIn("does not match", rows[0]["reason"])
+
+    def test_a_refused_plan_cannot_become_a_completed_evaluation(self) -> None:
+        """A benchmark can finish first; a refusal still means the plan did not run.
+
+        The session's time limit is a *planned* benchmark ending, so a plan that
+        is refused while the clock runs out could otherwise be read as a
+        completed evaluation. The control block's refusal outranks that status.
+        """
+        record: dict[str, Any] = {
+            "id": "refused-control",
+            "status": "running",
+            "valid": False,
+            "mode": "control",
+            "benchmark_run_id": "run-1",
+            "session_id": "",
+            "control": {
+                "state": "refused",
+                "reason": "The action was refused before execution.",
+                "states": [],
+            },
+            "objective": {},
+            "baseline": {},
+            "evidence": {},
+            "limitations": [],
+            "created_at": "2026-10-21T00:00:00Z",
+        }
+        self.lab._evaluations[record["id"]] = record
+
+        class _Finished:
+            def get(self, run_id: str) -> dict[str, Any]:
+                return {
+                    "status": "completed",
+                    "valid": True,
+                    "reason": "The observation ran to its budget.",
+                    "metrics": {},
+                    "evidence": {},
+                    "ended_at": "2026-10-21T00:00:10Z",
+                }
+
+        original = self.lab.benchmark
+        self.lab.benchmark = _Finished()  # type: ignore[assignment]
+        try:
+            self.lab._sync(record)
+        finally:
+            self.lab.benchmark = original  # type: ignore[assignment]
+
+        self.assertEqual(record["status"], "aborted")
+        self.assertFalse(record["valid"])
+        self.assertIn("controlled plan was refused", record["reason"])
+
+    async def test_an_unmet_objective_is_decided_but_not_a_success(self) -> None:
+        self.input.on_press = None  # the key arrives; the window does not change
+        request = self._control_request()
+        preflight = await self.lab.preflight(request)
+        self.assertTrue(preflight["ready"], preflight["blocking"])
+        record = await self.lab.start(
+            {**request, "approval_digest": preflight["approval"]["digest"]}
+        )
+        finished = await self._wait_terminal(record["id"], timeout=20.0)
+
+        self.assertEqual(finished["status"], "completed", finished["reason"])
+        self.assertTrue(finished["valid"], finished["reason"])
+        self.assertTrue(finished["objective"]["decided"])
+        self.assertFalse(finished["objective"]["achieved"])
+        self.assertEqual(finished["objective"]["outcome"], "verified_failure")
+        self.assertEqual(finished["metrics"]["objective_success"]["value"], 0.0)
+        self.assertEqual(self.input.presses, ["key:w"])
 
 
 class EvaluationAuditTests(_EvaluationFixture):

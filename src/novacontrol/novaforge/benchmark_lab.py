@@ -25,6 +25,7 @@ import asyncio
 import math
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 from uuid import uuid4
 
@@ -85,6 +86,36 @@ def _scenario_version(scenario: Any) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int):
         return None
     return value
+
+
+def _budget(value: Any) -> int | None:
+    """An action budget as an integer, or ``-1`` so validation refuses it.
+
+    A non-numeric budget must reach ``MissionConfig`` as an INVALID value (which
+    refuses the start with a reason) rather than be dropped silently — a run
+    that asked for a bound and did not get one is not the run that was approved.
+    """
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool):
+        return -1
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return -1
+
+
+def _age_seconds(start: Any, end: Any) -> float | None:
+    """``end - start`` in seconds, or ``None`` when either stamp is unreadable."""
+    try:
+        begin = datetime.fromisoformat(str(start))
+        finish = datetime.fromisoformat(str(end))
+    except (TypeError, ValueError):
+        return None
+    seconds = (finish - begin).total_seconds()
+    if not math.isfinite(seconds) or seconds < 0:
+        return None
+    return round(seconds, 3)
 
 
 def _duration_value(value: Any) -> float | None:
@@ -481,11 +512,19 @@ class NovaForgeBenchmarkLab:
                 "policy": {
                     "available": False,
                     "id": None,
-                    "reason": "No action policy is invoked: NF-04 sends no input.",
+                    "reason": (
+                        "The benchmark lab itself invokes no policy and sends no input. A "
+                        "confirmed controlled evaluation may attach an approved action plan "
+                        "to this session; the plan is recorded by that evaluation."
+                    ),
                 },
                 "objective": {
                     "evaluation": scenario.evaluation,
+                    "configured": False,
+                    "available": bool(scenario.verifier.get("available")),
+                    "outcome": "in_progress",
                     "achieved": None,
+                    "decided": False,
                     "verifier": dict(scenario.verifier),
                     "success_criteria": scenario.success_criteria,
                     "data_complete": False,
@@ -507,6 +546,9 @@ class NovaForgeBenchmarkLab:
                 "errors": [],
                 "limitations": run_limitations(scenario),
                 "interrupted": False,
+                #: The session's action budget, when the caller configured one. NF-04
+                #: never sets it itself; a controlled evaluation does.
+                "max_actions": _budget(payload.get("max_actions")),
                 "runner": {
                     "poll_interval_ms": round(self.poll_interval * 1000.0, 1),
                     "polls": 0,
@@ -596,6 +638,7 @@ class NovaForgeBenchmarkLab:
         scenario: BenchmarkScenario,
         config: BenchmarkConfig,
         identity: Mapping[str, Any] | None = None,
+        max_actions: int | None = None,
     ) -> dict[str, Any]:
         mission: dict[str, Any] = {
             "name": f"Benchmark: {scenario.name}",
@@ -605,6 +648,8 @@ class NovaForgeBenchmarkLab:
             "time_limit_seconds": config.duration_seconds,
             "frame_interval_seconds": config.frame_interval_seconds,
         }
+        if max_actions is not None:
+            mission["max_actions"] = max_actions
         # Carried only when the caller pinned the identity it validated. A
         # benchmark started from the panel keeps title matching alone.
         for key in ("expected_handle", "expected_pid"):
@@ -631,7 +676,12 @@ class NovaForgeBenchmarkLab:
                 return
             try:
                 started = await self.manager.start(
-                    self._mission(scenario, config, dict(run.get("identity") or {}))
+                    self._mission(
+                        scenario,
+                        config,
+                        dict(run.get("identity") or {}),
+                        run.get("max_actions"),
+                    )
                 )
             except MissionValidationError as exc:
                 reasons = list(getattr(exc, "errors", None) or [str(exc)])
@@ -766,7 +816,14 @@ class NovaForgeBenchmarkLab:
                 return
             if record.state is SessionState.PAUSED and not record.frames:
                 pause_reason = str(record.pause_reason or "")
-                if pause_reason in {"target_lost", "target_changed", "target_unreadable"}:
+                if pause_reason in {
+                    "target_lost",
+                    "target_changed",
+                    "target_unreadable",
+                    "target_minimized",
+                    "target_hidden",
+                    "target_offscreen",
+                }:
                     run["runner"]["note"] = (
                         f"The target window was {pause_reason.replace('_', ' ')} before a "
                         "frame could be captured."
@@ -828,13 +885,17 @@ class NovaForgeBenchmarkLab:
         retention = dict(timeline.get("retention") or {})
         events = int(retention.get("stored") or 0)
 
+        objective = self._objective_block(record)
         metrics = collect_metrics(
             scenario=scenario,
             telemetry=telemetry,
             events=events,
             errors=len(record.errors),
             interventions=len(record.interventions),
+            objective=objective,
+            actions=record.actions_executed if record.capabilities.get("input_path") else None,
         )
+        run["objective"] = objective
         run["metrics"] = metrics
         run["metric_rows"] = len(metrics)
         run["telemetry"] = telemetry
@@ -899,7 +960,7 @@ class NovaForgeBenchmarkLab:
         runner["cancelled"] = bool(runner.get("cancelled"))
 
         status, reason = self._terminal_status(record, run, scenario, frames, latency_samples)
-        self._finish(run_id, status=status, reason=reason, scenario=scenario)
+        self._finish(run_id, status=status, reason=reason, scenario=scenario, objective=objective)
         runner["finalize_ms"] = round((time.monotonic() - collected) * 1000.0, 2)
 
     def _terminal_status(
@@ -946,29 +1007,110 @@ class NovaForgeBenchmarkLab:
                 f"The session ended in {state.value} "
                 f"({end_reason or 'no end reason'}); no completed observation was recorded.",
             )
-        if end_reason not in {"time_limit", "completed"}:
+        # ``objective_verified`` is the manager's own close for a session whose
+        # objective a verifier decided: it is a completed run, not an outside
+        # stop. Reading it as "stopped outside the runner" made every successful
+        # controlled evaluation ABORTED. ``action_budget`` is the SAME kind of
+        # ending: it is the mission's own bound, enforced by the session, not an
+        # operator stop. A plan that spends its last approved action is finished;
+        # the verdict recorded before the bound fired decides how it finished.
+        if end_reason not in {"time_limit", "completed", "objective_verified", "action_budget"}:
             return (
                 "aborted",
                 "The session was stopped outside the benchmark runner "
                 f"(end reason: {end_reason or 'none'}); the attempt is incomplete.",
             )
-        if frames < scenario.min_frames:
+        # A DECIDED objective is itself the measurement this run was asked for.
+        # The manager closes a session the moment a verifier records
+        # ``objective_verified``, so a fast success legitimately ends before the
+        # observation floor -- and counting its frames against that floor marked
+        # the one run that answered the question invalid. The floor still binds a
+        # run with no verdict, and a decided run must still show ONE fresh frame:
+        # a verdict with nothing observed is not a measurement.
+        verdict = dict(run.get("objective") or {})
+        decided = bool(verdict.get("decided"))
+        if frames < scenario.min_frames and not (decided and frames >= 1):
             return (
                 "invalid",
                 f"Only {frames} fresh frame(s) were recorded; this scenario requires at "
                 f"least {scenario.min_frames}. The attempt is excluded from aggregates.",
             )
-        if latency_samples < scenario.min_latency_samples:
+        if latency_samples < scenario.min_latency_samples and not decided:
             return (
                 "invalid",
                 f"Only {latency_samples} usable latency sample(s) were recorded; this "
                 f"scenario requires at least {scenario.min_latency_samples}.",
             )
+        if decided:
+            return (
+                "completed",
+                "The session recorded the required data and a verifier decided the objective: "
+                f"{verdict.get('outcome')}. {verdict.get('reason') or ''}".strip(),
+            )
         return (
             "completed",
-            "The observation ran to its budget and recorded the required data. No objective "
-            "is claimed: NF-04 has no verifier.",
+            (
+                "The observation ran to its budget and recorded the required data. The "
+                "objective is NOT decided: data completeness is not gameplay success."
+                if verdict.get("configured")
+                else "The observation ran to its budget and recorded the required data. No "
+                "objective was configured, so no gameplay outcome is claimed."
+            ),
         )
+
+    def _objective_block(self, record: SessionRecord) -> dict[str, Any]:
+        """The session's objective verdict, read from the record that holds it.
+
+        A run with no objective keeps the honest "not configured" answer; a run
+        whose verifier has not decided says ``in_progress``/``unknown`` and
+        reports no completion time. Nothing here is inferred from the session
+        ending, the action count or the clock.
+        """
+        if record.objective is None:
+            return {
+                "configured": False,
+                "available": False,
+                "outcome": "unsupported",
+                "achieved": None,
+                "decided": False,
+                "data_complete": False,
+                "objective": None,
+                "verifier": "",
+                "verifier_version": 0,
+                "at": "",
+                "completion_time_seconds": None,
+                "reason": (
+                    "No objective was configured for this session, so no gameplay outcome "
+                    "is claimed. Ending is not success."
+                ),
+            }
+        verification = dict(record.verification or {})
+        outcome = str(verification.get("outcome") or "in_progress")
+        decided = bool(verification.get("decided")) or outcome in {
+            "verified_success",
+            "verified_failure",
+        }
+        achieved = verification.get("achieved")
+        completion = (
+            _age_seconds(record.started_at, verification.get("at")) if decided else None
+        )
+        return {
+            "configured": True,
+            "available": bool(record.capabilities.get("objective_verifier", False)),
+            "outcome": outcome,
+            "achieved": achieved if isinstance(achieved, bool) else None,
+            "decided": decided,
+            "data_complete": False,
+            "objective": record.objective.to_dict(),
+            "verifier": str(verification.get("verifier", "") or ""),
+            "verifier_version": int(verification.get("verifier_version", 0) or 0),
+            "at": str(verification.get("at", "") or ""),
+            "completion_time_seconds": completion,
+            "reason": str(verification.get("reason", "") or (
+                "The objective is configured but has not been decided; a running session "
+                "is not a satisfied objective."
+            )),
+        }
 
     def _finish(
         self,
@@ -977,6 +1119,7 @@ class NovaForgeBenchmarkLab:
         status: str,
         reason: str,
         scenario: BenchmarkScenario | None = None,
+        objective: Mapping[str, Any] | None = None,
     ) -> None:
         run = self._runs.get(run_id)
         if run is None:
@@ -987,15 +1130,15 @@ class NovaForgeBenchmarkLab:
         run["valid"] = status == ELIGIBLE_STATUS
         run["reason"] = reason
         run["ended_at"] = run.get("ended_at") or utc_now()
-        run["objective"] = {
-            **dict(run.get("objective") or {}),
-            "achieved": None,
-            "data_complete": status == ELIGIBLE_STATUS,
-            "reason": (
-                "No objective verifier exists in NF-04; data completeness is not gameplay "
+        block = dict(objective if objective is not None else run.get("objective") or {})
+        block["achieved"] = block.get("achieved") if isinstance(block.get("achieved"), bool) else None
+        block["data_complete"] = status == ELIGIBLE_STATUS
+        if not block.get("reason"):
+            block["reason"] = (
+                "No objective verifier decided this run; data completeness is not gameplay "
                 "success."
-            ),
-        }
+            )
+        run["objective"] = block
         if scenario is not None:
             run["limitations"] = run_limitations(scenario)
         self._persist(verify_run_id=run_id)

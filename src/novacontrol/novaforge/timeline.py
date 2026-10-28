@@ -82,6 +82,9 @@ EVENT_SPECS: dict[str, tuple[str, str]] = {
     "target.lost": ("target", "warning"),
     "target.changed": ("target", "warning"),
     "target.unreadable": ("target", "warning"),
+    "target.minimized": ("target", "warning"),
+    "target.hidden": ("target", "warning"),
+    "target.offscreen": ("target", "warning"),
     "frame.captured": ("capture", "info"),
     "frame.rejected": ("capture", "warning"),
     "capture.failed": ("capture", "error"),
@@ -102,13 +105,46 @@ EVENT_SPECS: dict[str, tuple[str, str]] = {
     "action.aborted": ("action", "warning"),
     "objective.configured": ("objective", "info"),
     "objective.verified": ("objective", "info"),
+    # NF-20: the planning decisions. These were published to the bus only until
+    # the vocabulary was extended — ``append`` REFUSES an unknown type and
+    # ``_event`` swallows that refusal, so every plan edge vanished from the
+    # session's audit trail while the code looked like it recorded one.
+    "novaforge.plan.created": ("plan", "info"),
+    "novaforge.plan.started": ("plan", "info"),
+    "novaforge.plan.step": ("plan", "info"),
+    "novaforge.plan.finished": ("plan", "info"),
+    "novaforge.plan.refused": ("plan", "warning"),
+    "novaforge.plan.invalidated": ("plan", "warning"),
+    "novaforge.plan.cancelled": ("plan", "warning"),
+    "novaforge.plan.replanned": ("plan", "info"),
+    "novaforge.plan.replan_refused": ("plan", "warning"),
+    # NF-21: the outcome decisions. Same rule as the plan edges above — an
+    # unregistered type is refused by ``append`` and swallowed by ``_event``, so
+    # a missing entry makes the verdict disappear from the audit trail while the
+    # code looks like it recorded one.
+    "novaforge.outcome.started": ("outcome", "info"),
+    "novaforge.outcome.verified": ("outcome", "info"),
+    "novaforge.outcome.recovery": ("outcome", "warning"),
+    # NF-22: the autonomous run's own moves. Same rule again, and it bit this
+    # phase too: an unregistered type is refused by ``append`` and swallowed by
+    # ``_event``, so the whole autonomous trail disappeared from the timeline
+    # while the code looked like it recorded one. Every phase move the supervisor
+    # announces (``novaforge.autonomy.phase``) and every operator decision on it
+    # is registered here, with its own category so a panel can show just the run.
+    "novaforge.autonomy.phase": ("autonomy", "info"),
+    "autonomy.started": ("autonomy", "info"),
+    "autonomy.declined": ("autonomy", "warning"),
+    "autonomy.paused": ("autonomy", "info"),
+    "autonomy.resumed": ("autonomy", "info"),
+    "autonomy.cancelled": ("autonomy", "warning"),
+    "autonomy.plan_answered": ("autonomy", "info"),
 }
 
 CATEGORIES = tuple(sorted({category for category, _ in EVENT_SPECS.values()}))
 SEVERITIES = ("info", "warning", "error")
 SOURCES = (
     "session", "capture", "target", "telemetry", "guardian", "store", "record",
-    "action", "objective",
+    "action", "objective", "planner", "verifier", "autonomy",
 )
 
 #: Event types that are genuinely recorded by NF-03 itself.
@@ -311,7 +347,10 @@ def summary_text(event: TimelineEvent) -> str:
         return f"No fresh frame: {payload.get('reason') or 'the capture was not fresh'}"
     if event.type == "capture.failed":
         return f"Capture failed: {payload.get('error') or 'the capture seam raised'}"
-    if event.type in {"target.lost", "target.changed", "target.unreadable"}:
+    if event.type in {
+        "target.lost", "target.changed", "target.unreadable",
+        "target.minimized", "target.hidden", "target.offscreen",
+    }:
         return f"Target {event.type.split('.')[1]}: {payload.get('detail') or 'recorded by the loop'}"
     if event.type == "target.validated":
         return f"Target validated: {payload.get('title') or 'the pinned window'}"

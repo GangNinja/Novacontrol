@@ -5534,3 +5534,284 @@ subtests; `test_application.py` 34 passed / 15 subtests. Both mypy views clean o
 `docs/API.md` in sync. **Verdict: PASS WITH LIMITATIONS** — one objective kind (window title), a declared key
 set, no game launched, and anti-cheat/per-game policy unproven; real-time gameplay is still not supported and
 the ~8.2 fps ceiling from the readiness audit is untouched.
+
+## 71. The controlled evaluation reaches the panel — and the panel refuses to call execution a win (2026-10-21)
+
+The controlled chain was proven over HTTP five times and was still invisible in the product: the
+Evaluation tab could only watch. It now offers a **Mode** switch, and in control mode an objective
+editor, an operator-authored plan (key / hold / click / move), the environment's declared action
+policy, an action budget, and one approval checkbox bound to the digest the preflight returned.
+The plan is held in `forge.evaluation.plan` — not read back from the DOM — so the payload, the
+signature and the rendered summary cannot disagree about what is being approved, and every edit
+clears the previous validation and approval because both are keyed to that digest.
+
+The gate is the part worth reading twice. Start requires readiness, an unchanged configuration, and
+consent — and in control mode the preflight's own `approval.digest`, which the payload merely echoes.
+The panel cannot mint one (a Node pin forbids `sha256`/`crypto.subtle` in the file). A failed start
+is never re-posted: `recoverEvaluationStart` looks for a `running` record with the same
+`plan_digest` and adopts it, because a second POST is a second execution request, not a retry.
+
+Then the ending, which is where this panel could most easily lie. `completed · objective verified`
+is printed only from `objective.decided` / `objective_verified`; a controlled run that ended without
+a decided verdict reads `objective inconclusive`; an undecided metric row prints
+`Unavailable — reason`, never `0`; and the report shows the digest, the approval, the six stages and
+the verifier's own evidence beside the actions. Observation-only keeps its own wording and its own
+confirmation, and switching back to it restores that form exactly.
+
+Three defects came out of verification, not out of reading the code. **Driving the live form** showed
+an edited plan row still summarising itself as `key ? · 60 ms` after `space` was chosen — the row head
+is now updated in place so a re-render does not steal focus mid-edit. **The existing UI test** caught
+that routing every start through the new guard had dropped the observation-mode confirmation: consent
+is now required in both modes, with different wording. And the **first live run** ended with the
+`refusal` stage still `pending` on a verified success; a finished run refused nothing, so
+`_run_control` closes it as `not_applicable` and the control-run test pins it.
+
+**Live acceptance, twice, through the served page** (`127.0.0.1:8001`, temp working directory, so the
+user's `data/` was untouched): mode → control, `artifact-harness@1`, target `NC FORGE HARNESS - idle`,
+one `key space · 60 ms`, readiness all-pass, digest `3a03631f…` / `7f7de870…`, approval required
+before start, then `completed · objective verified` with the verdict quoting the window title
+`NC FORGE HARNESS - READY`, `objective_success achieved`, `actions_executed 1`, and the report
+rendering digest + actions + evidence. The harness window is disposable and was closed afterwards;
+no real game was launched or controlled.
+
+**Checks.** `test_novaforge_ui.py` 104 passed / 61 subtests (16 new: guard, observation consent,
+digest echo, recovery, verdict translation, plan/objective validation, summaries, markup, and six
+DOM-rendered pins); `test_novaforge_evaluation.py -k ControlEvaluationTests` 5 passed;
+`test_novaforge_evaluation_api.py` 13 passed; `test_novaforge_benchmark_api.py` 22 passed; both mypy
+views clean over 428 files; `docs/API.md` in sync. The DOM harness was mutation-checked — removing the
+`in_progress` verdict branch made the inconclusive copy disappear from the captured nodes.
+**Verdict: PASS WITH LIMITATIONS** — the panel is no longer a blocker to a first controlled game
+evaluation; what remains is a decision pipeline, objective kinds a real game can announce, more than
+one controllable environment, and a policy that can be proven rather than declared.
+
+## 72. NF-08 — a second objective kind and a loop that stops (2026-10-21)
+
+NF-07 left two named blockers: nobody chose actions, and the verifier could only read a window
+title. Both are addressed here, and the interesting work was in what the new pieces REFUSE to say.
+
+`observation.py` makes one timestamped value the only thing a decision may act on. The bug that
+mattered was found by a test rather than a reading: a capture that claimed `fresh: true` while
+reporting a 30 s age was accepted, because the builder trusted the boolean and not its own bound.
+Freshness now requires both. The other decision was about a **title**: it is text that was read, so
+an observation with a readable title and a fresh frame is actionable even when OCR finds nothing —
+otherwise a title-driven policy could never run on a host without OCR, and `degraded` would mean
+"we read the window but refuse to use what it said".
+
+`ocr_text` reuses the capture seam, crops to the target and reads through the SAME Windows engine
+the vision-guided click uses. The honesty rule took the most thought: Windows OCR returns words and
+no confidence. An invented number would have made every verdict look measured, so the verifier
+treats no-confidence as a missing measurement: recognised words may decide (the words ARE the
+measurement), an empty reading may not prove `absent`, and the verdict carries `confidence: null`
+with the note saying why. Absence and a failed read are the same observation without a confidence.
+
+The loop was the easy part once the manager's gates were understood: it never injects, it proposes
+to `plan_action` and executes the returned digest. `completed` requires the verifier. A live run
+then taught the one rule the unit tests had not: a `verified_failure` **before** any action is the
+starting state ("READY is not on screen yet"), not a verdict, and ending there made a
+default-configured loop fail before it began. It is now recorded and the loop proceeds; only a
+failure after an action is final. The HTTP loop also defaulted an explicit `max_actions: 0` to the
+budget instead of rejecting it — `or` on a number is a validation hole, now `is None`.
+
+**Live.** The disposable WinForms harness was driven through the served page: one injected `space`,
+OCR read `RECEIVED 1 KEY(S)` from a fresh frame, and the session completed `verified_success` in
+5.96 s with the loop card showing `#1 key space · expectation met`. The API run produced the same
+verdict from evidence quoting the recognised text. A second API run, against a harness already
+showing the marker, completed at precheck with no action — the loop saving work rather than
+scripting one more press. The preview screenshot tool could not composite the page, so the UI
+evidence is textual; that is recorded rather than papered over.
+
+**Checks.** `test_novaforge_closed_loop.py` 47 passed (new); NovaForge core/UI 157 and 313 passed
+with 75 subtests; gameplay HTTP 11/10; route contract 18/90; benchmark 75/111; evaluation 76/34;
+`test_web_api.py` static subset 3/12; both mypy views clean over 431 files; `docs/API.md` in sync.
+The DOM harness was mutation-checked by breaking the completed-loop label and watching the right
+test fail. The full `test_web_api.py` run exceeded the tool window twice and is reported as
+unfinished, not green. **Verdict: PASS WITH LIMITATIONS** — the loop and the second objective kind
+are real; the policy is a deterministic harness rule, and no game-playing claim is made.
+
+## 73. NF-09 — the vision model answers into a typed claim, and the loop refuses to wait for it (2026-10-22)
+
+NF-08 ended with one empty seam: `ObservationBuilder.describe` existed and nothing implemented it, so
+every machine reported `vision_model: false`. Filling it was mostly a matter of refusing to let a model's
+opinion become evidence. `visual.py` wraps the EXISTING provider chain (the capability gate that reads
+Ollama's metadata, the persisted vision-model choice, the existing downscale) and turns an answer into a
+versioned value that names its frame and model, separates `evidence` from `provenance:
+model_interpretation`, keeps `confidence: null` while recording a self-rating only as
+`reported_confidence`, and records a disagreement with the OS-read title or OCR as a CONFLICT instead of
+picking a winner. Output fields that look like actions are discarded and reported. Stale and clipped
+frames are refused before a model is called at all.
+
+The bounded loop found the design error the tests were waiting for. Wiring the describer into every
+observation made a one-action loop take **24.3 s** (12 s description cap + action + verify) and the NF-08
+acceptance test with a 20 s deadline correctly returned `stopped`. A control loop must not pay a model's
+latency for evidence it already has, so the loop now observes with `describe=False` and the read-only
+interpret endpoint is the deliberate path; the test class is back to **3.44 s**. A second honesty bug came
+out of the live run: an empty model answer was `degraded`, which reads as "answered without a usable
+structure" when nothing answered. It is now `unavailable`, pinned by a test.
+
+**Live inference failed, and is reported as failed.** Ollama served `qwen3-vl:4b` on CPU; the gate
+correctly reported vision. Attempt 1 spent 46.7 s on 1235 prompt tokens and 148.0 s decoding 1200 tokens
+at 8.10 tok/s, then returned **empty content** at 194.9 s. Attempt 2 used a 2000-token budget at 720 px and
+**timed out at 295 s**. A direct short-prompt probe of the same model read "NC FORGE HARNES - idle" and
+returned JSON in 54.2 s, so the wiring and the model's eyes work; a reasoning 4B model on this CPU does not
+fit a bounded structured answer. No model-backed interpretation is claimed.
+
+One wire decision came out of that: `json_mode` would route the call to Ollama's NATIVE endpoint, whose
+message shape is text `content` plus an `images` list — it cannot carry the OpenAI image blocks this
+wrapper sends, so the structured vision request stays on the compatible surface. The native structured
+path was still fixed to send `format: json` (it advertised structured support without constraining the
+reply), and Anthropic's provider now drops the NovaControl-only hint rather than forwarding it.
+
+**Checks.** `test_novaforge_vision.py` **46 passed**; NovaForge core/API/gameplay/UI/vision/loop/timeline
+**417 passed / 88 subtests**; NF-04/05/06 evaluation/benchmark/coach/experiment **209 / 164**; vision suite
++ route contract **160 / 107**; `test_web_api.py` + `test_web_platform.py` **120 / 437**; both mypy views
+clean over **432 files**; `docs/API.md` in sync; `node --check` clean on the touched JS. The page reloaded
+with the NF-09 roadmap row and a truthful capability line (`qwen3-vl:4b via llm:ollama`) and zero console
+errors; the Describe Frame click was not re-run live because the known inference takes up to 295 s, though
+the endpoint itself was called twice. **Verdict: PASS WITH LIMITATIONS** for the contract and its safety,
+**FAIL** for live inference on this hardware — the interface is real, the model's answer is not.
+
+## 74. NF-10 — a policy that reads the stage, and a baseline that does not (2026-10-22)
+
+NF-08 shipped one rule and NF-10 needed two things it could not do: choose a different action
+for a different state, and prove that choice against something. Both fit the existing
+`DecisionProvider` seam, so nothing about the loop, the guardian, the action policy or the
+verifier was replaced. The disposable harness grew a second task (`-Task stages`) rather than a
+second window: `IDLE --A--> ARMED --B--> COMPLETE`, with `FAULT --R--> IDLE` as recovery. The
+state is the window title, which is the property that makes the experiment checkable — the
+policy and the verifier read the same OS fact, and no hidden script decides for either.
+
+`HarnessStagesPolicy` is a deterministic rule over that title (v1). It refuses stale and
+unreadable observations, refuses to act at COMPLETE, stops after a stall, and labels every
+proposal with its policy version, evidence refs, expected next title, uncertainty and whether a
+MODEL chose it. The vision fallback is deliberately narrow: a model description is consulted only
+when the title states no stage, must be a structured conflict-free interpretation, and the
+decision is labelled model-backed. `FixedKeyPolicy` presses one key on everything and exists to
+be the baseline.
+
+The live run found a defect that unit tests had no reason to see: `_VK` was generated with
+uppercase letters while `normalize_key` lowercases before lookup, so `b` and `r` were "not a key
+this build knows" and the second stage could not be pressed. Lowercasing the generated table
+fixed every letter, pinned across all 26. A second design defect needed a policy-level answer:
+NF-08 treated a verifier failure after any action as a failed attempt, which is right for a
+one-action rule and fatal for a staged objective. The policy now declares
+`fail_on_unmet_verification` (default True keeps NF-08 and the baseline unchanged; False for the
+stage rule), and a policy stop with a failing verdict is reported `failed`, not `stopped`.The transition metric had been reading a nested shape real runs never used, reporting 0 transitions
+until it read `observation["title"]`; and once it counted real transitions it credited the BASELINE with
+adapting (its own wrong key moved IDLE→FAULT), so it now requires a changed second decision after the
+change — 3/3 candidate, 0/3 baseline, pinned by a test that feeds a fixed policy a state change.
+
+Live acceptance, with a fresh window per trial and the same limits for both policies: candidate
+**3/3 verified_success**, two actions and two observed transitions each, 1.750/1.609/1.613 s; a
+controlled-fault recovery trial **verified_success** from FAULT in three actions, 2.425 s; the
+fixed baseline **0/3**, one action, verified failure in FAULT at 1.00/1.05/1.55 s. The candidate is
+slower by 0.46 s because it takes the two actions the task requires. Three trials on a deterministic
+task: no significance, raw rows kept. **No model chose a live decision** — NF-09's CPU inference
+failure stands, `model_backed_trials: 0`, and the model-backed-policy verdict is FAIL rather than
+a mock dressed as intelligence.
+
+**Checks.** `test_novaforge_policy.py` **26 passed**; policy/loop/gameplay/API **243 / 22**;
+desktop/UI/vision/timeline **337 / 121**; both mypy views clean over **433 files**; `docs/API.md`
+in sync; `node --check` clean. `scripts/novaforge_policy_acceptance.py --trials 3` exits 0 and
+writes the trial evidence. The full repository suite was not run in one pass. **Verdict: PASS
+WITH LIMITATIONS** — state-dependent decisions, guarded execution, independent verification and a
+baseline comparison are demonstrated; sample size, a single environment and the absence of a
+working local model are the limits. *(The live figures above were superseded by the verification
+pass in §75, which re-ran the acceptance after changing the loop; the report and the stored
+artifact carry that run.)*
+
+## 75. NF-10 verification pass — the bounds a policy needs, and the record the panel owed (2026-10-22)
+
+Auditing NF-10 against its own ten sections found four things the first pass had not done, and
+the phase tests were run first so the baseline was a real one (256 passed / 97 subtests).
+
+The most serious was a missing **decision bound**. The loop bounded the observation (15 s) and
+the verifier (20 s) but awaited `policy.propose()` with no timeout, so one policy that never
+returned would hold the run — and the operator's Stop — for ever. `LoopLimits` now carries
+`decision_timeout_seconds` (default 10 s, validated like its siblings); the decision runs under
+`asyncio.wait_for`, a spent bound stops the run with that reason, and a cancel that arrived
+during the wait is reported as `canceled` instead of being mislabelled a timeout.
+
+The second was that a **policy fault escaped the loop**. Only `PolicyUnavailable` was caught, so a
+policy that raised (or returned a shape that failed later at `proposal.to_dict()`) propagated out
+of `run()`; a raising planner/executor did too. A returned answer is now validated before
+planning (`_proposal_problem`: action mapping, kind, non-empty reason, evidence sequence,
+expectation mapping), and a raise anywhere in propose/plan/execute is recorded as `error` with the
+fault named and nothing executed. Nothing is retried, and no gate is bypassed.
+
+The third was **§8 exposure**, which the first pass had skipped entirely — the report had no UI
+section, and the panel showed plan/execute status without the observed state, the decision's
+reason, evidence refs, expected outcome, uncertainty, verifier reason, metrics or history. Each
+step now renders all of those; the verifier's verdict is quoted separately from the loop's stop
+reason; and a Trial history card shows per-policy aggregates plus the last five rows, refusals and
+inconclusive runs included. It reads `GET /novaforge/trials` (new read-only route, registered in
+ApiSurface, route_consumers and `docs/API.md`), and the loop response also returns `trial` and
+`policy_summaries`. The aggregates are produced by `policy_eval` — the module the acceptance
+script uses — so the panel and the report cannot disagree about a number. History is capped at 50
+rows and says `durable: false`; a metric with no samples is omitted, never zero.
+
+Fourth, a smaller contract gap: `HarnessReadyPolicy`'s proposal carried its policy id but not its
+version, so a proposal held outside a loop could not name the version that chose it.
+
+Tests grew by thirteen (seven policy, three API, three DOM) and pin the new guards: a hung policy stops at its bound; a cancel during the
+wait is `canceled`; a raising policy and four malformed shapes are `error` with **no plan call**; a
+planner fault is recorded, not raised; target loss after an action stops before another decision;
+a non-positive decision bound is refused; a finished run becomes a trial with its aggregates; an
+inconclusive run and a refused run stay visible; and the DOM driver asserts the state/reason/
+expectation/evidence/uncertainty lines and the trial card.
+
+**Re-verified live after the changes** (`scripts/novaforge_policy_acceptance.py --trials 3
+--output data/novaforge_nf10_trials.json`, exit 0): candidate **3/3 verified_success**, 1.965 /
+2.276 / 2.366 s, two actions and two changed decisions each; recovery **verified_success** from
+FAULT in three actions, 2.695 s; baseline **0/3 verified_failure**, one action, 1.529 / 1.589 /
+1.096 s. Responded-to-transition **3/3 vs 0/3**; `model_backed_trials: 0`. The run is slower by
+0.80 s because it takes the two actions the task requires.
+
+**Checks.** policy **33 passed**; policy/loop/gameplay/API/core **253 / 26**; desktop/UI/vision/
+timeline **340 / 121**; route contract + API reference + benchmark/evaluation/experiment routes
+**60 / 413**; both mypy views clean over **433 files**; `docs/API.md` in sync (323 routes);
+`node --check` clean. The full repository suite was not run in one pass. Verdict unchanged:
+**PASS WITH LIMITATIONS** — the limitations remain the sample size, one deterministic environment,
+process-local trial history, and the absence of any live model-chosen decision.
+
+
+## 76. The docs were two audits behind the tree, and the first Linux run found what Windows could not (2026-10-28)
+
+The NF-08…NF-26 work was finished but never packaged, and its front matter had stopped tracking it. The
+README's NovaForge table ended at **NF-09** while the tree shipped **NF-26**; its headline suite size still
+read **3,325 passed / 12 skipped / 2,102 subtests / 108 files** against a tree that reports **5,963 / 1 /
+3,847 / 148**; `docs/STATUS.md` stopped at NF-15 and its "Next Work" section still described the decision
+pipeline as the missing link, four phases after it shipped. All of that now matches the tree, and every
+added row carries the phase's own honest verdict rather than a uniform tick — NF-13A stays *partially
+verified*, NF-23…NF-26 stay **PARTIAL PASS** with **B-01/B-02** spelled out, and the limitations list says
+plainly that no real game has been played, that embedding is refused rather than forced, that graphical HUD
+features are unsupported by construction, and that capture is Windows-only. `docs/NOVAFORGE_VERIFICATION.md`
+keeps its NF-01…NF-06 audit text standing and was only extended (Appendices A–E), because rewriting a
+historical report to look better is the failure mode these documents exist to prevent.
+
+Packaging it meant running the CI jobs where CI runs them. Both mypy views had been reported clean —
+because both had been run **on Windows**, where typeshed declares `ctypes.windll` and `ctypes.WINFUNCTYPE`.
+From Linux, the native view reported **5 errors in 3 files** (`gui/theme.py`, `novaforge/embedding.py`,
+`novaforge/launcher.py`): every one a Windows-only attribute behind a guard a type checker cannot narrow —
+`try/except`, an `os.name == "nt"` test, and the injectable `platform_supported` property. The fix is the
+codebase's own documented idiom: `telemetry/hardware.py` already explains that only a literal `sys.platform`
+comparison lets the checker narrow both views, so `theme.py` and `launcher.py` now guard that way (an early
+return each, identical behaviour — both already answered `True` off Windows). `Win32WindowApi` keeps its
+injectable platform, which `sys.platform` cannot express, so its three reads go through one documented
+`_windll()` helper and a `getattr(ctypes, "WINFUNCTYPE")`. **No `# type: ignore` and no widened override**;
+a suppression would have hidden the next Windows-only read in the same file.
+
+The first complete Linux run then had exactly one failure, and it was worth having: the approved-command
+planner test ran `python -c print(42)`, and a stock Ubuntu image has no `python`, only `python3`, so the
+step failed and the test asserted `COMPLETED` against `FAILED`. The product was fine; the test was not
+hermetic — it was asserting that the host has a python alias rather than that an approved step runs and its
+stdout is captured. Both it and its refusal sibling now build the command from `sys.executable`, with the
+assertions untouched.
+
+**Measured on the Linux tree** (Ubuntu, Python 3.12, editable `.[dev]` install — the `test` job's
+environment): full suite **5,722 passed / 242 skipped / 3,791 subtests / 0 failed** in **961.45 s**; before
+the test fix it was **1 failed / 5,721 passed / 242 skipped**, that single failure being the one above.
+`mypy src` and `mypy src --platform win32` both clean over **454 files** from Linux,
+`docs/API.md` in sync, `test_planner_phase4.py` **67 passed / 5 subtests** on both platforms. The 242
+Linux skips are the Windows-only desktop/browser E2E modules — the same tree reports 1 skip on Windows. No
+game was launched and no gameplay input was sent; the NF-23…NF-26 verdicts did not move, because packaging
+cannot clear a live-game blocker.

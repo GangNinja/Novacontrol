@@ -63,6 +63,8 @@ __all__ = [
     "GameplayAction",
     "ScreenInput",
     "action_digest",
+    "as_int",
+    "wait_bounded",
 ]
 
 
@@ -163,8 +165,12 @@ class ActionPolicy:
         }
 
 
-def _as_int(value: Any, label: str) -> int | None:
-    """A strict integer read: ``"12abc"`` is not 12, and ``True`` is not 1."""
+def as_int(value: Any, label: str) -> int | None:
+    """A strict integer read: ``"12abc"`` is not 12, and ``True`` is not 1.
+
+    Public because the NF-19 control model parses the same request fields and
+    must not grow a second, subtly different number parser.
+    """
     if value is None or value == "":
         return None
     if isinstance(value, bool):
@@ -211,13 +217,13 @@ class GameplayAction:
                 f"Unknown action kind {raw_kind or '(blank)'!r}; expected one of "
                 f"{', '.join(sorted(ACTION_KINDS))}."
             )
-        duration = _as_int(data.get("duration_ms"), "duration_ms")
+        duration = as_int(data.get("duration_ms"), "duration_ms")
         return cls(
             kind=ActionKind(raw_kind),
             key=str(data.get("key", "") or ""),
             button=str(data.get("button", "left") or "left").strip().lower(),
-            x=_as_int(data.get("x"), "x"),
-            y=_as_int(data.get("y"), "y"),
+            x=as_int(data.get("x"), "x"),
+            y=as_int(data.get("y"), "y"),
             duration_ms=60 if duration is None else duration,
             note=str(data.get("note", "") or "")[: cls.MAX_NOTE],
             action_id=str(data.get("action_id", "") or uuid4().hex[:12]),
@@ -434,12 +440,13 @@ class ScreenInput:
         await self._command(f"move {x} {y}")
 
 
-async def _wait(ms: int, abort: InputStop) -> None:
+async def wait_bounded(ms: int, abort: InputStop) -> None:
     """Sleep ``ms`` in small slices so a stop request interrupts a hold.
 
     One long ``asyncio.sleep`` would keep a held key down for the whole
     duration after the operator asked to stop, which is the exact failure the
-    guard exists to prevent.
+    guard exists to prevent. Shared with NF-19's control interface for the same
+    reason: there is one interruptible wait in this build.
     """
     remaining = max(0.0, ms / 1000.0)
     while remaining > 0:
@@ -533,22 +540,22 @@ class ActionRunner:
                     await self.input.move(action.x, action.y)
                     steps += 1
                 if action.kind is ActionKind.CLICK:
-                    await _wait(policy.tap_ms, self.abort)
+                    await wait_bounded(policy.tap_ms, self.abort)
                     await guard.press_button(action.button)
                     steps += 1
-                    await _wait(policy.tap_ms, self.abort)
+                    await wait_bounded(policy.tap_ms, self.abort)
                     await guard.release_button(action.button)
                     steps += 1
                 elif action.kind is ActionKind.KEY:
                     await guard.press_key(action.key)
                     steps += 1
-                    await _wait(min(action.duration_ms, policy.max_duration_ms), self.abort)
+                    await wait_bounded(min(action.duration_ms, policy.max_duration_ms), self.abort)
                     await guard.release_key(action.key)
                     steps += 1
                 elif action.kind is ActionKind.HOLD:
                     await guard.press_key(action.key)
                     steps += 1
-                    await _wait(min(action.duration_ms, policy.max_hold_ms), self.abort)
+                    await wait_bounded(min(action.duration_ms, policy.max_hold_ms), self.abort)
                     await guard.release_key(action.key)
                     steps += 1
         except InputAbort as exc:

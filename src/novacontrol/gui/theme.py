@@ -15,6 +15,7 @@ itself never declares animation/transition properties.
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 
@@ -314,9 +315,35 @@ def apply_dashboard_theme(app: Any) -> None:
 
 
 def _has_animations(app: Any) -> bool:
-    """True when the OS allows animations (QStyleHints.hasAnimations)."""
-    style_hints = app.styleHints()
-    return bool(style_hints.hasAnimations())
+    """True when the OS allows animations.
+
+    ``QStyleHints.hasAnimations()`` is used when the installed Qt exposes it.
+    PySide6 6.12 no longer does, so the SAME Windows system parameter it reads
+    (``SPI_GETCLIENTAREAANIMATION``) is asked directly; an unreadable setting is
+    treated as "animations are fine", which only skips the extra effect disable
+    and never turns a working UI into a reduced one.
+    """
+    method = getattr(app.styleHints(), "hasAnimations", None)
+    if callable(method):
+        return bool(method())
+    # A literal `sys.platform` test, not a host flag: the type checker reads this
+    # file under BOTH platform views (CI verifies the Windows view from Linux),
+    # and only this comparison lets it narrow the branch and accept
+    # `ctypes.windll`, which typeshed declares Windows-only. Off Windows the
+    # answer was already `True` (the missing attribute landed in the `except`).
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+
+        enabled = ctypes.c_int(1)
+        if ctypes.windll.user32.SystemParametersInfoW(
+            0x1042, 0, ctypes.byref(enabled), 0
+        ):
+            return bool(enabled.value)
+    except Exception:  # noqa: BLE001 - an unanswerable hint is not reduced motion
+        pass
+    return True
 
 
 def _disable_effects(app: Any, qt: Any) -> None:

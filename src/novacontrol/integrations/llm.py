@@ -140,6 +140,10 @@ class OpenAICompatibleLLMProvider:
             "messages": [dict(message) for message in payload.get("messages", ())],
             "stream": False,
             "think": False,
+            # The compatible surface gets this from ``response_format``; the
+            # native endpoint needs its own field or a JSON-constrained caller
+            # receives free-form prose.
+            "format": "json",
         }
         if isinstance(budget, int) and budget > 0:
             body["options"] = {"num_predict": budget}
@@ -338,6 +342,9 @@ class AnthropicMessagesProvider:
             else:
                 claude_messages.append({"role": str(message.get("role", "user")), "content": str(message.get("content", ""))})
         kw: dict[str, Any] = dict(kwargs)  # temperature, max_tokens, …
+        # A NovaControl-facing hint, never an Anthropic wire field.
+        kw.pop("json_mode", None)
+        kw.pop("response_format", None)
         explicit_system = kw.pop("system", None)
         if explicit_system:
             # A caller-supplied system WINS (documented contract): it replaces
@@ -472,6 +479,24 @@ def _default_transport(url: str, headers: dict[str, str], payload: dict[str, Any
 
 _OLLAMA_DEFAULT_URL = "http://127.0.0.1:11434"
 _ollama_cache: dict[str, Any] | None = None
+
+
+def ollama_disabled(environ: Mapping[str, str] | None = None) -> bool:
+    """True when Ollama auto-detection is switched off by environment.
+
+    ONE predicate for every boot path: the chat brain, the lazy re-probe and
+    the vision pipeline all ask this, so a deployment (or a test run) that set
+    ``NOVACONTROL_DISABLE_OLLAMA`` never reaches the socket from one of them
+    while another quietly probes. An explicitly passed EMPTY mapping is
+    authoritative — ``environ or os.environ`` would leak the host env back in.
+    """
+    values = os.environ if environ is None else environ
+    return values.get("NOVACONTROL_DISABLE_OLLAMA", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def detect_ollama(
@@ -1401,8 +1426,7 @@ def build_llm_provider_from_environment(environ: Mapping[str, str] | None = None
         )
 
     # 2. Ollama auto-detection (skip if explicitly disabled)
-    disable_ollama = values.get("NOVACONTROL_DISABLE_OLLAMA", "").strip().lower()
-    if disable_ollama not in {"1", "true", "yes", "on"}:
+    if not ollama_disabled(values):
         ollama_url = values.get("NOVACONTROL_OLLAMA_URL", _OLLAMA_DEFAULT_URL).strip()
         ollama = build_ollama_provider(ollama_url)
         if ollama is not None:
@@ -1448,7 +1472,7 @@ def make_ollama_reprobe(
         async def disabled_by_explicit_config() -> object | None:
             return None
         return disabled_by_explicit_config
-    if values.get("NOVACONTROL_DISABLE_OLLAMA", "").strip().lower() in {"1", "true", "yes", "on"}:
+    if ollama_disabled(values):
         async def disabled_by_flag() -> object | None:
             return None
         return disabled_by_flag

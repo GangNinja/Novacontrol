@@ -101,14 +101,21 @@ class _EvaluationApiFixture(_IsolatedApiTestCase):
 class EvaluationRegistryApiTests(_EvaluationApiFixture):
     def test_the_registry_separates_compatibility_from_control(self) -> None:
         body = self._get_ok("/novaforge/games")
+        self.assertEqual(body["capabilities_source"], "runtime")
+        # The fixture's manager has no injector and no verifier probe, so the
+        # artifact harness's DECLARED control mode is not live capability here.
         self.assertEqual(body["controllable_count"], 0)
         self.assertEqual(body["observation_only_count"], 2)
-        self.assertEqual(body["runnable_count"], 2)
+        self.assertEqual(body["runnable_count"], 3)
         by_id = {item["game_id"]: item for item in body["games"]}
         self.assertEqual(by_id["disposable-window"]["status"], "OBSERVATION_ONLY")
         self.assertEqual(by_id["gameplay-objective"]["status"], "UNSUPPORTED")
+        self.assertEqual(by_id["artifact-harness"]["status"], "SUPPORTED_WITH_LIMITATIONS")
+        self.assertIn("control", by_id["artifact-harness"]["evaluation_modes"])
+        self.assertFalse(by_id["artifact-harness"]["control_capable"])
         self.assertFalse(by_id["disposable-window"]["input"]["available"])
         self.assertFalse(by_id["disposable-window"]["launch"]["available"])
+        self.assertFalse(by_id["artifact-harness"]["launch"]["available"])
 
     def test_one_environment_and_an_unknown_one(self) -> None:
         body = self._get_ok("/novaforge/games/disposable-window")
@@ -148,7 +155,7 @@ class EvaluationPreflightApiTests(_EvaluationApiFixture):
             "/novaforge/evaluations/baseline?game=disposable-window&scenario=observation-baseline"
         )
         self.assertFalse(body["available"])
-        self.assertIn("first completed evaluation", body["reason"])
+        self.assertIn("first completed one becomes the baseline", body["reason"])
         self.assertEqual(
             self._client.get(
                 "/novaforge/evaluations/baseline?game=nope"

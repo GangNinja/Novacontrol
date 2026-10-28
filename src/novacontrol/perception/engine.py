@@ -1404,7 +1404,12 @@ def _text_lines(
         text = word.text.strip()
         if not text:
             continue
-        grouped.setdefault(word.line if word.line else index, []).append(word)
+        # Line 0 is a LINE, not a missing value: keying it on the word index
+        # scattered its words into whichever later line happened to share that
+        # index, which merged a title bar into the readout below it and gave the
+        # merged record a box spanning both.
+        key = word.line if word.line is not None else index
+        grouped.setdefault(key, []).append(word)
     lines: list[OcrText] = []
     for order, key in enumerate(sorted(grouped)):
         group = grouped[key]

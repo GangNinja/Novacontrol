@@ -231,6 +231,11 @@ class TargetWindow:
     that the window it was addressing was closed and another window took the
     same title. ``scale`` is the window's DPI multiplier, and ``bounds`` are
     physical pixels — the same space the capture worker writes.
+
+    ``minimized`` and ``visible`` are stored separately from identity. A
+    minimized fullscreen game keeps its handle and pid, but its window is at
+    the off-screen placeholder and a screen capture shows the desktop; that is
+    not a live frame of this target.
     """
 
     title: str
@@ -240,6 +245,8 @@ class TargetWindow:
     client: tuple[int, int, int, int]
     scale: float = 1.0
     foreground: bool = False
+    minimized: bool = False
+    visible: bool = True
 
     @property
     def width(self) -> int:
@@ -260,6 +267,8 @@ class TargetWindow:
             "height": self.height,
             "scale": self.scale,
             "foreground": self.foreground,
+            "minimized": self.minimized,
+            "visible": self.visible,
         }
 
     @classmethod
@@ -281,6 +290,8 @@ class TargetWindow:
             client=(client[0], client[1], client[2], client[3]),
             scale=float(data.get("scale", 1.0) or 1.0),
             foreground=bool(data.get("foreground", False)),
+            minimized=bool(data.get("minimized", False)),
+            visible=bool(data.get("visible", True)),
         )
 
 
@@ -297,8 +308,19 @@ class FrameRecord:
     capture_ms: float
     capture_mode: str
     fresh: bool
-    source: str  # "window_crop" | "screen" | "unavailable"
+    source: str  # "window_crop" | "window_surface" | "screen" | "unavailable"
     note: str = ""
+    #: Which capture backend produced it (``printwindow`` / ``gdi_display``), or
+    #: empty for a record written before backends existed.
+    backend: str = ""
+    #: ``valid`` | ``repeated`` | ``blank`` | ``not_target`` | ``unverified``.
+    #: A repeated frame is a limitation, not a failure; a blank one is neither
+    #: evidence nor live.
+    content: str = ""
+    #: The full validation verdict (capture/visibility/freshness/content).
+    #: Absent for legacy frames, which the UI treats as "unverified" rather than
+    #: inventing a pass.
+    validation: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -313,6 +335,9 @@ class FrameRecord:
             "fresh": self.fresh,
             "source": self.source,
             "note": self.note,
+            "backend": self.backend,
+            "content": self.content,
+            "validation": dict(self.validation),
         }
 
 
@@ -648,6 +673,13 @@ class SessionRecord:
                         fresh=bool(frame.get("fresh", False)),
                         source=str(frame.get("source", "screen")),
                         note=str(frame.get("note", "")),
+                        backend=str(frame.get("backend", "")),
+                        content=str(frame.get("content", "")),
+                        validation=(
+                            dict(frame.get("validation"))
+                            if isinstance(frame.get("validation"), dict)
+                            else {}
+                        ),
                     )
                 )
             except (KeyError, TypeError, ValueError):

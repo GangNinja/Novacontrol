@@ -1790,5 +1790,36 @@ class PerceptionApiTests(unittest.TestCase):
                 NON_RENDER_ROLES, "reading only: no panel owns it")
 
 
+class TextLineGroupingTests(unittest.TestCase):
+    """Line 0 is a line: a title bar must not be merged into the readout below."""
+
+    def test_words_on_line_zero_stay_together_and_apart_from_other_lines(self) -> None:
+        from novacontrol.vision.ocr import OcrWord
+
+        words = (
+            OcrWord(text="NC", line=0, x=75, y=24, width=30, height=17),
+            OcrWord(text="FORGE", line=0, x=114, y=24, width=70, height=17),
+            OcrWord(text="AUDIT", line=0, x=192, y=24, width=66, height=17),
+            OcrWord(text="TICK", line=1, x=640, y=182, width=272, height=86),
+            OcrWord(text="786", line=1, x=994, y=182, width=196, height=86),
+        )
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        images = _ImageSet(Path(tmp.name))
+        engine = PerceptionEngine(
+            vision=VisionManager(provider=NullVisionProvider(), ocr=ScriptedOcr(words)),
+            ocr=ScriptedOcr(words),
+        )
+
+        result = run(engine.perceive({"source": images.shapes, "question": "read the text"}))
+
+        lines = [(item.text, item.bbox) for item in result.text]
+        self.assertEqual([text for text, _ in lines], ["NC FORGE AUDIT", "TICK 786"])
+        header, counter = lines[0][1], lines[1][1]
+        assert header is not None and counter is not None
+        self.assertLessEqual(header.y + header.height, 41)  # the title bar only
+        self.assertEqual((counter.x, counter.y), (640, 182))
+
+
 if __name__ == "__main__":
     unittest.main()

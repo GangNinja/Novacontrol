@@ -79,7 +79,7 @@ class NovaForgeApiTests(_ForgeApiFixture):
         They describe the build that SHIPS: no observe-only claim (input exists
         now) and no claim that a budget is unenforceable (it is enforced at
         execution), while the real bounds — the key policy, the launch
-        prohibition and the one checkable objective kind — stay stated.
+        prohibition and the checkable objective kinds — stay stated.
         """
         body = self._client.get("/novaforge/status").json()
         joined = " ".join(body["status"]["limitations"]).lower()

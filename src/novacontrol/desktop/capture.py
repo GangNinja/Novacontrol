@@ -28,14 +28,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import subprocess
 import sys
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from novacontrol.desktop.capture_validation import THUMB_SUFFIX as _THUMB_SUFFIX
 from novacontrol.desktop.input import WindowGeometry
 
 __all__ = [
+    "THUMB_SUFFIX",
     "CaptureResult",
     "PersistentScreenCapture",
     "WindowGeometry",
@@ -43,6 +46,7 @@ __all__ = [
     "capture_supported_here",
     "looks_like_png",
     "oneshot_capture_script",
+    "sweep_orphan_thumbnails",
 ]
 
 #: C# interop, compiled ONCE by the worker at startup. It lives in the worker
@@ -71,10 +75,32 @@ public static class NCDesktop
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hWnd);
     [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr hWnd);
     [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT point);
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+    [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr hWnd, IntPtr hdc, uint flags);
     delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    // Window-surface capture. PW_RENDERFULLCONTENT (2) asks the window to render
+    // its own content rather than whatever the screen shows; it is what makes a
+    // DirectX window capturable while another window covers it. It is NOT a
+    // guarantee: some renderers answer black, so the caller must validate the
+    // pixels before treating them as a frame of the target.
+    public static bool PrintTo(IntPtr hWnd, IntPtr hdc)
+    {
+        if (hWnd == IntPtr.Zero || IsIconic(hWnd)) return false;
+        return PrintWindow(hWnd, hdc, 2);
+    }
+
+    public static bool IsMinimized(IntPtr hWnd) { return IsIconic(hWnd); }
+
+    public static string BoundsOf(IntPtr hWnd)
+    {
+        RECT r;
+        if (!GetWindowRect(hWnd, out r)) return "";
+        return r.Left + "," + r.Top + "," + r.Right + "," + r.Bottom;
+    }
 
     public static bool Move(int x, int y) { return SetCursorPos(x, y); }
     public static string Cursor()
@@ -103,9 +129,14 @@ public static class NCDesktop
         StringBuilder sb = new StringBuilder(512);
         GetWindowText(hWnd, sb, sb.Capacity);
         bool fg = GetForegroundWindow() == hWnd;
+        bool iconic = IsIconic(hWnd);
+        bool visible = IsWindowVisible(hWnd);
         string clientRel = (origin.X - r.Left) + "," + (origin.Y - r.Top) + "," + c.Right + "," + c.Bottom;
         string scale = ((double)dpi / 96.0).ToString(System.Globalization.CultureInfo.InvariantCulture);
-        return hWnd.ToInt64() + "|" + r.Left + "," + r.Top + "," + r.Right + "," + r.Bottom + "|" + clientRel + "|" + pid + "|" + scale + "|" + (fg ? "1" : "0") + "|" + sb.ToString();
+        // ``iconic`` and ``visible`` travel WITH the geometry, not as a second
+        // probe: a caller that reads a window while it minimizes must be able to
+        // tell "same handle, no usable client area" from "the target moved".
+        return hWnd.ToInt64() + "|" + r.Left + "," + r.Top + "," + r.Right + "," + r.Bottom + "|" + clientRel + "|" + pid + "|" + scale + "|" + (fg ? "1" : "0") + "|" + (iconic ? "1" : "0") + "|" + (visible ? "1" : "0") + "|" + sb.ToString();
     }
 
     public static string Find(string substring)
@@ -148,6 +179,31 @@ $t::SetProcessDPIAware() | Out-Null
 $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
 $bmp = [System.Drawing.Bitmap]::new($bounds.Width, $bounds.Height)
 $g = [System.Drawing.Graphics]::FromImage($bmp)
+# One window-surface bitmap, re-allocated only when the window's size changes.
+$surface = $null
+$surfaceWidth = 0
+$surfaceHeight = 0
+# The 48x27 paint thumbnail: raw BGR bytes (48*27*3 = 3888, stride 144 needs no
+# padding). It exists so a caller can judge the paint WITHOUT decoding the full
+# frame: at 5.2 MP a PNG decode costs ~35 ms warm and 300+ ms cold, more than
+# the capture it judges. GDI+ writes 24bppRgb as B,G,R in memory; the reader
+# knows that, and the statistics are still computed in exactly one place.
+function Save-NCThumb($source, $path) {
+  $tw = 48; $th = 27
+  $thumb = [System.Drawing.Bitmap]::new($tw, $th, [System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
+  $tg = [System.Drawing.Graphics]::FromImage($thumb)
+  $tg.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+  $tg.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+  $tg.DrawImage($source, 0, 0, $tw, $th)
+  $tg.Dispose()
+  $rect = [System.Drawing.Rectangle]::new(0, 0, $tw, $th)
+  $data = $thumb.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly, [System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
+  $bytes = [byte[]]::new($tw * $th * 3)
+  [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $bytes, 0, $bytes.Length)
+  $thumb.UnlockBits($data)
+  $thumb.Dispose()
+  [System.IO.File]::WriteAllBytes($path, $bytes)
+}
 $out = [Console]::Out
 $out.WriteLine('ready ' + $bounds.Width + 'x' + $bounds.Height)
 $out.Flush()
@@ -187,6 +243,58 @@ while ($true) {
       $out.WriteLine('ok ' + $sw.ElapsedMilliseconds + ' ' + [NCDesktop]::At([int]$parts[1], [int]$parts[2]))
     } elseif ($verb -eq 'describe') {
       $out.WriteLine('ok ' + $sw.ElapsedMilliseconds + ' ' + [NCDesktop]::DescribeHandle([long]$parts[1]))
+    } elseif ($verb -eq 'printwindow') {
+      $handle = [IntPtr]::new([long]$parts[1])
+      $rest = $line.Substring(('printwindow ' + $parts[1] + ' ').Length)
+      # A tab cannot occur in a Windows path, so ``path<TAB>thumb`` is
+      # unambiguous while a space-containing directory still works.
+      $path = $rest
+      $thumbPath = ''
+      if ($rest.Contains("`t")) {
+        $pieces = $rest.Split("`t")
+        $path = $pieces[0]
+        $thumbPath = $pieces[1]
+      }
+      if ([NCDesktop]::IsMinimized($handle)) { throw 'target_minimized' }
+      $raw = [NCDesktop]::BoundsOf($handle)
+      if ($raw -eq '') { throw 'target_unreadable' }
+      $coords = $raw.Split(',')
+      $w = [int]$coords[2] - [int]$coords[0]
+      $hh = [int]$coords[3] - [int]$coords[1]
+      if ($w -lt 8 -or $hh -lt 8) { throw 'target_offscreen' }
+      if ($null -eq $surface -or $surfaceWidth -ne $w -or $surfaceHeight -ne $hh) {
+        if ($null -ne $surface) { $surface.Dispose() }
+        $surface = [System.Drawing.Bitmap]::new($w, $hh)
+        $surfaceWidth = $w
+        $surfaceHeight = $hh
+      }
+      $sg = [System.Drawing.Graphics]::FromImage($surface)
+      $sg.Clear([System.Drawing.Color]::Black)
+      $hdc = $sg.GetHdc()
+      $printed = $false
+      try { $printed = [NCDesktop]::PrintTo($handle, $hdc) } finally { $sg.ReleaseHdc($hdc); $sg.Dispose() }
+      if (-not $printed) { throw 'printwindow_refused' }
+      $surface.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+      if ($thumbPath -ne '') { Save-NCThumb $surface $thumbPath }
+      $size = (Get-Item -LiteralPath $path).Length
+      $out.WriteLine('ok ' + $sw.ElapsedMilliseconds + ' ' + $size + ' ' + $w.ToString() + 'x' + $hh.ToString())
+    } elseif ($verb -eq 'display') {
+      # Explicit display verb, used when a thumbnail is wanted: the historical
+      # bare path line stays the no-thumbnail form.
+      $rest = $line.Substring(8)
+      $path = $rest
+      $thumbPath = ''
+      if ($rest.Contains("`t")) {
+        $pieces = $rest.Split("`t")
+        $path = $pieces[0]
+        $thumbPath = $pieces[1]
+      }
+      $g.CopyFromScreen(0, 0, 0, 0, $bmp.Size)
+      $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+      if ($thumbPath -ne '') { Save-NCThumb $bmp $thumbPath }
+      $size = (Get-Item -LiteralPath $path).Length
+      $dims = $bounds.Width.ToString() + 'x' + $bounds.Height.ToString()
+      $out.WriteLine('ok ' + $sw.ElapsedMilliseconds + ' ' + $size + ' ' + $dims)
     } else {
       $g.CopyFromScreen(0, 0, 0, 0, $bmp.Size)
       $bmp.Save($line, [System.Drawing.Imaging.ImageFormat]::Png)
@@ -225,6 +333,38 @@ _ONESHOT_TEMPLATE = (
 #: The eight bytes every PNG starts with. A capture that "exists" but is not a
 #: PNG is not evidence of a screen.
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+#: Suffix of the 48x27 paint thumbnail written beside a frame when one is asked
+#: for. The name and the layout both belong to the reader, which owns the
+#: statistics computed from it; this module only writes it. Re-exported here
+#: because a caller asking for a thumbnail needs the name it will appear under.
+THUMB_SUFFIX = _THUMB_SUFFIX
+
+
+def sweep_orphan_thumbnails(directory: str | Path) -> int:
+    """Remove paint side cars in ``directory`` whose frame no longer exists.
+
+    This module names them ``<frame>.thumb``, so a side car whose ``<frame>`` is
+    gone is garbage — a frame prune that removed the PNG, or a process that died
+    between writing the two. The router deletes each one as it reads it, which is
+    the normal path; this sweep is the backstop. Returns how many were removed,
+    and an unreadable directory is worth zero rather than an exception: pruning
+    must never be able to fail a session.
+    """
+    try:
+        candidates = list(Path(directory).glob("*" + THUMB_SUFFIX))
+    except OSError:
+        return 0
+    removed = 0
+    for path in candidates:
+        if path.with_name(path.name[: -len(THUMB_SUFFIX)]).exists():
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        removed += 1
+    return removed
 
 
 def capture_supported_here() -> bool:
@@ -270,6 +410,16 @@ class CaptureResult:
     #: For input/geometry commands: the worker's detail payload (e.g. a window
     #: geometry record). Empty for capture frames.
     detail: str = ""
+    #: What the frame contains: ``display`` (the composited desktop, full screen)
+    #: or ``window_surface`` (the target's own rendered surface, window sized).
+    #: Empty for input/geometry commands.
+    source: str = ""
+    #: The capture backend that produced it (``gdi_display`` / ``printwindow``).
+    backend: str = ""
+    #: The 48x27 paint thumbnail written beside this frame, when one was asked
+    #: for. Empty means no thumbnail: the paint must then be judged from the
+    #: full frame, which is exactly the decode this side car exists to avoid.
+    thumbnail: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,6 +512,13 @@ class PersistentScreenCapture:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                # A console window created for the worker would take the
+                # FOREGROUND the moment a session starts -- which is exactly the
+                # window the Guardian requires to be focused before it injects a
+                # key. Without this flag, starting capture could deny the first
+                # action of every controlled run. It buys nothing else: the
+                # worker speaks stdin/stdout and never needs a console.
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except Exception as exc:
             self._process = None
@@ -380,10 +537,18 @@ class PersistentScreenCapture:
         await self._stop_process()
         return False
 
-    async def capture(self, save_path: str, *, timeout: float | None = None) -> CaptureResult:
-        """Write one fresh PNG frame to ``save_path`` through the worker."""
+    async def capture(
+        self, save_path: str, *, timeout: float | None = None, thumbnail: bool = False
+    ) -> CaptureResult:
+        """Write one fresh PNG frame to ``save_path`` through the worker.
+
+        ``thumbnail=True`` also asks for the 48x27 paint thumbnail beside it, so
+        validation does not have to decode the full frame.
+        """
         target = str(Path(save_path).resolve())
-        reply, failure = await self._exchange(target, timeout or self.frame_timeout)
+        thumb = target + THUMB_SUFFIX if thumbnail else ""
+        line = f"display {target}\t{thumb}" if thumbnail else target
+        reply, failure = await self._exchange(line, timeout or self.frame_timeout)
         if reply is None:
             return CaptureResult(False, path=target, error=failure)
         if reply.startswith("err "):
@@ -401,6 +566,60 @@ class PersistentScreenCapture:
             elapsed_ms=elapsed_ms,
             size_bytes=size_bytes,
             persistent=True,
+            source="display",
+            backend="gdi_display",
+            thumbnail=thumb,
+        )
+
+    async def capture_window(
+        self,
+        handle: int,
+        save_path: str,
+        *,
+        timeout: float | None = None,
+        thumbnail: bool = False,
+    ) -> CaptureResult:
+        """Capture the TARGET WINDOW's own surface, at window size, via PrintWindow.
+
+        This is the backend that can see a window another window covers: it asks
+        the window to render itself instead of copying the composited display.
+        Two honest failure modes travel back instead of a black frame: a
+        minimized window is refused (``target_minimized``), and a renderer that
+        will not answer PrintWindow raises ``printwindow_refused``. A frame that
+        is produced but unpainted is caught by the caller's content validation.
+        """
+        target = str(Path(save_path).resolve())
+        thumb = target + THUMB_SUFFIX if thumbnail else ""
+        line = (
+            f"printwindow {int(handle)} {target}\t{thumb}"
+            if thumbnail
+            else f"printwindow {int(handle)} {target}"
+        )
+        reply, failure = await self._exchange(line, timeout or self.frame_timeout)
+        if reply is None:
+            return CaptureResult(False, path=target, error=failure, source="window_surface",
+                                backend="printwindow")
+        if reply.startswith("err "):
+            return CaptureResult(
+                False, path=target, error=reply[4:].strip(), persistent=True,
+                source="window_surface", backend="printwindow",
+            )
+        parts = reply.split(" ")
+        width, height = _parse_size(parts[3]) if len(parts) >= 4 else (0, 0)
+        size_bytes = int(parts[2]) if len(parts) >= 3 else 0
+        elapsed_ms = int(parts[1]) if len(parts) >= 2 else 0
+        self.frames += 1
+        return CaptureResult(
+            True,
+            path=target,
+            width=width,
+            height=height,
+            elapsed_ms=elapsed_ms,
+            size_bytes=size_bytes,
+            persistent=True,
+            source="window_surface",
+            backend="printwindow",
+            thumbnail=thumb,
         )
 
     async def send_input(self, command: str, *, timeout: float | None = None) -> CaptureResult:
@@ -610,15 +829,29 @@ def _parse_size(text: str) -> tuple[int, int]:
 
 
 def _parse_geometry(text: str) -> WindowGeometry | None:
-    """Parse the worker's ``hwnd|bounds|client|pid|scale|fg|title`` geometry line.
+    """Parse the worker's geometry line.
+
+    Current shape: ``hwnd|bounds|client|pid|scale|fg|iconic|visible|title``.
+    The older seven-field shape (``...|fg|title``) is still accepted so a
+    caller using a separately supplied worker is not broken by the added
+    fields; in that shape minimization is inferred from the off-screen
+    placeholder bounds by the caller, while ``visible`` defaults to true.
 
     Returns None when the payload is not the shape we expect — a geometry that
     could not be parsed is "unknown", never "zero-sized" (a zero-sized window
     would make every point fall outside it and every input refused for the
     wrong reason).
     """
-    parts = text.split("|", 6)
-    if len(parts) < 7:
+    parts = text.split("|", 8)
+    if len(parts) == 7:
+        title = parts[6]
+        minimized = False
+        visible = True
+    elif len(parts) >= 9:
+        title = parts[8]
+        minimized = parts[6] == "1"
+        visible = parts[7] == "1"
+    else:
         return None
     try:
         handle = int(parts[0])
@@ -632,10 +865,12 @@ def _parse_geometry(text: str) -> WindowGeometry | None:
         return None
     return WindowGeometry(
         handle=handle,
-        title=parts[6],
+        title=title,
         bounds=(bounds[0], bounds[1], bounds[2], bounds[3]),
         client=(client[0], client[1], client[2], client[3]),
         pid=pid,
         scale=scale,
         foreground=parts[5] == "1",
+        minimized=minimized,
+        visible=visible,
     )

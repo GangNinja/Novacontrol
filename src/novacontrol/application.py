@@ -10,11 +10,13 @@ import re
 import shlex
 import shutil
 import socket
+import sys
+import tempfile
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from collections.abc import Callable, Coroutine, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from contextvars import ContextVar
 from typing import Any, TypeAlias, cast
 from uuid import uuid4
@@ -183,7 +185,11 @@ from novacontrol.integrations import (
     ollama_models,
     validate_cloud_key,
 )
-from novacontrol.integrations.llm import _redact_key, provider_supports_vision
+from novacontrol.integrations.llm import (
+    _redact_key,
+    ollama_disabled,
+    provider_supports_vision,
+)
 from novacontrol.knowledge import (
     KnowledgeBase,
     KnowledgeManager,
@@ -202,12 +208,39 @@ from novacontrol.models import (
     ModelRegistry,
 )
 from novacontrol.novaforge.actions import ScreenInput
+from novacontrol.novaforge.launcher import (
+    ALREADY_RUNNING,
+    AMBIGUOUS_MATCH,
+    INSTALLED_AND_LAUNCHABLE,
+    NOT_FOUND_ON_INTERNAL_STORAGE,
+    GameCatalog,
+    GameLaunchService,
+    candidate_title,
+    game_request,
+    row_matches,
+)
 from novacontrol.novaforge import (
+    ClosedLoopRunner,
+    FixedKeyPolicy,
+    HarnessReadyPolicy,
+    HarnessStagesPolicy,
+    LoopLimits,
+    LoopResult,
+    MissionValidationError,
     NovaForgeBenchmarkLab,
     NovaForgeCoach,
     NovaForgeEvaluationLab,
     NovaForgeExperimentLab,
     NovaForgeManager,
+    ObservationBuilder,
+    PolicyTrial,
+    ScreenTextReader,
+    SessionConflictError,
+    VisionDescriber,
+    summaries_by_policy,
+    summarise,
+    trial_rows,
+    vision_timeout_from_environment,
 )
 from novacontrol.persistence import JsonStateStore
 from novacontrol.phone import PhoneControlController, PhoneControlModule
@@ -314,7 +347,12 @@ from novacontrol.optimization.benchmark import (
     ModelBenchmarking,
 )
 from novacontrol.optimization.governor import GovernorThresholds, ResourceGovernor
-from novacontrol.optimization.models import ExecutionMode, PrivacyAction, PrivacyControls
+from novacontrol.optimization.models import (
+    ExecutionMode,
+    PrivacyAction,
+    PrivacyControls,
+    ResourceLevel,
+)
 from novacontrol.optimization.privacy import PrivacyPolicy
 from novacontrol.decision.providers import (
     DecisionProvider,
@@ -1763,6 +1801,25 @@ class NovaControlApplication:
         # that in the workspace, not refuse to start the application.
         desktop_runner = self.desktop.runner
         novaforge_capture = getattr(desktop_runner, "capture_screen", None)
+        # The window-surface seam: PrintWindow can see a covered window, which a
+        # desktop crop cannot. Wiring it gives NovaForge a capture ROUTER (it
+        # picks a backend by declared capability and validates the pixels);
+        # without it the manager keeps the single desktop-crop path.
+        window_capture = getattr(desktop_runner, "capture_window", None)
+        # Declared before the branch so ``None`` is a legal value of this name: a
+        # runner without the seam must leave the manager's window backend
+        # UNWIRED (it reports the capability as unavailable), never wired to a
+        # stub that would claim it.
+        novaforge_capture_window: Callable[[int, str], Awaitable[Any]] | None = None
+        if window_capture is not None:
+            # Ask for the 48x27 paint side car with every frame: the router then
+            # judges the pixels from 3888 bytes instead of decoding a 5.2 MP PNG
+            # per frame, and PrintWindow's side car covers exactly the window's
+            # region, so it is the frame's own paint. The seam's call shape stays
+            # ``(handle, path)`` for every backend that drives it.
+            async def novaforge_capture_window(handle: int, path: str) -> Any:
+                return await window_capture(handle, path, thumbnail=True)
+
         novaforge_geometry = getattr(desktop_runner, "window_geometry", None)
         novaforge_windows = getattr(desktop_runner, "window_lines", None)
         # Remediation R1/R2: the gameplay injector and the verifier's evidence
@@ -1782,20 +1839,82 @@ class NovaControlApplication:
             except Exception:  # noqa: BLE001 - an unwired worker is a capability gap
                 novaforge_input = None
                 novaforge_probe = None
+        # A objective may name a game-written state artifact, and the only paths
+        # it may name are these roots. The operator can point this at the folder
+        # their game writes saves/logs into; without a declaration the verifier
+        # reports itself unready rather than reading an unapproved path.
+        artifact_roots: list[Path] = []
+        declared_roots = os.environ.get("NOVACONTROL_NOVAFORGE_ARTIFACT_ROOTS", "")
+        for part in declared_roots.split(os.pathsep):
+            text = part.strip()
+            if text:
+                artifact_roots.append(Path(text).expanduser())
+        if not artifact_roots:
+            artifact_roots.append(self.data_dir / "novaforge" / "artifacts")
+            artifact_roots.append(Path(tempfile.gettempdir()))
+        # NF-11: game discovery and the launch lifecycle. It reuses the JARVIS
+        # desktop runner for every platform fact (Steam manifests, Start Menu
+        # index, process identity, memory, launch and graceful close) and adds
+        # only the catalog and the ownership rules. A runner that cannot supply
+        # a seam leaves the service unbuilt rather than half-wired.
+        self.games = self._build_game_service(desktop_runner)
         self.novaforge = NovaForgeManager(
             data_dir=self.data_dir,
+            # NF-18: game knowledge uses the SAME memory store as every other
+            # durable memory, so there is one persistence path, not a second DB.
+            memory=self.memory,
             capture=novaforge_capture or self._novaforge_no_capture,
             geometry=novaforge_geometry or self._novaforge_no_geometry,
             window_lines=novaforge_windows or self._novaforge_no_windows,
+            capture_window=novaforge_capture_window,
             release_inputs=getattr(desktop_runner, "release_all_inputs", None),
             action_input=novaforge_input,
             objective_probe=novaforge_probe,
+            # NF-08 B: the OCR objective reads through the SAME Windows engine
+            # the vision-guided click uses. On a host without it the verifier
+            # is not installed at all, and the capability says so.
+            ocr_reader=(
+                self._perception_screen_text if sys.platform.startswith("win") else None
+            ),
+            artifact_roots=tuple(artifact_roots),
             permissions=self.risk,
             publish=self._novaforge_publish,
+            game_launcher=self.games,
+            # NF-15: the launch path's own process-identity probe, so an
+            # observation can tell an exited process from a destroyed window
+            # (a reused pid is a different process). Absent on a test double or
+            # a non-Windows host, where the observer reports "unknown" instead
+            # of guessing.
+            process_identity=getattr(desktop_runner, "process_identity", None),
+            # NF-22: the autonomous run's admission gate reads the SAME governor
+            # (and therefore the same monitor) every other load decision in this
+            # build asks, so a run cannot be admitted into a machine the rest of
+            # the build has already classed as under pressure.
+            autonomy_resources=self._novaforge_autonomy_resources,
             capture_supported=bool(
                 capture_supported_here() and novaforge_capture is not None and novaforge_geometry is not None
             ),
         )
+        # NF-08 A/C: observation and the closed loop. The builder is built PER
+        # RUN from whatever manager is installed, because it reads that
+        # manager's own window probe and capture seam — a builder bound at boot
+        # would keep reading a manager that has since been replaced. The loop
+        # acts only through the manager's plan/execute gates, so the Guardian,
+        # digest binding and action budget are not bypassed by being
+        # "automatic". The policy is an explicit navigation rule, not a
+        # gameplay brain, and its capability says exactly that.
+        self._novaforge_loops: dict[str, asyncio.Event] = {}
+        # NF-10: every finished loop run becomes one comparable trial row. It is
+        # PROCESS-local on purpose — the durable record is the acceptance
+        # script's JSON artifact, and a panel must not imply it survives a
+        # restart when it does not.
+        self._novaforge_trials: list[PolicyTrial] = []
+        self._novaforge_trial_count = 0
+        # NF-09: ONE describer for the process, resolving the vision provider at
+        # CALL time so a model installed (or removed) at runtime is what gets
+        # used, without rebuilding the observation path or restarting.
+        self._novaforge_describer: VisionDescriber | None = None
+        self.novaforge.decision_capability = self._novaforge_loop_capability
         # NF-04 composes the session manager: it starts ONE real observation
         # session per run and reads that session's own telemetry, timeline and
         # record. It gets the same store and event seam, so benchmark history is
@@ -2691,6 +2810,15 @@ class NovaControlApplication:
         nothing declares vision, which is what leaves the decision to the
         remaining fallbacks rather than pinning a model that is not there.
         """
+        if ollama_disabled() and self.model_manager.provider_name() == "ollama":
+            # The operator (or the test harness) switched local-runtime probing
+            # off. Honouring it only in the chat brain's own builder made every
+            # app construction in a test run spend seconds per socket attempt
+            # here, so vision selection takes the same gate as boot resolution.
+            # Scoped to the LOCAL runtime: an injected provider (a test's fake,
+            # or a different backend) is not behind that socket and must still
+            # answer the selection question.
+            return ""
         try:
             self.model_manager.refresh_capabilities()
             selection = self.model_manager.select_for_request(requires_vision=True)
@@ -2728,6 +2856,11 @@ class NovaControlApplication:
         # An experiment orchestrates evaluations, so it stops FIRST: cancelling
         # the arms before the records they poll are closed is the only order that
         # leaves a truthful experiment record behind.
+        # A closed loop acts through the manager, so it is asked to stop BEFORE
+        # the manager closes the session: a loop still deciding would see its
+        # next action refused and record a refusal that was really a shutdown.
+        for cancel in getattr(self, "_novaforge_loops", {}).values():
+            cancel.set()
         await self.novaforge_experiments.shutdown()
         await self.novaforge_benchmarks.shutdown()
         # The evaluation reads the benchmark's terminal state, so it is closed
@@ -3269,12 +3402,19 @@ class NovaControlApplication:
             },
         )
         handler = self._HANDLERS.get(decision.intent)
+        # NF-12: a request that NAMES a catalog game is answered by the game
+        # library — a status question from its row, a launch request as an
+        # approval-gated PLAN. The name gate is what keeps every other "open X"
+        # (calculator, Chrome, the settings) on the desktop path it already had.
+        game_here_kind, _game_here_name = self._game_request_here(text)
         # Whether the request was actually CARRIED OUT is known here, not in the
         # understanding layer, so the outcome is reported against the same
         # request id. An exception is re-raised unchanged: recording a failure
         # must not swallow it.
         try:
-            if handler:
+            if game_here_kind:
+                route, payload = await self._handle_game_request(request, text)
+            elif handler:
                 route, payload = await handler(self, request, text)
             else:
                 route, payload = await self._handle_agent(request, text)
@@ -4077,6 +4217,85 @@ class NovaControlApplication:
         """Window-list seam for a runner that has none: the probe is unavailable."""
         return None
 
+    def _build_game_service(self, runner: Any) -> GameLaunchService | None:
+        """NovaForge's game catalog and launch lifecycle, over the JARVIS seams.
+
+        Every fact comes from the desktop runner the rest of the application
+        uses — Steam manifests, the Start Menu index, process identity, memory,
+        launch, graceful close — so discovery can never disagree with
+        ``launch <game>`` about what is installed. A runner missing any seam
+        leaves the service unbuilt; the API then reports game launch as
+        unavailable instead of offering half an integration.
+
+        Bounds are configurable because they are machine facts: free memory, a
+        startup wait and a shutdown wait differ between a 16 GB laptop and a
+        workstation.
+        """
+        seams = {
+            "steam": getattr(runner, "installed_steam_games", None),
+            "shortcuts": getattr(runner, "installed_app_targets", None),
+            "processes": getattr(runner, "game_processes", None),
+            "processes_under": getattr(runner, "game_processes_under", None),
+            "launch": getattr(runner, "launch_game_target", None),
+            "close": getattr(runner, "close_game_window", None),
+            "memory": getattr(runner, "memory_snapshot", None),
+        }
+        required = {name: seam for name, seam in seams.items() if name != "processes_under"}
+        if not all(callable(seam) for seam in required.values()):
+            return None
+        # ``processes_under`` is an ENHANCEMENT, not a requirement: without it a
+        # title whose executable name shares nothing with the game (SFA.exe) is
+        # simply harder to verify, and the catalog says so rather than refusing
+        # to build the whole integration.
+        if not callable(seams["processes_under"]):
+            seams["processes_under"] = None
+        roots = [
+            part.strip()
+            for part in os.environ.get("NOVACONTROL_GAME_DIRS", "").split(os.pathsep)
+            if part.strip()
+        ]
+        # The callable() check above is the runtime gate; these casts only tell
+        # the type checker what it has already established.
+        steam_games = cast(Callable[[], Sequence[Mapping[str, Any]]], seams["steam"])
+        shortcuts = cast(Callable[[], Mapping[str, str]], seams["shortcuts"])
+        processes = cast(
+            Callable[[Sequence[str]], Awaitable[Sequence[Mapping[str, Any]]]],
+            seams["processes"],
+        )
+        launch = cast(Callable[..., Awaitable[Mapping[str, Any]]], seams["launch"])
+        close_window = cast(Callable[[str], Awaitable[Mapping[str, Any]]], seams["close"])
+        memory = cast(Callable[[], Awaitable[Mapping[str, Any]]], seams["memory"])
+        under = cast(
+            Callable[[Sequence[str]], Awaitable[Sequence[Mapping[str, Any]]]] | None,
+            seams["processes_under"],
+        )
+        catalog = GameCatalog(
+            steam_games=steam_games,
+            shortcuts=shortcuts,
+            processes=processes,
+            processes_under=under,
+            configured_dirs=tuple(roots),
+        )
+
+        def number(name: str, default: float) -> float:
+            try:
+                return float(os.environ.get(name, default))
+            except (TypeError, ValueError):
+                return default
+
+        return GameLaunchService(
+            catalog,
+            launch=launch,
+            processes=processes,
+            processes_under=under,
+            close_window=close_window,
+            memory=memory,
+            min_free_gb=number("NOVACONTROL_GAME_MIN_FREE_GB", 2.0),
+            max_used_percent=number("NOVACONTROL_GAME_MAX_MEM_PERCENT", 92.0),
+            startup_timeout=number("NOVACONTROL_GAME_STARTUP_TIMEOUT", 90.0),
+            shutdown_timeout=number("NOVACONTROL_GAME_SHUTDOWN_TIMEOUT", 30.0),
+        )
+
     def _novaforge_experiment_permission(self) -> dict[str, Any]:
         """Revalidate an experiment against the SAME permission layer tools use.
 
@@ -4104,6 +4323,30 @@ class NovaControlApplication:
             "reason": str(getattr(decision, "reason", "")),
         }
 
+    def _novaforge_autonomy_resources(self) -> dict[str, Any]:
+        """NF-22's admission gate: the machine's room, from the shared governor.
+
+        A CRITICAL machine refuses the run — the phase requires the existing
+        resource gate to be respected, and an autonomous session that drives a
+        game is exactly the work that must not start on a machine with no room.
+        TIGHT is admitted: the run's own budgets, not a memory figure, are what
+        bound it, and the reading travels in the run's own record so the panel
+        can show what it saw. An unreadable figure stays ``None`` — an absent
+        sensor is not permission, and it is not pressure either.
+        """
+        assessment = self.governor.assess()
+        level = assessment.level
+        available_ram = assessment.available_ram_bytes
+        return {
+            "available": True,
+            "allow": level is not ResourceLevel.CRITICAL,
+            "state": level.value,
+            "level": level.value,
+            "reason": "; ".join(assessment.reasons)
+            or f"The machine reads {level.value}.",
+            "available_ram_bytes": available_ram,
+        }
+
     async def _novaforge_publish(self, event_type: str, payload: dict[str, Any]) -> None:
         """Publish a NovaForge event on the application's ONE bus.
 
@@ -4114,6 +4357,429 @@ class NovaControlApplication:
         event that every connected client would receive.
         """
         await self.event_bus.emit(event_type, source="novaforge", **payload)
+
+    # ── NF-08: the closed loop, wired to the gates that already exist ──────
+
+    def _build_novaforge_observations(
+        self, *, describe_timeout: float | None = None, describe: bool = True
+    ) -> ObservationBuilder:
+        """The observation seams of the CURRENT manager, read at call time.
+
+        ``describe`` is FALSE for the bounded closed loop: a model call is not
+        free. A configured VLM on a CPU host can take tens of seconds for one
+        frame, which would spend the loop's entire observation budget before it
+        can act — measured here at 24 s for a ONE-action loop with a 12 s
+        description cap, past a 20 s deadline. The loop therefore observes what
+        is MEASURED (frame, window title, OCR) and stays a deterministic control
+        loop; the read-only interpret endpoint is the deliberate way to ask a
+        model what it sees. A policy that wants model descriptions receives
+        them by being handed a builder with ``describe=True``.
+
+        ``describe_timeout`` is the CALLER's budget for a model description, and
+        only matters when ``describe`` is on. The interpret endpoint passes the
+        model's own deadline, because one deliberate description is exactly
+        what it was asked for.
+        """
+        manager = self.novaforge
+        reader = manager.read_frame_text if manager.ocr_reader is not None else None
+        describer = self._build_novaforge_vision() if describe else None
+        return ObservationBuilder(
+            probe=manager.window_probe,
+            capture=manager.capture_frame if manager.capture_supported else None,
+            ocr=ScreenTextReader(read_text=reader) if reader is not None else None,
+            # When wired, the describer reports its own availability, so an
+            # absent model is a REPORTED reason rather than a missing seam and
+            # OCR/title evidence keeps working either way.
+            describe=describer,
+            describe_timeout=(
+                (min(12.0, describer.timeout) if describe_timeout is None else describe_timeout)
+                if describer is not None
+                else 0.05
+            ),
+        )
+
+    def _build_novaforge_vision(self) -> VisionDescriber:
+        """The process's visual interpreter, resolving the live provider per call."""
+        if self._novaforge_describer is None:
+            self._novaforge_describer = VisionDescriber(
+                provider=lambda: self.vision_manager.provider,
+                timeout=vision_timeout_from_environment(),
+            )
+        return self._novaforge_describer
+
+    def _novaforge_vision_reason(self) -> str:
+        """Why visual interpretation is unavailable, in THIS build's terms."""
+        settings = self.config.vision
+        if settings.provider == "none":
+            return (
+                "Visual interpretation is disabled by configuration "
+                "(vision.provider: none); OCR and window-title evidence remain available."
+            )
+        provider = self.vision_manager.provider
+        name = str(getattr(provider, "name", "") or "none")
+        model = str(getattr(provider, "model", "") or "")
+        described = name + (f"/{model}" if model else "")
+        return (
+            f"The vision pipeline's provider ({described}) is not image-capable or not "
+            "installed; the capability gate refuses it, so no screenshot was sent. OCR "
+            "and window-title evidence remain available."
+        )
+
+    def _novaforge_vision_capability(self) -> dict[str, Any]:
+        """Truthful visual-interpretation capability for the API and the panel."""
+        try:
+            capability = dict(self._build_novaforge_vision().capability())
+        except Exception as exc:  # noqa: BLE001 - a capability report cannot fail a read
+            return {
+                "available": False,
+                "reason": (
+                    "The visual interpreter could not report its capability: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+            }
+        if not capability.get("available"):
+            capability["reason"] = self._novaforge_vision_reason()
+        return capability
+
+    #: The decision policies this build can install. ``ready`` is the NF-08
+    #: harness rule and stays the default so an existing caller is unchanged;
+    #: ``stages`` is the NF-10 state-dependent policy; ``fixed`` is its honest
+    #: baseline. A name that is not here is refused, never silently swapped for
+    #: a different policy.
+    _NOVAFORGE_POLICIES = {
+        "ready": HarnessReadyPolicy,
+        "stages": HarnessStagesPolicy,
+        "fixed": FixedKeyPolicy,
+    }
+
+    @classmethod
+    def novaforge_policy_names(cls) -> tuple[str, ...]:
+        return tuple(cls._NOVAFORGE_POLICIES)
+
+    def _build_novaforge_loop(
+        self,
+        *,
+        policy: str = "ready",
+        limits: LoopLimits | None = None,
+        cancel: asyncio.Event | None = None,
+    ) -> ClosedLoopRunner:
+        """One runner per run: its observation history must not outlive a run.
+
+        The policy is created here too, so its "nothing left to do" reason
+        belongs to this run rather than to whichever run happened last. The
+        policy NAME is explicit: a typo must not fall back to another policy
+        and quietly report a different experiment than the one requested.
+        """
+        factory = self._NOVAFORGE_POLICIES.get(str(policy or "ready"))
+        if factory is None:
+            raise ValueError(
+                f"Unknown decision policy {policy!r}; installed policies are "
+                + ", ".join(sorted(self._NOVAFORGE_POLICIES))
+                + "."
+            )
+        return ClosedLoopRunner(
+            gateway=self.novaforge,
+            # No model call inside the bounded loop: see the describe= note on
+            # _build_novaforge_observations. The measurements it needs (window
+            # title, OCR, frame freshness) are all direct evidence.
+            observations=self._build_novaforge_observations(describe=False),
+            policy=factory(),
+            limits=limits,
+            cancel=cancel,
+        )
+
+    def _novaforge_policy_capability(self, name: str) -> dict[str, Any]:
+        """One installed policy's truthful capability row.
+
+        A policy that cannot describe itself is reported as unavailable with the
+        error, never omitted: a caller choosing from the list must see the row
+        that cannot be used.
+        """
+        factory = self._NOVAFORGE_POLICIES[name]
+        try:
+            policy = factory()
+            data = (
+                dict(policy.capability())
+                if hasattr(policy, "capability")
+                else {
+                    "policy": getattr(policy, "name", name),
+                    "available": bool(getattr(policy, "available", False)),
+                    "model_backed": False,
+                    "reason": "The policy did not report a capability.",
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - a capability read cannot fail the route
+            data = {
+                "policy": name,
+                "available": False,
+                "model_backed": False,
+                "reason": f"The policy could not report its capability: {type(exc).__name__}: {exc}",
+            }
+        data["id"] = name
+        data.setdefault("version", 0)
+        return data
+
+    def _novaforge_loop_capability(self) -> dict[str, Any]:
+        """What the decision pipeline can do on THIS host, for /capabilities.
+
+        A loop nobody installed must not be reported as present, and a policy
+        that is deterministic must not be dressed up as a gameplay brain.
+        """
+        try:
+            capability = dict(self._build_novaforge_loop().capability()["closed_loop"])
+        except Exception as exc:  # noqa: BLE001 - a capability report cannot fail a boot
+            return {
+                "available": False,
+                "reason": (
+                    "The closed loop could not report its capability: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+            }
+        capability["vision"] = self._novaforge_vision_capability()
+        # NF-10: every installed policy, named, so a caller can choose one and
+        # see whether it is model-backed WITHOUT reading the source.
+        capability["policies"] = [
+            self._novaforge_policy_capability(name)
+            for name in self._NOVAFORGE_POLICIES
+        ]
+        if self.novaforge.action_runner is None:
+            capability["available"] = False
+            capability["reason"] = (
+                "No gameplay injector is wired, so a decision could not be executed."
+            )
+        return capability
+
+    async def run_novaforge_loop(
+        self, session_id: str, payload: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Run the closed loop once against a live session, inside its bounds.
+
+        Nothing here injects input or re-implements a gate: every action goes
+        through ``plan_action``/``execute_action``, so a stopped session, a lost
+        foreground window, a spent budget or a Guardian denial stops the loop
+        for the reason the manager would have given a person.
+        """
+        data = dict(payload or {})
+        if self.novaforge.get(session_id) is None:
+            raise KeyError(session_id)
+        defaults = LoopLimits()
+        raw_actions = data.get("max_actions")
+        raw_deadline = data.get("deadline_seconds")
+        try:
+            # Blank means "use the default"; an explicit 0 must reach validation
+            # and be refused, not be swallowed by a truthiness check.
+            max_actions = int(
+                defaults.max_actions if raw_actions in (None, "") else raw_actions
+            )
+            deadline = float(
+                defaults.deadline_seconds if raw_deadline in (None, "") else raw_deadline
+            )
+        except (TypeError, ValueError) as exc:
+            raise MissionValidationError(
+                ["max_actions must be a whole number and deadline_seconds a number."]
+            ) from exc
+        limits = LoopLimits(max_actions=max_actions, deadline_seconds=deadline)
+        problems = limits.errors()
+        if problems:
+            raise MissionValidationError(problems)
+        policy_name = str(data.get("policy") or "ready").strip()
+        if policy_name not in self._NOVAFORGE_POLICIES:
+            raise MissionValidationError(
+                [
+                    f"Unknown policy {policy_name!r}; choose one of "
+                    + ", ".join(sorted(self._NOVAFORGE_POLICIES))
+                    + "."
+                ]
+            )
+        if session_id in self._novaforge_loops:
+            raise SessionConflictError(
+                "A closed loop is already running for this session; cancel it first."
+            )
+        cancel = asyncio.Event()
+        self._novaforge_loops[session_id] = cancel
+        try:
+            runner = self._build_novaforge_loop(
+                policy=policy_name, limits=limits, cancel=cancel
+            )
+            result = await runner.run(
+                session_id,
+                verify_before_first_action=bool(data.get("verify_first", True)),
+            )
+        finally:
+            self._novaforge_loops.pop(session_id, None)
+        trial = self._record_novaforge_trial(result)
+        payload = result.to_dict()
+        payload["trial"] = trial
+        # Aggregates for every policy run in THIS process, computed by the one
+        # evaluation module rather than re-derived in the route or the panel.
+        payload["policy_summaries"] = summaries_by_policy(self._novaforge_trials)
+        return payload
+
+    #: How many trial rows a process keeps for the panel. A cap is a promise
+    #: that trial history cannot grow without bound; the acceptance artifact
+    #: remains the full record.
+    NOVAFORGE_TRIAL_LIMIT = 50
+
+    def _record_novaforge_trial(self, result: LoopResult) -> dict[str, Any]:
+        """Record one finished run as a comparable trial row.
+
+        It runs nothing and decides nothing: the row is read from the loop's own
+        result, using the same ``PolicyTrial`` the acceptance script uses, so a
+        panel number and a reported number cannot disagree about what happened.
+        """
+        self._novaforge_trial_count += 1
+        trial = PolicyTrial.from_loop(result, trial=self._novaforge_trial_count)
+        self._novaforge_trials.append(trial)
+        overflow = len(self._novaforge_trials) - self.NOVAFORGE_TRIAL_LIMIT
+        if overflow > 0:
+            del self._novaforge_trials[:overflow]
+        return dict(trial_rows([trial])[0])
+
+    def novaforge_trial_history(self) -> dict[str, Any]:
+        """Policy trials recorded by THIS process, with their aggregates.
+
+        Refused, failed and inconclusive runs are kept: a history that only
+        shows the successes is a marketing page, not a record. The rows are
+        compact (no per-step payloads) because the loop response already
+        carries the steps of the run it reports.
+        """
+        return {
+            "trials": trial_rows(self._novaforge_trials),
+            "summaries": summaries_by_policy(self._novaforge_trials),
+            "limit": self.NOVAFORGE_TRIAL_LIMIT,
+            "durable": False,
+            "note": (
+                "Trial history covers this process only; it is not persisted. "
+                "The acceptance script's JSON artifact is the durable record, and "
+                "only the objective verifier decides whether a trial succeeded."
+            ),
+        }
+
+    # ── NovaForge plan approval: the operator's token, not a request flag ─────
+    # NF-20 recorded the gap: `/plan/execute` accepted `approved: true`, a flag an
+    # authenticated caller can set for itself, so the approval existed only as
+    # text in the request. A plan now carries the SAME server-minted, single-use,
+    # time-limited token the desktop/browser/phone command plans carry, and the
+    # execute route consumes it before anything is dispatched.
+
+    #: The two shapes the NovaForge plan routes serve a plan in: the build and
+    #: replan receipts carry it under `plan`, the status view under `current`.
+    FORGE_PLAN_KEYS = ("plan", "current")
+
+    def forge_plan_receipt(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Serve one NovaForge plan receipt, minting the approval token it needs.
+
+        Only a plan that is actually awaiting approval gets a token: a plan whose
+        policy requires none carries no token and needs none to run, so this can
+        never turn a plan that did not require approval into one that does.
+        """
+        if not isinstance(payload, dict):
+            return payload
+        for key in self.FORGE_PLAN_KEYS:
+            plan = payload.get(key)
+            if not isinstance(plan, dict):
+                continue
+            approval = plan.get("approval")
+            if not isinstance(approval, dict) or not approval.get("required"):
+                continue
+            if str(approval.get("status") or "") != "pending":
+                continue
+            plan_id = str(plan.get("plan_id") or "").strip()
+            if plan_id:
+                approval["token"] = self._mint_approval(plan_id, plan)
+        return payload
+
+    async def execute_forge_plan(
+        self, session_id: str, payload: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Execute ONE NovaForge plan, guarded by the server-issued approval token.
+
+        The token is bound to the plan id, expires with the approval window and is
+        consumed exactly once, so `approved: true` alone runs nothing: a missing,
+        unknown, expired or replayed token raises ValueError (HTTP 403) and no
+        input is dispatched. A plan that is NOT awaiting approval — a policy that
+        does not require it, or one that already ran — is passed through untouched,
+        because the planner already answers those cases itself.
+        """
+        plan_id = str(payload.get("plan_id") or "").strip()
+        if plan_id and payload.get("approved") is True:
+            gate = self.novaforge.plan_gate(plan_id)
+            approval = dict(gate.get("approval") or {})
+            awaiting = (
+                str(gate.get("status") or "") == "awaiting_approval"
+                and bool(approval.get("required"))
+            )
+            if awaiting:
+                token = str(payload.get("approval_token") or "").strip()
+                if not token:
+                    raise ValueError(
+                        "Executing a NovaForge plan requires an approval token. Build the "
+                        "plan again, review it, then execute with the token from that "
+                        "preview — `approved` on its own is not an approval."
+                    )
+                self._consume_approval(token, plan_id)
+        return await self.novaforge.execute_plan(session_id, payload)
+
+    async def interpret_novaforge_frame(self, session_id: str) -> dict[str, Any]:
+        """Describe the session target's CURRENT frame with the vision model.
+
+        Read-only: this captures, reads and asks a model, and returns the typed
+        interpretation with its evidence references. It cannot plan, approve or
+        execute anything, and the verdict for an objective remains the
+        verifier's. When no image-capable model is wired the observation is
+        still returned (title/OCR evidence) with the capability reason saying
+        why no interpretation exists.
+        """
+        record = self.novaforge.get(session_id)
+        if record is None:
+            raise KeyError(session_id)
+        target = getattr(record, "target", None)
+        if target is None:
+            raise MissionValidationError(
+                [
+                    "The session has not validated a target window, so there is no "
+                    "frame to interpret."
+                ]
+            )
+        describer = self._build_novaforge_vision()
+        observation = await self._build_novaforge_observations(
+            describe_timeout=describer.timeout + 1.0
+        ).observe(
+            int(getattr(target, "handle", 0) or 0),
+            pid=int(getattr(target, "pid", 0) or 0) or None,
+        )
+        vision = observation.vision
+        return {
+            "session_id": session_id,
+            "observation": summarise(observation, limit=300),
+            "frame": dict(observation.frame) if observation.frame else None,
+            "vision": vision,
+            # What was MEASURED, named, so a reader can tell it from the model's
+            # description without parsing prose.
+            "measured": [str(item.get("method") or "") for item in observation.evidence],
+            "conflicts": list(observation.conflicts),
+            "capability": self._novaforge_vision_capability(),
+        }
+
+    def cancel_novaforge_loop(self, session_id: str) -> dict[str, Any]:
+        """Ask a running loop to stop before its next action (idempotent).
+
+        A loop that is not running is a 200 with ``cancelled: false`` and the
+        reason: the caller needs to know the loop it thinks is running is not.
+        """
+        cancel = self._novaforge_loops.get(session_id)
+        if cancel is None:
+            return {
+                "session_id": session_id,
+                "cancelled": False,
+                "reason": "No closed loop is running for this session.",
+            }
+        cancel.set()
+        return {
+            "session_id": session_id,
+            "cancelled": True,
+            "reason": "The loop will stop before its next action, not mid-action.",
+        }
 
     async def _perception_window_probe(self) -> list[str] | None:
         """Visible windows, for the agentic perception engine's probe seam.
@@ -9793,6 +10459,456 @@ class NovaControlApplication:
             correlation_id=correlation_id,
         )
 
+    # ── NF-12: game library, launch planning and verified execution ─────
+    #
+    # These methods are the USER-FACING door to the NF-11 service. They add no
+    # discovery of their own: the catalog answers "is it here / is it running",
+    # the service answers "did my launch work / may I close it", and this layer
+    # only contributes the request shape, the approval token and the envelope
+    # the existing command renderer already knows how to draw. Launching keeps
+    # the app's existing confirmation rule: a plan first, then the same
+    # single-use token, then execution.
+
+    def _game_request_here(self, text: str) -> tuple[str, str]:
+        """``(kind, name)`` when this text is a GAME request this host can serve.
+
+        A launch/status phrase is only claimed when the name is one of the
+        catalog's candidate titles (or their aliases), so "open calculator" and
+        "start the server" keep travelling the desktop plan they always did.
+        "attach" needs no name: it is the "the game that is already running"
+        request, which the catalog resolves by itself.
+        """
+        if self.games is None:
+            return "", ""
+        kind, name = game_request(text)
+        if kind == "attach":
+            return kind, name
+        if name and candidate_title(name) is not None:
+            return kind, name
+        return "", ""
+
+    def _game_observation_state(self) -> dict[str, Any]:
+        """What observation can do right now — never inferred from a launch.
+
+        A verified launch proves a process and a window. Whether those pixels
+        can be captured is a different question, answered by the same capability
+        row the Readiness card shows.
+        """
+        try:
+            capture = dict(self.novaforge.capabilities().get("capture") or {})
+        except Exception:  # noqa: BLE001 - a capability read cannot fail a launch
+            capture = {}
+        return {
+            "available": bool(capture.get("available")),
+            "reason": str(capture.get("reason") or ""),
+            "implied_by_launch": False,
+            "note": (
+                "A verified launch is not a verified capture: save a mission and "
+                "start a session to learn whether this game's frames can actually be read."
+            ),
+        }
+
+    async def game_library(self, query: str = "") -> dict[str, Any]:
+        """Discovered games (optionally filtered), plus this service's own state.
+
+        One read, one inventory: the rows are the catalog's, the owned claim and
+        history are the service's. A host without the service says so instead of
+        returning an empty list that would read as "no games installed".
+        """
+        if self.games is None:
+            return {
+                "available": False,
+                "entries": [],
+                "counts": {},
+                "query": str(query or "").strip(),
+                "matched": 0,
+                "total": 0,
+                "owned": None,
+                "history": [],
+                "memory": {"ok": True, "available": False, "reason": "No launch service is wired."},
+                "reason": (
+                    "No game catalog is wired on this host. Discovery needs the JARVIS "
+                    "desktop runner's Steam/shortcut/process seams."
+                ),
+                "limitations": [],
+            }
+        body = await self.games.catalog_payload()
+        status = await self.games.status_payload()
+        wanted = str(query or "").strip()
+        rows = body.get("entries", [])
+        if wanted:
+            rows = [row for row in rows if row_matches(row, wanted)]
+        body["available"] = True
+        body["query"] = wanted
+        body["total"] = len(body.get("entries", []))
+        body["entries"] = rows
+        body["matched"] = len(rows)
+        body["owned"] = status["owned"]
+        body["history"] = status["history"]
+        body["memory"] = status["memory"]
+        body["observation"] = self._game_observation_state()
+        return body
+
+    async def game_library_resolve(self, query: str) -> dict[str, Any]:
+        """Resolve one name against the catalog WITHOUT launching anything."""
+        if self.games is None:
+            return {
+                "available": False,
+                "status": "NOT_TESTED",
+                "entry": None,
+                "candidates": [],
+                "launchable": False,
+                "reason": "No game catalog is wired on this host.",
+            }
+        resolution = await self.games.catalog.resolve(query)
+        entry = resolution.get("entry")
+        memory = await self.games.memory_check()
+        return {
+            **resolution,
+            "available": True,
+            "launchable": bool(
+                entry is not None and entry.get("status") == INSTALLED_AND_LAUNCHABLE
+            ),
+            "memory": memory,
+            "observation": self._game_observation_state(),
+        }
+
+    async def plan_game_launch(self, text: str) -> dict[str, Any]:
+        """Preview EXACTLY what would start, and mint the approval token.
+
+        The plan carries the resolved title, the verified install evidence, the
+        target that would be issued and the resource gate's measurement. Nothing
+        is launched here; a name that cannot be resolved unambiguously gets a
+        plan with NO token, because there is no single action to approve.
+        """
+        command = str(text or "").strip()
+        kind, name = game_request(command)
+        if not command:
+            raise ValueError("A game name is required.")
+        if self.games is None:
+            return self._game_envelope(
+                command=command,
+                status="NOT_TESTED",
+                summary=(
+                    "No game launch service is wired on this host, so nothing can be "
+                    "previewed or started. Discovery needs the JARVIS desktop runner."
+                ),
+                approval={"required": False, "approved": False, "message": "No launch service."},
+            )
+        if kind == "attach":
+            return await self._game_attach_envelope(command)
+        claim = await self.games.owned_claim()
+        if claim is not None:
+            # One game at a time, and only after the previous test's exit is
+            # confirmed. A plan here would mint a token whose execution the
+            # service would refuse, so the refusal is reported at the preview.
+            return self._game_envelope(
+                command=command,
+                status="ANOTHER_GAME_OWNED",
+                summary=(
+                    f"{claim.name} was started by this service (pid {claim.pid}) and has not "
+                    "been confirmed closed. Close it before launching another game."
+                ),
+                entry={"title": claim.name},
+                steps=[
+                    "Close the tracked instance through its window and confirm it exited.",
+                    "Then preview the next launch.",
+                ],
+            )
+        resolution = await self.games.catalog.resolve(name or command)
+        status = str(resolution["status"])
+        entry = resolution.get("entry")
+        memory = await self.games.memory_check()
+        if status == AMBIGUOUS_MATCH:
+            return self._game_envelope(
+                command=command,
+                status=AMBIGUOUS_MATCH,
+                summary=(
+                    "More than one installed title matches that name, so nothing was "
+                    "prepared. Name the edition you mean."
+                ),
+                entry=None,
+                candidates=resolution.get("candidates") or [],
+                memory=memory,
+            )
+        if entry is None or status != INSTALLED_AND_LAUNCHABLE:
+            reason = (entry or {}).get("reason") or "This title cannot be launched."
+            return self._game_envelope(
+                command=command,
+                status=status,
+                summary=reason,
+                entry=entry,
+                memory=memory,
+                attach=await self.games.adopt(name or command)
+                if status == ALREADY_RUNNING
+                else None,
+            )
+        if not memory["ok"]:
+            return self._game_envelope(
+                command=command,
+                status="LAUNCH_REFUSED",
+                summary=f"Launch refused by the resource gate: {memory['reason']}.",
+                entry=entry,
+                memory=memory,
+            )
+        artifact = entry.get("artifact") or {}
+        source = str(artifact.get("source") or "unknown")
+        target = str(artifact.get("launch_target") or "")
+        steps = [
+            f"Start {entry['title']!r} through {source} ({target or 'no target recorded'}).",
+            "Verify the exact process identity (pid and start time) and that its window appeared.",
+            "Send no input: stop at the game's own first screen.",
+            "Close only this instance through its window and confirm it exited before anything else starts.",
+        ]
+        plan = self._game_envelope(
+            command=command,
+            status="waiting_for_approval",
+            summary=(
+                f"{entry['title']} is installed and launchable via {source}. "
+                "Approving starts exactly this installation and verifies its process and window."
+            ),
+            entry=entry,
+            memory=memory,
+            steps=steps,
+            workflow={
+                "id": "",
+                "name": f"Launch {entry['title']}",
+                "actions": [
+                    {
+                        "type": "game_launch",
+                        "target": target,
+                        "description": f"Launch {entry['title']} via {source}",
+                    }
+                ],
+            },
+        )
+        token = self._mint_approval(command, plan)
+        plan["approval"] = {
+            "required": True,
+            "approved": False,
+            "token": token,
+            "message": (
+                "Approving starts this verified installation. Nothing is sent to the game "
+                "and no other game is closed."
+            ),
+        }
+        return plan
+
+    async def execute_game_launch(
+        self, text: str, *, approval_token: str | None = None
+    ) -> dict[str, Any]:
+        """Run an approved game launch, reporting each verified stage separately.
+
+        A missing, expired or replayed token raises ``ValueError`` (HTTP 403) and
+        nothing starts. The result distinguishes the launch being REQUESTED, a
+        process STARTING, a WINDOW appearing and the launch being VERIFIED — a
+        command that was issued is never reported as a successful start.
+        """
+        command = str(text or "").strip()
+        if not command:
+            raise ValueError("A game name is required.")
+        if self.games is None:
+            raise ValueError("No game launch service is wired on this host.")
+        if not approval_token:
+            raise ValueError(
+                "Launching a game requires an approval token. Preview it first, then "
+                "approve the exact plan."
+            )
+        self._consume_approval(approval_token, command)
+        _kind, name = game_request(command)
+        try:
+            result = await self.games.launch(name or command)
+        except RuntimeError as exc:
+            # A race the plan could not see: another instance became this
+            # service's own between preview and approval. Refusing is a result,
+            # not a server error — nothing was started.
+            return {
+                "route": "game_launch",
+                "status": "LAUNCH_REFUSED",
+                "command": command,
+                "target": name or command,
+                "summary": str(exc),
+                "approval": {
+                    "required": True,
+                    "approved": True,
+                    "message": "The token was accepted; the launch itself was refused.",
+                },
+                "execution_results": [
+                    {
+                        "action": "game_launch",
+                        "status": "failed",
+                        "error": str(exc),
+                        "output": {},
+                    }
+                ],
+                "stages": {
+                    "launch_requested": True,
+                    "process_started": False,
+                    "window_detected": False,
+                    "launch_verified": False,
+                },
+                "game": {"status": "LAUNCH_REFUSED", "reason": str(exc)},
+                "observation": self._game_observation_state(),
+            }
+        launch = result.get("launch") or {}
+        verified = bool(launch.get("verified"))
+        stages = {
+            "launch_requested": True,
+            "process_started": bool(launch.get("pid")),
+            "window_detected": bool(launch.get("window")),
+            "launch_verified": verified,
+        }
+        reason = str(result.get("reason") or "")
+        entry = result.get("entry") or {}
+        target = str(entry.get("title") or launch.get("name") or name or command)
+        if verified:
+            summary = f"{target} started and was verified: {launch.get('verification')}."
+        elif stages["process_started"]:
+            summary = f"{target} started but the launch is NOT verified: {reason}"
+        else:
+            summary = f"{target} was not started: {reason}"
+        return {
+            "route": "game_launch",
+            "status": result.get("status"),
+            "command": command,
+            "target": target,
+            "summary": summary,
+            "approval": {
+                "required": True,
+                "approved": True,
+                "message": "Approved and executed once through the single-use token.",
+            },
+            "execution_results": [
+                {
+                    "action": "game_launch",
+                    "status": "completed" if verified else "failed",
+                    "error": "" if verified else reason,
+                    "output": result,
+                }
+            ],
+            "stages": stages,
+            "game": result,
+            "observation": self._game_observation_state(),
+        }
+
+    async def close_game_launch(self, *, launch_id: str = "") -> dict[str, Any]:
+        """Close ONLY the instance this process started, and confirm it exited."""
+        if self.games is None:
+            raise ValueError("No game launch service is wired on this host.")
+        outcome = await self.games.close(launch_id=launch_id)
+        return {
+            **outcome,
+            "route": "game_library",
+            "summary": str(outcome.get("reason") or ""),
+            "observation": self._game_observation_state(),
+        }
+
+    async def attach_game(self, query: str = "") -> dict[str, Any]:
+        """Report a game that was ALREADY running, without taking ownership."""
+        if self.games is None:
+            raise ValueError("No game launch service is wired on this host.")
+        outcome = await self.games.adopt(str(query or ""))
+        return {
+            **outcome,
+            "route": "game_library",
+            "summary": str(outcome.get("reason") or ""),
+            "observation": self._game_observation_state(),
+        }
+
+    def _game_envelope(
+        self,
+        *,
+        command: str,
+        status: str,
+        summary: str,
+        entry: dict[str, Any] | None = None,
+        candidates: list[Any] | None = None,
+        memory: dict[str, Any] | None = None,
+        steps: list[str] | None = None,
+        workflow: dict[str, Any] | None = None,
+        attach: dict[str, Any] | None = None,
+        approval: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """The plan/result envelope ``renderCommand`` already understands.
+
+        ``workflow.actions`` and ``approval`` are always present so the chat's
+        command branch owns this body; a blocked plan carries no token, which is
+        what removes the Approve button rather than a renderer special case.
+        """
+        payload: dict[str, Any] = {
+            "route": "game_launch",
+            "status": status,
+            "command": command,
+            "target": (entry or {}).get("title") or "NovaForge library",
+            "summary": summary,
+            "entry": entry,
+            "workflow": workflow or {"id": "", "name": "No launch", "actions": []},
+            "approval": approval
+            or {
+                "required": False,
+                "approved": False,
+                "message": "Nothing can be launched for this request.",
+            },
+            "stages": {
+                "launch_requested": False,
+                "process_started": False,
+                "window_detected": False,
+                "launch_verified": False,
+            },
+            "observation": self._game_observation_state(),
+        }
+        if candidates:
+            payload["candidates"] = candidates
+        if memory is not None:
+            payload["memory"] = memory
+        if steps:
+            payload["steps"] = steps
+        if attach is not None:
+            payload["attach"] = attach
+        return payload
+
+    async def _game_attach_envelope(self, command: str) -> dict[str, Any]:
+        if self.games is None:
+            return self._game_envelope(
+                command=command,
+                status=NOT_FOUND_ON_INTERNAL_STORAGE,
+                summary="No game launch service is wired on this host.",
+            )
+        attached = await self.games.adopt("")
+        return self._game_envelope(
+            command=command,
+            status=str(attached.get("status") or NOT_FOUND_ON_INTERNAL_STORAGE),
+            summary=str(attached.get("reason") or ""),
+            entry=attached.get("entry"),
+            candidates=attached.get("candidates") or [],
+            attach=attached,
+        )
+
+    async def _handle_game_request(
+        self, request: BrainRequest, text: str
+    ) -> tuple[str, dict[str, Any]]:
+        """Chat entry point for the two game questions a person actually asks.
+
+        A status question is answered from the catalog row (installed / running /
+        missing / needs a runtime). A launch question returns a PLAN, never a
+        launch: the same approval the command panel uses gates it, because chat
+        is a place to ask, not a way around the gate.
+        """
+        kind, name = game_request(text)
+        if kind == "attach":
+            return "game_library", await self.attach_game("")
+        if kind == "status":
+            resolution = await self.game_library_resolve(name)
+            entry = resolution.get("entry") or {}
+            title = str(entry.get("title") or name)
+            status = str(resolution.get("status") or "")
+            reason = str(entry.get("reason") or resolution.get("reason") or "")
+            return "game_library", {
+                **resolution,
+                "summary": f"{title}: {status.replace('_', ' ').lower()}. {reason}".strip(),
+            }
+        return "game_launch", await self.plan_game_launch(text)
+
     def plan_browser_command(self, command: str) -> dict[str, Any]:
         """Parse a browser command into a workflow, mint an approval token, and return the plan."""
         from novacontrol.browser.models import BrowserWorkflow
@@ -10095,6 +11211,18 @@ class NovaControlApplication:
     def plan_command(self, command: str) -> dict[str, Any]:
         return self._dispatch_device_command(command)
 
+    async def plan_command_or_game(self, command: str) -> dict[str, Any]:
+        """The unified planning door: a catalog game first, then the devices.
+
+        ``/command/plan`` serves both the Quick Command tab and the Approve And
+        Run button, so routing a game phrase here keeps ONE approval surface:
+        the plan it returns is executed by ``/command/execute``'s game branch.
+        """
+        kind, _name = self._game_request_here(command)
+        if kind:
+            return await self.plan_game_launch(command)
+        return self.plan_command(command)
+
     async def execute_command(
         self, command: str, *, approval_token: str | None = None, correlation_id: str = ""
     ) -> dict[str, Any]:
@@ -10103,6 +11231,15 @@ class NovaControlApplication:
         ``correlation_id`` (optional) tags the run's progress events so two
         concurrent executions of the same family interleave cleanly in the UI.
         """
+        # NF-12: an approved GAME launch is executed by the launch service (which
+        # verifies the process and window) instead of the generic desktop chain.
+        # Chat, the Quick Command tab and the library panel all approve through
+        # this one endpoint, so the token gate and the verified path stay shared.
+        game_kind, _game_name = self._game_request_here(command)
+        if game_kind == "attach":
+            return await self.attach_game("")
+        if game_kind == "launch":
+            return await self.execute_game_launch(command, approval_token=approval_token)
         decision = self.brain.decide(BrainRequest(text=command, context=self.status()))
         if decision.intent is BrainIntent.DESKTOP_AUTOMATION:
             return await self.execute_desktop_command(command, approval_token=approval_token, correlation_id=correlation_id)

@@ -147,7 +147,12 @@ class CoachApiTests(_ExperimentApiFixture):
         )
         self.assertIn("proposed", body["recommendations"]["statuses"])
         self.assertTrue(body["limits"])
-        self.assertIn("no objective verifier", " ".join(body["limits"]).lower())
+        # The limit must state WHEN a success may be claimed: the verifier's
+        # decided verdict. It used to say "no objective verifier exists", which
+        # NF-07 made false; the assertion now pins the honest rule instead.
+        limits = " ".join(body["limits"]).lower()
+        self.assertIn("decided verdict", limits)
+        self.assertIn("verifier", limits)
 
     def test_an_analysis_of_a_recorded_evaluation_is_read_only_and_cited(self) -> None:
         evaluation = self._evaluate()

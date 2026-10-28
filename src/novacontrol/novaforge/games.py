@@ -23,13 +23,14 @@ The honesty rules the phase depends on live here:
 
 from __future__ import annotations
 
+import platform
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
 from .benchmark import BenchmarkScenario, resolve_scenario
 
-GAME_SCHEMA_VERSION = 1
-EVALUATION_VERSION = 1
+GAME_SCHEMA_VERSION = 2
+EVALUATION_VERSION = 2
 
 #: The compatibility vocabulary. The order is the escalation the UI shows.
 GAME_STATUSES = (
@@ -88,13 +89,71 @@ def _capability(
     }
 
 
+def runtime_capability_rows(capabilities: Mapping[str, Any]) -> dict[str, Any]:
+    """Translate the manager's capability report into the registry's vocabulary.
+
+    One translation, so the registry, the panel and the evaluation cannot each
+    invent their own reading of the same facts. A missing section is
+    ``unavailable`` with a reason, never an assumed capability.
+    """
+    caps = dict(capabilities or {})
+
+    def row(section: str, reason: str) -> dict[str, Any]:
+        data = dict(caps.get(section) or {})
+        available = bool(data.get("available"))
+        return {
+            "available": available,
+            "state": "available" if available else "unavailable",
+            "reason": "" if available else str(data.get("reason") or reason),
+            "detail": dict(data),
+        }
+
+    verification = dict(caps.get("objective_verification") or {})
+    ready_kinds = [str(item) for item in verification.get("ready_kinds") or []
+                   if str(item)]
+    objective_row = {
+        "available": bool(verification.get("available")) and bool(ready_kinds),
+        "state": "available" if ready_kinds else "unavailable",
+        "reason": "" if ready_kinds else str(
+            verification.get("reason")
+            or "No objective verifier is ready on this host."
+        ),
+        "kinds": list(verification.get("kinds") or []),
+        "ready_kinds": ready_kinds,
+        "detail": dict(verification),
+    }
+    launch = row("game_launch", "No game launch service is wired on this host.")
+    launch["state"] = (
+        "available" if launch["available"] else "not_implemented"
+    )
+    launch["coordinates_sessions"] = False
+    launch["installs"] = False
+    return {
+        "window_discovery": row("window_discovery", "Window probing is unavailable."),
+        "capture": row("capture", "Screen capture is unavailable."),
+        "input": row(
+            "action_execution",
+            "No Guardian-enforced gameplay injector is wired to this host.",
+        ),
+        "objective_verification": objective_row,
+        "guardian_enforcement": dict(caps.get("guardian_enforcement") or {
+            "available": False,
+            "reason": "The Guardian's enforcement report is unavailable.",
+        }),
+        "launch": launch,
+        "action_policy": dict(caps.get("action_policy") or {}),
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class GameRecord:
     """A validated, versioned environment record.
 
-    ``window_detection`` and ``capture`` describe seams this build really has
-    (the NF-01 manager's own validation and the desktop capture path).
-    ``input`` and ``objective_verification`` describe what it does not.
+    The capability blocks are the environment's DECLARED interface: what the
+    target exposes, and what a run against it would require. They are not a
+    claim about the machine reading them — :meth:`to_dict` replaces them with
+    the live manager's rows when one is supplied (``capabilities_source: "runtime"``),
+    so a host without an injector cannot inherit another machine's capability.
     """
 
     game_id: str
@@ -201,8 +260,16 @@ class GameRecord:
             problems.append("An unavailable objective verifier must state why.")
         return problems
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
+    def to_dict(self, runtime: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """The record as a reader should see it: declared, or the live truth.
+
+        ``runtime`` is ``NovaForgeManager.capabilities()``. When supplied, the
+        capability blocks are REPLACED (the declarations are kept under
+        ``declared``) and ``control_capable`` becomes a runtime fact: capture
+        alone never makes an environment controllable, and an objective kind
+        with no ready verifier cannot be claimed.
+        """
+        data: dict[str, Any] = {
             "schema_version": GAME_SCHEMA_VERSION,
             "game_id": self.game_id,
             "version": self.version,
@@ -224,7 +291,37 @@ class GameRecord:
             "known_limitations": list(self.known_limitations),
             "runnable": self.runnable,
             "control_capable": self.control_capable,
+            "capabilities_source": "declared",
         }
+        if runtime is None:
+            return data
+        overlay = runtime_capability_rows(runtime)
+        data["declared"] = {
+            "input": dict(self.input),
+            "objective_verification": dict(self.objective_verification),
+            "capture": dict(self.capture),
+            "window_detection": dict(self.window_detection),
+            "launch": dict(self.launch),
+        }
+        data["window_detection"] = overlay["window_discovery"]
+        data["capture"] = overlay["capture"]
+        data["input"] = overlay["input"]
+        data["launch"] = overlay["launch"]
+        data["objective_verification"] = overlay["objective_verification"]
+        data["guardian_enforcement"] = overlay["guardian_enforcement"]
+        data["action_policy"] = overlay["action_policy"]
+        data["capabilities_source"] = "runtime"
+        data["control_capable"] = bool(
+            self.status in CONTROL_CAPABLE
+            and "control" in self.evaluation_modes
+            and overlay["input"].get("available")
+            and overlay["objective_verification"].get("available")
+        )
+        data["runtime_ready"] = bool(
+            overlay["capture"].get("available")
+            and overlay["objective_verification"].get("available")
+        )
+        return data
 
 
 _NO_LAUNCH = _capability(
@@ -261,8 +358,10 @@ _NO_INPUT = _capability(
     False,
     state="not_implemented",
     reason=(
-        "No gameplay input path exists in this build. Guardian's own input boundary "
-        "refuses any future caller that has not validated a running target."
+        "An evaluation run sends no input: NF-05 starts an observation-only benchmark "
+        "session and configures no action path or objective for it. A Guardian-enforced "
+        "gameplay action path exists for a directly-driven session (NF-07), but it is not "
+        "part of the evaluation pipeline."
     ),
 )
 
@@ -270,9 +369,41 @@ _NO_VERIFIER = _capability(
     False,
     state="not_implemented",
     reason=(
-        "No objective verifier is attached to a NovaForge session. A time limit ending "
-        "is data completeness, not a verified objective."
+        "An observation-only evaluation configures no objective and attaches no verifier, "
+        "so a time-limit ending is data completeness, not a verified objective. A "
+        "controlled evaluation of this environment would need one."
     ),
+)
+
+
+#: Declared for a CONTROL-capable environment: the target accepts keyboard and
+#: mouse input, and a run against it requires the build to wire the Guardian's
+#: injector. The live availability is reported by ``to_dict(runtime=...)``.
+_INPUT_DECLARED = _capability(
+    True,
+    detail={
+        "environment": "keyboard and mouse",
+        "requirement": (
+            "The host must wire a Guardian-enforced injector; availability is reported "
+            "per session and never inferred from this declaration."
+        ),
+        "policy": "key taps/holds, left clicks and cursor moves; no text entry or chords",
+    },
+)
+
+#: Declared objective verification for a CONTROL-capable environment. The kinds
+#: are resolved against the live registry; a kind whose verifier is not ready
+#: (no window probe, no artifact root) reports unavailable at runtime.
+_GAME_STATE_VERIFIER = _capability(
+    True,
+    detail={
+        "kinds": ["window_title", "game_state_file"],
+        "artifact": (
+            "A JSON state file the target writes, read at a declared pointer inside a "
+            "declared root; the action record is never evidence."
+        ),
+        "requirement": "A ready verifier and a declared evidence source on this host.",
+    },
 )
 
 
@@ -364,9 +495,11 @@ SCENARIOS: tuple[GameRecord, ...] = (
         display_name="Gameplay Objective Evaluation (unsupported)",
         status="UNSUPPORTED",
         status_reason=(
-            "Scoring an in-game objective needs a decision pipeline, a gameplay input path "
-            "and an objective verifier. None of the three exists in this build, so running "
-            "this entry would fabricate both the actions and the score."
+            "Scoring an in-game objective AUTONOMOUSLY needs a decision pipeline that "
+            "chooses actions. The build has a Guardian-enforced action path and independent "
+            "verifiers, but no planner, so running this entry would fabricate the decision "
+            "half of the score. A controlled evaluation of an operator-authored plan is "
+            "available through the artifact-harness entry instead."
         ),
         supported_systems=("Windows", "Linux", "Darwin"),
         evaluation_modes=(),
@@ -393,6 +526,61 @@ SCENARIOS: tuple[GameRecord, ...] = (
         known_limitations=(
             "Catalog record only: this entry states a missing capability, not a runnable plan.",
             "No game name is claimed: no specific game can be evaluated by this build.",
+        ),
+    ),
+    GameRecord(
+        game_id="artifact-harness",
+        version=1,
+        display_name="Disposable Artifact Harness",
+        status="SUPPORTED_WITH_LIMITATIONS",
+        status_reason=(
+            "A disposable, operator-opened Windows test window that retitles itself and "
+            "writes a JSON state artifact when it receives a planned key. It is the "
+            "controlled evaluation's stand-in target: everything a real game would need is "
+            "exercised, and nothing about a real game's capability is claimed."
+        ),
+        supported_systems=("Windows",),
+        evaluation_modes=("observation_only", "control"),
+        launch=_NO_LAUNCH,
+        window_detection=_WINDOW_DETECTION,
+        capture=_CAPTURE,
+        input=_INPUT_DECLARED,
+        display_requirements={
+            "mode": "windowed",
+            "visibility": "fully visible on the primary display",
+            "minimum_size": "any measurable window",
+        },
+        required_interfaces=(
+            "NF-01 session manager",
+            "NF-07 Guardian-enforced input path",
+            "objective verifier (window_title or game_state_file)",
+        ),
+        objective_verification=_GAME_STATE_VERIFIER,
+        benchmark={
+            "scenarios": (
+                "controlled-objective",
+                "observation-baseline",
+                "capture-latency",
+                "observation-continuity",
+            ),
+            "baseline_scenario": "controlled-objective",
+            "mode": "controlled_objective",
+        },
+        offline={
+            "classification": "local_disposable_harness",
+            "confirmation_required": False,
+            "evidence": (
+                "The harness runs on this machine and opens no network connection; it "
+                "writes only the state artifact the operator names."
+            ),
+        },
+        known_limitations=(
+            "This is a disposable harness, not a game: a successful run proves the "
+            "controlled workflow, never a real game's capability.",
+            "The action plan is operator-authored; no planner chooses actions.",
+            "The objective evidence is the harness's own JSON artifact or window title; "
+            "artifacts must live inside a declared root.",
+            "The target is never launched by NovaForge; the operator opens it.",
         ),
     ),
 )
@@ -425,21 +613,31 @@ def resolve_game(game_id: str, version: Any = None) -> GameRecord | None:
     return next((item for item in versions if item.version == wanted), None)
 
 
-def game_catalog() -> dict[str, Any]:
+def game_catalog(runtime: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    games = [item.to_dict(runtime=runtime) for item in SCENARIOS]
+    controllable = [item for item in games if item.get("control_capable")]
     return {
         "version": EVALUATION_VERSION,
         "schema_version": GAME_SCHEMA_VERSION,
-        "games": [item.to_dict() for item in SCENARIOS],
+        "games": games,
         "runnable_count": sum(1 for item in SCENARIOS if item.runnable),
         "observation_only_count": sum(
             1 for item in SCENARIOS if item.status == "OBSERVATION_ONLY"
         ),
-        "controllable_count": sum(1 for item in SCENARIOS if item.control_capable),
+        "controllable_count": len(controllable),
+        "capabilities_source": "runtime" if runtime is not None else "declared",
         "modes": list(EVALUATION_MODES),
         "note": (
-            "No entry is controllable or objectively verifiable in this build: every "
-            "runnable environment is observation-only, and a completed evaluation means "
-            "its data was recorded, never that a game objective was achieved."
+            "Controllability and objective verification are reported from the live "
+            "manager when one is attached: capture alone is not control, and a declared "
+            "verifier kind with no ready evidence source is reported unavailable. A "
+            "completed OBSERVATION-ONLY evaluation is data completeness, never a won game."
+            if runtime is not None
+            else (
+                "These are DECLARED capabilities: they describe what each environment "
+                "requires. Ask the evaluation API for the live report before concluding an "
+                "environment is controllable on this host."
+            )
         ),
     }
 
@@ -487,6 +685,15 @@ def readiness_checks(
     conflicts: Sequence[str],
     expected_handle: Any = None,
     expected_pid: Any = None,
+    runtime_input: bool | None = None,
+    verifier_kinds: Sequence[str] | None = None,
+    objective: Mapping[str, Any] | None = None,
+    objective_supported: bool | None = None,
+    objective_reason: str = "",
+    plan_errors: Sequence[str] = (),
+    plan_length: int = 0,
+    action_budget: int | None = None,
+    supported_systems: Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
     """One row per required condition, with the evidence it was judged on.
 
@@ -516,7 +723,7 @@ def readiness_checks(
         )
     )
 
-    mode_ok = mode == "observation_only" and mode in game.evaluation_modes
+    mode_ok = mode in game.evaluation_modes
     checks.append(
         _check(
             "evaluation_mode",
@@ -527,8 +734,32 @@ def readiness_checks(
                 ""
                 if mode_ok
                 else (
-                    "Only observation_only is available: no gameplay input path or "
-                    "objective verifier exists, so a control evaluation cannot run."
+                    f"This environment declares {list(game.evaluation_modes) or 'no mode'}; "
+                    f"{mode!r} is not one of them. A control evaluation needs an "
+                    "environment that declares it AND a runtime input path and ready "
+                    "objective verifier."
+                )
+            ),
+        )
+    )
+
+    system = platform.system()
+    allowed_systems = tuple(
+        str(item) for item in (supported_systems or game.supported_systems)
+    )
+    platform_ok = system.casefold() in {item.casefold() for item in allowed_systems}
+    checks.append(
+        _check(
+            "platform_support",
+            "Operating system",
+            "pass" if platform_ok else "fail",
+            evidence=f"this host is {system}; declared {list(allowed_systems)}",
+            reason=(
+                ""
+                if platform_ok
+                else (
+                    f"This environment declares {list(allowed_systems)}; the evaluation "
+                    f"cannot run on {system or 'an unidentified platform'}."
                 )
             ),
         )
@@ -641,43 +872,151 @@ def readiness_checks(
         )
     )
 
-    verifier_available = bool(game.objective_verification.get("available"))
+    if verifier_kinds is not None:
+        ready_kinds = [str(item) for item in verifier_kinds if str(item)]
+        verifier_reason = (
+            ""
+            if ready_kinds
+            else str(
+                (game.objective_verification.get("detail") or {}).get("requirement")
+                or "No objective verifier is ready on this host."
+            )
+        )
+    else:
+        declared = dict(game.objective_verification or {})
+        ready_kinds = [
+            str(item) for item in (declared.get("detail") or {}).get("kinds") or []
+        ]
+        verifier_reason = str(
+            declared.get("reason")
+            or "No objective verifier is available; the result is data completeness."
+        )
+    verifier_available = bool(ready_kinds)
     checks.append(
         _check(
             "objective_verification",
             "Objective verifier",
             "pass" if verifier_available else "unavailable",
-            required=False,
-            evidence="verifier attached" if verifier_available else "",
-            reason=(
-                ""
-                if verifier_available
-                else str(
-                    game.objective_verification.get("reason")
-                    or "No objective verifier is available; the result is data completeness."
-                )
+            # A control evaluation needs a verifier to mean anything; an
+            # observation-only run reports its absence without being blocked by it.
+            required=mode == "control",
+            evidence=(
+                f"ready kinds: {', '.join(ready_kinds)}" if verifier_available else ""
             ),
+            reason="" if verifier_available else verifier_reason,
         )
     )
 
     if mode == "control":
-        input_ok = bool(game.input.get("available"))
+        input_ok = (
+            bool(runtime_input) if runtime_input is not None else bool(game.input.get("available"))
+        )
         checks.append(
             _check(
                 "input_capability",
                 "Gameplay input capability",
                 "pass" if input_ok else "fail",
-                evidence="input path available" if input_ok else "",
+                evidence=(
+                    "a Guardian-enforced injector is wired on this host" if input_ok else ""
+                ),
                 reason=(
                     ""
                     if input_ok
                     else str(
-                        game.input.get("reason")
-                        or "No gameplay input path exists in this build."
+                        (game.input.get("detail") or {}).get("requirement")
+                        or game.input.get("reason")
+                        or "No Guardian-enforced gameplay input path is wired to this host."
                     )
                 ),
             )
         )
+        if objective is None:
+            checks.append(
+                _check(
+                    "objective_definition",
+                    "Objective definition",
+                    "fail",
+                    reason=(
+                        "A controlled evaluation needs an explicit objective; without one a "
+                        "completed run is data completeness, not a game outcome."
+                    ),
+                )
+            )
+        else:
+            kind = str(objective.get("kind") or "")
+            supported = bool(objective_supported)
+            detail = "; ".join(
+                part
+                for part in (
+                    f"kind {kind}",
+                    f"path {objective.get('path')!r}" if objective.get("path") else "",
+                    f"pointer {objective.get('pointer')!r}" if objective.get("pointer") else "",
+                    f"comparison {objective.get('mode')!r}",
+                )
+                if part
+            )
+            checks.append(
+                _check(
+                    "objective_definition",
+                    "Objective definition",
+                    "pass" if supported else "fail",
+                    evidence=detail if supported else "",
+                    reason="" if supported else (objective_reason or "The objective is not checkable."),
+                )
+            )
+        if plan_errors:
+            checks.append(
+                _check(
+                    "action_plan",
+                    "Approved action plan",
+                    "fail",
+                    reason="; ".join(str(item) for item in plan_errors),
+                )
+            )
+        elif plan_length < 1:
+            checks.append(
+                _check(
+                    "action_plan",
+                    "Approved action plan",
+                    "fail",
+                    reason=(
+                        "A controlled evaluation needs at least one planned action; the plan "
+                        "is what the operator approves."
+                    ),
+                )
+            )
+        else:
+            checks.append(
+                _check(
+                    "action_plan",
+                    "Approved action plan",
+                    "pass",
+                    evidence=(
+                        f"{plan_length} action(s), each validated against the action policy"
+                    ),
+                )
+            )
+            budget_ok = action_budget is not None and action_budget >= plan_length
+            checks.append(
+                _check(
+                    "action_budget",
+                    "Action budget",
+                    "pass" if budget_ok else "fail",
+                    evidence=(
+                        f"{action_budget} action(s) allowed for {plan_length} planned"
+                        if budget_ok
+                        else ""
+                    ),
+                    reason=(
+                        ""
+                        if budget_ok
+                        else (
+                            "A controlled evaluation needs an explicit action budget at least "
+                            "as large as its plan; without one the plan is unbounded."
+                        )
+                    ),
+                )
+            )
     else:
         checks.append(
             _check(
@@ -816,13 +1155,35 @@ def readiness_summary(checks: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
-def evaluation_limitations(game: GameRecord, scenario: BenchmarkScenario) -> list[str]:
+def evaluation_limitations(
+    game: GameRecord,
+    scenario: BenchmarkScenario,
+    *,
+    mode: str = "observation_only",
+) -> list[str]:
     """Limitations that apply to every evaluation of this environment."""
+    if mode == "control":
+        completion_rule = (
+            "A controlled evaluation is COMPLETED only as a run record; it is a verified "
+            "objective only when the session's verifier decided one. An undecided run is "
+            "inconclusive, never a success."
+        )
+        decision_rule = (
+            "The action plan is operator-authored and approved by digest: no planner chooses "
+            "an action, so this measures controlled execution, not autonomous play."
+        )
+    else:
+        completion_rule = (
+            "A COMPLETED observation-only evaluation means the run recorded its required "
+            "data; it never means a game objective was achieved."
+        )
+        decision_rule = (
+            "An observation-only evaluation sends no input and configures no objective, so "
+            "no gameplay capability is demonstrated."
+        )
     limitations = [
-        "A COMPLETED evaluation means the observation recorded its required data; it "
-        "never means a game objective was achieved.",
-        "No decision pipeline, gameplay input path or objective verifier exists in this "
-        "build, so no gameplay capability is demonstrated.",
+        completion_rule,
+        decision_rule,
         "The target must already be open; NF-05 never launches, installs or restarts it.",
         f"Environment compatibility: {game.status} — {game.status_reason}",
         *game.known_limitations,
@@ -837,6 +1198,7 @@ def missing_evidence(
     timeline: Mapping[str, Any] | None,
     baseline: Mapping[str, Any] | None,
     session_id: str = "",
+    objective: Mapping[str, Any] | None = None,
 ) -> list[str]:
     """Evidence links that were expected and are absent, each with the reason.
 
@@ -873,6 +1235,23 @@ def missing_evidence(
     elif timeline is not None:
         for gap in timeline.get("limitations") or []:
             gaps.append(str(gap))
+    if objective is not None and objective.get("configured"):
+        if not objective.get("decided"):
+            gaps.append(
+                "No decided objective verdict was recorded: the run is inconclusive, and "
+                "its completion is not evidence of success."
+            )
+        outcome = str(objective.get("outcome") or "")
+        if outcome in {"unknown", "verification_error", "unsupported"}:
+            gaps.append(
+                f"The objective verifier reported {outcome}: "
+                f"{objective.get('reason') or 'no reason recorded'}"
+            )
+        if not objective.get("available"):
+            gaps.append(
+                "No ready objective verifier was attached to this run, so its objective "
+                "could not be decided on this host."
+            )
     if baseline is not None and not baseline.get("benchmark_run_id"):
         gaps.append(
             "No compatible baseline exists yet; this evaluation cannot be compared."

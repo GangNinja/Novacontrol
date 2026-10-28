@@ -77,6 +77,12 @@ def _target_state(record: SessionRecord) -> tuple[str, str]:
         return "changed", "A different window now carries the title; resume is refused."
     if record.pause_reason == "target_unreadable":
         return "unreadable", "The geometry probe could not read the target; input is not allowed."
+    if record.pause_reason == "target_minimized":
+        return "minimized", "The target window is minimized; capture and input are suspended until it is restored."
+    if record.pause_reason == "target_hidden":
+        return "hidden", "The target window is not visible; capture and input are suspended."
+    if record.pause_reason == "target_offscreen":
+        return "offscreen", "The target window has no usable on-screen area; capture and input are suspended."
     if record.state is SessionState.PAUSED:
         return "held", "The session is paused; no input is allowed while held."
     if record.state is SessionState.RUNNING:
@@ -285,10 +291,11 @@ def guardian_state(
             "enforced": verification_supported,
             "state": "enforced" if verification_supported else "unsupported",
             "detail": (
-                "A verdict is read from the target window (not from the action record) and "
-                "reported as verified_success / verified_failure / unknown."
+                "A verdict is read from the objective's own evidence — the target window's "
+                "title or a game-written state artifact — never from the action record, and "
+                "reported as verified_success / verified_failure / in_progress / unknown."
                 if verification_supported
-                else "No verifier is attached, so no gameplay outcome can be claimed."
+                else "No ready verifier is attached, so no gameplay outcome can be claimed."
             ),
         },
     ]
@@ -305,6 +312,9 @@ def guardian_state(
             "title": target.title if target else "",
             "handle": target.handle if target else None,
             "pid": target.pid if target else None,
+            "foreground": bool(target.foreground) if target else None,
+            "minimized": bool(target.minimized) if target else None,
+            "visible": bool(target.visible) if target else None,
             "last_checked_at": record.telemetry.last_target_check_at,
             "reason": target_reason,
         },
@@ -317,7 +327,7 @@ def guardian_state(
             "reason": str(record.verification.get("reason", "")) or (
                 "No verdict has been produced for this session yet."
                 if verification_supported
-                else "No objective verifier is attached to this session."
+                else "No ready objective verifier is attached to this session."
             ),
         },
         "limits": {

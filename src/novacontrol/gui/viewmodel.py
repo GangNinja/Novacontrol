@@ -23,6 +23,7 @@ class DashboardViewModel:
                     DashboardTab.CHAT,
                     DashboardTab.INTELLIGENCE,
                     DashboardTab.EXPLORE,
+                    DashboardTab.NOVAFORGE,
                     DashboardTab.DEMOS,
                     DashboardTab.AUTOMATION,
                     DashboardTab.TASKS,

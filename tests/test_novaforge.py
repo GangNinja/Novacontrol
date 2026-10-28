@@ -59,6 +59,8 @@ class FakeWindow:
     client: tuple[int, int, int, int] = (0, 0, 1000, 600)
     scale: float = 1.0
     foreground: bool = True
+    minimized: bool = False
+    visible: bool = True
 
 
 class FakeDesktop:
@@ -173,6 +175,27 @@ class MissionValidationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["valid"])
         self.assertEqual(len(result["candidates"]), 2)
         self.assertIn("more specific title", result["errors"][0])
+
+    async def test_an_unknown_start_field_is_refused_by_name(self) -> None:
+        """A field this build would ignore is a refusal, not a silent drop."""
+        desktop = FakeDesktop()
+        manager = NovaForgeManager(
+            data_dir=Path(self._tmp.name), capture=desktop.capture, geometry=desktop.geometry,
+            window_lines=desktop.window_lines,
+        )
+        result = await manager.validate(_mission(max_seconds=20, objective_mode="contains"))
+        self.assertFalse(result["valid"])
+        named = " ".join(result["errors"])
+        self.assertIn("max_seconds", named)
+        self.assertIn("objective_mode", named)
+        # The refusal names what IS accepted, so the operator can fix the call.
+        self.assertIn("time_limit_seconds", named)
+        with self.assertRaises(MissionValidationError) as ctx:
+            await manager.start(_mission(max_seconds=20))
+        self.assertIn("max_seconds", str(ctx.exception))
+        # A known-field payload is unaffected, identity pins included.
+        good = await manager.validate(_mission(expected_handle=0x1234, expected_pid=1))
+        self.assertTrue(good["valid"], good["errors"])
 
     async def test_validation_returns_the_measured_target(self) -> None:
         desktop = FakeDesktop()
@@ -379,6 +402,66 @@ class SessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(MissionValidationError):
             await manager.resume(session_id)
         await manager.stop(session_id)
+
+    async def test_minimized_target_pauses_without_recording_a_desktop_frame(self) -> None:
+        manager = self.manager()
+        session = await manager.start(_mission())
+        session_id = session["session_id"]
+        await _wait_for(lambda: manager.get(session_id).frames, message="first frame")
+        before = len(manager.get(session_id).frames)
+
+        self.desktop.window.minimized = True
+        await _wait_for(
+            lambda: manager.get(session_id).state is SessionState.PAUSED,
+            message="minimized pause",
+        )
+        record = manager.get(session_id)
+        self.assertEqual(record.pause_reason, "target_minimized")
+        self.assertTrue(record.target.minimized)
+        self.assertEqual(len(record.frames), before, "no desktop frame may be recorded as the target")
+        guardian = manager.describe(record)["guardian"]
+        self.assertEqual(guardian["target"]["state"], "minimized")
+        self.assertTrue(guardian["target"]["minimized"])
+        # The typed event must survive the timeline's vocabulary check: an
+        # unregistered type is dropped silently, which is how a recorded pause
+        # would look like it happened but never appear in the evidence.
+        timeline = manager.timeline_payload(session_id)["events"]
+        minimized = [event for event in timeline if event["type"] == "target.minimized"]
+        self.assertEqual(len(minimized), 1)
+        self.assertEqual(minimized[0]["payload"]["reason"], "target_minimized")
+
+        # A minimized window is not a resumable target: restore it first.
+        with self.assertRaises(MissionValidationError):
+            await manager.resume(session_id)
+        self.desktop.window.minimized = False
+        resumed = await manager.resume(session_id)
+        self.assertEqual(resumed["state"], SessionState.RUNNING.value)
+        await manager.stop(session_id)
+
+    async def test_offscreen_target_pauses_before_a_desktop_frame_is_recorded(self) -> None:
+        manager = self.manager()
+        session = await manager.start(_mission())
+        session_id = session["session_id"]
+        await _wait_for(lambda: manager.get(session_id).frames, message="first frame")
+
+        self.desktop.window.bounds = (5000, 5000, 6000, 6000)
+        await _wait_for(
+            lambda: manager.get(session_id).state is SessionState.PAUSED,
+            message="off-screen pause",
+        )
+        record = manager.get(session_id)
+        self.assertEqual(record.pause_reason, "target_offscreen")
+        self.assertFalse(record.observations[-1].evidence)
+        self.assertIn("did not contain the target", record.observations[-1].summary.lower())
+        await manager.stop(session_id)
+
+    async def test_capture_frame_refuses_a_minimized_target(self) -> None:
+        manager = self.manager()
+        self.desktop.window.minimized = True
+        frame = await manager.capture_frame("NC FORGE TEST")
+        self.assertFalse(frame["fresh"])
+        self.assertEqual(frame["target_issue"], "target_minimized")
+        self.assertIn("minimized", frame["reason"].lower())
 
     async def test_time_limit_stops_without_claiming_completion(self) -> None:
         manager = self.manager()

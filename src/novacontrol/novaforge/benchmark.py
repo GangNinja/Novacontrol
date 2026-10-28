@@ -7,16 +7,17 @@ compatibility rules applied to persisted run records.
 
 The honesty rules the rest of the phase depends on live here:
 
-* **A scenario says whether its success criteria can be evaluated.** NF-04 has
-  no action path and no objective verifier, so every runnable scenario is
-  ``observation_only``. A gameplay scenario exists in the catalog as
-  UNSUPPORTED with the reason, rather than being silently substituted by an
-  observation run.
+* **A scenario says whether its success criteria can be evaluated.** The
+  observation scenarios configure no objective; the ``controlled-objective``
+  scenario runs only through an NF-05 controlled evaluation, with an approved
+  objective and plan. An autonomous gameplay score remains UNSUPPORTED with the
+  reason, rather than being silently substituted by an observation run.
 * **Missing is not zero.** A metric whose source did not measure it is a row
   with ``available=False`` and a reason. It is never ``0``.
 * **Success is not completion.** A run can be ``completed`` (the observation
   ran for its budget and the data is complete) while ``objective_achieved`` is
-  ``None``: no verifier exists, and NF-04 never claims gameplay success.
+  ``None``: no objective was configured, and NF-04 claims no gameplay success.
+  A controlled run's verdict is recorded only when its verifier decided one.
 * **Comparisons are refused, not fudged.** Different scenarios, versions,
   budgets, observation intervals, target windows or geometries produce
   ``compatible=False``. Compatible runs still get ``established=False``: one
@@ -318,37 +319,44 @@ METRIC_CATALOG: tuple[MetricSpec, ...] = (
         key="objective_success",
         label="Verified objective success",
         unit="ratio",
-        kind="unsupported",
-        numerator="runs whose objective a real verifier confirmed",
-        denominator="eligible runs",
-        aggregation="not computed",
-        eligibility="none",
+        kind="measured",
+        numerator="runs whose objective a verifier decided successfully",
+        denominator="runs with a decided verdict",
+        aggregation="sum per run; median across comparable runs",
+        eligibility="the session configured a supported objective and recorded a decided verdict",
         method=(
-            "No objective verifier is attached to a NovaForge observation session. "
-            "A time limit ending is not success, so this metric has no numerator."
+            "Read from the session's recorded objective verdict (verified_success = 1, "
+            "verified_failure = 0). A run with no objective or an undecided verdict is "
+            "UNAVAILABLE, never zero."
         ),
     ),
     MetricSpec(
         key="completion_time_seconds",
         label="Time to verified objective",
         unit="s",
-        kind="unsupported",
-        numerator="time from start to a verified objective",
-        denominator="runs with a verified objective",
-        aggregation="not computed",
-        eligibility="none",
-        method="There is no verified completion event to time; run duration is reported instead.",
+        kind="derived",
+        numerator="verdict time minus session start",
+        denominator="one run with a decided verdict",
+        aggregation="median across comparable runs",
+        eligibility="the session recorded a decided objective verdict",
+        method=(
+            "The verifier's own observation timestamp minus the session's start. Reported "
+            "only for a decided verdict; an unresolved run has no completion time."
+        ),
     ),
     MetricSpec(
         key="actions_executed",
         label="Executed actions",
         unit="actions",
-        kind="unsupported",
-        numerator="actions executed and recorded by the session",
+        kind="measured",
+        numerator="actions whose input was sent and whose presses were released",
         denominator="one run",
-        aggregation="not computed",
-        eligibility="none",
-        method="NF-02/NF-04 has no action path, so no action count exists. It is not zero.",
+        aggregation="sum per run; median across comparable runs",
+        eligibility="a session with a wired action path",
+        method=(
+            "Counted from the session record's actions_executed. A refused or failed "
+            "action never increments it, so a refusal is not counted as an action."
+        ),
     ),
     MetricSpec(
         key="recovery_attempts",
@@ -453,6 +461,10 @@ class BenchmarkScenario:
     reproducibility: tuple[str, ...]
     metrics: tuple[str, ...]
     limitations: tuple[str, ...] = field(default_factory=tuple)
+    #: True when the scenario's meaning depends on a configured objective. An
+    #: observation scenario never sets this, so its data completeness can never
+    #: be mistaken for an objective verdict.
+    objective_required: bool = False
 
     @property
     def key(self) -> str:
@@ -499,6 +511,7 @@ class BenchmarkScenario:
             "metrics": list(self.metrics),
             "metric_definitions": [spec.to_dict() for spec in metrics_for(self.metrics)],
             "limitations": list(self.limitations),
+            "objective_required": bool(self.objective_required),
         }
 
 
@@ -670,6 +683,97 @@ SCENARIOS: tuple[BenchmarkScenario, ...] = (
         ),
     ),
     BenchmarkScenario(
+        scenario_id="controlled-objective",
+        version=1,
+        name="Controlled Objective Run",
+        objective=(
+            "Execute an operator-approved action plan in one validated window and measure the "
+            "objective verdict a verifier reads from the target's own evidence."
+        ),
+        kind="gameplay",
+        evaluation="controlled_objective",
+        supported=True,
+        unsupported_reason="",
+        target_requirement=(
+            "One already-open window with a configured, supported objective and a wired "
+            "Guardian-enforced action path."
+        ),
+        preconditions=(
+            "The operator opened and validated the target window; nothing is launched.",
+            "A supported objective is configured for the session before any action.",
+            "Every action is approved by digest and passes the Guardian gate.",
+            "A time limit and an action budget are both configured.",
+        ),
+        reset_procedure=(
+            "None automated. The operator prepares the target's starting state and must open a "
+            "fresh session afterwards; NF-05 never resets or restarts the target."
+        ),
+        default_duration_seconds=20,
+        frame_interval_seconds=0.5,
+        min_frames=4,
+        min_latency_samples=1,
+        observation_source="NovaForge window-cropped capture plus the session's recorded actions.",
+        capabilities={
+            "observe": True,
+            "capture": True,
+            "act": True,
+            "verify_objective": True,
+        },
+        success_criteria=(
+            "A decided objective verdict: verified_success when the verifier's own read meets "
+            "the objective, verified_failure when it demonstrably does not. An undecided run is "
+            "inconclusive, never a success, and this scenario runs no model to compare."
+        ),
+        verifier={
+            "available": True,
+            "kind": "operator_configured",
+            "reason": (
+                "The session's objective verifier reads the target's own evidence (its window "
+                "title or a game-written state artifact); the action record is never evidence."
+            ),
+        },
+        required_evidence=(
+            "session record",
+            "action records",
+            "objective verification result",
+            "captured frame references",
+        ),
+        failure_conditions=(
+            "The objective cannot be read (missing, stale, malformed or out-of-root evidence).",
+            "An action is refused by the Guardian, the budget, or an approval mismatch.",
+            "The target window disappears or is replaced during the run.",
+            "The run ends before a verdict: it is inconclusive, not a success.",
+        ),
+        reproducibility=(
+            "The run records the objective definition digest, the approved plan digest, the "
+            "target identity and both budgets.",
+            "A repeated run is comparable only when those digests, the scenario version and the "
+            "window geometry match; a different objective is never comparable.",
+        ),
+        metrics=(
+            "objective_success",
+            "completion_time_seconds",
+            "actions_executed",
+            "frames",
+            "duration_seconds",
+            "errors",
+            "interventions",
+            "timeline_events",
+        ),
+        limitations=(
+            "The plan is operator-authored: this scenario proves controlled execution, not "
+            "autonomous play, and no model or policy chooses an action.",
+            "An undecided verdict is reported as inconclusive; it is never converted to a "
+            "failure or a success.",
+            "The target is never launched or reset by this build; the operator prepares it.",
+            "A verified success closes the session through the manager's own "
+            "objective_verified path, so a fast success records fewer frames than the "
+            "scenario's observation floor; its decided verdict, not the frame count, is "
+            "the result (at least one fresh frame is still required).",
+        ),
+        objective_required=True,
+    ),
+    BenchmarkScenario(
         scenario_id="gameplay-objective",
         version=1,
         name="Gameplay Objective (unsupported)",
@@ -678,9 +782,10 @@ SCENARIOS: tuple[BenchmarkScenario, ...] = (
         evaluation="objective_verified",
         supported=False,
         unsupported_reason=(
-            "NF-04 has no decision pipeline, no gameplay input path and no objective "
-            "verifier. Running this scenario would fabricate both the actions and the "
-            "score; gameplay evaluation belongs to NF-05, after those paths exist."
+            "Autonomous gameplay scoring needs a decision pipeline that neither NF-04 nor "
+            "NF-05 has: a controlled evaluation executes an OPERATOR-approved plan, so no "
+            "agent chooses actions and no model is compared. Running this scenario would "
+            "fabricate the decision half of the score."
         ),
         target_requirement="An action-capable session with an objective verifier.",
         preconditions=(
@@ -700,14 +805,22 @@ SCENARIOS: tuple[BenchmarkScenario, ...] = (
             "act": False,
             "verify_objective": False,
         },
-        success_criteria="Not evaluable: no objective verifier exists in this build.",
+        success_criteria=(
+            "Not evaluable autonomously: no decision pipeline chooses actions to score."
+        ),
         verifier={
             "available": False,
             "kind": "none",
-            "reason": "There is no verified objective to score.",
+            "reason": (
+                "A controlled run verifies an objective through an operator-approved plan; "
+                "an autonomous score would need a decision half this build does not have."
+            ),
         },
         required_evidence=("action records", "objective verification result"),
-        failure_conditions=("Any run is unsupported until an action and verification path exists.",),
+        failure_conditions=(
+            "Any run is unsupported until an autonomous decision pipeline exists; a "
+            "controlled evaluation uses the controlled-objective scenario instead.",
+        ),
         reproducibility=(
             "Blocked: a starting state cannot be reset and no model is run.",
         ),
@@ -758,8 +871,9 @@ def scenario_payload() -> dict[str, Any]:
         "unsupported_count": len(SCENARIOS) - len(supported),
         "metric_catalog": metric_catalog(),
         "note": (
-            "Only observation and capture benchmarks are runnable in NF-04. Gameplay "
-            "evaluation is listed as unsupported rather than approximated."
+            "Observation and capture benchmarks are runnable directly. The controlled-objective "
+            "scenario is run only through a confirmed NF-05 evaluation with an approved action "
+            "plan; an autonomous gameplay score remains unsupported rather than approximated."
         ),
     }
 
@@ -986,12 +1100,17 @@ def collect_metrics(
     events: int,
     errors: int,
     interventions: int,
+    objective: Mapping[str, Any] | None = None,
+    actions: int | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Build one run's metric rows from telemetry that was actually measured.
 
     The telemetry payload is NF-02's own snapshot, so this function adds no
     probe and cannot invent a value: a missing field becomes an unavailable row
-    with the reason the source gave (or a stated absence).
+    with the reason the source gave (or a stated absence). ``objective`` is the
+    session's recorded verdict block and ``actions`` its executed count; both
+    default to absent, so an observation-only run keeps reporting those metrics
+    as unavailable with a reason instead of a fabricated zero.
     """
     capture = dict(telemetry.get("capture") or {})
     latency = dict(capture.get("latency_ms") or {})
@@ -1160,6 +1279,42 @@ def collect_metrics(
             rows[key] = _row(
                 int(errors), source="session.errors",
                 kind=spec.kind, unit=spec.unit,
+            )
+        elif key == "objective_success":
+            achieved = (objective or {}).get("achieved")
+            available = isinstance(achieved, bool)
+            rows[key] = _row(
+                1.0 if achieved is True else 0.0 if achieved is False else None,
+                source="session.verification.achieved",
+                available=available,
+                reason=str((objective or {}).get("reason") or "No decided objective verdict was recorded for this run."),
+                kind=spec.kind,
+                unit=spec.unit,
+            )
+        elif key == "completion_time_seconds":
+            value = _number((objective or {}).get("completion_time_seconds"))
+            rows[key] = _row(
+                value,
+                source="session.verification.at - session.started_at",
+                available=value is not None,
+                reason=str((objective or {}).get("reason") or (
+                    "The objective was not decided, so there is no completion time to measure."
+                )),
+                kind=spec.kind,
+                unit=spec.unit,
+            )
+        elif key == "actions_executed":
+            value = _number(actions)
+            rows[key] = _row(
+                value,
+                source="session.counts.actions_executed",
+                available=value is not None,
+                reason=(
+                    "This session has no recorded action count, so the executed-action "
+                    "count is unavailable — it is not zero."
+                ),
+                kind=spec.kind,
+                unit=spec.unit,
             )
         else:  # pragma: no cover - catalog tests keep this unreachable
             rows[key] = _unavailable(key, f"No collector exists for {key!r}.")
@@ -1382,11 +1537,21 @@ def aggregate_runs(
             "aborted, invalid and differently-configured attempts are counted in "
             "status_counts and listed in excluded, never folded into a metric as zero."
         ),
-        "objective_verified": False,
+        "objective_verified": any(
+            bool(_mapping(run.get("objective")).get("decided")) for run in cohort
+        ),
         "metrics": stats,
         "objective_note": (
-            "No objective verifier exists in NF-04. These are observation metrics; a "
-            "completed run is data completeness, not a won game."
+            "These runs configured an objective: `objective_verified` is true when at "
+            "least one eligible run recorded a decided verdict, and `objective_success` is "
+            "the achieved rate over decided verdicts. An undecided run is unavailable, "
+            "never zero."
+            if scenario.objective_required
+            else (
+                "No objective verifier is attached to these runs: this scenario configures "
+                "no objective for a benchmark session, so these are observation metrics and "
+                "a completed run is data completeness, not a won game."
+            )
         ),
     }
 
@@ -1743,6 +1908,12 @@ def run_limitations(scenario: BenchmarkScenario) -> list[str]:
     return [
         "Only COMPLETED and valid runs recorded on the same configuration, target "
         "geometry and operating system enter an aggregate; every attempt is still counted.",
-        "Objective achievement is never claimed: no verifier is attached.",
+        (
+            "An objective verdict is claimed only when the session's verifier decided one; "
+            "an undecided run is inconclusive, never success."
+            if scenario.objective_required
+            else "Objective achievement is never claimed for this scenario: it configures "
+            "no objective."
+        ),
         *scenario.limitations,
     ]

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -1056,8 +1057,19 @@ class ApplicationPlannerTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
+    @staticmethod
+    def _print_42_command() -> str:
+        """Print 42 with THIS interpreter, not a bare ``python``.
+
+        ``python`` is not on PATH everywhere — a stock Ubuntu install provides
+        ``python3`` only — and this class is about the approved step running and
+        its stdout being captured, not about the host having a python alias.
+        Naming ``sys.executable`` makes the assertion true on both CI runners.
+        """
+        return f"{sys.executable} -c print(42)"
+
     async def test_a_command_step_is_refused_without_explicit_approval(self) -> None:
-        step = self._command_step("python -c print(42)")
+        step = self._command_step(self._print_42_command())
         plan = Plan(goal="run a command", steps=(step,))
 
         result = await self.app.workflow_executor.execute(plan)
@@ -1068,7 +1080,7 @@ class ApplicationPlannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("approval", outcome.error.message if outcome.error else "")
 
     async def test_an_approved_command_step_runs_and_is_verified(self) -> None:
-        step = self._command_step("python -c print(42)")
+        step = self._command_step(self._print_42_command())
         plan = Plan(goal="run a command", steps=(step,))
         self.app.approved_plan_steps = {step.id}
         try:

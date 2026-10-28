@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import unittest
 
-from novacontrol.desktop.capture import CaptureResult
+from novacontrol.desktop.capture import CaptureResult, _parse_geometry
 from novacontrol.desktop.controller import LocalDesktopRunner
 from novacontrol.desktop.input import (
     InputAbort,
@@ -193,6 +193,21 @@ class KeyAndButtonVocabularyTests(unittest.TestCase):
         self.assertEqual(key_release_command("Control"), "control")
         self.assertEqual(key_release_command("page_up"), "pageup")
 
+    def test_every_letter_resolves_after_lowercasing(self) -> None:
+        """The table is lowercased by ``normalize_key``; every letter must exist.
+
+        An uppercase A-Z table made b/r/q unknown while a/s/d/w only worked
+        because they were listed a second time. NF-10's staged task names "b",
+        which is how the gap surfaced.
+        """
+        for letter in "abcdefghijklmnopqrstuvwxyz":
+            with self.subTest(letter=letter):
+                self.assertEqual(
+                    vk_for_key(letter), ord(letter.upper()),
+                    f"{letter!r} has no virtual-key code",
+                )
+                self.assertEqual(key_release_command(letter.upper()), letter)
+
     def test_unknown_key_is_not_guessed(self) -> None:
         self.assertIsNone(vk_for_key("hyper"))
         self.assertIsNone(key_release_command("hyper"))
@@ -262,6 +277,31 @@ def _placed_window() -> WindowGeometry:
         scale=2.0,
         foreground=True,
     )
+
+
+class WindowGeometryParsingTests(unittest.TestCase):
+    """The worker's geometry line carries identity AND visibility."""
+
+    def test_current_shape_reports_minimized_and_visible(self) -> None:
+        geometry = _parse_geometry(
+            "1234|100,50,1100,650|0,0,1000,600|4242|1.5|1|1|0|NovaGame"
+        )
+        self.assertIsNotNone(geometry)
+        assert geometry is not None
+        self.assertTrue(geometry.foreground)
+        self.assertTrue(geometry.minimized)
+        self.assertFalse(geometry.visible)
+        self.assertEqual(geometry.title, "NovaGame")
+
+    def test_legacy_shape_defaults_to_visible_and_not_minimized(self) -> None:
+        geometry = _parse_geometry(
+            "1234|100,50,1100,650|0,0,1000,600|4242|1.5|1|NovaGame"
+        )
+        self.assertIsNotNone(geometry)
+        assert geometry is not None
+        self.assertFalse(geometry.minimized)
+        self.assertTrue(geometry.visible)
+        self.assertEqual(geometry.title, "NovaGame")
 
 
 class CoordinateConversionTests(unittest.TestCase):

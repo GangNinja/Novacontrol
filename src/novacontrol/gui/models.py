@@ -12,6 +12,7 @@ class DashboardTab(StrEnum):
     CHAT = "chat"
     INTELLIGENCE = "intelligence"
     EXPLORE = "explore"
+    NOVAFORGE = "novaforge"
     DEMOS = "demos"
     AUTOMATION = "automation"
     TASKS = "tasks"
@@ -29,6 +30,7 @@ class DashboardTab(StrEnum):
             DashboardTab.CHAT: "Chat",
             DashboardTab.INTELLIGENCE: "Intelligence",
             DashboardTab.EXPLORE: "Explore",
+            DashboardTab.NOVAFORGE: "NovaForge",
             DashboardTab.DEMOS: "Demos",
             DashboardTab.AUTOMATION: "Automation",
             DashboardTab.TASKS: "Tasks",

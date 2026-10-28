@@ -28,6 +28,7 @@ from novacontrol.integrations import llm as llm_module
 from novacontrol.integrations.llm import (
     OllamaMemoryPlan,
     cloud_llm_presets,
+    ollama_disabled,
     ensure_exclusive_ollama_model,
     get_cloud_preset,
     is_ollama_vision_model,
@@ -128,6 +129,39 @@ class OllamaCompletionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(requested["url"], f"{OLLAMA_URL}/v1/chat/completions")
         self.assertNotIn("/v1/v1/", str(requested["url"]))
         self.assertEqual(answer, "hello from ollama")
+
+    async def test_a_structured_local_call_uses_the_json_constrained_native_path(self) -> None:
+        """Reasoning must not consume the whole reply on a JSON request.
+
+        ``json_mode`` is the caller's hint that this is a structured call; on
+        the local transport it selects ``/api/chat`` with thinking disabled, and
+        the body asks Ollama itself for JSON. Without the hint the call stays on
+        the compatible surface, where a reasoning VLM can burn the budget and
+        answer nothing (measured on qwen3-vl:4b).
+        """
+        provider = OpenAICompatibleLLMProvider(
+            name="ollama",
+            base_url=OLLAMA_URL,
+            api_key="x",
+            model="qwen3-vl:4b",
+            ollama_url=OLLAMA_URL,
+        )
+        payload: dict[str, object] = {
+            "model": "qwen3-vl:4b",
+            "messages": [{"role": "user", "content": "describe"}],
+            "max_tokens": 200,
+        }
+        with mock.patch(
+            "novacontrol.integrations.llm.ollama_disable_thinking", return_value=True
+        ):
+            native = provider._ollama_native_payload(payload, structured=True)
+            prose = provider._ollama_native_payload(payload, structured=False)
+
+        assert native is not None
+        self.assertIs(native["think"], False)
+        self.assertEqual(native["format"], "json")
+        self.assertEqual(native["options"], {"num_predict": 200})
+        self.assertIsNone(prose)
 
     async def test_empty_choices_return_empty_answer(self) -> None:
         provider = OpenAICompatibleLLMProvider(
@@ -232,6 +266,18 @@ class ProviderResolutionTests(unittest.TestCase):
         ):
             provider = build_llm_provider_from_environment({"NOVACONTROL_DISABLE_OLLAMA": "1"})
         self.assertIsInstance(provider, EchoLLMProvider)
+
+    def test_the_disable_flag_has_one_predicate_with_an_authoritative_mapping(self) -> None:
+        """Every boot path asks the same switch, and an empty mapping is final.
+
+        The suite runs with the flag set process-wide; passing ``{}`` here must
+        still answer False, or a test that injected an empty environment would
+        silently inherit the host's setting.
+        """
+        self.assertTrue(ollama_disabled({"NOVACONTROL_DISABLE_OLLAMA": "YES"}))
+        self.assertTrue(ollama_disabled({"NOVACONTROL_DISABLE_OLLAMA": "1"}))
+        self.assertFalse(ollama_disabled({}))
+        self.assertFalse(ollama_disabled({"NOVACONTROL_DISABLE_OLLAMA": "0"}))
 
 
 class OllamaReprobeTests(unittest.IsolatedAsyncioTestCase):

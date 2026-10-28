@@ -11,6 +11,7 @@ fails when the block is doctored (and regenerating repairs it).
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -58,6 +59,39 @@ class ApiReferenceSyncTests(unittest.TestCase):
         """The shared table and the wire contract must name the same routes."""
         routes = {(route.method, route.path) for route in ApiSurface.default().routes}
         self.assertEqual(routes, set(ROUTE_CONSUMERS))
+
+    def test_every_route_the_app_serves_is_declared(self) -> None:
+        """A handler is not a route until it is declared, and six once were not.
+
+        The app factory registers every endpoint as an ``@app.<verb>("…")``
+        decorator on a literal path. Parsing those is enough to prove the
+        direction that nothing else pins: a new handler that is never added to
+        ``ApiSurface``/``ROUTE_CONSUMERS`` is served, undocumented and invisible
+        to the frontend contract — exactly the state ``/build/project``,
+        ``/build/artifacts``, ``/build/run`` and the three ``/models/*`` routes
+        were in until an audit found them. FastAPI's own ``/docs``, ``/redoc``
+        and ``/openapi.json`` are added by the framework, not by a decorator
+        here, so no exemption list is needed and none is written.
+        """
+        source = (REPO / "src" / "novacontrol" / "api" / "app.py").read_text(encoding="utf-8")
+        served = {
+            (method.upper(), path)
+            for method, path in re.findall(
+                r'@app\.(get|post|put|delete|patch)\(\s*["\']([^"\']+)["\']', source
+            )
+        }
+        declared = {(route.method, route.path) for route in ApiSurface.default().routes}
+        self.assertTrue(served, "the handler parse must find routes, not nothing")
+        self.assertEqual(
+            served - declared,
+            set(),
+            "every handler in api/app.py must be declared in ApiSurface and ROUTE_CONSUMERS",
+        )
+        self.assertEqual(
+            declared - served,
+            set(),
+            "a declared route with no handler in api/app.py is a promise the app cannot keep",
+        )
 
     def test_check_mode_passes_on_the_current_tree(self) -> None:
         result = _run(["--check"], cwd=REPO)

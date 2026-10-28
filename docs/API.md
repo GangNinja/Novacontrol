@@ -43,6 +43,12 @@ The Phase 12 API subsystem provides REST and WebSocket entrypoints through FastA
 - `POST /plan/run`: Run a goal through the agent loop; steps needing approval must be named. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /plan/code`: Plan a coding task: language-aware steps plus a drafted code artifact. *(frontend: web panel `renderBuild`)*
 - `POST /build/save`: Save a drafted Build artifact to the build_workspace folder on disk. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /build/project`: Draft a small multi-file project with the coding agent: the configured model, or the sandbox-verified scaffold when none is installed. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /build/artifacts`: Saved Build artifacts, newest first, for the Run list. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /build/run`: Re-execute a saved Build artifact in the sandbox. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /models/status`: What the shared model runtime holds right now, and the memory policy it applies to it. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /models/load`: Load a model, unloading whatever must go first to make room for it. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /models/unload`: Release one resident model, or every resident model when none is named. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /command/plan`: Plan a natural desktop or phone command. *(frontend: web panel `renderCommand`)*
 - `POST /command/execute`: Execute an approved natural desktop or phone command. *(frontend: web panel `renderCommand`)*
 - `POST /desktop/plan`: Plan an approval-gated desktop action. *(frontend: web panel `renderCommand`)*
@@ -57,6 +63,11 @@ The Phase 12 API subsystem provides REST and WebSocket entrypoints through FastA
 - `POST /vision/describe`: Capture the screen and describe it (vision model or window probe). *(frontend: web panel `renderGeneric`)*
 - `POST /vision/click`: Vision-locate a labeled element on screen, click it, and verify. *(frontend: web panel `renderGeneric`)*
 - `GET /novaforge/status`: NovaForge readiness, saved mission draft and the active session. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/library`: Discovered games with installation evidence, launchability status and this process's own launch claim; query parameter: `q`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/library/resolve`: One game name's catalog status without launching anything; query parameter: `name`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/library/launch`: Preview a verified game launch and mint its approval token, or execute the plan that token approved (`name`/`command`, `approval_token`). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/library/close`: Close only the instance this process started (graceful window close) and confirm it exited. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/library/attach`: Report a game that was already running without taking ownership of it. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /novaforge/windows`: Open windows for the NovaForge target picker, or why they cannot be read. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /novaforge/mission`: Read the persisted NovaForge mission draft. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /novaforge/mission`: Persist a NovaForge mission draft and report its field validation. *(frontend: no web panel - API/CLI or infrastructure)*
@@ -69,11 +80,53 @@ The Phase 12 API subsystem provides REST and WebSocket entrypoints through FastA
 - `POST /novaforge/sessions/{session_id}/stop`: Cancel a session, release input and persist its final record. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /novaforge/sessions/{session_id}/cancel`: Abort the session loop now, release input and confirm the outcome (idempotent). *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /novaforge/sessions/{session_id}/emergency-stop`: Guardian emergency stop: bounded abort, input cleanup and the confirmed result. *(frontend: no web panel - API/CLI or infrastructure)*
-- `GET /novaforge/capabilities`: Per-capability availability with the exact blocker: capture, action execution, Guardian enforcement, objective verification, persistence, decision pipeline, game launch. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/capabilities`: Per-capability availability with the exact blocker: capture, action execution, Guardian enforcement, objective verification, persistence, decision pipeline, vision interpretation, game launch. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/trials`: Policy trial rows and aggregates from runs finished in this process; refused, failed and inconclusive trials are kept. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/observation`: The unified game observation pipeline: bound target, state, measured rate and latency, the last records, pause reason and bounded history. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/observation/start`: Bind one target window and start the bounded observation schedule; body: `title`, optional `game`, `pid`, `start_time`, `process`, `interval`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/observation/pause`: Pause a user-requested observation (never auto-cleared). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/observation/resume`: Resume a user pause after re-reading the pinned target identity. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/observation/stop`: Stop the observation schedule and clean up (idempotent). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/observation/observe`: Capture and validate one frame now; a concurrent capture answers `busy` and starts nothing. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/observation/frame`: Serve the newest validated observation frame (PNG); 404 when nothing was validated. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/state`: The NF-16 game-state reader: last structured state, bounded history, profile table, measured processing latency, counts and refusals. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/state/analyze`: Read one game state from the newest VALIDATED observation; body may pin `profile_id`. A stale, missing or superseded observation is a refusal with a reason code. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/state/reset`: Forget the state comparison baseline (history is kept). *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/state/profiles`: The perception profiles this build ships, including rejected ones and why. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/objectives`: The NF-17 objective picture: understood objectives, evidence, bounded history, diagnostics and measured interpretation latency. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/objectives/reset`: Forget the current objectives and the observation-ordering baseline; history and events are kept. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/objectives/profiles`: The objective rules this build ships, including rejected profiles and why. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/knowledge`: NF-18 game knowledge: per-game counts, revalidation due, the transient session memory and why it is not persisted; query parameter: `game`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/knowledge/records`: Knowledge records for ONE game with their evidence and status; query parameters: `game` (required), `category`, `status`, `q`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/knowledge`: Record one explicit evidence-bearing knowledge candidate; an invalid category, content or evidence reference is a 422. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/knowledge/{knowledge_id}/revalidate`: Re-check one stale or contradicted record with fresh evidence; a record that needs no revalidation is reported, not changed. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /novaforge/sessions/{session_id}/objective`: Attach a checkable objective (window title) to a live session; unsupported kinds are recorded and reported unsupported. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /novaforge/sessions/{session_id}/actions/plan`: Validate and digest-bind one gameplay action without sending it; a denial carries the Guardian's reason. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /novaforge/sessions/{session_id}/actions/execute`: Execute one digest-bound action proposal after revalidating target identity, foreground, policy and budget. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/sessions/{session_id}/control`: NF-19 control-interface state: bounds, gate decision, held inputs, the last result and why nothing is running. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/control`: Run ONE typed, bounded input action (`kind` plus its parameters); a refusal is a 200 carrying its code, and completion never means the game reacted. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/control/cancel`: Ask the in-flight control action to stop at its next checkpoint and release what it holds. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/control/release`: Release every input the control interface holds (idempotent; refused while an action is in flight). *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/sessions/{session_id}/plan`: NF-20 planning state: declared rules, the current plan, its candidates and rationale, bounds and the gate. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/plan`: Build ONE bounded plan from verified state, objective and knowledge; nothing is sent, and a missing or stale reading is a refusal with a code. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/plan/execute`: Execute ONE approved plan step by step through NF-19 (`plan_id`, `approved`, `approval_token` from the plan preview); 403 without the single-use token, stops on refusal, failure, staleness or objective change, and never claims an effect. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/plan/cancel`: Cancel the session's pending or running plan and its in-flight input operation (idempotent). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/plan/replan`: Regenerate a stopped plan from fresh evidence within its bound (`plan_id`, `reason` from the declared triggers); the previous plan is invalidated first. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/sessions/{session_id}/outcomes`: NF-21 outcome verification state: declared rules, the last verification run, recorded outcomes, recovery counts and the policy's bounds. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/outcomes/verify`: Verify ONE plan's dispatched steps against fresh post-action observations (`plan_id`, `max_steps`); each step is verified_success, verified_failure, partial, unknown, timed out, aborted or not_verifiable, and missing evidence is never reported as a failure. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/outcomes/recover`: Carry out one outcome's recorded recovery decision (`outcome_id`, `approve`); side-effecting responses need explicit approval, unknown outcomes trigger a fresh bounded observation rather than a repeated action, and no recovery path dispatches input. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/outcomes/cancel`: Ask an in-flight outcome verification to stop at its next checkpoint (idempotent). *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/sessions/{session_id}/autonomy`: NF-22 autonomous run state: phase, outcome, pinned objective and completion criteria, current plan and plan-approval status, dispatched actions, last verification, recovery/replan counts, the declared budgets, the resource reading and the sessions a run may drive. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/autonomy/start`: Begin ONE bounded autonomous run over a live session (`approved`, `note`, `task`, `limits`); the operator's approval is the gate, every limit may be narrowed but never widened, and without approval the answer is `approval_required` with nothing started. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/autonomy/pause`: Pause an autonomous run (`reason`); the session pauses and the next cycle re-observes rather than continuing from a pre-pause reading. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/autonomy/resume`: Resume a paused autonomous run; a run that already ended is never restarted. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/autonomy/cancel`: Cancel an autonomous run before its next stage (`reason`) and let it end cleanly, releasing the session's input through the session's own stop path. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/autonomy/approve`: Answer a run parked in WAITING_FOR_APPROVAL (`approved`, `note`); one answer covers exactly one plan and the next plan parks again. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /novaforge/autonomy/trace`: The complete autonomous orchestration history (query parameter: `session_id`): every phase move with its reason, observation and state references, objective readings, retrieved knowledge references, plans, approvals, execution results, verification evidence and recovery decisions. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /novaforge/sessions/{session_id}/verify`: Run the independent objective verifier and record its verdict and evidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/loop`: Run the bounded closed loop once: observe, decide, plan, execute and verify through the session's own gates; query body: `max_actions`, `deadline_seconds`, `verify_first`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/loop/cancel`: Ask a running closed loop to stop before its next action (idempotent). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/sessions/{session_id}/vision/interpret`: Describe the target's current frame with the configured vision model (read-only); returns the typed interpretation, its evidence references, latency and conflicts, or the exact reason no interpretation exists. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /novaforge/sessions/{session_id}/verification`: The objective, its verdict, evidence references and action counts for one session. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /novaforge/sessions/{session_id}/telemetry`: Measured telemetry and Guardian status for one session. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /novaforge/sessions/{session_id}/timeline`: Read-only evidence timeline for one session (filterable, paged). *(frontend: no web panel - API/CLI or infrastructure)*
@@ -94,7 +147,7 @@ The Phase 12 API subsystem provides REST and WebSocket entrypoints through FastA
 - `GET /novaforge/evaluations`: Retained evaluation attempts, newest first; query parameters: `limit`, `game`. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /novaforge/evaluations/baseline`: Current baseline for an environment/scenario; query parameters: `game`, `scenario`, `version`. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /novaforge/evaluations/preflight`: Judge every readiness check against the live window without starting an evaluation. *(frontend: no web panel - API/CLI or infrastructure)*
-- `POST /novaforge/evaluations`: Start one confirmed observation-only evaluation through the benchmark lab. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /novaforge/evaluations`: Start one confirmed evaluation: an observation run, or a controlled plan approved by the digest preflight issued. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /novaforge/evaluations/{evaluation_id}`: One evaluation: readiness, benchmark run, baseline and status. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /novaforge/evaluations/{evaluation_id}/cancel`: Cancel an active evaluation through its session's stop path (idempotent). *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /novaforge/evaluations/{evaluation_id}/report`: Per-game evaluation report with evidence links, missing evidence and limitations. *(frontend: no web panel - API/CLI or infrastructure)*

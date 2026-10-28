@@ -21,6 +21,7 @@ JS-renderer tests in this suite.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -113,6 +114,37 @@ const out = {
     unreadable: L.frameFreshness({ captured_at: 'not-a-date' }, now),
     none: L.frameFreshness(null, now),
   },
+  live: {
+    running: L.frameLiveState('RUNNING', frame(100), now),
+    paused: L.frameLiveState('PAUSED', frame(100), now),
+    stopped: L.frameLiveState('STOPPED', frame(100), now),
+    waiting: L.frameLiveState('RUNNING', null, now),
+    stale: L.frameLiveState('RUNNING', frame(6000), now),
+    validated: L.frameLiveState('RUNNING', frame(100, { source: 'window_surface',
+      validation: { livable: true, reason: '' } }), now),
+    rejected: L.frameLiveState('RUNNING', frame(100, { source: 'window_surface',
+      validation: { livable: false, reason: 'The frame is essentially blank.' } }), now),
+    screenSource: L.frameLiveState('RUNNING', frame(100, { source: 'screen' }), now),
+  },
+  captureLabels: {
+    surface: L.sourceLabel('window_surface'),
+    crop: L.sourceLabel('window_crop'),
+    screen: L.sourceLabel('screen'),
+    printwindow: L.backendLabel('printwindow'),
+    gdi: L.backendLabel('gdi_display'),
+    unknownBackend: L.backendLabel(''),
+    validation: L.validationLabel({ capture_ok: true, target_visible: true, fresh: true,
+      content_ok: true, livable: true }),
+    rejected: L.validationLabel({ capture_ok: true, target_visible: false, fresh: false,
+      content_ok: false, livable: false }),
+    none: L.validationLabel(null),
+  },
+  targets: {
+    minimized: L.targetLine({ title: 'Freedom Fighters', minimized: true, visible: true, foreground: false }),
+    foreground: L.targetLine({ title: 'Freedom Fighters', minimized: false, visible: true, foreground: true }),
+    hidden: L.targetVisibilityLabel({ visible: false }),
+    background: L.targetVisibilityLabel({ visible: true, foreground: false }),
+  },
   duration: [L.formatDuration(12.44), L.formatDuration(63), L.formatDuration(-1),
     L.formatDuration(null), L.formatDuration(undefined), L.formatDuration(''), L.formatDuration(0)],
 };
@@ -189,6 +221,52 @@ class NovaForgeLogicTests(unittest.TestCase):
         self.assertTrue(freshness["flaggedExplicit"]["stale"])
         self.assertTrue(freshness["unreadable"]["stale"])
         self.assertTrue(freshness["none"]["stale"])
+
+    def test_a_paused_or_terminal_session_never_shows_a_live_frame(self) -> None:
+        live = self.data["live"]
+        self.assertTrue(live["running"]["show"])
+        self.assertEqual(live["running"]["mode"], "live")
+        self.assertFalse(live["paused"]["show"], "a paused frame must not stay labelled live")
+        self.assertEqual(live["paused"]["mode"], "paused")
+        self.assertFalse(live["stopped"]["show"])
+        self.assertFalse(live["waiting"]["show"])
+        self.assertTrue(live["stale"]["show"])
+        self.assertEqual(live["stale"]["mode"], "stale")
+
+    def test_only_a_frame_that_passed_validation_is_shown_as_live(self) -> None:
+        """H02 is the recorded failure: a validated verdict is the only ticket in.
+
+        The frame timestamp cannot stand in for it — a fresh PNG of the desktop
+        is fresh and is not the game.
+        """
+        live = self.data["live"]
+        self.assertTrue(live["validated"]["show"])
+        self.assertEqual(live["validated"]["mode"], "live")
+        self.assertFalse(live["rejected"]["show"], "a rejected frame must never be labelled live")
+        self.assertIn("not live", live["rejected"]["mode"])
+        self.assertIn("blank", live["rejected"]["reason"])
+        self.assertFalse(live["screenSource"]["show"], "the desktop fallback is not the target")
+
+    def test_the_panel_names_the_backend_source_and_validation_separately(self) -> None:
+        labels = self.data["captureLabels"]
+        self.assertEqual(labels["surface"], "window surface")
+        self.assertEqual(labels["crop"], "window crop")
+        self.assertEqual(labels["screen"], "full screen")
+        self.assertEqual(labels["printwindow"], "PrintWindow (window surface)")
+        self.assertEqual(labels["gdi"], "GDI display crop")
+        self.assertEqual(labels["unknownBackend"], "—")
+        self.assertIn("target visible", labels["validation"])
+        self.assertIn("content is the target", labels["validation"])
+        self.assertIn("target not visible", labels["rejected"])
+        self.assertIn("content unverified", labels["rejected"])
+        self.assertEqual(labels["none"], "not validated")
+
+    def test_target_visibility_is_reported_separately_from_identity(self) -> None:
+        targets = self.data["targets"]
+        self.assertEqual(targets["minimized"], "Freedom Fighters · minimized")
+        self.assertEqual(targets["foreground"], "Freedom Fighters · foreground")
+        self.assertEqual(targets["hidden"], "hidden")
+        self.assertEqual(targets["background"], "background")
 
     def test_duration_formatting_is_honest_about_negative_and_missing_values(self) -> None:
         self.assertEqual(
@@ -342,8 +420,12 @@ class NovaForgePanelContractTests(unittest.TestCase):
         self.assertIn("flex-wrap: wrap", block, "the tab strip must wrap, not scroll")
         self.assertNotIn("overflow-x", block)
         self.assertNotIn("fit-content", block)
+        # One tab per view, derived rather than hard-coded: every phase (and
+        # NF-12's Game Library) has to add both, and a view without a tab would
+        # be unreachable. The strip wraps, so no tab can hide off the edge.
+        views = len(re.findall(r'class="forge-view(?: active)?"', self.html))
         self.assertEqual(
-            self.html.count("data-forge-tab="), 9,
+            self.html.count("data-forge-tab="), views,
             "every NovaForge view needs its own always-visible tab",
         )
 
@@ -1118,7 +1200,8 @@ class NovaForgeBenchmarkUiTests(unittest.TestCase):
         self.assertIn("Export Result (JSON)", self.html)
         self.assertIn("Open Evidence Timeline", self.js)
         self.assertIn("unavailable — " + "", self.js)
-        self.assertIn("CPU, memory, GPU/NPU use and objective success are unavailable", self.js)
+        self.assertIn("CPU, memory and GPU/NPU use are unavailable in NF-04", self.js)
+        self.assertIn("an undecided run is unavailable, never zero", self.js)
         self.assertIn("benchmarkCanStart", self.js)
         self.assertIn("signature !== benchmarkSignature()", self.js)
         # Re-opening the tab refreshes the window list, but must not reset a
@@ -1584,6 +1667,510 @@ class NovaForgeEvaluationRendererDomTests(unittest.TestCase):
         report = self.data["reportWithCounts"]["text"]
         self.assertIn("13 pass · 0 warn · 0 fail · 1 unavailable", report)
         self.assertIn("completed · data complete", report)
+
+
+CONTROL_LOGIC_NEEDLE = r"""
+const fs = require('fs');
+global.window = {};
+global.document = { getElementById: function () { return null; } };
+eval(fs.readFileSync(process.argv[2] || process.argv[1], 'utf8'));
+const L = global.window.NovaForgeLogic;
+if (!L) { console.log(JSON.stringify({ error: 'NovaForgeLogic missing' })); process.exit(0); }
+const ready = { mode: 'control', ready: true, approval: { digest: 'd1' } };
+const policy = { max_steps: 3, allowed_keys: ['space', 'enter'], max_hold_ms: 500, allowed_buttons: ['left'] };
+console.log(JSON.stringify({
+  guard: {
+    ready: L.controlStartGuard(false, ready, null, true, true),
+    busy: L.controlStartGuard(true, ready, null, true, true),
+    notReady: L.controlStartGuard(false, { mode: 'control', ready: false }, null, true, true),
+    unapproved: L.controlStartGuard(false, ready, null, false, true),
+    stale: L.controlStartGuard(false, ready, null, true, false),
+    running: L.controlStartGuard(false, ready, { status: 'running' }, true, true),
+    noDigest: L.controlStartGuard(false, { mode: 'control', ready: true, approval: {} }, null, true, true),
+    noPreflight: L.controlStartGuard(false, null, null, true, true),
+    observationUnconfirmed: L.controlStartGuard(
+      false, { mode: 'observation_only', ready: true }, null, false, true
+    ),
+    observationConfirmed: L.controlStartGuard(
+      false, { mode: 'observation_only', ready: true }, null, true, true
+    )
+  },
+  recovery: {
+    adopted: (L.controlStartRecovery([
+      { id: 'done', status: 'completed', plan_digest: 'd1' },
+      { id: 'live', status: 'running', plan_digest: 'd1' }
+    ], 'd1') || {}).id || '',
+    otherDigest: L.controlStartRecovery(
+      [{ id: 'live', status: 'running', plan_digest: 'zz' }], 'd1'
+    ),
+    noDigest: L.controlStartRecovery(
+      [{ id: 'live', status: 'running', plan_digest: 'd1' }], ''
+    )
+  },
+  verdict: {
+    success: L.controlVerdictText({ configured: true, decided: true, outcome: 'verified_success' }),
+    failure: L.controlVerdictText({ configured: true, decided: true, outcome: 'verified_failure' }),
+    running: L.controlVerdictText({ configured: true, decided: false, outcome: 'in_progress' }),
+    unsupported: L.controlVerdictText({ configured: false, available: false, outcome: 'unsupported' }),
+    successTone: L.controlVerdictTone({ decided: true, outcome: 'verified_success' }),
+    failureTone: L.controlVerdictTone({ decided: true, outcome: 'verified_failure' }),
+    runningTone: L.controlVerdictTone({ decided: false, outcome: 'in_progress' })
+  },
+  plan: {
+    valid: L.controlPlanErrors(
+      [{ kind: 'key', key: 'space', duration_ms: 60 }], '1', policy
+    ),
+    empty: L.controlPlanErrors([], '1', policy),
+    overBudget: L.controlPlanErrors(
+      [{ kind: 'key', key: 'space', duration_ms: 60 }, { kind: 'key', key: 'enter', duration_ms: 60 }],
+      '1', policy
+    ),
+    tooMany: L.controlPlanErrors([
+      { kind: 'key', key: 'space', duration_ms: 10 },
+      { kind: 'key', key: 'space', duration_ms: 10 },
+      { kind: 'key', key: 'space', duration_ms: 10 },
+      { kind: 'key', key: 'space', duration_ms: 10 }
+    ].slice(0, 4), '4', policy),
+    wrongKey: L.controlPlanErrors(
+      [{ kind: 'key', key: 'f13', duration_ms: 60 }], '1', policy
+    ),
+    longHold: L.controlPlanErrors(
+      [{ kind: 'hold', key: 'space', duration_ms: 5000 }], '1', policy
+    ),
+    clickNoPoint: L.controlPlanErrors(
+      [{ kind: 'click', button: 'left' }], '1', policy
+    ),
+    unknownKind: L.controlPlanErrors([{ kind: 'teleport' }], '1', policy)
+  },
+  objective: {
+    titleOk: L.controlObjectiveErrors({ kind: 'window_title', mode: 'contains', parameter: 'READY' }),
+    titleBlank: L.controlObjectiveErrors({ kind: 'window_title', mode: 'contains', parameter: ' ' }),
+    absolute: L.controlObjectiveErrors({
+      kind: 'game_state_file', mode: 'equals', parameter: '1', path: 'C:/tmp/state.json'
+    }),
+    traversal: L.controlObjectiveErrors({
+      kind: 'game_state_file', mode: 'equals', parameter: '1', path: '../state.json'
+    }),
+    blankValue: L.controlObjectiveErrors({
+      kind: 'game_state_file', mode: 'gte', parameter: '', path: 'state.json'
+    }),
+    absentNeedsNoValue: L.controlObjectiveErrors({
+      kind: 'game_state_file', mode: 'absent', parameter: '', path: 'state.json'
+    }),
+    staleAge: L.controlObjectiveErrors({
+      kind: 'game_state_file', mode: 'equals', parameter: '1', path: 'state.json',
+      max_age_seconds: 0
+    })
+  },
+  summary: {
+    action: L.controlActionSummary({ kind: 'hold', key: 'space', duration_ms: 500 }),
+    click: L.controlActionSummary({ kind: 'click', button: 'left', x: 10, y: 20 }),
+    plan: L.evaluationPlanSummaryText([
+      { kind: 'key', key: 'space', duration_ms: 60 },
+      { kind: 'move', x: 5, y: 6 }
+    ]),
+    empty: L.evaluationPlanSummaryText([]),
+    modeControl: L.evaluationModeText('control'),
+    modeObservation: L.evaluationModeText('observation_only')
+  }
+}));
+"""
+
+
+@unittest.skipIf(shutil.which("node") is None, "node is not installed")
+class NovaForgeControlledEvaluationUiTests(unittest.TestCase):
+    """NF-05 controlled mode: approval by digest, recovery, and the verdict."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        completed = subprocess.run(
+            [shutil.which("node") or "node", "-e", CONTROL_LOGIC_NEEDLE, str(PANEL_JS)],
+            capture_output=True, text=True, encoding="utf-8", timeout=60,
+        )
+        if completed.returncode != 0:
+            raise AssertionError(f"node failed: {completed.stderr[:500]}")
+        try:
+            cls.data = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise AssertionError(f"unexpected node output: {completed.stdout[:500]}") from exc
+        cls.html = INDEX.read_text(encoding="utf-8")
+        cls.js = PANEL_JS.read_text(encoding="utf-8")
+
+    def test_start_needs_readiness_the_digest_and_an_unstale_approval(self) -> None:
+        guard = self.data["guard"]
+        self.assertEqual(guard["ready"], "")
+        self.assertIn("in flight", guard["busy"])
+        self.assertIn("Validate readiness", guard["notReady"])
+        self.assertIn("Approve the exact plan", guard["unapproved"])
+        self.assertIn("validate readiness again", guard["stale"])
+        self.assertIn("already running", guard["running"])
+        self.assertIn("No approval digest", guard["noDigest"])
+        self.assertIn("Validate readiness", guard["noPreflight"])
+
+    def test_observation_mode_still_needs_its_own_confirmation(self) -> None:
+        guard = self.data["guard"]
+        self.assertIn("Confirm this exact configuration", guard["observationUnconfirmed"])
+        self.assertEqual(guard["observationConfirmed"], "")
+
+    def test_an_ambiguous_start_adopts_the_running_digest_instead_of_re_posting(self) -> None:
+        recovery = self.data["recovery"]
+        self.assertEqual(recovery["adopted"], "live")
+        self.assertIsNone(recovery["otherDigest"])
+        self.assertIsNone(recovery["noDigest"])
+        start = self.js[self.js.index("async function recoverEvaluationStart"):
+                        self.js.index("async function startEvaluation")]
+        self.assertIn("/novaforge/evaluations?limit=25", start)
+        self.assertNotIn('method: "POST"', start)
+
+    def test_the_verdict_is_the_verifiers_and_never_inferred_from_completion(self) -> None:
+        verdict = self.data["verdict"]
+        self.assertEqual(verdict["success"], "verified success")
+        self.assertIn("not achieved", verdict["failure"])
+        self.assertIn("inconclusive", verdict["running"])
+        self.assertEqual(verdict["unsupported"], "not evaluated")
+        self.assertEqual(verdict["successTone"], "ok")
+        self.assertEqual(verdict["failureTone"], "bad")
+        self.assertEqual(verdict["runningTone"], "warn")
+
+    def test_the_plan_is_validated_against_the_environments_declared_policy(self) -> None:
+        plan = self.data["plan"]
+        self.assertEqual(plan["valid"], [])
+        self.assertTrue(plan["empty"])
+        self.assertIn("smaller than the plan", " ".join(plan["overBudget"]))
+        self.assertIn("at most 3 actions", " ".join(plan["tooMany"]))
+        self.assertIn("f13", " ".join(plan["wrongKey"]))
+        self.assertIn("between 1 and 500 ms", " ".join(plan["longHold"]))
+        self.assertIn("non-negative x and y", " ".join(plan["clickNoPoint"]))
+        self.assertIn("unknown kind", " ".join(plan["unknownKind"]))
+
+    def test_the_objective_refuses_an_unreadable_artifact_address(self) -> None:
+        objective = self.data["objective"]
+        self.assertEqual(objective["titleOk"], [])
+        self.assertTrue(objective["titleBlank"])
+        self.assertIn("not absolute", " ".join(objective["absolute"]))
+        self.assertIn("must not contain '..'", " ".join(objective["traversal"]))
+        self.assertTrue(objective["blankValue"])
+        self.assertEqual(objective["absentNeedsNoValue"], [])
+        self.assertTrue(objective["staleAge"])
+
+    def test_plan_summaries_are_readable_and_never_empty_sounding(self) -> None:
+        summary = self.data["summary"]
+        self.assertIn("hold space for 500 ms", summary["action"])
+        self.assertEqual(summary["click"], "click left at 10,20")
+        self.assertIn("key space · 60 ms", summary["plan"])
+        self.assertIn("move to 5,6", summary["plan"])
+        self.assertEqual(summary["empty"], "No action is planned yet.")
+        self.assertIn("experimental", summary["modeControl"])
+        self.assertEqual(summary["modeObservation"], "observation only")
+
+    def test_the_panel_ships_the_controlled_form_and_its_binding_copy(self) -> None:
+        for element_id in (
+            "forgeEvaluationMode", "forgeEvaluationControlBanner",
+            "forgeEvaluationControlConfig", "forgeEvaluationObjectiveKind",
+            "forgeEvaluationObjectiveMode", "forgeEvaluationObjectiveParameter",
+            "forgeEvaluationObjectivePath", "forgeEvaluationObjectivePointer",
+            "forgeEvaluationObjectiveAge", "forgeEvaluationPlanList",
+            "forgeEvaluationPlanAddKey", "forgeEvaluationPlanAddHold",
+            "forgeEvaluationPlanAddClick", "forgeEvaluationPlanAddMove",
+            "forgeEvaluationPlanProblems", "forgeEvaluationPlanSummary",
+            "forgeEvaluationPlanLimits", "forgeEvaluationBudget",
+            "forgeEvaluationApprove", "forgeEvaluationApprovalRow",
+        ):
+            self.assertIn(f'id="{element_id}"', self.html, f"missing #{element_id}")
+        self.assertIn("Observation only (default)", self.html)
+        self.assertIn("Controlled evaluation (experimental)", self.html)
+        self.assertIn("Approval is bound to the digest", self.html)
+
+    def test_start_echoes_the_preflights_digest_and_nothing_else(self) -> None:
+        payload = self.js[self.js.index("function evaluationStartPayload"):
+                          self.js.index("async function recoverEvaluationStart")]
+        self.assertIn("approval_digest", payload)
+        self.assertIn("forge.evaluation.preflight", payload)
+        self.assertIn(".approval", payload)
+        # The approval is never minted client-side: no digest literal, no hash.
+        self.assertNotIn("sha256", self.js.lower())
+        self.assertNotIn("crypto.subtle", self.js)
+
+    def test_a_failed_control_start_requires_a_fresh_approval(self) -> None:
+        start = self.js[self.js.index("async function startEvaluation"):
+                        self.js.index("async function cancelEvaluation")]
+        self.assertIn("recoverEvaluationStart(digest)", start)
+        self.assertIn("invalidateEvaluationDigest()", start)
+        self.assertIn("busy = false", start)
+
+
+CONTROL_RENDERER_NEEDLE = r"""
+const fs = require('fs');
+function __mk(tag, cls, text) {
+  return {
+    tagName: tag,
+    className: cls || '',
+    _text: text == null ? '' : String(text),
+    children: [],
+    dataset: {},
+    hidden: false,
+    title: '',
+    type: '',
+    disabled: false,
+    value: '',
+    checked: false,
+    get textContent() {
+      return this._text + this.children.map(function (c) { return c.textContent; }).join('');
+    },
+    set textContent(value) { this._text = String(value); this.children.length = 0; },
+    set innerHTML(value) { this._text = ''; this.children.length = 0; },
+    get innerHTML() { return ''; },
+    appendChild(child) { this.children.push(child); return child; },
+    setAttribute() {},
+    removeAttribute() {},
+    addEventListener() {},
+    click() {},
+    classList: { add() {}, remove() {}, toggle() {} },
+    querySelector() { return null; },
+    querySelectorAll() { return []; }
+  };
+}
+global.window = {};
+var window = global.window;
+var __byId = {};
+var document = {
+  getElementById: function (id) {
+    if (!__byId[id]) __byId[id] = __mk(id);
+    return __byId[id];
+  },
+  createElement: function (tag) { return __mk(tag); },
+  addEventListener: function () {},
+  body: __mk('body'),
+  hidden: false
+};
+function el(tag, cls, text) { return __mk(tag, cls, text); }
+function authHeaders() { return {}; }
+function requestJson() { throw new Error('renderers must not touch the network'); }
+eval(fs.readFileSync(process.argv[2], 'utf8'));
+var L = global.window.NovaForgeLogic;
+if (!L) { console.log(JSON.stringify({ error: 'NovaForgeLogic missing' })); process.exit(0); }
+function walk(node, out) {
+  (node.children || []).forEach(function (child) {
+    out.push(child);
+    walk(child, out);
+  });
+  return out;
+}
+var out = {};
+var state = L.evaluationState();
+state.mode = 'control';
+state.detail = { action_policy: { max_steps: 2, allowed_keys: ['space', 'enter'], max_hold_ms: 500, allowed_buttons: ['left'] } };
+document.getElementById('forgeEvaluationObjectiveKind').value = 'window_title';
+document.getElementById('forgeEvaluationObjectiveMode').value = 'contains';
+document.getElementById('forgeEvaluationObjectiveParameter').value = 'READY';
+document.getElementById('forgeEvaluationBudget').value = '1';
+
+// 1. A plan with one action and a budget that cannot cover it.
+state.plan = [
+  { kind: 'key', key: 'space', duration_ms: 60, note: '' },
+  { kind: 'click', x: 10, y: 20, button: 'left', note: '' }
+];
+L.renderEvaluationPlan();
+var planList = document.getElementById('forgeEvaluationPlanList');
+var planNodes = walk(planList, []);
+out.plan = {
+  rows: planNodes.filter(function (n) { return n.className === 'forge-plan-row'; }).length,
+  kinds: planNodes.filter(function (n) { return n.className === 'forge-plan-kind'; })
+    .map(function (n) { return n.textContent; }),
+  summary: document.getElementById('forgeEvaluationPlanSummary').textContent,
+  limits: document.getElementById('forgeEvaluationPlanLimits').textContent,
+  badge: document.getElementById('forgeEvaluationPlanState').textContent,
+  problems: document.getElementById('forgeEvaluationPlanProblems').textContent
+};
+
+// 2. A passing controlled preflight: the digest is what the operator approves.
+var digest = new Array(65).join('a');
+L.renderEvaluationPreflight({
+  ready: true, errors: [], blocking: [], mode: 'control',
+  counts: { pass: 12, warn: 0, fail: 0, unavailable: 1 },
+  checks: [{ id: 'objective_verification', label: 'Objective verifier', status: 'pass', required: true, evidence: 'windows_title v1', reason: '' }],
+  target: { title: 'Artifact Harness', handle: 100, pid: 200, width: 800, height: 600 },
+  control: {
+    mode: 'control', plan_digest: digest, state: 'ready',
+    objective: { kind: 'window_title', mode: 'contains', parameter: 'READY' },
+    actions: [{ kind: 'key', key: 'space', duration_ms: 60 }],
+    limits: { max_actions: 1, duration_seconds: 10, action_interval_seconds: 0.5 },
+    target: { title: 'Artifact Harness', handle: 100, pid: 200 }, reason: ''
+  },
+  approval: { digest: digest, actions: 1 },
+  baseline: { available: false, reason: 'No completed evaluation exists yet.' },
+  note: 'Preflight starts nothing.'
+});
+var preflight = document.getElementById('forgeEvaluationPreflight');
+var preflightNodes = walk(preflight, []);
+var digestNode = preflightNodes.filter(function (n) { return n.className === 'forge-digest'; })[0] || { dataset: {}, textContent: '' };
+out.preflight = {
+  text: preflight.textContent,
+  digest: digestNode.dataset.digest || '',
+  digestShown: digestNode.textContent
+};
+
+// 3. A controlled run whose VERIFIER decided success.
+L.renderEvaluationRun({
+  id: 'eval1', mode: 'control', status: 'completed', valid: true,
+  reason: 'Benchmark run 7 ended completed: data complete.',
+  game: { display_name: 'Artifact Harness' }, scenario: { name: 'Controlled Baseline' },
+  benchmark_run_id: '7', session_id: 'sess7', duration_seconds: 12.5,
+  objective: { available: true, configured: true, verified: true, achieved: true,
+    decided: true, outcome: 'verified_success', reason: 'The title read READY.',
+    evidence: ['window_title: "READY" contains "READY"'] },
+  control: {
+    plan_digest: digest, state: 'verified', verdict: 'verified_success',
+    limits: { max_actions: 1 },
+    states: [
+      { stage: 'proposal', state: 'recorded', reason: 'operator authored' },
+      { stage: 'approval', state: 'approved', reason: 'digest approved' },
+      { stage: 'execution', state: 'completed', reason: 'every action executed' },
+      { stage: 'verification', state: 'verified_success', reason: 'the title read READY' },
+      { stage: 'refusal', state: 'not_applicable', reason: 'nothing refused' },
+      { stage: 'cleanup', state: 'completed', reason: 'inputs released' }
+    ],
+    steps: [
+      { index: 1, action: { kind: 'key', key: 'space', duration_ms: 60 }, status: 'executed', reason: '' }
+    ]
+  },
+  metrics: {
+    objective_success: { available: true, value: 1, kind: 'boolean' },
+    completion_time_seconds: { available: true, value: 4.5, unit: 's', kind: 'measured' },
+    actions_executed: { available: true, value: 1, kind: 'measured' }
+  },
+  baseline: { role: 'baseline' }, comparison: null
+}, false);
+var runBox = document.getElementById('forgeEvaluationRun');
+var runNodes = walk(runBox, []);
+out.run = {
+  text: runBox.textContent,
+  badge: document.getElementById('forgeEvaluationRunState').textContent,
+  verdictTone: (runNodes.filter(function (n) { return n.className === 'forge-verdict'; })[0] || { dataset: {} }).dataset.tone || '',
+  stages: runNodes.filter(function (n) { return n.status && n.status !== undefined && n.className === '' && n.children.length === 3; }).length,
+  executed: runNodes.filter(function (n) { return n.className === '' && n.status === 'executed'; }).length,
+  metricText: runBox.textContent
+};
+
+// 4. A controlled run that ended without a decided verdict.
+L.renderEvaluationRun({
+  id: 'eval2', mode: 'control', status: 'completed', valid: true,
+  reason: 'Benchmark run 8 ended completed: data complete.',
+  game: { display_name: 'Artifact Harness' }, scenario: { name: 'Controlled Baseline' },
+  benchmark_run_id: '8', session_id: 'sess8', duration_seconds: 10,
+  objective: { available: true, configured: true, verified: false, achieved: null,
+    decided: false, outcome: 'in_progress', reason: 'No verdict arrived within 15 s.' },
+  control: { plan_digest: digest, state: 'inconclusive', limits: { max_actions: 1 }, states: [], steps: [] },
+  metrics: {}, baseline: null, comparison: null
+}, false);
+out.inconclusive = {
+  text: document.getElementById('forgeEvaluationRun').textContent,
+  tone: (walk(document.getElementById('forgeEvaluationRun'), [])
+    .filter(function (n) { return n.className === 'forge-verdict'; })[0] || { dataset: {} }).dataset.tone || ''
+};
+
+// 5. A controlled report renders the same verdict and its approved actions.
+L.renderEvaluationReport({
+  evaluation_id: 'eval1', mode: 'control', status: 'completed', valid: true,
+  reason: 'Benchmark run 7 ended completed: data complete.',
+  game: { display_name: 'Artifact Harness' }, compatibility: { status: 'CONTROLLED', reason: 'Harness only.' },
+  readiness: { ready: true, counts: { pass: 12, warn: 0, fail: 0, unavailable: 1 } },
+  objective: { available: true, configured: true, verified: true, achieved: true,
+    decided: true, outcome: 'verified_success', reason: 'The title read READY.',
+    objective: { kind: 'window_title', mode: 'contains', parameter: 'READY' },
+    evidence: ['window_title: "READY" contains "READY"'] },
+  control: { plan_digest: digest, state: 'verified', limits: { max_actions: 1 },
+    states: [{ stage: 'verification', state: 'verified_success', reason: 'the title read READY' }],
+    steps: [{ index: 1, action: { kind: 'key', key: 'space', duration_ms: 60 }, status: 'executed', reason: '' }] },
+  approval: { digest: digest }, plan_digest: digest, verdict: 'verified_success',
+  benchmark_run_id: '7', session_id: 'sess7',
+  metrics: { objective_success: { available: true, value: 1, kind: 'boolean' } },
+  evidence: {}, baseline: null, comparison: null, limitations: [], missing_evidence: [],
+  real_gameplay_control_exercised: true, note: 'One controlled evaluation.'
+});
+out.report = { text: document.getElementById('forgeEvaluationReport').textContent };
+console.log(JSON.stringify(out));
+"""
+
+
+@unittest.skipIf(shutil.which("node") is None, "node is not installed")
+class NovaForgeControlledRendererDomTests(unittest.TestCase):
+    """What the controlled form and the verdict RENDER, driven through the real code."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as handle:
+            handle.write(CONTROL_RENDERER_NEEDLE)
+            cls._driver = Path(handle.name)
+        completed = subprocess.run(
+            ["node", str(cls._driver), str(PANEL_JS)], capture_output=True, timeout=60, check=False,
+        )
+        stdout = completed.stdout.decode("utf-8", errors="replace")
+        stderr = completed.stderr.decode("utf-8", errors="replace")
+        if completed.returncode != 0:
+            raise AssertionError(f"node failed: {stderr[:800]}")
+        try:
+            cls.data = json.loads(stdout.strip().splitlines()[-1])
+        except (IndexError, json.JSONDecodeError) as exc:  # pragma: no cover - harness failure
+            raise AssertionError(f"controlled driver produced no JSON: {stdout[:400]!r}") from exc
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._driver.unlink(missing_ok=True)
+
+    def test_the_plan_editor_renders_every_action_and_its_policy(self) -> None:
+        plan = self.data["plan"]
+        self.assertEqual(plan["rows"], 2)
+        self.assertEqual(plan["kinds"], ["key", "click"])
+        self.assertIn("key space · 60 ms", plan["summary"])
+        self.assertIn("click left at 10,20", plan["summary"])
+        self.assertIn("keys space, enter", plan["limits"])
+        self.assertIn("at most 2 actions per run", plan["limits"])
+        self.assertIn("2 actions", plan["badge"])
+        self.assertIn("smaller than the plan", plan["problems"])
+
+    def test_the_preflight_shows_the_exact_digest_the_operator_approves(self) -> None:
+        preflight = self.data["preflight"]
+        self.assertEqual(preflight["digest"], "a" * 64)
+        self.assertIn("a" * 64, preflight["digestShown"])
+        self.assertIn("Approved plan", preflight["text"])
+        self.assertIn("single-use", preflight["text"])
+        self.assertIn("title contains \"READY\"", preflight["text"])
+
+    def test_a_verified_success_renders_the_verdict_and_the_executed_action(self) -> None:
+        run = self.data["run"]
+        self.assertEqual(run["verdictTone"], "ok")
+        self.assertIn("verified success", run["text"])
+        self.assertIn("The title read READY.", run["text"])
+        self.assertIn("completed · objective verified", run["badge"])
+        self.assertIn("Approved actions", run["text"])
+        self.assertIn("key space · 60 ms", run["text"])
+        self.assertIn("achieved", run["text"])
+        self.assertIn("4.5 s", run["text"])
+
+    def test_the_six_control_stages_are_rendered_separately(self) -> None:
+        text = self.data["run"]["text"]
+        for stage in ("proposal", "approval", "execution", "verification", "refusal", "cleanup"):
+            self.assertIn(stage, text)
+        self.assertIn("not applicable", text)
+
+    def test_an_undecided_run_is_inconclusive_and_never_a_success(self) -> None:
+        inconclusive = self.data["inconclusive"]
+        self.assertEqual(inconclusive["tone"], "warn")
+        self.assertIn("inconclusive — no verdict yet", inconclusive["text"])
+        self.assertIn("No verdict arrived within 15 s.", inconclusive["text"])
+        self.assertNotIn("verified success", inconclusive["text"])
+
+    def test_a_controlled_report_carries_the_verdict_the_actions_and_the_digest(self) -> None:
+        report = self.data["report"]["text"]
+        self.assertIn("verified success", report)
+        self.assertIn("The title read READY.", report)
+        self.assertIn("Approved actions", report)
+        self.assertIn("Plan digest", report)
+        self.assertIn("a" * 64, report)
+        self.assertIn('title contains "READY"', report)
+        self.assertIn("Gameplay control exercisedyes", report)
+        self.assertIn("objective_success", report)
 
 
 COACH_DECISION_NEEDLE = """
@@ -2112,7 +2699,1319 @@ class NovaForgeCoachPanelContractTests(unittest.TestCase):
         self.assertIn("it invokes no", self.html)
         self.assertIn("none of them promises a score improvement", self.html)
         self.assertNotIn("guaranteed improvement", self.html.lower())
+CLOSED_LOOP_NEEDLE = r"""
+const fs = require('fs');
+function __mk(tag, cls, text) {
+  return {
+    tagName: tag,
+    className: cls || '',
+    _text: text == null ? '' : String(text),
+    children: [],
+    dataset: {},
+    hidden: false,
+    title: '',
+    type: '',
+    disabled: false,
+    value: '',
+    checked: false,
+    placeholder: '',
+    get textContent() {
+      return this._text + this.children.map(function (c) { return c.textContent; }).join('');
+    },
+    set textContent(value) { this._text = String(value); this.children.length = 0; },
+    set innerHTML(value) { this._text = ''; this.children.length = 0; },
+    get innerHTML() { return ''; },
+    appendChild(child) { this.children.push(child); return child; },
+    setAttribute() {},
+    removeAttribute() {},
+    addEventListener() {},
+    click() {},
+    classList: { add() {}, remove() {}, toggle() {} },
+    querySelector() { return null; },
+    querySelectorAll() { return []; }
+  };
+}
+global.window = {};
+var window = global.window;
+var __byId = {};
+var document = {
+  getElementById: function (id) {
+    if (!__byId[id]) __byId[id] = __mk(id);
+    return __byId[id];
+  },
+  createElement: function (tag) { return __mk(tag); },
+  addEventListener: function () {},
+  body: __mk('body'),
+  hidden: false
+};
+function el(tag, cls, text) { return __mk(tag, cls, text); }
+function authHeaders() { return {}; }
+function requestJson() { throw new Error('renderers must not touch the network'); }
+eval(fs.readFileSync(process.argv[2], 'utf8'));
+var L = global.window.NovaForgeLogic;
+if (!L) { console.log(JSON.stringify({ error: 'NovaForgeLogic missing' })); process.exit(0); }
+function walk(node, out) {
+  (node.children || []).forEach(function (child) {
+    out.push(child);
+    walk(child, out);
+  });
+  return out;
+}
+var out = {};
+
+// The real form fields -> the payload the objective route receives.
+document.getElementById('forgeObjectiveKind').value = 'ocr_text';
+document.getElementById('forgeObjectiveParameter').value = '  LEVEL COMPLETE  ';
+document.getElementById('forgeObjectiveMode').value = 'equals';
+document.getElementById('forgeObjectiveRegion').value = ' 10,20,300,80 ';
+out.ocrObjective = L.objectivePayload();
+document.getElementById('forgeObjectiveKind').value = 'ocr_text';
+document.getElementById('forgeObjectiveRegion').value = '';
+out.ocrWholeWindow = L.objectivePayload();
+document.getElementById('forgeObjectiveKind').value = 'window_title';
+document.getElementById('forgeObjectiveParameter').value = 'READY';
+out.titleObjective = L.objectivePayload();
+
+out.labels = {
+  completed: L.loopStatusText('completed'),
+  refused: L.loopStatusText('refused'),
+  unknown: L.loopStatusText('something-else'),
+  missing: L.loopStatusText(null)
+};
+
+var state = L.loopState();
+// 1. No pipeline on this host: the buttons must not offer one.
+state.capability = { available: false, reason: 'No gameplay injector is wired.' };
+state.result = null;
+state.running = false;
+L.renderLoop({ state: 'RUNNING' });
+out.unavailable = {
+  badge: __byId['forgeLoopBadge'].textContent,
+  runDisabled: __byId['forgeLoopRunButton'].disabled,
+  cancelDisabled: __byId['forgeLoopCancelButton'].disabled,
+  policy: __byId['forgeLoopPolicy'].textContent,
+  body: __byId['forgeLoopResult'].textContent,
+  available: __byId['forgeLoopBadge'].dataset.available
+};
+
+// 2. A verified run: status, the verifier's badge and the step's own row.
+state.capability = {
+  available: true,
+  reason: 'Every action travels the session plan and execute path.',
+  policy: { policy: 'HarnessReadyPolicy', model_backed: false },
+  safety: { guarded_actions: true }
+};
+state.result = {
+  status: 'completed',
+  reason: 'Read window 1: satisfied because the screen showed READY.',
+  actions_executed: 1, actions_refused: 0, decisions: 1, elapsed_seconds: 1.25,
+  verification: { outcome: 'verified_success', reason: 'READY' },
+  steps: [{
+    index: 0,
+    proposal: { action: { kind: 'key', key: 'space' } },
+    plan_status: 'proposed', execute_status: 'executed',
+    outcome_met: true, reason: ''
+  }]
+};
+L.renderLoop({ state: 'RUNNING' });
+var completedNodes = walk(__byId['forgeLoopResult'], []);
+out.completed = {
+  badge: __byId['forgeLoopBadge'].textContent,
+  runDisabled: __byId['forgeLoopRunButton'].disabled,
+  policy: __byId['forgeLoopPolicy'].textContent,
+  body: __byId['forgeLoopResult'].textContent,
+  rows: completedNodes.filter(function (n) { return n.className === 'forge-action-row'; })
+    .map(function (n) { return { text: n.textContent, status: n.dataset.status }; })
+};
+
+// 2b. NF-10: a decision shows its state, reason, expectation, uncertainty and
+// evidence, and the verifier's own reason is quoted separately.
+state.result = {
+  status: 'failed',
+  reason: 'The verifier decided: marker never appeared.',
+  actions_executed: 2, actions_refused: 0, decisions: 2, elapsed_seconds: 2.5,
+  policy: 'HarnessStagesPolicy', policy_version: 1, model_backed: false,
+  verification: { outcome: 'verified_failure', reason: 'title does not contain COMPLETE' },
+  steps: [{
+    index: 0,
+    observation: { status: 'observed', title: 'NC FORGE HARNESS - STAGE IDLE', text: '' },
+    proposal: {
+      action: { kind: 'key', key: 'a' },
+      reason: "The harness is in stage IDLE; 'a' is that stage's action.",
+      evidence: ['window:1', 'observation:2026-10-22T10:00:00+00:00'],
+      uncertainty: ['The title is the only state evidence.'],
+      model_backed: false
+    },
+    plan_status: 'proposed', execute_status: 'executed',
+    expected_outcome: 'the window title will contain STAGE ARMED',
+    outcome_met: true, reason: ''
+  }]
+};
+L.renderLoop({ state: 'RUNNING' });
+out.decision = { body: __byId['forgeLoopResult'].textContent };
+
+// 2c. Trial history: aggregates AND failures, with the durability limit stated.
+L.renderTrialHistory({
+  trials: [
+    {
+      policy: 'HarnessStagesPolicy', trial: 1, outcome: 'verified_success',
+      actions: 2, refused: 0, transitions: 2, responded_to_transition: true,
+      elapsed_s: 1.6, reason: 'COMPLETE in the title'
+    },
+    {
+      policy: 'HarnessStagesPolicy', trial: 2, outcome: 'refused',
+      actions: 0, refused: 1, transitions: 0, responded_to_transition: false,
+      elapsed_s: 0.4, reason: 'Guardian denied the plan'
+    }
+  ],
+  summaries: [{
+    policy: 'HarnessStagesPolicy', policy_version: 1, trials: 2,
+    outcomes: { verified_success: 1, verified_failure: 0, inconclusive: 0, refused: 1 },
+    success_rate: 0.5, actions_executed_mean: 1.0, elapsed_seconds_mean: 1.0,
+    responded_to_transition_trials: 1, model_backed_trials: 0
+  }],
+  durable: false,
+  note: 'Trial history covers this process only; it is not persisted.'
+});
+out.trials = {
+  body: __byId['forgeTrialHistory'].textContent,
+  badge: walk(__byId['forgeTrialHistory'], [])
+    .filter(function (n) { return n.className === 'forge-badge'; })
+    .map(function (n) { return n.textContent; })
+};
+
+// 3. A run in flight: both controls off, and the promise is the loop's own.
+state.running = true;
+L.renderLoop({ state: 'RUNNING' });
+out.running = {
+  runDisabled: __byId['forgeLoopRunButton'].disabled,
+  cancelDisabled: __byId['forgeLoopCancelButton'].disabled,
+  body: __byId['forgeLoopResult'].textContent
+};
+state.running = false;
+console.log(JSON.stringify(out));
+"""
+
+
+@unittest.skipIf(shutil.which("node") is None, "node is not installed")
+class ClosedLoopPanelTests(unittest.TestCase):
+    """NF-08 in the panel: OCR objectives and the loop's own record."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as handle:
+            handle.write(CLOSED_LOOP_NEEDLE)
+            cls._driver = Path(handle.name)
+        completed = subprocess.run(
+            ["node", str(cls._driver), str(PANEL_JS)],
+            capture_output=True, timeout=60, check=False,
+        )
+        stdout = completed.stdout.decode("utf-8", errors="replace")
+        stderr = completed.stderr.decode("utf-8", errors="replace")
+        if completed.returncode != 0:
+            raise AssertionError(f"node failed: {stderr[:800]}")
+        try:
+            cls.data = json.loads(stdout.strip().splitlines()[-1])
+        except (IndexError, json.JSONDecodeError) as exc:  # pragma: no cover - harness failure
+            raise AssertionError(f"driver produced no JSON: {stdout[:400]!r}") from exc
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._driver.unlink(missing_ok=True)
+
+    def test_an_ocr_objective_sends_its_mode_and_region(self) -> None:
+        payload = self.data["ocrObjective"]
+        self.assertEqual(payload["kind"], "ocr_text")
+        self.assertEqual(payload["parameter"], "LEVEL COMPLETE")
+        self.assertEqual(payload["mode"], "equals")
+        self.assertEqual(payload["region"], "10,20,300,80")
+        self.assertNotIn("region", self.data["ocrWholeWindow"])
+        self.assertEqual(self.data["ocrWholeWindow"]["mode"], "equals")
+        self.assertEqual(self.data["titleObjective"], {"kind": "window_title", "parameter": "READY"})
+
+    def test_the_status_text_separates_a_verdict_from_a_stop(self) -> None:
+        labels = self.data["labels"]
+        self.assertIn("objective verified", labels["completed"])
+        self.assertIn("refused", labels["refused"])
+        self.assertEqual(labels["unknown"], "something-else")
+        self.assertEqual(labels["missing"], "no run")
+
+    def test_an_unavailable_pipeline_cannot_offer_a_run(self) -> None:
+        unavailable = self.data["unavailable"]
+        self.assertEqual(unavailable["badge"], "unavailable")
+        self.assertEqual(unavailable["available"], "false")
+        self.assertTrue(unavailable["runDisabled"])
+        self.assertTrue(unavailable["cancelDisabled"])
+        self.assertIn("No gameplay injector is wired.", unavailable["policy"])
+        self.assertIn("No closed loop has run", unavailable["body"])
+
+    def test_a_verified_run_renders_the_verifier_badge_and_its_step(self) -> None:
+        completed = self.data["completed"]
+        self.assertEqual(completed["badge"], "HarnessReadyPolicy")
+        self.assertFalse(completed["runDisabled"])
+        self.assertIn("deterministic rule", completed["policy"])
+        self.assertIn("objective verified", completed["body"])
+        self.assertIn("verified success", completed["body"])
+        self.assertIn("actions executed: 1", completed["body"])
+        self.assertIn("Policy: HarnessReadyPolicy", completed["body"])
+        self.assertEqual(len(completed["rows"]), 1)
+        self.assertIn("#1 key space", completed["rows"][0]["text"])
+        self.assertIn("expectation met", completed["rows"][0]["text"])
+        self.assertEqual(completed["rows"][0]["status"], "executed")
+
+    def test_a_decision_shows_its_state_reason_expectation_and_evidence(self) -> None:
+        """A keystroke is not a decision; the panel must show why it was chosen."""
+        body = self.data["decision"]["body"]
+        self.assertIn("Policy: HarnessStagesPolicy v1", body)
+        self.assertIn("deterministic decisions only", body)
+        self.assertIn("Verifier: verified_failure — title does not contain COMPLETE", body)
+        self.assertIn("state: NC FORGE HARNESS - STAGE IDLE", body)
+        self.assertIn("Reason: The harness is in stage IDLE", body)
+        self.assertIn("Expected: the window title will contain STAGE ARMED", body)
+        self.assertIn("Uncertainty: The title is the only state evidence.", body)
+        self.assertIn("Evidence: window:1", body)
+
+    def test_trial_history_shows_aggregates_and_keeps_a_refusal(self) -> None:
+        """Metrics come from the server; a failure is never filtered out."""
+        trials = self.data["trials"]
+        body = trials["body"]
+        self.assertEqual(trials["badge"], ["2 trials"])
+        self.assertIn("HarnessStagesPolicy v1", body)
+        self.assertIn("verified: 1 success / 0 failure", body)
+        self.assertIn("rate 0.5", body)
+        self.assertIn("decided differently after a transition: 1/2", body)
+        self.assertIn("no model-backed decision", body)
+        self.assertIn("#2 refused by a gate", body)
+        self.assertIn("Guardian denied the plan", body)
+        self.assertIn("not persisted", body)
+
+    def test_the_trial_history_route_is_wired_and_read_only(self) -> None:
+        html = INDEX.read_text(encoding="utf-8")
+        js = PANEL_JS.read_text(encoding="utf-8")
+        self.assertIn('id="forgeTrialHistory"', html)
+        self.assertIn('"/novaforge/trials"', js)
+        # The aggregates are READ from the server's rows, never recomputed here:
+        # one evaluation module owns the numbers the panel and the report quote.
+        self.assertIn("summary.success_rate", js)
+        self.assertIn("summary.responded_to_transition_trials", js)
+        self.assertIn("verified: ", js)
+
+    def test_a_running_loop_disables_run_and_offers_stop(self) -> None:
+        running = self.data["running"]
+        self.assertTrue(running["runDisabled"], "a second run must not start")
+        self.assertFalse(running["cancelDisabled"], "Stop is how the operator cancels it")
+        self.assertIn("stops at the first untrusted observation", running["body"])
+
+    def test_the_panel_offers_the_ocr_objective_and_posts_the_loop_routes(self) -> None:
+        html = INDEX.read_text(encoding="utf-8")
+        js = PANEL_JS.read_text(encoding="utf-8")
+        for element_id in (
+            "forgeLoopRunButton",
+            "forgeLoopCancelButton",
+            "forgeLoopPolicySelect",
+            "forgeLoopMaxActions",
+            "forgeLoopDeadline",
+            "forgeLoopResult",
+            "forgeObjectiveMode",
+            "forgeObjectiveRegion",
+        ):
+            with self.subTest(element_id=element_id):
+                self.assertIn(f'id="{element_id}"', html)
+        self.assertIn('<option value="ocr_text">', html)
+        self.assertIn('+ "/loop"', js)
+
+    def test_the_loop_sends_and_reports_the_selected_policy(self) -> None:
+        """NF-10: the panel names the policy it ran, and the version."""
+        html = INDEX.read_text(encoding="utf-8")
+        js = PANEL_JS.read_text(encoding="utf-8")
+        for value in ("ready", "stages", "fixed"):
+            with self.subTest(policy=value):
+                self.assertIn(f'<option value="{value}">', html)
+        self.assertIn("policy: policy", js)
+        self.assertIn("result.policy_version", js)
+        self.assertIn("model_backed", js)
+        self.assertIn("deterministic decisions only", js)
+        self.assertIn('+ "/loop/cancel"', js)
+        self.assertNotIn("/command/execute", js)
+
+    def test_the_panel_offers_visual_interpretation_as_its_own_capability(self) -> None:
+        """NF-09: the model's eyes and the policy's decisions are separate rows."""
+        html = INDEX.read_text(encoding="utf-8")
+        js = PANEL_JS.read_text(encoding="utf-8")
+        for element_id in (
+            "forgeLoopVision",
+            "forgeDescribeFrame",
+            "forgeVisionInterpretation",
+        ):
+            with self.subTest(element_id=element_id):
+                self.assertIn(f'id="{element_id}"', html)
+        self.assertIn("capability.vision", js)
+        self.assertIn("/vision/interpret", js)
+        self.assertIn("model interpretation", js)
+        self.assertIn("not evidence", js)
+
+
+VISION_RENDERER_NEEDLE = r"""
+const fs = require('fs');
+function makeNode(tag) {
+  const node = {
+    tagName: tag, className: '', _text: '', children: [], firstChild: null,
+    appendChild: function (child) {
+      this.children.push(child);
+      this.firstChild = this.children[0] || null;
+      return child;
+    },
+    removeChild: function (child) {
+      this.children = this.children.filter(function (item) { return item !== child; });
+      this.firstChild = this.children[0] || null;
+      return child;
+    },
+    setAttribute: function () {},
+  };
+  Object.defineProperty(node, 'textContent', {
+    get: function () {
+      if (this.children.length) {
+        return this.children.map(function (child) { return child.textContent; }).join('');
+      }
+      return this._text;
+    },
+    set: function (value) { this._text = String(value); this.children = []; this.firstChild = null; },
+  });
+  Object.defineProperty(node, 'innerHTML', {
+    get: function () { return ''; },
+    set: function () { this._text = ''; this.children = []; this.firstChild = null; },
+  });
+  return node;
+}
+const nodes = { forgeVisionInterpretation: makeNode('div') };
+global.window = {};
+global.document = {
+  getElementById: function (id) { return nodes[id] || null; },
+  createElement: makeNode,
+  createTextNode: function (text) { const node = makeNode('#text'); node.textContent = text; return node; },
+};
+function el(tag, className, text) {
+  const node = makeNode(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+eval(fs.readFileSync(process.argv[2], 'utf8'));
+const L = global.window.NovaForgeLogic;
+if (!L || !L.renderVisionInterpretation) {
+  console.log(JSON.stringify({ error: 'renderVisionInterpretation missing' }));
+  process.exit(0);
+}
+const interpreted = {
+  status: 'interpreted', interpreted: true, provenance: 'model_interpretation', schema_valid: true,
+  description: 'A small window shows READY.', model: 'qwen3-vl:4b', provider: 'llm:ollama',
+  duration_ms: 1200, cached: false, frame: { age_seconds: 0.2 },
+  labels: ['READY'], uncertainty: [], conflicts: [], confidence: null,
+};
+L.renderVisionInterpretation({
+  vision: interpreted, measured: ['window_probe', 'frame', 'ocr'], conflicts: [],
+  capability: { available: true, model: 'qwen3-vl:4b' },
+});
+const described = nodes.forgeVisionInterpretation.textContent;
+
+L.renderVisionInterpretation({
+  vision: null, measured: ['window_probe', 'frame'],
+  capability: { available: false, reason: 'No image-capable provider is wired.' },
+});
+const absent = nodes.forgeVisionInterpretation.textContent;
+
+// No frame was produced at all: the panel must name the OBSERVATION's problem,
+// not blame the configured model for a stale read.
+L.renderVisionInterpretation({
+  vision: null, measured: ['window_probe'],
+  observation: { status: 'stale', reason: 'The frame is 30 s old (limit 2 s).' },
+  capability: { available: true, model: 'qwen3-vl:4b', reason: 'Frames are described by qwen3-vl:4b.' },
+});
+const stale = nodes.forgeVisionInterpretation.textContent;
+
+// A model that timed out produced no interpretation; the badge must say so.
+L.renderVisionInterpretation({
+  vision: Object.assign({}, interpreted, {
+    status: 'unavailable', interpreted: false, description: '',
+    reason: 'The vision model did not answer within 60 s.',
+  }),
+  measured: ['window_probe'], capability: { available: true },
+});
+const failed = nodes.forgeVisionInterpretation.textContent;
+
+L.renderVisionInterpretation({
+  vision: Object.assign({}, interpreted, {
+    description: 'An empty window.',
+    conflicts: ['The model reported no visible text, but OCR read text from the same frame.'],
+  }),
+  measured: ['window_probe', 'frame', 'ocr'],
+  conflicts: ['The model reported no visible text, but OCR read text from the same frame.'],
+  capability: { available: true },
+});
+const conflicted = nodes.forgeVisionInterpretation.textContent;
+
+L.renderVisionInterpretation({ vision: interpreted, measured: ['window_probe'], conflicts: [] });
+const measured = nodes.forgeVisionInterpretation.textContent;
+
+console.log(JSON.stringify({ described, absent, conflicted, measured, stale, failed }));
+"""
+
+
+class VisionPanelRendererTests(unittest.TestCase):
+    """What NF-09 renders: a model CLAIM, beside the measured evidence."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        if shutil.which("node") is None:  # pragma: no cover - environment gate
+            raise unittest.SkipTest("node is not installed")
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as handle:
+            handle.write(VISION_RENDERER_NEEDLE)
+            cls._driver = Path(handle.name)
+        completed = subprocess.run(
+            ["node", str(cls._driver), str(PANEL_JS)],
+            capture_output=True, timeout=60, check=False,
+        )
+        stdout = completed.stdout.decode("utf-8", errors="replace")
+        stderr = completed.stderr.decode("utf-8", errors="replace")
+        if completed.returncode != 0:
+            raise AssertionError(f"node failed: {stderr[:800]}")
+        try:
+            cls.data = json.loads(stdout.strip().splitlines()[-1])
+        except (IndexError, json.JSONDecodeError) as exc:  # pragma: no cover - harness failure
+            raise AssertionError(f"vision renderer produced no JSON: {stdout[:400]!r}") from exc
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._driver.unlink(missing_ok=True)
+
+    def test_a_description_is_labelled_a_model_claim_and_sits_beside_evidence(self) -> None:
+        text = self.data["described"]
+        self.assertIn("Vision: described within the schema", text)
+        self.assertIn("model interpretation", text)
+        self.assertIn("Model interpretation (not evidence): A small window shows READY.", text)
+        self.assertIn("Measured evidence read from the target: window_probe, frame, ocr", text)
+        self.assertIn("inference: 1200 ms", text)
+        self.assertIn("schema: valid", text)
+        self.assertIn("cannot approve, plan or execute", text)
+        self.assertNotIn("verified success", text)
+
+    def test_an_unavailable_model_names_the_reason_without_hiding_evidence(self) -> None:
+        text = self.data["absent"]
+        self.assertIn("No visual interpretation exists", text)
+        self.assertIn("No image-capable provider is wired.", text)
+        self.assertIn("measured evidence", text)
+
+    def test_a_stale_observation_is_not_blamed_on_the_model(self) -> None:
+        text = self.data["stale"]
+        self.assertIn("the observation was stale", text)
+        self.assertIn("30 s old", text)
+        self.assertNotIn("Frames are described by", text)
+        self.assertIn("measured evidence", text)
+
+    def test_a_failed_answer_is_not_labelled_a_model_interpretation(self) -> None:
+        text = self.data["failed"]
+        self.assertIn("Vision: no interpretation was produced", text)
+        self.assertIn("did not answer within 60 s", text)
+        self.assertNotIn("model interpretation", text)
+
+    def test_a_conflict_is_rendered_as_uncertainty_not_as_a_verdict(self) -> None:
+        text = self.data["conflicted"]
+        self.assertIn("disagree", text)
+        self.assertIn("reported as uncertain", text)
+        self.assertNotIn("verified success", text)
+
+    def test_the_model_never_stands_in_for_measured_evidence(self) -> None:
+        text = self.data["measured"]
+        self.assertIn("Measured evidence read from the target: window_probe", text)
+
+
+OBSERVATION_UI_NEEDLE = r"""
+const fs = require('fs');
+global.window = {};
+global.document = { getElementById: function () { return null; } };
+eval(fs.readFileSync(process.argv[2], 'utf8'));
+const L = global.window.NovaForgeLogic;
+if (!L) { console.log(JSON.stringify({ error: 'NovaForgeLogic missing' })); process.exit(0); }
+const now = Date.now();
+function at(offsetMs) { return new Date(now - offsetMs).toISOString(); }
+const success = { at: at(200), width: 800, height: 500, backend: 'printwindow', capture_ms: 4 };
+const out = {
+  controls: {
+    idle: L.observationControls({ state: 'idle' }),
+    observing: L.observationControls({ state: 'observing' }),
+    userPaused: L.observationControls({ state: 'paused', pause: { user_requested: true } }),
+    autoPaused: L.observationControls({ state: 'paused', pause: { user_requested: false } }),
+    stopped: L.observationControls({ state: 'stopped' }),
+    missing: L.observationControls(null),
+  },
+  freshness: {
+    live: L.observationFreshness({ state: 'observing', last_success: success }, now),
+    stale: L.observationFreshness({ state: 'observing',
+      last_success: { at: at(20000) } }, now),
+    unreadable: L.observationFreshness({ state: 'observing',
+      last_success: { at: 'not-a-date' } }, now),
+    paused: L.observationFreshness({ state: 'paused', last_success: success }, now),
+    stopped: L.observationFreshness({ state: 'stopped', last_success: success }, now),
+    untested: L.observationFreshness({ state: 'idle' }, now),
+  },
+  rate: [
+    L.observationRateText({ rate_hz: 4.2 }),
+    L.observationRateText({ rate_hz: null }),
+    L.observationRateText({}),
+    L.observationRateText(null),
+  ],
+  latency: [
+    L.observationLatencyText({ latency_ms: { last: 12, average: 10, max: 20 } }),
+    L.observationLatencyText({ latency_ms: { last: null, average: null, max: null } }),
+    L.observationLatencyText({}),
+  ],
+  delay: [
+    L.observationDelayText({ schedule_delay_ms: { last: 5, max: 9 } }),
+    L.observationDelayText({ schedule_delay_ms: { last: null, max: null } }),
+  ],
+  reasons: {
+    unread: L.observationReasonText(null),
+    pauseDetail: L.observationReasonText({ state: 'paused',
+      pause: { code: 'target_minimized', detail: 'The window is minimized.' } }),
+    endReason: L.observationReasonText({ state: 'failed', reason: 'The process exited.' }),
+    observing: L.observationReasonText({ state: 'observing' }),
+    idle: L.observationReasonText({ state: 'idle' }),
+    stopped: L.observationReasonText({ state: 'stopped' }),
+  },
+  target: [
+    L.observationTargetText({ target: { title: 'Freedom Fighters', pid: 42,
+      start_time: '2026-10-24T09:00:00Z', handle: 17185 } }),
+    L.observationTargetText({ target: null }),
+    L.observationTargetText(null),
+  ],
+  window: {
+    observing: L.observationWindowText({ state: 'observing',
+      last_observation: { status: 'observed', visibility: {
+        minimized: false, visible: true, foreground: true }, target_valid: true } }),
+    background: L.observationWindowText({ state: 'observing',
+      last_observation: { status: 'observed', visibility: {
+        minimized: false, visible: true, foreground: false }, target_valid: true } }),
+    paused: L.observationWindowText({ state: 'paused',
+      pause: { code: 'target_minimized', user_requested: false } }),
+    userPaused: L.observationWindowText({ state: 'paused',
+      pause: { code: 'user_paused', user_requested: true } }),
+    untouched: L.observationWindowText({ state: 'idle' }),
+    missing: L.observationWindowText(null),
+  },
+  facts: {
+    live: L.observationFactRows({
+      state: 'observing', game: 'Fake Game', session_id: 'obs-abc',
+      target: { title: 'Freedom Fighters', pid: 42, start_time: '2026-10-24T09:00:00Z',
+        handle: 17185 },
+      last_observation: { status: 'observed', captured_at: at(300),
+        visibility: { minimized: false, visible: true, foreground: true },
+        target_valid: true },
+      last_success: { at: at(200), seq: 7, width: 800, height: 500, backend: 'printwindow' },
+      backend: 'printwindow',
+      measured: { rate_hz: 4.2, latency_ms: { last: 12, average: 10, max: 20 },
+        schedule_delay_ms: { last: 5, max: 9 } },
+      consecutive_failures: 0,
+      counts: { observed: 3, rejected: 1, unavailable: 0 },
+    }),
+    idle: L.observationFactRows({ state: 'idle' }),
+    missing: L.observationFactRows(null),
+  },
+};
+console.log(JSON.stringify(out));
+"""
+
+
+@unittest.skipIf(shutil.which("node") is None, "node is not installed")
+class ObservationCardLogicTests(unittest.TestCase):
+    """NF-15's card asks the observer, and never turns a record into a feed."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as handle:
+            handle.write(OBSERVATION_UI_NEEDLE)
+            cls._driver = Path(handle.name)
+        completed = subprocess.run(
+            ["node", str(cls._driver), str(PANEL_JS)],
+            capture_output=True, timeout=60, check=False,
+        )
+        stdout = completed.stdout.decode("utf-8", errors="replace")
+        stderr = completed.stderr.decode("utf-8", errors="replace")
+        if completed.returncode != 0:
+            raise AssertionError(f"node failed: {stderr[:800]}")
+        try:
+            cls.data = json.loads(stdout.strip().splitlines()[-1])
+        except (IndexError, json.JSONDecodeError) as exc:  # pragma: no cover - harness failure
+            raise AssertionError(f"observation driver produced no JSON: {stdout[:400]!r}") from exc
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._driver.unlink(missing_ok=True)
+
+    def test_controls_follow_the_observer_state_and_a_user_pause(self) -> None:
+        controls = self.data["controls"]
+        self.assertEqual(controls["idle"]["start"], True)
+        self.assertEqual(controls["idle"]["stop"], False)
+        self.assertEqual(controls["observing"]["start"], False)
+        self.assertEqual(controls["observing"]["pause"], True)
+        self.assertEqual(controls["observing"]["once"], True)
+        self.assertEqual(controls["userPaused"]["resume"], True)
+        self.assertEqual(controls["userPaused"]["pause"], False)
+        self.assertEqual(controls["userPaused"]["once"], False)
+        self.assertEqual(controls["autoPaused"]["pause"], True)
+        self.assertEqual(controls["autoPaused"]["resume"], False)
+        self.assertEqual(controls["stopped"]["start"], True)
+        self.assertEqual(controls["missing"]["start"], True)
+
+    def test_only_a_running_fresh_validation_is_labelled_validated_now(self) -> None:
+        freshness = self.data["freshness"]
+        self.assertEqual(freshness["live"]["show"], True)
+        self.assertEqual(freshness["live"]["mode"], "validated now")
+        self.assertEqual(freshness["stale"]["show"], False)
+        self.assertEqual(freshness["unreadable"]["show"], False)
+        for key in ("paused", "stopped"):
+            self.assertEqual(freshness[key]["show"], False, key)
+            self.assertIn("record", freshness[key]["mode"], key)
+        self.assertEqual(freshness["untested"]["mode"], "not tested")
+
+    def test_an_unmeasured_figure_says_so_instead_of_rendering_zero(self) -> None:
+        rate = self.data["rate"]
+        self.assertEqual(rate[0], "4.20 Hz")
+        for value in rate[1:]:
+            self.assertEqual(value, "not measured yet")
+        self.assertTrue(self.data["latency"][0].startswith("12 ms"))
+        self.assertEqual(self.data["latency"][1], "not measured yet")
+        self.assertEqual(self.data["latency"][2], "not measured yet")
+        self.assertTrue(self.data["delay"][0].startswith("5 ms"))
+        self.assertEqual(self.data["delay"][1], "not measured yet")
+
+    def test_the_pause_or_failure_reason_is_shown_verbatim(self) -> None:
+        reasons = self.data["reasons"]
+        self.assertIn("not been read", reasons["unread"])
+        self.assertEqual(reasons["pauseDetail"], "The window is minimized.")
+        self.assertEqual(reasons["endReason"], "The process exited.")
+        self.assertIn("validated before", reasons["observing"])
+        self.assertIn("not been started", reasons["idle"])
+        self.assertEqual(reasons["stopped"], "Observation is stopped.")
+
+    def test_the_target_line_names_process_identity_and_the_window(self) -> None:
+        target = self.data["target"]
+        self.assertIn("Freedom Fighters", target[0])
+        self.assertIn("pid 42", target[0])
+        self.assertIn("start 2026-10-24T09:00:00Z", target[0])
+        self.assertIn("hwnd 17185", target[0])
+        self.assertEqual(target[1], "not bound")
+        self.assertEqual(target[2], "not bound")
+
+    def test_the_window_state_is_its_own_fact_not_a_second_identity(self) -> None:
+        window = self.data["window"]
+        self.assertEqual(window["observing"], "visible · foreground · target valid")
+        self.assertEqual(window["background"], "visible · background · target valid")
+        self.assertEqual(window["paused"], "target_minimized · paused")
+        self.assertEqual(window["userPaused"], "user_paused · paused by the user")
+        self.assertEqual(window["untouched"], "not tested")
+        self.assertEqual(window["missing"], "not read")
+        live = {row[0]: row[1] for row in self.data["facts"]["live"]}
+        self.assertEqual(live["Window"], "visible · foreground · target valid")
+
+    def test_the_facts_name_the_last_validated_frame_and_count_refusals(self) -> None:
+        live = {row[0]: row[1] for row in self.data["facts"]["live"]}
+        self.assertEqual(live["Game"], "Fake Game")
+        self.assertIn("seq 7", live["Last validated"])
+        self.assertIn("observed", live["Last read"])
+        self.assertEqual(live["Frame"], "800×500 (seq 7)")
+        self.assertEqual(live["Backend"], "printwindow")
+        self.assertIn("4.20 Hz", live["Measured rate"])
+        self.assertTrue(live["Capture latency"].startswith("12 ms"))
+        self.assertTrue(live["Scheduling delay"].startswith("5 ms"))
+        self.assertIn("3 observed", live["Counts"])
+        self.assertEqual(live["Session"], "obs-abc")
+
+    def test_untested_facts_report_absence_instead_of_zero(self) -> None:
+        for key in ("idle", "missing"):
+            rows = {row[0]: row[1] for row in self.data["facts"][key]}
+            self.assertEqual(rows["Last validated"], "never", key)
+            self.assertEqual(rows["Frame"], "no validated frame", key)
+            self.assertEqual(rows["Measured rate"], "not measured yet", key)
+            self.assertEqual(rows["Counts"], "not read", key)
+            self.assertEqual(rows["Game"], "not bound", key)
+            self.assertEqual(rows["Target"], "not bound", key)
+            self.assertEqual(rows["Last read"], "not tested", key)
+
+
+STATE_UI_NEEDLE = r"""
+const fs = require('fs');
+global.window = {};
+global.document = { getElementById: function () { return null; } };
+eval(fs.readFileSync(process.argv[2], 'utf8'));
+const L = global.window.NovaForgeLogic;
+if (!L) { console.log(JSON.stringify({ error: 'NovaForgeLogic missing' })); process.exit(0); }
+const now = Date.now();
+function at(offsetMs) { return new Date(now - offsetMs).toISOString(); }
+const state = {
+  state_id: 'state-1', game: 'NC FORGE AUDIT TICK', sequence: 2, status: 'partial',
+  observation: { observation_id: 'obs-1:0002', at: at(100), session_id: 'obs-1' },
+  profile: { profile_id: 'nc-forge-tick@1', version: '1', matched: true, forced: false, reason: '' },
+  hud: [
+    { element_id: 'counter', label: 'Tick counter', status: 'recognized', text: '786', value: 786 },
+    { element_id: 'header', label: 'Window header', status: 'absent', text: '', value: null, reason: 'empty' },
+    { element_id: 'prompt', label: 'Prompt', status: 'ambiguous', text: '7', value: null, reason: 'too short' },
+    { element_id: 'bar', label: 'Bar', status: 'unreadable', text: '', value: null, reason: 'no OCR' },
+    { element_id: 'health', label: 'Health', status: 'unsupported', text: '', value: null,
+      reason: 'no bar reader' },
+  ],
+  entities: [{ entity_id: 'e1', kind: 'unknown',
+    box: { x: 10, y: 20, width: 30, height: 40 }, overlaps_hud: true }],
+  entity_status: 'detected', entity_reason: '',
+  changes: [{ kind: 'hud_value_changed', field: 'counter', before: '780', after: '786',
+    detail: 'Tick counter changed', inferred: false }],
+  tracking: { compared: true, reason: 'compared with the previous observation' },
+  unknown: [{ field: 'header', status: 'absent', reason: 'empty' }],
+  unsupported: ['Health (health): no bar reader'],
+  quality: { declared: 2, recognized: 1, coverage: 0.5, heuristic: true },
+  reasons: ['header: absent — empty'],
+  timestamp: at(100),
+};
+const statusShape = {
+  state: state, counts: { analyzed: 2, failed: 1, superseded: 0 },
+  measured: { processing_ms: { last: 320, average: 300, max: 320 } },
+  last_error: null,
+  last_refusal: { reason_code: 'observation_stale',
+    reason: 'The last validated frame is 30.0s old (limit 5.0s).' },
+  history: [state],
+};
+const out = {
+  hud: L.stateHudRows(state),
+  hudMissing: L.stateHudRows(null),
+  changes: [L.stateChangeText(state.changes[0]), L.stateChangeText(
+    { kind: 'hud_status_changed', field: 'counter', before: 'recognized', after: 'absent',
+      detail: 'it went away' })],
+  entity: [
+    L.stateEntitySummary(state),
+    L.stateEntitySummary({ entity_status: 'none', entities: [] }),
+    L.stateEntitySummary({ entity_status: 'unavailable', entities: [] }),
+    L.stateEntitySummary(null),
+  ],
+  quality: [
+    L.stateCoverageText(state.quality),
+    L.stateCoverageText({ declared: 0, recognized: 0 }),
+    L.stateCoverageText(null),
+  ],
+  profile: [
+    L.stateProfileText(statusShape),
+    L.stateProfileText({ state: { profile: { matched: false } } }),
+    L.stateProfileText({ state: { profile: { profile_id: 'p@1', version: '2',
+      matched: true, forced: true } } }),
+    L.stateProfileText(null),
+  ],
+  hints: [
+    L.stateHintText(statusShape),
+    L.stateHintText({ state: { profile: { matched: false, reason: 'No profile matched; generic.' },
+      quality: { declared: 0, recognized: 0 } } }),
+    L.stateHintText({ state: { profile: { matched: true }, observation: {
+      observation_id: 'obs-1:0002' }, quality: { declared: 2, recognized: 2 }, reasons: [] } }),
+    L.stateHintText(null),
+  ],
+  facts: L.stateFactRows(statusShape),
+  untouched: L.stateFactRows({ state: null, counts: { analyzed: 0, failed: 0, superseded: 0 },
+    measured: { processing_ms: { last: null } }, last_error: null }),
+  failed: L.stateFactRows({ state: null, counts: { analyzed: 0, failed: 1, superseded: 0 },
+    measured: { processing_ms: { last: null } },
+    last_error: { reason_code: 'observation_stale', reason: 'The frame is 30s old.' } }),
+  refusal: L.stateFactRows({ state: null, counts: { analyzed: 1, failed: 0, superseded: 0 },
+    measured: { processing_ms: { last: null } }, last_error: null,
+    last_refusal: { reason_code: 'observation_superseded',
+      reason: 'The target changed while the state was being read.' } }),
+};
+console.log(JSON.stringify(out));
+"""
+
+
+@unittest.skipIf(shutil.which("node") is None, "node is not installed")
+class StateCardLogicTests(unittest.TestCase):
+    """NF-16's card distinguishes the five answers a declared field can give."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as handle:
+            handle.write(STATE_UI_NEEDLE)
+            cls._driver = Path(handle.name)
+        completed = subprocess.run(
+            ["node", str(cls._driver), str(PANEL_JS)],
+            capture_output=True, timeout=60, check=False,
+        )
+        stdout = completed.stdout.decode("utf-8", errors="replace")
+        stderr = completed.stderr.decode("utf-8", errors="replace")
+        if completed.returncode != 0:
+            raise AssertionError(f"node failed: {stderr[:800]}")
+        try:
+            cls.data = json.loads(stdout.strip().splitlines()[-1])
+        except (IndexError, json.JSONDecodeError) as exc:  # pragma: no cover - harness failure
+            raise AssertionError(f"state driver produced no JSON: {stdout[:400]!r}") from exc
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._driver.unlink(missing_ok=True)
+
+    def test_a_missing_field_never_prints_a_zero_or_a_value(self) -> None:
+        rows = {row["element"]: row for row in self.data["hud"]}
+        self.assertEqual(rows["counter"]["status"], "recognized")
+        self.assertEqual(rows["counter"]["value"], "786")
+        for element in ("header", "prompt", "bar", "health"):
+            self.assertEqual(rows[element]["value"], "", element)
+            self.assertEqual(rows[element]["status"], rows[element]["status"], element)
+        self.assertEqual(rows["header"]["status"], "absent")
+        self.assertEqual(rows["prompt"]["status"], "ambiguous")
+        self.assertEqual(rows["bar"]["status"], "unreadable")
+        self.assertEqual(rows["health"]["status"], "unsupported")
+        self.assertEqual(self.data["hudMissing"], [])
+
+    def test_a_change_names_both_ends_and_its_field(self) -> None:
+        value, status = self.data["changes"]
+        self.assertIn("counter: hud_value_changed", value)
+        self.assertIn("780 → 786", value)
+        self.assertIn("counter: hud_status_changed", status)
+        self.assertIn("recognized → absent", status)
+
+    def test_entities_are_counted_but_never_named(self) -> None:
+        detected, none, unavailable, missing = self.data["entity"]
+        self.assertEqual(detected, "1 region(s) · kind unknown")
+        self.assertEqual(none, "none")
+        self.assertEqual(unavailable, "unavailable")
+        self.assertEqual(missing, "not read")
+
+    def test_quality_is_labelled_heuristic_and_coverage_is_not_a_confidence(self) -> None:
+        covered, generic, missing = self.data["quality"]
+        self.assertEqual(covered, "1 of 2 declared field(s) · heuristic")
+        self.assertEqual(generic, "no declared fields (generic reading)")
+        self.assertEqual(missing, "not measured")
+
+    def test_the_profile_line_separates_a_match_a_miss_and_a_pin(self) -> None:
+        matched, missed, pinned, missing = self.data["profile"]
+        self.assertEqual(matched, "nc-forge-tick@1 v1")
+        self.assertEqual(missed, "none matched")
+        self.assertEqual(pinned, "p@1 v2 (pinned)")
+        self.assertEqual(missing, "not read")
+
+    def test_the_hint_names_the_reason_the_state_is_partial(self) -> None:
+        reasons, unmatched, ok, missing = self.data["hints"]
+        self.assertEqual(reasons, "header: absent — empty")
+        self.assertEqual(unmatched, "No profile matched; generic.")
+        self.assertIn("obs-1:0002", ok)
+        self.assertIn("2 of 2", ok)
+        self.assertIn("not been read", missing)
+
+    def test_the_facts_separate_measured_from_unmeasured(self) -> None:
+        facts = {row[0]: row[1] for row in self.data["facts"]}
+        self.assertEqual(facts["State"], "partial")
+        self.assertEqual(facts["Quality"], "1 of 2 declared field(s) · heuristic")
+        self.assertEqual(facts["Processing"], "320 ms (avg 300, max 320)")
+        self.assertEqual(facts["Entities"], "1 region(s) · kind unknown")
+        self.assertEqual(facts["Changes"], "1")
+        self.assertEqual(facts["Counts"], "2 analyzed · 1 failed · 0 superseded")
+        self.assertEqual(facts["Last error"], "none")
+        self.assertEqual(
+            facts["Last refusal"],
+            "observation_stale — The last validated frame is 30.0s old (limit 5.0s).",
+        )
+        self.assertIn("obs-1:0002", facts["Observation"])
+        untouched = {row[0]: row[1] for row in self.data["untouched"]}
+        self.assertEqual(untouched["State"], "untested")
+        self.assertEqual(untouched["Observation"], "never")
+        self.assertEqual(untouched["Processing"], "not measured yet")
+        self.assertEqual(untouched["Counts"], "0 analyzed · 0 failed · 0 superseded")
+        failed = {row[0]: row[1] for row in self.data["failed"]}
+        self.assertEqual(failed["Last error"], "observation_stale — The frame is 30s old.")
+        refusal = {row[0]: row[1] for row in self.data["refusal"]}
+        self.assertEqual(
+            refusal["Last refusal"],
+            "observation_superseded — The target changed while the state was being read.",
+        )
+        self.assertEqual(refusal["Last error"], "none")
+        self.assertEqual(untouched["Last refusal"], "none")
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+NF19_CONTROL_NEEDLE = r"""
+const fs = require('fs');
+global.window = {};
+global.document = { getElementById: function () { return null; } };
+eval(fs.readFileSync(process.argv[1], 'utf8'));
+const L = global.window.NovaForgeLogic;
+if (!L) { console.log(JSON.stringify({ error: 'NovaForgeLogic missing' })); process.exit(0); }
+const allowed = { allow: true, state: 'allowed', reason: 'gate allows' };
+const blocked = { allow: false, state: 'held', reason: 'The session is PAUSED; input is not allowed while held.' };
+function status(gate, extra) {
+  return Object.assign({
+    available: true, active: null, held: [], history: [],
+    policy: { action_deadline_ms: 4000, max_key_hold_ms: 1500, max_wait_ms: 2000 },
+    session: { session_id: 's1', state: 'RUNNING', gate: gate },
+  }, extra || {});
+}
+function buttons(state) { return [state.run, state.cancel, state.release]; }
+const out = {
+  ready: L.inputControlState(status(allowed)),
+  blocked: L.inputControlState(status(blocked)),
+  inFlight: L.inputControlState(status(allowed, { active: { kind: 'key_hold', status: 'running' } })),
+  holding: L.inputControlState(status(allowed, { held: [{ kind: 'key', name: 'w' }] })),
+  unwired: L.inputControlState(status(allowed, { available: false })),
+  missing: L.inputControlState(null),
+  buttons: {
+    ready: buttons(L.inputControlState(status(allowed))),
+    blocked: buttons(L.inputControlState(status(blocked))),
+    inFlight: buttons(L.inputControlState(status(allowed, { active: { kind: 'wait' } }))),
+    holding: buttons(L.inputControlState(status(allowed, { held: [{ kind: 'key', name: 'w' }] }))),
+    unwired: buttons(L.inputControlState(status(allowed, { available: false }))),
+    missing: buttons(L.inputControlState(null)),
+  },
+  payloads: {
+    press: L.controlPayloadFor('key_press', ' W ', ''),
+    hold: L.controlPayloadFor('key_hold', 'w 120', ''),
+    wait: L.controlPayloadFor('wait', '250', ''),
+    move: L.controlPayloadFor('mouse_move', '', '500,300'),
+    halfPoint: L.controlPayloadFor('mouse_press', '', '500'),
+    mouseHold: L.controlPayloadFor('mouse_hold', '150', '200,220'),
+    release: L.controlPayloadFor('key_release', 'Esc', ''),
+  },
+};
+console.log(JSON.stringify(out));
+"""
+
+
+@unittest.skipIf(shutil.which("node") is None, "node is not installed")
+class NF19ControlInterfacePanelTests(unittest.TestCase):
+    """The control card's buttons come from the SERVER's gate, not the session."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        completed = subprocess.run(
+            [shutil.which("node") or "node", "-e", NF19_CONTROL_NEEDLE, str(PANEL_JS)],
+            capture_output=True, timeout=60, check=False,
+        )
+        stdout = completed.stdout.decode("utf-8", errors="replace").strip()
+        stderr = completed.stderr.decode("utf-8", errors="replace")
+        if completed.returncode != 0:
+            raise AssertionError(f"node failed: {stderr[:800]}")
+        try:
+            cls.data = json.loads(stdout.splitlines()[-1])
+        except (IndexError, json.JSONDecodeError) as exc:  # pragma: no cover - harness failure
+            raise AssertionError(f"control driver produced no JSON: {stdout[:400]!r}") from exc
+
+    def test_a_blocked_gate_disables_sending_even_on_a_running_session(self) -> None:
+        self.assertEqual(self.data["buttons"]["ready"], [True, False, False])
+        self.assertEqual(self.data["buttons"]["blocked"], [False, False, False])
+        self.assertFalse(self.data["blocked"]["run"])
+        self.assertEqual(self.data["blocked"]["badge"], "held")
+        self.assertIn("PAUSED", self.data["blocked"]["gateReason"])
+
+    def test_an_in_flight_action_can_be_cancelled_but_not_doubled(self) -> None:
+        self.assertEqual(self.data["buttons"]["inFlight"], [False, True, False])
+        self.assertTrue(self.data["inFlight"]["cancel"])
+
+    def test_release_is_offered_only_for_inputs_the_interface_holds(self) -> None:
+        self.assertEqual(self.data["buttons"]["holding"], [True, False, True])
+        self.assertIn("key:w", self.data["holding"]["heldText"])
+        self.assertEqual(self.data["buttons"]["unwired"], [False, False, False])
+        self.assertEqual(self.data["buttons"]["missing"], [False, False, False])
+        self.assertEqual(self.data["unwired"]["badge"], "no input path")
+
+    def test_payloads_are_typed_and_a_half_point_is_omitted(self) -> None:
+        self.assertEqual(self.data["payloads"]["press"], {"kind": "key_press", "key": "W"})
+        self.assertEqual(
+            self.data["payloads"]["hold"], {"kind": "key_hold", "key": "w", "duration_ms": 120}
+        )
+        self.assertEqual(self.data["payloads"]["wait"], {"kind": "wait", "duration_ms": 250})
+        self.assertEqual(
+            self.data["payloads"]["move"], {"kind": "mouse_move", "x": 500, "y": 300}
+        )
+        self.assertEqual(self.data["payloads"]["halfPoint"], {"kind": "mouse_press"})
+        self.assertEqual(
+            self.data["payloads"]["mouseHold"],
+            {"kind": "mouse_hold", "x": 200, "y": 220, "duration_ms": 150},
+        )
+
+    def test_the_panel_ships_the_card_and_never_calls_completion_success(self) -> None:
+        html = INDEX.read_text(encoding="utf-8")
+        for element_id in (
+            "forgeControlCard", "forgeControlBadge", "forgeControlKind",
+            "forgeControlKey", "forgeControlPoint", "forgeControlRunButton",
+            "forgeControlCancelButton", "forgeControlReleaseButton", "forgeControlLog",
+        ):
+            with self.subTest(element=element_id):
+                self.assertIn(f'id="{element_id}"', html, f"missing #{element_id}")
+        self.assertIn("no effect is observed or verified", html)
+        js = PANEL_JS.read_text(encoding="utf-8")
+        for route in ('"/control"', '"/control/cancel"', '"/control/release"'):
+            self.assertIn(route, js, route)
+        self.assertIn("No in-game effect was observed", js)
+        self.assertIn("inputControlState(status)", js)
+        # The card starts honest on boot instead of staying on its placeholder.
+        self.assertIn("renderControl(null)", js)
+
+    def test_the_control_card_is_rendered_in_mission_control_not_guardian(self) -> None:
+        """A card in a hidden tab is invisible: the tab it ships in is pinned.
+
+        The panel's views are display:none outside the active tab, so a control
+        card placed in Guardian would satisfy every id/JS assertion while never
+        being reachable from Mission Control (this happened during NF-19).
+        """
+        html = INDEX.read_text(encoding="utf-8")
+        mission = html.index('id="forgeMissionView"')
+        card = html.index('id="forgeControlCard"')
+        guardian = html.index('id="forgeGuardianView"')
+        self.assertGreater(card, mission, "the control card must be in Mission Control")
+        self.assertLess(card, guardian, "the control card must not be in Guardian")
+
+
+NF20_PLAN_NEEDLE = r"""
+const fs = require('fs');
+global.window = {};
+global.document = { getElementById: function () { return null; } };
+eval(fs.readFileSync(process.argv[1], 'utf8'));
+const L = global.window.NovaForgeLogic;
+if (!L) { console.log(JSON.stringify({ error: 'NovaForgeLogic missing' })); process.exit(0); }
+const allowed = { allow: true, state: 'allowed', reason: '' };
+const blocked = { allow: false, state: 'held', reason: 'The session is PAUSED; input is not allowed while held.' };
+function current(name, extra) {
+  return Object.assign({
+    plan_id: 'p1', status: name, steps: [{ index: 1 }], replan_count: 0,
+    reason: 'why', code: '',
+  }, extra || {});
+}
+function status(plan, extra) {
+  return Object.assign({
+    available: true, running: false, policy: { max_replans: 2 },
+    session: { session_id: 's1', gate: allowed }, current: plan, history: [],
+  }, extra || {});
+}
+function buttons(view) { return [view.build, view.execute, view.cancel, view.replan]; }
+const out = {
+  missing: L.planView(null),
+  ready: L.planView(status(null)),
+  pending: L.planView(status(current('awaiting_approval'))),
+  running: L.planView(status(current('running'), { running: true })),
+  executed: L.planView(status(current('executed'))),
+  exhausted: L.planView(status(current('executed', { replan_count: 2 }))),
+  failed: L.planView(status(current('failed'))),
+  blocked: L.planView(status(current('awaiting_approval'), {
+    session: { session_id: 's1', gate: blocked },
+  })),
+  buttons: {
+    missing: buttons(L.planView(null)),
+    ready: buttons(L.planView(status(null))),
+    pending: buttons(L.planView(status(current('awaiting_approval')))),
+    running: buttons(L.planView(status(current('running'), { running: true }))),
+    executed: buttons(L.planView(status(current('executed')))),
+    exhausted: buttons(L.planView(status(current('executed', { replan_count: 2 })))),
+    blocked: buttons(L.planView(status(current('awaiting_approval'), {
+      session: { session_id: 's1', gate: blocked },
+    }))),
+  },
+};
+console.log(JSON.stringify(out));
+"""
+
+
+@unittest.skipIf(shutil.which("node") is None, "node is not installed")
+class NF20PlanningPanelTests(unittest.TestCase):
+    """Build/Execute/Cancel/Replan are gated by the plan's own state and gate."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        completed = subprocess.run(
+            [shutil.which("node") or "node", "-e", NF20_PLAN_NEEDLE, str(PANEL_JS)],
+            capture_output=True, timeout=60, check=False,
+        )
+        stdout = completed.stdout.decode("utf-8", errors="replace").strip()
+        stderr = completed.stderr.decode("utf-8", errors="replace")
+        if completed.returncode != 0:
+            raise AssertionError(f"node failed: {stderr[:800]}")
+        try:
+            cls.data = json.loads(stdout.splitlines()[-1])
+        except (IndexError, json.JSONDecodeError) as exc:  # pragma: no cover - harness failure
+            raise AssertionError(f"plan driver produced no JSON: {stdout[:400]!r}") from exc
+
+    def test_a_session_with_no_plan_offers_building_only_when_the_gate_allows(self) -> None:
+        self.assertEqual(self.data["buttons"]["missing"], [False, False, False, False])
+        self.assertEqual(self.data["missing"]["badge"], "untested")
+        self.assertEqual(self.data["buttons"]["ready"], [True, False, False, False])
+
+    def test_an_unapproved_plan_can_be_approved_or_cancelled_but_not_replanned(self) -> None:
+        self.assertEqual(self.data["buttons"]["pending"], [True, True, True, False])
+        self.assertEqual(self.data["pending"]["badge"], "awaiting_approval")
+
+    def test_a_blocked_gate_disables_building_and_executing_even_with_a_todo_plan(self) -> None:
+        self.assertEqual(self.data["buttons"]["blocked"], [False, False, True, False])
+        self.assertIn("PAUSED", self.data["blocked"]["gateReason"])
+
+    def test_a_running_plan_allows_only_cancellation(self) -> None:
+        self.assertEqual(self.data["buttons"]["running"], [False, False, True, False])
+        self.assertEqual(self.data["running"]["badge"], "running")
+
+    def test_replanning_is_offered_after_an_end_and_stops_at_its_bound(self) -> None:
+        self.assertEqual(self.data["buttons"]["executed"], [True, False, False, True])
+        self.assertEqual(self.data["buttons"]["exhausted"], [True, False, False, False])
+
+    def test_executing_a_plan_sends_the_server_minted_approval_token(self) -> None:
+        """The press approves THIS preview with the token the server issued for it.
+
+        `approved: true` is a request the caller can write for itself; the token
+        is the server's record that this exact plan was reviewed, and the route
+        refuses without it (403). If the panel ever stopped sending the token the
+        button would look enabled and every press would refuse.
+        """
+        js = PANEL_JS.read_text(encoding="utf-8")
+        start = js.index("async function executePlan")
+        end = js.index("async function cancelPlan", start)
+        body = js[start:end]
+        self.assertIn("current.approval", body)
+        self.assertIn("approval_token: approval.token", body)
+        self.assertIn("approved: true", body)
+        # A refusal repaints from a fresh preview instead of dead-ending.
+        self.assertIn("renderPlan(await loadPlanBody())", body)
+
+    def test_the_card_makes_planning_and_execution_separate_presses(self) -> None:
+        html = INDEX.read_text(encoding="utf-8")
+        for element_id in (
+            "forgePlanCard", "forgePlanBadge", "forgePlanHint", "forgePlanFacts",
+            "forgePlanBuildButton", "forgePlanExecuteButton", "forgePlanCancelButton",
+            "forgePlanReplanButton", "forgePlanCandidates", "forgePlanHistory",
+        ):
+            with self.subTest(element=element_id):
+                self.assertIn(f'id="{element_id}"', html, f"missing #{element_id}")
+        js = PANEL_JS.read_text(encoding="utf-8")
+        self.assertIn('planPath("")', js)
+        for route in ('"/execute"', '"/cancel"', '"/replan"'):
+            self.assertIn("planPath(" + route + ")", js, route)
+        self.assertIn("planView(status)", js)
+        self.assertIn("renderPlan(null)", js)
+        self.assertIn("in-game effect was NOT observed", js)
+        # The card is reachable from Mission Control, not hidden in Guardian.
+        mission = html.index('id="forgeMissionView"')
+        card = html.index('id="forgePlanCard"')
+        guardian = html.index('id="forgeGuardianView"')
+        self.assertGreater(card, mission, "the plan card must be in Mission Control")
+        self.assertLess(card, guardian, "the plan card must not be in Guardian")
+
+
+NF20_PLAN_DOM = r"""
+const fs = require('fs');
+function makeNode(tag, id) {
+  const node = {
+    tagName: String(tag || 'div').toUpperCase(), id: id || '', className: '',
+    textContent: '', _html: '', dataset: {}, children: [], disabled: false, hidden: false,
+    appendChild: function (child) { this.children.push(child); return child; },
+  };
+  Object.defineProperty(node, 'innerHTML', {
+    get: function () { return this._html; },
+    set: function (value) { this._html = value; if (value === '') this.children = []; },
+  });
+  return node;
+}
+const nodes = {};
+[
+  'forgePlanBadge', 'forgePlanHint', 'forgePlanFacts', 'forgePlanCandidates',
+  'forgePlanHistory', 'forgePlanBuildButton', 'forgePlanExecuteButton',
+  'forgePlanCancelButton', 'forgePlanReplanButton',
+].forEach(function (id) { nodes[id] = makeNode('div', id); });
+global.document = {
+  getElementById: function (id) { return nodes[id] || null; },
+  createElement: function (tag) { return makeNode(tag); },
+};
+global.el = function (tag, className, text) {
+  const node = makeNode(tag);
+  node.className = className || '';
+  if (text !== undefined) node.textContent = String(text);
+  return node;
+};
+global.window = {};
+eval(fs.readFileSync(process.argv[1], 'utf8'));
+const L = global.window.NovaForgeLogic;
+function text(node) { return (node.textContent || '') + node.children.map(text).join(' '); }
+function snapshot() {
+  return {
+    badge: nodes.forgePlanBadge.textContent,
+    badgeState: nodes.forgePlanBadge.dataset.state,
+    hint: nodes.forgePlanHint.textContent,
+    buttons: ['forgePlanBuildButton', 'forgePlanExecuteButton', 'forgePlanCancelButton',
+      'forgePlanReplanButton'].map(function (id) { return nodes[id].disabled; }),
+    facts: text(nodes.forgePlanFacts),
+    candidates: text(nodes.forgePlanCandidates),
+    history: text(nodes.forgePlanHistory),
+  };
+}
+const plan = {
+  plan_id: 'p1', status: 'awaiting_approval', reason: 'why', code: '',
+  steps: [{ index: 1 }, { index: 2 }],
+  budgets: { max_actions: 4 }, approval: { status: 'pending' },
+  evidence_refs: { state_id: 'state-9xt', state_age_seconds: 1.2 },
+  objective: { description: 'Collect the audit tokens' }, replan_count: 0,
+  candidates: [
+    { description: 'Hold W', feasible: true, score: 4.3, risk: 'low', expected_cost_ms: 170 },
+    { description: 'Press Q', feasible: false, rejection: 'not a key this build knows' },
+  ],
+  execution: {}, effect_verified: false,
+};
+const status = {
+  available: true, running: false, policy: { max_replans: 2 },
+  session: { session_id: 's1', gate: { allow: true, state: 'allowed', reason: '' } },
+  current: plan, history: [{ status: 'awaiting_approval', code: '', reason: 'because' }],
+};
+L.renderPlan(status);
+const withPlan = snapshot();
+L.renderPlan(null);
+const without = snapshot();
+console.log(JSON.stringify({ withPlan: withPlan, without: without }));
+"""
+
+
+@unittest.skipIf(shutil.which("node") is None, "node is not installed")
+class NF20PlanRendererDomTests(unittest.TestCase):
+    """The real renderPlan builds the card from the server's own plan record."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        completed = subprocess.run(
+            [shutil.which("node") or "node", "-e", NF20_PLAN_DOM, str(PANEL_JS)],
+            capture_output=True, timeout=60, check=False,
+        )
+        stdout = completed.stdout.decode("utf-8", errors="replace").strip()
+        stderr = completed.stderr.decode("utf-8", errors="replace")
+        if completed.returncode != 0:
+            raise AssertionError(f"node failed: {stderr[:800]}")
+        try:
+            cls.data = json.loads(stdout.splitlines()[-1])
+        except (IndexError, json.JSONDecodeError) as exc:  # pragma: no cover - harness failure
+            raise AssertionError(f"plan DOM driver produced no JSON: {stdout[:400]!r}") from exc
+
+    def test_the_card_shows_the_objective_steps_approval_and_effect_gap(self) -> None:
+        card = self.data["withPlan"]
+        self.assertEqual(card["badge"], "awaiting_approval")
+        self.assertEqual(card["badgeState"], "awaiting_approval")
+        self.assertIn("Collect the audit tokens", card["facts"])
+        self.assertIn("2 of 4", card["facts"])
+        self.assertIn("pending", card["facts"])
+        self.assertIn("not observed (NF-21)", card["facts"])
+        self.assertIn("1.2 s", card["facts"])
+
+    def test_selected_and_rejected_candidates_both_carry_their_reason(self) -> None:
+        candidates = self.data["withPlan"]["candidates"]
+        self.assertIn("selected: Hold W", candidates)
+        self.assertIn("score 4.3", candidates)
+        self.assertIn("rejected: Press Q", candidates)
+        self.assertIn("not a key this build knows", candidates)
+
+    def test_the_buttons_follow_the_plan_and_history_is_shown(self) -> None:
+        card = self.data["withPlan"]
+        self.assertEqual(card["buttons"], [False, False, False, True])
+        self.assertIn("because", card["history"])
+        self.assertIn("awaiting_approval", card["hint"])
+
+    def test_an_unread_card_is_honest_and_disables_everything(self) -> None:
+        card = self.data["without"]
+        self.assertEqual(card["badge"], "untested")
+        self.assertEqual(card["buttons"], [True, True, True, True])
+        self.assertIn("has not been read", card["hint"])
+        self.assertEqual(card["facts"], "")
