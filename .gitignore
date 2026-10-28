@@ -36,11 +36,10 @@ token.txt
 # Generated Build artifacts (Build tab "Save to disk")
 build_workspace/
 /.codex-audit-temp/
-# NF-23…NF-26 verification session artifacts. The probe scripts and the raw JSON
-# numbers are kept because the reports cite them by path; the logs, frame dumps
-# and rendered PNGs they produced are not (they are tens of megabytes).
-.nc23_tmp/**/*.log
-.nc23_tmp/out/
-.nc24_tmp/**/*.log
-.nc_cap_evidence/**/*.png
-.nc_audit_full.log
+# NF-23…NF-26 verification session artifacts — scratch evidence, never product.
+# The phase reports cite these paths, and the reports already call them untracked:
+# a probe script is a throwaway driver for one measurement, not code the app ships.
+# Ignored wholesale so none of it can be committed again; rerunning a report's repro
+# command recreates the script, and the measurements it quoted stay in the report.
+/.nc*/
+/.nc_*

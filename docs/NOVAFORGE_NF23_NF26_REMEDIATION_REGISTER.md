@@ -17,6 +17,13 @@ are marked here as re-verified rather than re-opened.
 | Host | Windows 11, Python 3.13, 16.5 GB RAM; no game launched, no input injected into any game |
 | Files added by this pass (scratch, not product) | `.nc_probe_nf23_reachable.py`, `.nc_probe_nf23_frames.py`, `.nc_audit_workflows.py`, `.nc_audit_nf25_nf26.py` |
 
+**Correction (2026-10-28).** The packaging commit that followed this pass (`55d0c4d`) swept 34
+`.nc*` scratch files into the repository, contradicting every report that calls them untracked.
+They are no longer tracked (`git rm --cached`, no working-tree deletion) and `.gitignore` now
+covers `/.nc*/` and `/.nc_*` wholesale, so none of them can be committed again. The files remain
+on the author's disk, so the evidence paths below still resolve locally; a fresh clone recreates
+them by rerunning a report's repro command.
+
 ## 2. Disposition key
 
 | Code | Meaning |

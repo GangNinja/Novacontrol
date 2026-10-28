@@ -405,7 +405,9 @@ python scripts/novaforge_nf26_learning_eval.py
 python scripts/novaforge_nf25_task_eval.py
 python scripts/novaforge_nf22_autonomy_acceptance.py
 
-# live probes used in this pass (no game, no input; the harness window is disposable)
+# live probes used in this pass (no game, no input; the harness window is disposable).
+# These are session-local scratch, not product: /.nc*/ and /.nc_* are gitignored, so a
+# fresh clone recreates them from this description before rerunning the evidence.
 python .nc_probe_nf23_reachable.py
 python .nc_probe_nf23_frames.py
 python .nc_audit_workflows.py
