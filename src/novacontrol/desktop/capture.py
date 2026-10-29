@@ -637,8 +637,19 @@ class PersistentScreenCapture:
         if reply.startswith("err "):
             return CaptureResult(False, error=reply[4:].strip(), persistent=True)
         parts = reply.split(" ")
-        elapsed_ms = int(parts[1]) if len(parts) >= 2 else 0
-        detail = reply.split(" ", 2)[2] if len(parts) >= 3 else ""
+        # The worker normally answers ``ok <ms> <detail>``. A reply that omits the
+        # elapsed field (``ok <detail>``) still carries the fact we asked for, and
+        # reading its first token as a millisecond count raised ValueError on a
+        # live window's geometry line — which failed that capture and every
+        # observation that followed it. The number is a measurement, never the
+        # payload, so a missing one is 0 rather than an exception.
+        elapsed_ms = 0
+        detail = ""
+        if len(parts) >= 3 and parts[1].isdigit():
+            elapsed_ms = int(parts[1])
+            detail = reply.split(" ", 2)[2]
+        elif len(parts) >= 2 and reply.startswith("ok "):
+            detail = reply[len("ok ") :].strip()
         return CaptureResult(True, error="", elapsed_ms=elapsed_ms, persistent=True, detail=detail)
 
     async def window_geometry(
@@ -767,6 +778,11 @@ class PersistentScreenCapture:
             raw = await asyncio.wait_for(process.stdout.readline(), timeout)
         except TimeoutError:
             self.last_error = f"the capture worker did not answer in {timeout:.0f}s"
+            # The worker may still answer the command we stopped waiting for, and
+            # that late line would then be consumed as the NEXT command's reply
+            # (``find`` returning the previous query's window, or a geometry line
+            # arriving where a frame was expected). Mark the pipe for a restart.
+            self._desynced = True
             return None
         except Exception as exc:
             self.last_error = f"reading the capture worker failed: {type(exc).__name__}: {exc}"

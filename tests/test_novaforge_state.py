@@ -608,6 +608,8 @@ class FakeObserver:
         title: str = "NC FORGE AUDIT TICK - 786",
         frame: Path | None = None,
         tested: bool = True,
+        interval: float | None = None,
+        capture_ms: float | None = None,
     ) -> None:
         self.session_id = session_id
         self.seq = seq
@@ -617,6 +619,10 @@ class FakeObserver:
         self.title = title
         self._frame = frame
         self.tested = tested
+        #: The real observer reports these, and the freshness window is judged
+        #: against them; ``None`` keeps the pre-cadence behaviour (the floor).
+        self.interval = interval
+        self.capture_ms = capture_ms
         self.observation_id = f"{session_id}:{seq:04d}"
 
     def status(self) -> dict[str, Any]:
@@ -628,13 +634,20 @@ class FakeObserver:
                 "width": self.width,
                 "height": self.height,
                 "backend": "printwindow",
+                "capture_ms": self.capture_ms,
             }
             if self.tested
             else None
         )
+        interval = (
+            {"requested_seconds": self.interval, "applied_seconds": self.interval}
+            if self.interval is not None
+            else {}
+        )
         return {
             "state": "observing",
             "session_id": self.session_id,
+            "interval": interval,
             "game": "NC FORGE AUDIT TICK",
             "target": {
                 "title": self.title,
@@ -714,6 +727,34 @@ class GameStateServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(outcome.analyzed)
         self.assertEqual(outcome.reason_code, "observation_stale")
         self.assertIn("record, not a current state", outcome.reason)
+
+    async def test_a_frame_as_old_as_the_observers_own_cadence_is_read(self) -> None:
+        """A 5 s interval plus 1.4 s capture makes the newest frame ~6.4 s old.
+
+        The fixed 5 s window refused that frame as stale, so the state reader
+        could never succeed on a target it could not capture more often than
+        that — the refusal was of the only frame that existed.
+        """
+        observer = FakeObserver(
+            at=stamp(seconds_ago=6.4),
+            frame=self.frame,
+            interval=5.0,
+            capture_ms=1400.0,
+        )
+        outcome = await self.service(observer).analyze()
+        self.assertTrue(outcome.analyzed, outcome.reason)
+
+    async def test_a_frame_far_older_than_the_cadence_is_still_stale(self) -> None:
+        observer = FakeObserver(
+            at=stamp(seconds_ago=20.0),
+            frame=self.frame,
+            interval=5.0,
+            capture_ms=1400.0,
+        )
+        outcome = await self.service(observer).analyze()
+        self.assertFalse(outcome.analyzed)
+        self.assertEqual(outcome.reason_code, "observation_stale")
+        self.assertIn("7.4s", outcome.reason)
 
     async def test_an_unreadable_timestamp_is_refused_rather_than_assumed_fresh(self) -> None:
         service = self.service(FakeObserver(at="not-a-date"))

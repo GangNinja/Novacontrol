@@ -58,7 +58,13 @@ __all__ = [
 STATE_NAMESPACE = "novaforge_state"
 
 #: Default freshness window: a frame older than this is a record, not a state.
+#: This is a FLOOR, not a fixed limit — see ``GameStateService._freshness_limit``.
 DEFAULT_MAX_AGE_SECONDS = 5.0
+
+#: Ceiling the observation cadence may widen the freshness window to. A pipeline
+#: that cannot produce a frame within this long is not a state reader at all, and
+#: saying so is better than silently reading something ancient.
+DEFAULT_MAX_AGE_CEILING = 30.0
 
 #: Default ceiling on one analysis (perception is CPU-bound on this laptop).
 DEFAULT_ANALYZE_TIMEOUT = 25.0
@@ -299,6 +305,42 @@ class GameStateService:
             if future.done() and self._worker is future:
                 self._worker = None
 
+    def _freshness_limit(self, status: Mapping[str, Any] | None = None) -> float:
+        """The window a frame is judged against — never shorter than the cadence.
+
+        A fixed window shorter than the observer's own frame period refuses every
+        reading the pipeline can produce. The concrete case: the observer's own
+        maximum interval is 5.0 s and a large window takes ~1.4 s to capture, so
+        the newest frame is already ~6.4 s old when it lands — a 5.0 s limit then
+        reports ``observation_stale`` for the ONLY frame that exists and the
+        feature can never work on that target, however often it is retried.
+
+        The configured ``max_age_seconds`` stays the floor. The observer's applied
+        interval plus its last measured capture may raise the window (one second
+        of slack for a read that starts mid-cycle), bounded by
+        ``DEFAULT_MAX_AGE_CEILING`` so a broken probe cannot make anything "fresh".
+        An observer that reports no interval keeps the floor, which is why every
+        existing refusal — and every test that pins one — is unchanged.
+        """
+        base = max(0.0, float(self.max_age_seconds))
+        if status is None:
+            try:
+                status = self.observer.status()
+            except Exception:  # noqa: BLE001 - an unreadable observer keeps the floor
+                return base
+        try:
+            interval = float(_mapping(status.get("interval")).get("applied_seconds") or 0.0)
+        except (TypeError, ValueError):
+            interval = 0.0
+        if interval <= 0.0:
+            return base
+        try:
+            capture = float(_mapping(status.get("last_success")).get("capture_ms") or 0.0) / 1000.0
+        except (TypeError, ValueError):
+            capture = 0.0
+        cadence = interval + max(0.0, capture)
+        return max(base, min(cadence + 1.0, DEFAULT_MAX_AGE_CEILING))
+
     # ── the reading ────────────────────────────────────────────────────────
     async def analyze(self, *, profile_id: str | None = None) -> AnalysisOutcome:
         """Read one state from the newest validated observation, or refuse.
@@ -359,11 +401,12 @@ class GameStateService:
                 "The last validated observation has no readable timestamp, so its "
                 "freshness cannot be established.",
             )
-        if age > max(0.0, float(self.max_age_seconds)):
+        limit = self._freshness_limit(status)
+        if age > limit:
             return self._refuse(
                 "observation_stale",
                 f"The last validated frame is {age:.1f}s old (limit "
-                f"{self.max_age_seconds:.1f}s); this is a record, not a current state.",
+                f"{limit:.1f}s); this is a record, not a current state.",
             )
         try:
             path = self.observer.frame_path()
@@ -712,7 +755,7 @@ class GameStateService:
                     "average": round(sum(durations) / len(durations), 1) if durations else None,
                     "max": max(durations) if durations else None,
                 },
-                "freshness_limit_seconds": self.max_age_seconds,
+                "freshness_limit_seconds": self._freshness_limit(),
                 "analyze_timeout_seconds": self.analyze_timeout,
             },
             "limitations": [

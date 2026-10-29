@@ -1103,5 +1103,71 @@ class FrameRecordPersistenceTests(unittest.TestCase):
         self.assertEqual(reloaded.validation["livable"], True)
 
 
+def _canned_worker(reply: str) -> Any:
+    """A capture worker whose reply is fixed, with no process behind it."""
+    from novacontrol.desktop.capture import PersistentScreenCapture
+
+    class _Canned(PersistentScreenCapture):
+        async def _exchange(self, command: str, timeout: float) -> tuple[str, str]:
+            return reply, ""
+
+    return _Canned()
+
+
+class WorkerReplyParsingTests(unittest.IsolatedAsyncioTestCase):
+    """The worker's reply shape is parsed without inventing a measurement.
+
+    Measured failure (Supermarket Together, 2880x1800): the geometry reply was
+    answered once without its elapsed field, ``send_input`` read the geometry
+    line as a millisecond count and raised ``ValueError`` out of ``find``, which
+    failed that capture AND every observation after it — the observer counted
+    five consecutive rejections and stopped. A missing number is a missing
+    measurement, never a missing payload.
+    """
+
+    GEOMETRY = (
+        "7670684|0,0,2880,1800|0,0,2880,1800|36016|2|0|0|1|Supermarket Together"
+    )
+
+    async def test_a_reply_without_its_elapsed_field_still_carries_the_geometry(
+        self,
+    ) -> None:
+        from novacontrol.desktop.capture import _parse_geometry
+
+        worker = _canned_worker(f"ok {self.GEOMETRY}")
+        result = await worker.send_input("find Supermarket Together")
+        self.assertTrue(result.ok)
+        self.assertEqual(result.detail, self.GEOMETRY)
+        self.assertEqual(result.elapsed_ms, 0)
+        parsed = _parse_geometry(result.detail)
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.handle, 7670684)
+        self.assertEqual(parsed.pid, 36016)
+        self.assertEqual(parsed.title, "Supermarket Together")
+
+    async def test_the_normal_reply_still_reads_its_elapsed_and_detail(self) -> None:
+        worker = _canned_worker(f"ok 24 {self.GEOMETRY}")
+        result = await worker.send_input("find Supermarket Together")
+        self.assertEqual(result.elapsed_ms, 24)
+        self.assertEqual(result.detail, self.GEOMETRY)
+
+    async def test_a_stalled_read_marks_the_pipe_for_a_restart(self) -> None:
+        from novacontrol.desktop.capture import PersistentScreenCapture
+
+        class _Stalled:
+            async def readline(self) -> bytes:
+                await asyncio.sleep(5)
+                return b""
+
+        class _Process:
+            stdout = _Stalled()
+
+        worker = PersistentScreenCapture()
+        worker._process = _Process()  # type: ignore[assignment]
+        self.assertIsNone(await worker._read_line(0.01))
+        self.assertTrue(worker._desynced)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
