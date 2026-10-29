@@ -99,6 +99,11 @@ class ControlKind(StrEnum):
     MOUSE_RELEASE = "mouse_release"
     MOUSE_HOLD = "mouse_hold"
     WAIT = "wait"
+    #: Raise the session's own target window to the foreground. It exists
+    #: because every other kind REQUIRES the target to be in front: without a
+    #: way to put it there, a target that lost focus could never be acted on
+    #: again, and the interface's safety check became a permanent refusal.
+    FOCUS = "focus"
 
 
 CONTROL_KINDS = frozenset(kind.value for kind in ControlKind)
@@ -845,29 +850,30 @@ class GameControlService:
                     " ".join(mismatches) + " Nothing was sent.",
                     started,
                 )
-            if bool(getattr(geometry, "minimized", False)):
-                return self._finish(
-                    result,
-                    "target_minimized",
-                    "The target window is minimized; input is refused until it is restored.",
-                    started,
-                )
-            if not bool(getattr(geometry, "visible", True)):
-                return self._finish(
-                    result,
-                    "target_hidden",
-                    "The target window is not visible; input is refused.",
-                    started,
-                )
-            if self.policy.require_foreground and not bool(
-                getattr(geometry, "foreground", False)
-            ):
-                return self._finish(
-                    result,
-                    "not_foreground",
-                    "The target is not the foreground window; input would land elsewhere.",
-                    started,
-                )
+            if action.kind is not ControlKind.FOCUS:
+                if bool(getattr(geometry, "minimized", False)):
+                    return self._finish(
+                        result,
+                        "target_minimized",
+                        "The target window is minimized; input is refused until it is restored.",
+                        started,
+                    )
+                if not bool(getattr(geometry, "visible", True)):
+                    return self._finish(
+                        result,
+                        "target_hidden",
+                        "The target window is not visible; input is refused.",
+                        started,
+                    )
+                if self.policy.require_foreground and not bool(
+                    getattr(geometry, "foreground", False)
+                ):
+                    return self._finish(
+                        result,
+                        "not_foreground",
+                        "The target is not the foreground window; input would land elsewhere.",
+                        started,
+                    )
             if action.x is not None and action.y is not None and hasattr(geometry, "contains"):
                 if not geometry.contains(action.x, action.y, client=True):
                     bounds = (
@@ -992,6 +998,11 @@ class GameControlService:
             await guard.release_button(action.button)
         elif kind is ControlKind.WAIT:
             await wait_bounded(action.duration_ms, runner.abort)
+        elif kind is ControlKind.FOCUS:
+            # The worker raises the window AND verifies GetForegroundWindow, so a
+            # completed focus is the precondition of every other kind, measured.
+            await runner.input.focus(action.target.handle)
+            await self._note_dispatch(action, result)
         else:  # pragma: no cover - ControlKind is closed and validated first
             raise ValueError(f"Unsupported control kind: {kind!r}.")
         # A stop request that arrived DURING the input edge (a slow press, a
@@ -1069,6 +1080,11 @@ class GameControlService:
     def _completed_reason(self, action: ControlAction) -> str:
         if action.kind is ControlKind.WAIT:
             return "The bounded wait elapsed; no input was sent."
+        if action.kind is ControlKind.FOCUS:
+            return (
+                "The target window was raised to the foreground and the worker "
+                "verified it is the foreground window; no gameplay input was sent."
+            )
         if action.kind in _PRESS_KINDS:
             return (
                 "The press was sent and the input is held by this interface until a "

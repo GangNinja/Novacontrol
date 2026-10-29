@@ -1780,8 +1780,25 @@ class NovaForgeManager:
         }
 
     async def observe_frame_once(self) -> dict[str, Any]:
-        """One immediate read; a concurrent read is answered ``busy``."""
-        return await self.observer.observe_once()
+        """One immediate read of the target.
+
+        A continuously sampling observer is nearly always mid-capture, so a
+        forced one-shot read answers ``busy`` almost every time. A caller that
+        asked for "a frame now" and was told "busy" then stopped for an
+        observation it already had: the newest COMPLETED row is returned
+        instead, and it carries its own ``captured_at``, so freshness and
+        target identity are still judged by the caller rather than assumed here.
+        """
+        answer = await self.observer.observe_once()
+        if str(answer.get("status") or "") != "busy":
+            return answer
+        last = self.observer.status().get("last_observation")
+        if isinstance(last, Mapping) and str(last.get("status") or "") in {
+            "observed",
+            "rejected",
+        }:
+            return dict(last)
+        return answer
 
     def observation_frame_path(self) -> Path | None:
         """The newest VALIDATED observation frame, or None.
@@ -3931,6 +3948,55 @@ class NovaForgeManager:
         ]
         return trace
 
+    async def _arm_observation_for(self, session_id: str) -> dict[str, Any] | None:
+        """Bind the observation pipeline to this session's target before a run reads it.
+
+        A session's own capture loop and the NF-15 observer an autonomous run
+        reads are two different objects. Starting a run while that observer was
+        idle made every run stop at its very first stage with ``not_observing``:
+        the agent had no eye, which is not a bad decision. Arming it here is
+        wiring, not a second path — the run still reads through that observer.
+
+        Returns a refusal answer when observation cannot be armed; ``None`` means
+        the run may proceed.
+        """
+        record = self._sessions.get(session_id)
+        target = getattr(record, "target", None) if record is not None else None
+        if target is None:
+            # No session or no pinned window: the controller reports that itself.
+            return None
+        status = self.observer.status()
+        state = str(status.get("state") or "").lower()
+        current = status.get("target") or {}
+        same = str(current.get("title") or "").strip() == str(target.title).strip() and int(
+            current.get("pid") or 0
+        ) == int(target.pid or 0)
+        if same and state == "observing":
+            return None
+        if same and state == "paused":
+            await self.observer.resume()
+            return None
+        if state in {"observing", "paused"} and not same:
+            # One observer, one target: it is re-pinned to the session this run
+            # was approved for rather than left watching a different window.
+            await self.observer.stop("re-pinned to the session target")
+        answer = await self.observer.start(
+            title=str(target.title),
+            game=str(getattr(record, "game", "") or ""),
+            pid=int(target.pid or 0),
+        )
+        if answer.get("started"):
+            return None
+        return {
+            "started": False,
+            "code": str(answer.get("reason_code") or "observation_unavailable"),
+            "reason": (
+                "An autonomous run reads frames through the observation pipeline, "
+                "and it could not be armed for this session's target: "
+                + str(answer.get("reason") or "no reason was given.")
+            ),
+        }
+
     async def start_autonomy(
         self,
         session_id: str,
@@ -3948,6 +4014,14 @@ class NovaForgeManager:
         """
         controller = self.autonomy()
         parsed = self._autonomy_limits(limits)
+        blind = await self._arm_observation_for(session_id)
+        if blind is not None:
+            self._autonomy_event(
+                session_id,
+                "autonomy.declined",
+                {"code": str(blind.get("code") or ""), "reason": str(blind.get("reason") or "")},
+            )
+            return blind
         answer = await controller.start(
             session_id, approved=approved, note=note, task=task, limits=parsed
         )

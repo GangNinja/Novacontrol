@@ -1517,9 +1517,11 @@ def create_app() -> Any:
         """Run ONE typed, bounded input action; a refusal is a 200 with its code.
 
         Body: `kind` (`key_press`/`key_release`/`key_hold`/`mouse_move`/
-        `mouse_press`/`mouse_release`/`mouse_hold`/`wait`) plus the kind's own
-        parameters (`key`, `button`, `x`, `y`, `duration_ms`, `deadline_ms`).
-        Completion is the input operation's contract, never a verified effect.
+        `mouse_press`/`mouse_release`/`mouse_hold`/`wait`/`focus`) plus the
+        kind's own parameters (`key`, `button`, `x`, `y`, `duration_ms`,
+        `deadline_ms`). Completion is the input operation's contract, never a
+        verified effect --- except `focus`, whose worker re-reads the foreground
+        window and refuses when the target did not arrive in front.
         """
         try:
             return await nova.novaforge.control_execute(session_id, payload)

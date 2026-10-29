@@ -109,6 +109,7 @@ class ControlModelTests(unittest.TestCase):
             "mouse_release": {},
             "mouse_hold": {"x": 500, "y": 300, "duration_ms": 100},
             "wait": {"duration_ms": 50},
+            "focus": {},
         }
         self.assertEqual(set(samples), set(CONTROL_KINDS))
         for kind, fields in samples.items():
@@ -301,6 +302,40 @@ class ControlExecutionTests(unittest.IsolatedAsyncioTestCase):
         result = await service.execute(action("key_press", key="w"))
         self.assertEqual(result.code, "target_minimized")
         self.assertEqual(injector.presses, [])
+
+    async def test_a_focus_action_is_allowed_exactly_when_other_input_is_not(self) -> None:
+        # The refusal that protects every other kind must not protect the one
+        # kind whose job is to remove its cause: a background target can be
+        # focused, and a focused target can then be acted on.
+        service, _runner, injector = make_service(window=geometry(foreground=False))
+        focused = await service.execute(action("focus"))
+        self.assertEqual(focused.status, ControlStatus.COMPLETED)
+        self.assertEqual(injector.focuses, [0x1234])
+        self.assertIn("verified it is the foreground window", focused.reason)
+        self.assertEqual(injector.presses, [])
+
+        minimized = geometry()
+        minimized = WindowGeometry(
+            handle=minimized.handle,
+            title=minimized.title,
+            bounds=minimized.bounds,
+            client=minimized.client,
+            pid=minimized.pid,
+            minimized=True,
+        )
+        service, _runner, injector = make_service(window=minimized)
+        raised = await service.execute(action("focus"))
+        self.assertEqual(raised.status, ControlStatus.COMPLETED)
+        self.assertEqual(injector.focuses, [0x1234])
+
+    async def test_a_focus_action_never_sends_a_key_or_a_click(self) -> None:
+        service, _runner, injector = make_service(window=geometry(foreground=False))
+        result = await service.execute(action("focus", key="w", x=5, y=5))
+        self.assertEqual(result.status, ControlStatus.REJECTED)
+        self.assertTrue(result.reason)
+        self.assertEqual(injector.focuses, [])
+        self.assertEqual(injector.presses, [])
+        self.assertEqual(injector.moves, [])
 
     async def test_a_point_outside_the_client_area_is_refused(self) -> None:
         service, _runner, injector = make_service()

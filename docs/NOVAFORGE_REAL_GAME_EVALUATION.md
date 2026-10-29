@@ -259,3 +259,137 @@ without foreground, and the process exited twice on its own.
    capturing at native scale with a cheaper encoding path.
 5. **Record process liveness per session** so a self-exit is attributed to the
    game (with its exit time) rather than surfacing as an unexplained pause.
+
+---
+
+# ADDENDUM — Second pass: making NovaForge the actor
+
+The first pass ended with input refused. This pass fixed that and drove the
+whole chain through NovaForge's own API, with no manual clicking by the operator.
+
+## A. Defects found and fixed in this pass
+
+**D-4 — There was no way to focus the target, so every action was refused.**
+`ControlPolicy.require_foreground` is correct, but no control kind could satisfy
+it: a target that lost focus (or that NovaForge launched itself) could never be
+acted on again. Added `ControlKind.FOCUS` (`{"kind": "focus"}`): the capture
+worker restores a minimized window, attaches to the foreground thread
+(`AttachThreadInput`), raises the window, and **re-reads `GetForegroundWindow`**
+— a focus that did not arrive is an error, not a "completed". `Describe` now also
+treats a child window as foreground when its top-level window is.
+Evidence: `focus -> completed | "The target window was raised to the foreground
+and the worker verified it is the foreground window"`.
+
+**D-5 — An autonomous run never armed the observation it reads.**
+A session's capture loop and the NF-15 observer are different objects; the
+observer was idle, so every run stopped at its first stage with
+`not_observing` ("Observation is idle; no read was attempted"). `start_autonomy`
+now binds the observer to the session's own pinned target (re-pinning it if it
+was watching something else) and refuses the start — instead of starting a blind
+run — when it cannot be armed.
+
+**D-6 — A busy capture was retried faster than a capture takes.**
+After D-5 the run reported `capture_in_flight` and still died: retries were 0.2 s
+apart while a 2880×1800 capture takes ~1.1 s, so every retry met the same capture.
+The wait is now `CAPTURE_IN_FLIGHT_WAIT_SECONDS = 1.6` for `busy` and 0.25 s for
+`not_observing`.
+
+**D-7 — A continuously sampling observer always answers a forced read `busy`.**
+`observe_frame_once` now returns the newest COMPLETED observation when the read
+would be refused as busy, carrying its own `captured_at`, so freshness and target
+identity are still the caller's to judge.
+
+## B. What NovaForge actually did in the real game
+
+Launched through NovaForge (plan → approval token → `LAUNCH_VERIFIED`, pid
+22212), session `6895259559274aebb0e2314e41f2f56f` pinned to the game window at
+2880×1800, then every input below was issued **through
+`POST /sessions/{id}/control`**:
+
+| Step | Result |
+| --- | --- |
+| `focus` | completed — verified in front |
+| `mouse_move (378,438)` + press + release | completed |
+| **Observed effect** | the game left its main menu and rendered **"Select a store to continue"** with the existing save `NARASIMHA · Day 23` |
+| `focus` + click Continue `(762,765)` | completed |
+| **Observed effect** | still on the store-select screen (the second click did not land on the intended control) |
+
+This is the first verified **action → observed outcome** pair in this evaluation:
+the frame changed because NovaForge clicked, not because a menu timed out.
+Evidence: `data/nf_eval/after_new_store2.png` (post-click frame),
+`data/nf_eval/live_frame.png` (main menu, pre-click).
+
+## C. The task the operator asked for, and where it stops
+
+Objective given to NovaForge verbatim:
+
+> "Place products on the store shelves, keep the stock values correct, and order
+> any product whose stock is below 30."
+
+`POST /sessions/{id}/autonomy/start` accepted it (`started: true`), and the run
+then advanced through its own stages without operator input:
+
+1. approval recorded;
+2. observation armed and a frame read (**D-5/D-6/D-7 were what blocked this**);
+3. state read attempted from that frame;
+4. **stopped**: `observation_unavailable` —
+   "The target or the newest observation changed while the state was being read;
+   the result was discarded rather than attributed to it."
+   (`reason_code: observation_superseded`)
+
+### Root cause of the stop (open)
+
+`GameStateService.analyze` refuses a reading unless the frame it read is *still
+the observer's newest success*. A continuously sampling observer produces a newer
+frame every ~1–6 s while perception runs, so **no reading can ever be attributed
+while the observer is sampling** — the exact configuration autonomy uses. The
+refusal is not a wrong decision by the agent; it is the reading being discarded
+before the agent could decide anything.
+
+Two candidate corrections, both deliberate design choices rather than a bug fix:
+
+- **Freshness instead of newest** (recommended): accept a reading whose source
+  frame is still inside the freshness window and whose target is unchanged,
+  recording which frame it described. Requires re-specifying
+  `test_a_superseded_observation_discards_the_result` to supersede with an *aged*
+  frame, preserving its invariant, plus a new test for the fresh-but-newer case.
+- **Pinned read**: have the run pin one observation for the duration of the read
+  and refuse only if that pinned frame is replaced or the target changes.
+
+Until one is chosen, no autonomous decision cycle can complete on a live target,
+so **every objective above is NOT PASS**.
+
+## D. Binary objective scorecard
+
+| # | Objective | Status | Evidence / reason |
+| --- | --- | --- | --- |
+| 1 | Game discovery and selection | **PASS** | `/library` lists the installed title; `/windows` lists the running one |
+| 2 | Game launch / attachment | **PASS** | `LAUNCH_VERIFIED` with pid + window title, twice |
+| 3 | Correct process and window identification | **PASS** | session target pins handle/pid/2880×1800; mismatches refused |
+| 4 | Actual game display in the workspace | **PASS** | real 2880×1800 frames served over `/novaforge/frames/{id}`, content inspected |
+| 5 | Fresh observation acquisition | **PASS** | 29/29 then 21/21 frames, 0 stale, median 1 065 ms |
+| 6 | Observation timestamps / session association | **PASS** | `captured_at`, `age_seconds`, session id on every row |
+| 7 | Relevant state interpretation | **NOT PASS** | `observation_superseded` on every read; no game profile for this title |
+| 8 | Natural-language objective ingestion | **PASS** | task accepted and recorded on the run |
+| 9 | Decision generation from actual state | **NOT PASS** | needs #7 |
+| 10 | Actual input execution | **PASS** | `focus` + 3 edges completed; window verified foreground first |
+| 11 | Action-result verification | **PASS for one action** | menu → store-select observed after the click; second click landed nowhere |
+| 12 | Repeated autonomous cycles | **NOT PASS** | run stops at cycle 1 (#7) |
+| 13 | Adaptation to changing state | **NOT PASS** | not reached |
+| 14 | Recovery from failed actions | **NOT PASS** | not reached |
+| 15 | Live instruction updates | **NOT PASS** | not reached |
+| 16 | Launch Game control | **PASS** | route + approval token, verified launch |
+| 17 | Start Autonomous Play control | **PASS** | run started, bounds applied |
+| 18 | Pause / Resume | **NOT PASS** | route exists; not exercised in this pass |
+| 19 | Stop | **PASS** | session time limit ended a session at exactly its bound |
+| 20 | Emergency stop + input release | **NOT PASS** | not exercised |
+| 21 | Runtime status / telemetry | **PASS** | telemetry with capture counts and latency percentiles |
+| 22 | Session lifecycle / error handling | **PASS** | `target_lost` pause, time-limit stop, refusal codes |
+| 23 | UI responsiveness | **NOT PASS** | not re-verified this pass (server restarted) |
+| 24 | Session evidence / diagnostics | **PASS** | frames, timeline, autonomy trace, launch receipts |
+| 25 | Regression protection | **PASS** | 224 tests across control/autonomy/state; 151 across capture/state/gameplay API |
+
+**Total in-scope: 25. PASS: 14. NOT PASS: 11. Overall: NOT PASS.**
+
+Per the binary policy, overall PASS requires 25/25. Nothing here is a partial
+pass.

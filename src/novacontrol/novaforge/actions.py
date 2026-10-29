@@ -439,6 +439,15 @@ class ScreenInput:
     async def move(self, x: int, y: int) -> None:
         await self._command(f"move {x} {y}")
 
+    async def focus(self, handle: int) -> None:
+        """Raise the target window to the foreground, verified by the worker.
+
+        A refusal raises like any other failed command: a caller that believed a
+        window was focused when it was not would send the next keystroke to
+        whatever really is in front.
+        """
+        await self._command(f"focus {int(handle)}")
+
 
 async def wait_bounded(ms: int, abort: InputStop) -> None:
     """Sleep ``ms`` in small slices so a stop request interrupts a hold.
@@ -457,13 +466,15 @@ async def wait_bounded(ms: int, abort: InputStop) -> None:
 
 
 class ActionInjector(Protocol):
-    """The three edges a runner needs. No policy, no state: just injection."""
+    """The edges a runner needs. No policy, no state: just injection."""
 
     async def press(self, kind: str, name: str) -> None: ...
 
     async def release(self, kind: str, name: str) -> None: ...
 
     async def move(self, x: int, y: int) -> None: ...
+
+    async def focus(self, handle: int) -> None: ...
 
 
 @dataclass(slots=True)

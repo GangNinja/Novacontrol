@@ -80,6 +80,12 @@ public static class NCDesktop
     [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT point);
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
     [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr hWnd, IntPtr hdc, uint flags);
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
     delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
     // Window-surface capture. PW_RENDERFULLCONTENT (2) asks the window to render
@@ -94,6 +100,41 @@ public static class NCDesktop
     }
 
     public static bool IsMinimized(IntPtr hWnd) { return IsIconic(hWnd); }
+
+    // Foreground activation, VERIFIED rather than assumed. Windows refuses
+    // SetForegroundWindow from a process that does not own the current
+    // foreground window, so this thread is attached to that window's thread for
+    // the duration of the call (the documented workaround) and a released Alt
+    // tap lifts the foreground lock when the attach is not enough. The return
+    // value is an observation, not an attempt: false means the window is still
+    // not in front, which is exactly what a caller must not paper over.
+    public static bool Focus(IntPtr hWnd)
+    {
+        if (hWnd == IntPtr.Zero) return false;
+        IntPtr root = GetAncestor(hWnd, 2);
+        if (root != IntPtr.Zero) hWnd = root;
+        if (IsIconic(hWnd)) ShowWindow(hWnd, 9);
+        IntPtr before = GetForegroundWindow();
+        uint unused;
+        uint otherThread = GetWindowThreadProcessId(before, out unused);
+        uint mine = GetCurrentThreadId();
+        bool attached = false;
+        try
+        {
+            if (otherThread != 0 && otherThread != mine) attached = AttachThreadInput(mine, otherThread, true);
+            BringWindowToTop(hWnd);
+            SetForegroundWindow(hWnd);
+            if (GetForegroundWindow() != hWnd)
+            {
+                keybd_event(0x12, 0, 0, 0);
+                keybd_event(0x12, 0, 2, 0);
+                SetForegroundWindow(hWnd);
+            }
+        }
+        catch { }
+        finally { if (attached) { try { AttachThreadInput(mine, otherThread, false); } catch { } } }
+        return GetForegroundWindow() == hWnd;
+    }
 
     public static string BoundsOf(IntPtr hWnd)
     {
@@ -128,7 +169,12 @@ public static class NCDesktop
         if (dpi == 0) dpi = 96;
         StringBuilder sb = new StringBuilder(512);
         GetWindowText(hWnd, sb, sb.Capacity);
-        bool fg = GetForegroundWindow() == hWnd;
+        // A child window is in the foreground when its top-level window is:
+        // input addressed to the child lands in the app that owns the frame.
+        // Comparing the exact handle alone reported "not foreground" for a
+        // window that was visibly in front, which refused every input.
+        bool fg = GetForegroundWindow() == hWnd
+            || (GetAncestor(hWnd, 2) != IntPtr.Zero && GetAncestor(hWnd, 2) == GetForegroundWindow());
         bool iconic = IsIconic(hWnd);
         bool visible = IsWindowVisible(hWnd);
         string clientRel = (origin.X - r.Left) + "," + (origin.Y - r.Top) + "," + c.Right + "," + c.Bottom;
@@ -232,6 +278,14 @@ while ($true) {
     } elseif ($verb -eq 'key') {
       [NCDesktop]::Key([uint16]$parts[1], ($parts[2] -eq '1')) | Out-Null
       $out.WriteLine('ok ' + $sw.ElapsedMilliseconds + ' key')
+    } elseif ($verb -eq 'focus') {
+      $handle = [IntPtr]::new([long]$parts[1])
+      $focused = [NCDesktop]::Focus($handle)
+      if ($focused) {
+        $out.WriteLine('ok ' + $sw.ElapsedMilliseconds + ' focused ' + $handle.ToInt64())
+      } else {
+        $out.WriteLine('err not_focused the target window is not in the foreground after the request')
+      }
     } elseif ($verb -eq 'find') {
       $sub = $line.Substring(5)
       $out.WriteLine('ok ' + $sw.ElapsedMilliseconds + ' ' + [NCDesktop]::Find($sub))
@@ -694,6 +748,16 @@ class PersistentScreenCapture:
             return int(left), int(right)
         except ValueError:
             return None
+
+    async def focus_window(self, handle: int, *, timeout: float | None = None) -> CaptureResult:
+        """Bring the target window to the foreground and REPORT whether it arrived.
+
+        The worker restores a minimized window, attaches to the foreground
+        window's thread and re-reads ``GetForegroundWindow`` afterwards, so a
+        successful result means the window is actually in front --- the
+        precondition input needs, measured instead of assumed.
+        """
+        return await self.send_input(f"focus {int(handle)}", timeout=timeout)
 
     async def _exchange(self, command: str, timeout: float) -> tuple[str | None, str]:
         """Send one command and read its reply, restarting the worker once.

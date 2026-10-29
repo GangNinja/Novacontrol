@@ -75,11 +75,13 @@ class RecordingInput:
     presses: list[str] | None = None
     releases: list[str] | None = None
     moves: list[tuple[int, int]] | None = None
+    focuses: list[int] | None = None
 
     def __post_init__(self) -> None:
         self.presses = []
         self.releases = []
         self.moves = []
+        self.focuses = []
 
     async def press(self, kind: str, name: str) -> None:
         if self.fail_press:
@@ -93,6 +95,9 @@ class RecordingInput:
 
     async def move(self, x: int, y: int) -> None:
         self.moves.append((x, y))
+
+    async def focus(self, handle: int) -> None:
+        self.focuses.append(handle)
 
     def held(self) -> int:
         return len(self.presses) - len(self.releases)

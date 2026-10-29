@@ -280,6 +280,16 @@ OBSERVED_STATUS = "observed"
 OBSERVATION_BUSY_STATUS = "busy"
 OBSERVATION_IDLE_STATUS = "not_observing"
 
+#: How long to wait when a read answers ``busy`` — a capture is already in
+#: flight. Waiting less than one capture can never observe its completion: the
+#: retry then finds the SAME capture still running and the run is stopped for an
+#: unavailable observation it never actually lacked (a 2880x1800 window takes
+#: over a second per frame). This is a wait for measured work, not a poll delay.
+CAPTURE_IN_FLIGHT_WAIT_SECONDS = 1.6
+
+#: How long to wait when the observer reports it is not sampling at all.
+OBSERVATION_IDLE_WAIT_SECONDS = 0.25
+
 #: Phases in which the loop is actively working on the objective.
 ACTIVE_PHASES = frozenset(
     {
@@ -1347,7 +1357,7 @@ class AutonomousSessionController:
                 if status in {OBSERVATION_BUSY_STATUS, OBSERVATION_IDLE_STATUS} and attempt < int(
                     self.limits.observation_attempts
                 ):
-                    await self._wait_or_cancel(run.session_id, 0.2)
+                    await self._wait_for_observation(run.session_id, status)
                     continue
                 failure = self._observation_failure(observation) or (
                     AutonomyOutcome.OBSERVATION_UNAVAILABLE,
@@ -1521,8 +1531,10 @@ class AutonomousSessionController:
                 break
             if status == OBSERVATION_BUSY_STATUS or status == OBSERVATION_IDLE_STATUS:
                 # A frame is already in flight, or the observer is not sampling:
-                # waiting is the correct response — never a second capture.
-                await self._wait_or_cancel(session_id, 0.1)
+                # waiting is the correct response — never a second capture. The
+                # wait must outlast the capture that is running, or every retry
+                # meets the same one and reports an absent observation.
+                await self._wait_for_observation(session_id, status)
                 continue
             if attempt < attempts:
                 continue
@@ -2301,6 +2313,15 @@ class AutonomousSessionController:
             return
         if run.phase is not AutonomyPhase.PAUSED:
             self._record(run, AutonomyPhase.PAUSED, "The operator paused the run.")
+
+    async def _wait_for_observation(self, session_id: str, status: str) -> None:
+        """Wait the amount of time the observer's own answer implies."""
+        await self._wait_or_cancel(
+            session_id,
+            CAPTURE_IN_FLIGHT_WAIT_SECONDS
+            if status == OBSERVATION_BUSY_STATUS
+            else OBSERVATION_IDLE_WAIT_SECONDS,
+        )
 
     async def _wait_or_cancel(self, session_id: str, seconds: float) -> None:
         """A bounded wait that a cancel can interrupt (never ``time.sleep``)."""
