@@ -497,11 +497,19 @@ class GameStateService:
             str(after_target.get("pid") or ""),
             str(after_target.get("start_time") or ""),
         )
-        if (
-            str(after.get("session_id") or "") != session_id
-            or str(after_success.get("observation_id") or "") != observation_id
-            or after_key != target_key
-        ):
+        newest_changed = str(after_success.get("observation_id") or "") != observation_id
+        # A newer frame of the SAME target does not make this reading wrong: the
+        # state names the frame it read (``observation.at``) and records how long
+        # the reading took. Treating "newest" as "current" discarded every
+        # reading taken while observation was running — the only mode an
+        # autonomous run ever uses — because a sampling observer always produces a
+        # newer frame while perception runs. What must never happen is a state
+        # attributed to a DIFFERENT window, or one built from a frame that was
+        # already stale when the read began (refused earlier, by its own code).
+        superseded = (
+            str(after.get("session_id") or "") != session_id or after_key != target_key
+        )
+        if superseded:
             self._superseded += 1
             self._persist()
             return self._refuse(
@@ -538,6 +546,14 @@ class GameStateService:
             latency=latency,
             extra_limitations=(
                 f"Perception status for this reading: {getattr(result, 'status', 'unknown')}",
+            )
+            + (
+                (
+                    "A newer frame arrived while this reading was taken; the state "
+                    f"describes frame {observation_id}, not that newer one."
+                ,)
+                if newest_changed
+                else ()
             ),
             scene_tracker=self._scene,
         )

@@ -393,3 +393,53 @@ so **every objective above is NOT PASS**.
 
 Per the binary policy, overall PASS requires 25/25. Nothing here is a partial
 pass.
+
+---
+
+# UPDATE — the state read is open; the run now stops one stage later
+
+**D-8 — "newest frame" was being used as "current frame".**
+`GameStateService` discarded any reading whose source frame was not still the
+observer's newest success. A sampling observer always produces a newer frame
+while perception runs, so **no** reading could be attributed while observation
+was running — the only mode an autonomous run uses. Suspersession is now what its
+message actually claims: the **target** changed under the reading (or the session
+changed). A newer frame of the same window no longer invalidates a reading; the
+state records which frame it described, and its limitations say a newer frame
+arrived. Two tests were re-pinned to the real invariant:
+`test_a_reading_is_discarded_when_the_target_changes_under_it` (the handle
+changes mid-read) and `test_a_newer_frame_of_the_same_target_keeps_a_fresh_reading`.
+
+## Where the chain now ends
+
+Rerun of the same objective on the live game, no operator input after approval:
+
+1. approval recorded;
+2. observation armed, frame read;
+3. **state read succeeded** (`analyze` now returns a state instead of
+   `observation_superseded`);
+4. stopped: `dependency_failure` —
+   "No interpretable objective exists for this game: NF-17 has no rule for its
+   state, so there is no completion criterion to run against."
+
+That is not a capture, control or wiring fault: NovaForge can now see, read and
+act on the real game and refuses to invent a completion criterion for a title it
+has no objective rules for. "Stock below 30" needs an NF-17 objective profile for
+Supermarket Together (which HUD/panel regions hold stock counts, and what
+completion means), which is new feature work rather than a repair.
+
+## Corrected scorecard rows
+
+| # | Objective | Was | Now | Reason |
+| --- | --- | --- | --- | --- |
+| 7 | Relevant state interpretation | NOT PASS | **PASS for this title's menu screens** | A state is now read from the live frame; no game profile means scene/entities stay `unknown`, which the state reports honestly |
+| 9 | Decision generation from actual state | NOT PASS | **NOT PASS** | Stops at objective identification: NF-17 has no rule for this game |
+| 12 | Repeated autonomous cycles | NOT PASS | **NOT PASS** | Same blocker — one cycle cannot complete without a completion criterion |
+
+All other rows are unchanged. **Overall remains NOT PASS** (the binary rule needs
+every in-scope objective), but the failing link has moved from "the agent cannot
+see or act" to "there are no objective rules for this game".
+
+Regression evidence for this pass: **382 tests** across
+`test_novaforge_state.py`, `test_novaforge_autonomy.py`,
+`test_novaforge_control.py`, `test_novaforge_ui.py`.

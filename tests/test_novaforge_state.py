@@ -624,6 +624,11 @@ class FakeObserver:
         self.interval = interval
         self.capture_ms = capture_ms
         self.observation_id = f"{session_id}:{seq:04d}"
+        #: Target identity. A test that changes one of these mid-read is
+        #: describing a DIFFERENT window, which is what supersedes a reading.
+        self.handle = 17185
+        self.pid = 5150
+        self.start_time = "2026-10-25T09:00:00+00:00"
 
     def status(self) -> dict[str, Any]:
         success = (
@@ -651,9 +656,9 @@ class FakeObserver:
             "game": "NC FORGE AUDIT TICK",
             "target": {
                 "title": self.title,
-                "handle": 17185,
-                "pid": 5150,
-                "start_time": "2026-10-25T09:00:00+00:00",
+                "handle": self.handle,
+                "pid": self.pid,
+                "start_time": self.start_time,
             },
             "last_success": success,
         }
@@ -788,20 +793,50 @@ class GameStateServiceTests(unittest.IsolatedAsyncioTestCase):
         for measured in ("processing_ms", "model_load_ms"):
             self.assertIn(measured, outcome.state.to_dict()["latency"])
 
-    async def test_a_superseded_observation_discards_the_result(self) -> None:
+    async def test_a_reading_is_discarded_when_the_target_changes_under_it(self) -> None:
+        # The invariant that supersedes a reading is a DIFFERENT window, not a
+        # newer frame of the same one: attributing a state to a target it was not
+        # read from would aim an action at the wrong window.
         observer = FakeObserver(frame=self.frame)
 
         async def perceive(_frame: Any) -> Any:
-            observer.seq = 2
-            observer.observation_id = "obs-1:0002"
+            observer.title = "A DIFFERENT WINDOW"
+            observer.handle = 99999
             return fake_result(scene(text=TICK_TEXT))
 
         service = self.service(observer, perceive=perceive)
         outcome = await service.analyze()
         self.assertFalse(outcome.analyzed)
         self.assertEqual(outcome.reason_code, "observation_superseded")
+        self.assertEqual(service.status()["counts"]["superseded"], 1)
         self.assertIsNone(service.status()["state"])
         self.assertEqual(service.status()["counts"]["superseded"], 1)
+
+    async def test_a_newer_frame_of_the_same_target_keeps_a_fresh_reading(self) -> None:
+        # A continuously sampling observer always has a newer frame by the time
+        # perception finishes; discarding every such reading made the state
+        # unreadable whenever observation was running.
+        observer = FakeObserver(frame=self.frame)
+
+        async def perceive(_frame: Any) -> Any:
+            observer.seq = 2
+            observer.observation_id = "obs-1:0002"
+            observer.at = stamp()
+            return fake_result(scene(text=TICK_TEXT))
+
+        service = self.service(observer, perceive=perceive)
+        outcome = await service.analyze()
+        self.assertTrue(outcome.analyzed, outcome.reason)
+        assert outcome.state is not None
+        # The reading says which frame it described instead of claiming the newest.
+        self.assertEqual(outcome.state.observation.observation_id, "obs-1:0001")
+        self.assertTrue(
+            any(
+                "A newer frame arrived" in line
+                for line in outcome.state.to_dict()["limitations"]
+            ),
+            outcome.state.to_dict()["limitations"],
+        )
 
     async def test_a_second_analysis_is_refused_while_one_is_running(self) -> None:
         async def slow(_frame: Any) -> Any:
