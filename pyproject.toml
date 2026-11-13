@@ -19,6 +19,9 @@ dependencies = [
   "uvicorn[standard]>=0.30",
   "pydantic>=2.8",
   "pyyaml>=6.0",
+  # IANA timezone data for exchange calendars (zoneinfo has no database on
+  # Windows by default; a market session cannot be evaluated in a guessed zone).
+  "tzdata>=2024.1",
   # Vision layer: image loading for OCR/LLM element location (vision_guide)
   # and the Pillow fallback of the pixel-diff verification (desktop/vision).
   "pillow>=10.0",

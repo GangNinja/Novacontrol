@@ -217,6 +217,223 @@ class EventType(StrEnum):
     PRIVACY_MODE_CHANGED = "privacy.mode_changed"
     PRIVACY_DENIED = "privacy.denied"
 
+    # -- NovaMarket (NM-01) ---------------------------------------------------
+    # A financial subsystem's lifecycle, by name. The payloads carry the contract
+    # version, the capability ids, the lifecycle state, the changed configuration
+    # FIELD NAMES and health categories — never a credential, a price or a
+    # portfolio body. Market data events arrive with NM-02 and are declared in
+    # ``novacontrol.novamarket.events`` until they can be published truthfully.
+    NOVAMARKET_INITIALIZING = "novamarket.initializing"
+    NOVAMARKET_INITIALIZED = "novamarket.initialized"
+    NOVAMARKET_READY = "novamarket.ready"
+    NOVAMARKET_ENABLED = "novamarket.enabled"
+    NOVAMARKET_DISABLED = "novamarket.disabled"
+    # The control channel: another module may request a validated configuration
+    # change on the bus instead of the HTTP surface.
+    NOVAMARKET_CONFIGURATION_REQUESTED = "novamarket.configuration_requested"
+    NOVAMARKET_CONFIGURATION_CHANGED = "novamarket.configuration_changed"
+    NOVAMARKET_CAPABILITIES_REGISTERED = "novamarket.capabilities_registered"
+    NOVAMARKET_HEALTH_CHANGED = "novamarket.health_changed"
+    NOVAMARKET_WARNING = "novamarket.warning"
+    NOVAMARKET_ERROR = "novamarket.error"
+    NOVAMARKET_SHUTDOWN = "novamarket.shutdown"
+
+    # NM-02: market-data reliability. A data event describes what was observed,
+    # validated, refused or became unreachable. It carries identities and
+    # categories — never a price body, a credential or a raw provider response.
+    NOVAMARKET_DATA_AVAILABLE = "novamarket.data.available"
+    NOVAMARKET_DATA_UNAVAILABLE = "novamarket.data.unavailable"
+    NOVAMARKET_DATA_RECEIVED = "novamarket.data.received"
+    NOVAMARKET_DATA_VALIDATED = "novamarket.data.validated"
+    NOVAMARKET_DATA_REJECTED = "novamarket.data.rejected"
+    NOVAMARKET_DATA_STALE = "novamarket.data.stale"
+    NOVAMARKET_DATA_FRESHNESS_CHANGED = "novamarket.data.freshness_changed"
+    NOVAMARKET_DATA_PROVIDER_UNAVAILABLE = "novamarket.data.provider_unavailable"
+    NOVAMARKET_DATA_PROVIDER_RECOVERED = "novamarket.data.provider_recovered"
+    NOVAMARKET_DATA_QUALITY_CHANGED = "novamarket.data.quality_changed"
+    NOVAMARKET_DATA_INGESTION_FAILED = "novamarket.data.ingestion_failed"
+
+    # NM-03: NovaCoin wallets and the deterministic ledger. A wallet event is
+    # published only after its posting committed, and a ledger entry event names
+    # the entry that exists, never an attempt.
+    NOVAMARKET_WALLET_CREATED = "novamarket.wallet.created"
+    NOVAMARKET_WALLET_BALANCE_UPDATED = "novamarket.wallet.balance_updated"
+    NOVAMARKET_WALLET_DEPOSIT_COMPLETED = "novamarket.wallet.deposit_completed"
+    NOVAMARKET_WALLET_WITHDRAWAL_COMPLETED = "novamarket.wallet.withdrawal_completed"
+    NOVAMARKET_WALLET_TRANSFER_COMPLETED = "novamarket.wallet.transfer_completed"
+    NOVAMARKET_WALLET_TRANSACTION_FAILED = "novamarket.wallet.transaction_failed"
+    NOVAMARKET_LEDGER_ENTRY_CREATED = "novamarket.ledger.entry_created"
+    NOVAMARKET_LEDGER_RECONCILIATION_COMPLETED = (
+        "novamarket.ledger.reconciliation_completed"
+    )
+    NOVAMARKET_LEDGER_INTEGRITY_VIOLATION = "novamarket.ledger.integrity_violation"
+    NOVAMARKET_MARKET_EVENT_DISCOVERED = "novamarket.market_event.discovered"
+    NOVAMARKET_MARKET_EVENT_EXTRACTED = "novamarket.market_event.extracted"
+    NOVAMARKET_MARKET_EVENT_NORMALIZED = "novamarket.market_event.normalized"
+    NOVAMARKET_MARKET_EVENT_VERIFIED = "novamarket.market_event.verified"
+    NOVAMARKET_MARKET_EVENT_CLASSIFIED = "novamarket.market_event.classified"
+    NOVAMARKET_MARKET_EVENT_UPDATED = "novamarket.market_event.updated"
+    NOVAMARKET_MARKET_EVENT_RETRACTED = "novamarket.market_event.retracted"
+    NOVAMARKET_MARKET_EVENT_EXPIRED = "novamarket.market_event.expired"
+    NOVAMARKET_MARKET_EVENT_SOURCE_UNAVAILABLE = "novamarket.market_event.source_unavailable"
+    NOVAMARKET_MARKET_EVENT_EVIDENCE_CONFLICT = "novamarket.market_event.evidence.conflict_detected"
+    NOVAMARKET_ASSET_DISCOVERED = "novamarket.asset.discovered"
+    NOVAMARKET_ASSET_CANDIDATE_EVALUATED = "novamarket.asset.candidate.evaluated"
+    NOVAMARKET_ASSET_CANDIDATE_RANKED = "novamarket.asset.candidate.ranked"
+    NOVAMARKET_WATCHLIST_CREATED = "novamarket.watchlist.created"
+    NOVAMARKET_WATCHLIST_RENAMED = "novamarket.watchlist.renamed"
+    NOVAMARKET_WATCHLIST_INSTRUMENT_ADDED = "novamarket.watchlist.instrument.added"
+    NOVAMARKET_WATCHLIST_INSTRUMENT_UPDATED = "novamarket.watchlist.instrument.updated"
+    NOVAMARKET_WATCHLIST_INSTRUMENT_DOWNGRADED = "novamarket.watchlist.instrument.downgraded"
+    NOVAMARKET_WATCHLIST_INSTRUMENT_REMOVED = "novamarket.watchlist.instrument.removed"
+    NOVAMARKET_WATCHLIST_EVALUATION_COMPLETED = "novamarket.watchlist.evaluation.completed"
+    NOVAMARKET_ASSET_DISCOVERY_FAILED = "novamarket.asset.discovery.failed"
+    NOVAMARKET_FORECAST_CREATED = "novamarket.forecast.created"
+    NOVAMARKET_FORECAST_COMPLETED = "novamarket.forecast.completed"
+    NOVAMARKET_FORECAST_EVALUATION_PENDING = "novamarket.forecast.evaluation.pending"
+    NOVAMARKET_FORECAST_EVALUATED = "novamarket.forecast.evaluated"
+    NOVAMARKET_FORECAST_MODEL_TRAINED = "novamarket.forecast.model.trained"
+    NOVAMARKET_FORECAST_MODEL_VALIDATED = "novamarket.forecast.model.validated"
+    NOVAMARKET_FORECAST_MODEL_ACTIVATED = "novamarket.forecast.model.activated"
+    NOVAMARKET_FORECAST_MODEL_DEGRADED = "novamarket.forecast.model.degraded"
+    NOVAMARKET_FORECAST_MODEL_SUSPENDED = "novamarket.forecast.model.suspended"
+    NOVAMARKET_FORECAST_CALIBRATION_COMPLETED = "novamarket.forecast.calibration.completed"
+    NOVAMARKET_FORECAST_PERFORMANCE_UPDATED = "novamarket.forecast.performance.updated"
+    NOVAMARKET_PORTFOLIO_CREATED = "novamarket.portfolio.created"
+    NOVAMARKET_PORTFOLIO_ACTIVATED = "novamarket.portfolio.activated"
+    NOVAMARKET_PORTFOLIO_ALLOCATION_UPDATED = (
+        "novamarket.portfolio.allocation.updated"
+    )
+    NOVAMARKET_PORTFOLIO_POSITION_ADDED = "novamarket.portfolio.position.added"
+    NOVAMARKET_PORTFOLIO_POSITION_UPDATED = (
+        "novamarket.portfolio.position.updated"
+    )
+    NOVAMARKET_PORTFOLIO_POSITION_REMOVED = (
+        "novamarket.portfolio.position.removed"
+    )
+    NOVAMARKET_PORTFOLIO_VALUATION_UPDATED = (
+        "novamarket.portfolio.valuation.updated"
+    )
+    NOVAMARKET_PORTFOLIO_REBALANCE_PROPOSED = (
+        "novamarket.portfolio.rebalance.proposed"
+    )
+    NOVAMARKET_PORTFOLIO_REBALANCE_COMPLETED = (
+        "novamarket.portfolio.rebalance.completed"
+    )
+    NOVAMARKET_PORTFOLIO_PERFORMANCE_UPDATED = (
+        "novamarket.portfolio.performance.updated"
+    )
+    NOVAMARKET_PORTFOLIO_PAUSED = "novamarket.portfolio.paused"
+    NOVAMARKET_PORTFOLIO_SUSPENDED = "novamarket.portfolio.suspended"
+    NOVAMARKET_PORTFOLIO_CLOSED = "novamarket.portfolio.closed"
+
+    NOVAMARKET_RISK_ASSESSMENT_REQUESTED = "novamarket.risk.assessment.requested"
+    NOVAMARKET_RISK_ASSESSMENT_COMPLETED = "novamarket.risk.assessment.completed"
+    NOVAMARKET_RISK_ACTION_APPROVED = "novamarket.risk.action.approved"
+    NOVAMARKET_RISK_ACTION_REJECTED = "novamarket.risk.action.rejected"
+    NOVAMARKET_RISK_ACTION_RESTRICTED = "novamarket.risk.action.restricted"
+    NOVAMARKET_RISK_REVIEW_REQUIRED = "novamarket.risk.review.required"
+    NOVAMARKET_RISK_INSUFFICIENT_DATA = "novamarket.risk.insufficient_data"
+    NOVAMARKET_RISK_LIMIT_BREACHED = "novamarket.risk.limit.breached"
+    NOVAMARKET_RISK_ALERT_CREATED = "novamarket.risk.alert.created"
+    NOVAMARKET_RISK_ALERT_ACKNOWLEDGED = "novamarket.risk.alert.acknowledged"
+    NOVAMARKET_RISK_ALERT_RESOLVED = "novamarket.risk.alert.resolved"
+    NOVAMARKET_RISK_SCENARIO_COMPLETED = "novamarket.risk.scenario.completed"
+    NOVAMARKET_RISK_POLICY_UPDATED = "novamarket.risk.policy.updated"
+    NOVAMARKET_RISK_OVERRIDE_RECORDED = "novamarket.risk.override.recorded"
+    NOVAMARKET_RISK_ACTION_APPLIED = "novamarket.risk.action.applied"
+
+
+    # NM-09: strategy definitions, signals, proposals and conflicts.
+    NOVAMARKET_STRATEGY_CREATED = "novamarket.strategy.created"
+    NOVAMARKET_STRATEGY_ACTIVATED = "novamarket.strategy.activated"
+    NOVAMARKET_STRATEGY_PAUSED = "novamarket.strategy.paused"
+    NOVAMARKET_STRATEGY_DEGRADED = "novamarket.strategy.degraded"
+    NOVAMARKET_STRATEGY_SUSPENDED = "novamarket.strategy.suspended"
+    NOVAMARKET_STRATEGY_RETIRED = "novamarket.strategy.retired"
+    NOVAMARKET_STRATEGY_EVALUATED = "novamarket.strategy.evaluated"
+    NOVAMARKET_STRATEGY_SIGNAL_GENERATED = "novamarket.strategy.signal.generated"
+    NOVAMARKET_STRATEGY_SIGNAL_EXPIRED = "novamarket.strategy.signal.expired"
+    NOVAMARKET_STRATEGY_PROPOSAL_CREATED = "novamarket.strategy.proposal.created"
+    NOVAMARKET_STRATEGY_PROPOSAL_RISK_REQUESTED = "novamarket.strategy.proposal.risk.requested"
+    NOVAMARKET_STRATEGY_PROPOSAL_APPROVED = "novamarket.strategy.proposal.approved"
+    NOVAMARKET_STRATEGY_PROPOSAL_REJECTED = "novamarket.strategy.proposal.rejected"
+    NOVAMARKET_STRATEGY_PROPOSAL_RESTRICTED = "novamarket.strategy.proposal.restricted"
+    NOVAMARKET_STRATEGY_PROPOSAL_FORWARDED = "novamarket.strategy.proposal.forwarded"
+    NOVAMARKET_STRATEGY_CONFLICT_DETECTED = "novamarket.strategy.conflict.detected"
+    NOVAMARKET_STRATEGY_CONFLICT_RESOLVED = "novamarket.strategy.conflict.resolved"
+    NOVAMARKET_STRATEGY_PERFORMANCE_UPDATED = "novamarket.strategy.performance.updated"
+
+    # NM-10: realistic paper execution. These events describe committed orders,
+    # fills and reconciliation records; no event is a live-market claim.
+    NOVAMARKET_ORDER_CREATED = "novamarket.order.created"
+    NOVAMARKET_ORDER_VALIDATED = "novamarket.order.validated"
+    NOVAMARKET_ORDER_OPENED = "novamarket.order.opened"
+    NOVAMARKET_ORDER_PARTIALLY_FILLED = "novamarket.order.partially_filled"
+    NOVAMARKET_ORDER_FILLED = "novamarket.order.filled"
+    NOVAMARKET_ORDER_CANCEL_REQUESTED = "novamarket.order.cancel_requested"
+    NOVAMARKET_ORDER_CANCELLED = "novamarket.order.cancelled"
+    NOVAMARKET_ORDER_REJECTED = "novamarket.order.rejected"
+    NOVAMARKET_ORDER_EXPIRED = "novamarket.order.expired"
+    NOVAMARKET_ORDER_FAILED = "novamarket.order.failed"
+    NOVAMARKET_EXECUTION_FILL_RECORDED = "novamarket.execution.fill.recorded"
+    NOVAMARKET_EXECUTION_RECONCILED = "novamarket.execution.reconciled"
+    NOVAMARKET_EXECUTION_RECONCILIATION_FAILED = "novamarket.execution.reconciliation.failed"
+
+    # NM-11: reproducible historical backtesting. Every payload names a persisted
+    # run; no event is a live-performance or order claim.
+    NOVAMARKET_BACKTEST_CREATED = "novamarket.backtest.created"
+    NOVAMARKET_BACKTEST_STARTED = "novamarket.backtest.started"
+    NOVAMARKET_BACKTEST_PROGRESS_UPDATED = "novamarket.backtest.progress.updated"
+    NOVAMARKET_BACKTEST_COMPLETED = "novamarket.backtest.completed"
+    NOVAMARKET_BACKTEST_FAILED = "novamarket.backtest.failed"
+    NOVAMARKET_BACKTEST_CANCELLED = "novamarket.backtest.cancelled"
+    NOVAMARKET_BACKTEST_CHECKPOINT_CREATED = "novamarket.backtest.replay.checkpoint.created"
+    NOVAMARKET_BACKTEST_PERFORMANCE_CALCULATED = "novamarket.backtest.performance.calculated"
+    NOVAMARKET_BACKTEST_COMPARISON_COMPLETED = "novamarket.backtest.comparison.completed"
+    NOVAMARKET_BACKTEST_DATA_QUALITY_WARNING = "novamarket.backtest.data_quality.warning"
+    NOVAMARKET_BACKTEST_REPRODUCIBILITY_VERIFIED = "novamarket.backtest.reproducibility.verified"
+
+    # NM-12: non-executing Shadow Mode. Every payload describes a simulation;
+    # no event is an order, fill, wallet movement or investment return.
+    NOVAMARKET_SHADOW_SESSION_CREATED = "novamarket.shadow.session.created"
+    NOVAMARKET_SHADOW_SESSION_STARTED = "novamarket.shadow.session.started"
+    NOVAMARKET_SHADOW_SESSION_PAUSED = "novamarket.shadow.session.paused"
+    NOVAMARKET_SHADOW_SESSION_RESUMED = "novamarket.shadow.session.resumed"
+    NOVAMARKET_SHADOW_SESSION_STOPPED = "novamarket.shadow.session.stopped"
+    NOVAMARKET_SHADOW_SESSION_COMPLETED = "novamarket.shadow.session.completed"
+    NOVAMARKET_SHADOW_SESSION_CANCELLED = "novamarket.shadow.session.cancelled"
+    NOVAMARKET_SHADOW_SESSION_FAILED = "novamarket.shadow.session.failed"
+    NOVAMARKET_SHADOW_DECISION_RECORDED = "novamarket.shadow.decision.recorded"
+    NOVAMARKET_SHADOW_RISK_EVALUATED = "novamarket.shadow.risk.evaluated"
+    NOVAMARKET_SHADOW_PROJECTION_CREATED = "novamarket.shadow.projection.created"
+    NOVAMARKET_SHADOW_OUTCOME_UPDATED = "novamarket.shadow.outcome.updated"
+    NOVAMARKET_SHADOW_CYCLE_COMPLETED = "novamarket.shadow.cycle.completed"
+    NOVAMARKET_SHADOW_DATA_QUALITY_FAILED = "novamarket.shadow.data.quality.failed"
+    NOVAMARKET_SHADOW_RECOVERED = "novamarket.shadow.recovered"
+    NOVAMARKET_SHADOW_COMPARISON_COMPLETED = "novamarket.shadow.comparison.completed"
+    NOVAMARKET_SHADOW_ANALYTICS_UPDATED = "novamarket.shadow.analytics.updated"
+    NOVAMARKET_SHADOW_DIVERGENCE_DETECTED = "novamarket.shadow.divergence.detected"
+
+    # NM-13: controlled adaptive learning. Every payload names persisted
+    # evidence, an experiment or a version; none is an order or a live return.
+    NOVAMARKET_LEARNING_EVIDENCE_RECORDED = "novamarket.learning.evidence.recorded"
+    NOVAMARKET_LEARNING_EVIDENCE_REJECTED = "novamarket.learning.evidence.rejected"
+    NOVAMARKET_LEARNING_MONITOR_COMPLETED = "novamarket.learning.monitor.completed"
+    NOVAMARKET_LEARNING_ALERT_RAISED = "novamarket.learning.alert.raised"
+    NOVAMARKET_LEARNING_ALERT_ACKNOWLEDGED = "novamarket.learning.alert.acknowledged"
+    NOVAMARKET_LEARNING_EXPERIMENT_CREATED = "novamarket.learning.experiment.created"
+    NOVAMARKET_LEARNING_EXPERIMENT_STARTED = "novamarket.learning.experiment.started"
+    NOVAMARKET_LEARNING_EXPERIMENT_COMPLETED = "novamarket.learning.experiment.completed"
+    NOVAMARKET_LEARNING_EXPERIMENT_FAILED = "novamarket.learning.experiment.failed"
+    NOVAMARKET_LEARNING_EXPERIMENT_CANCELLED = "novamarket.learning.experiment.cancelled"
+    NOVAMARKET_LEARNING_CANDIDATE_EVALUATED = "novamarket.learning.candidate.evaluated"
+    NOVAMARKET_LEARNING_CANDIDATE_REJECTED = "novamarket.learning.candidate.rejected"
+    NOVAMARKET_LEARNING_CANDIDATE_APPROVED = "novamarket.learning.candidate.approved"
+    NOVAMARKET_LEARNING_CANDIDATE_SHADOW_VALIDATED = "novamarket.learning.candidate.shadow.validated"
+    NOVAMARKET_LEARNING_CANDIDATE_PROMOTED = "novamarket.learning.candidate.promoted"
+    NOVAMARKET_LEARNING_STRATEGY_ROLLED_BACK = "novamarket.learning.strategy.rolled_back"
+
 
 #: The payload fields each lifecycle event MUST carry. Checked when an event of
 #: a known type is published, so "the handler will find it" is a guarantee rather
@@ -356,6 +573,325 @@ EVENT_PAYLOAD_FIELDS: Mapping[EventType, tuple[str, ...]] = {
     EventType.AUDIT_PRUNED: ("removed",),
     EventType.PRIVACY_MODE_CHANGED: ("mode",),
     EventType.PRIVACY_DENIED: ("action", "reason"),
+    # NM-01: the lifecycle vocabulary. ``changed`` is a tuple of configuration
+    # FIELD NAMES, never the values (a value could be a provider reference or, one
+    # day, something sensitive). ``capabilities`` is a tuple of capability ids.
+    EventType.NOVAMARKET_INITIALIZING: ("contract_version",),
+    EventType.NOVAMARKET_INITIALIZED: ("contract_version", "capabilities"),
+    EventType.NOVAMARKET_READY: ("lifecycle",),
+    EventType.NOVAMARKET_ENABLED: ("lifecycle",),
+    EventType.NOVAMARKET_DISABLED: ("reason",),
+    EventType.NOVAMARKET_CONFIGURATION_REQUESTED: ("configuration",),
+    EventType.NOVAMARKET_CONFIGURATION_CHANGED: ("changed",),
+    EventType.NOVAMARKET_CAPABILITIES_REGISTERED: ("capabilities", "count"),
+    EventType.NOVAMARKET_HEALTH_CHANGED: ("health", "previous"),
+    EventType.NOVAMARKET_WARNING: ("code", "detail"),
+    EventType.NOVAMARKET_ERROR: ("error_type", "error"),
+    EventType.NOVAMARKET_SHUTDOWN: ("reason",),
+    EventType.NOVAMARKET_DATA_AVAILABLE: ("assets", "sources"),
+    EventType.NOVAMARKET_DATA_UNAVAILABLE: ("reason",),
+    EventType.NOVAMARKET_DATA_RECEIVED: ("instrument_id", "provider", "quality"),
+    EventType.NOVAMARKET_DATA_VALIDATED: ("instrument_id", "quality"),
+    EventType.NOVAMARKET_DATA_REJECTED: ("instrument_id", "provider", "reason"),
+    EventType.NOVAMARKET_DATA_STALE: ("asset", "provider", "age_seconds"),
+    EventType.NOVAMARKET_DATA_FRESHNESS_CHANGED: ("asset", "fresh"),
+    EventType.NOVAMARKET_DATA_PROVIDER_UNAVAILABLE: ("provider", "reason"),
+    EventType.NOVAMARKET_DATA_PROVIDER_RECOVERED: ("provider", "circuit_state"),
+    EventType.NOVAMARKET_DATA_QUALITY_CHANGED: (
+        "instrument_id",
+        "previous",
+        "quality",
+    ),
+    EventType.NOVAMARKET_DATA_INGESTION_FAILED: ("error_type", "error"),
+    EventType.NOVAMARKET_WALLET_CREATED: ("wallet_id", "owner"),
+    EventType.NOVAMARKET_WALLET_BALANCE_UPDATED: ("wallet_id", "balance"),
+    EventType.NOVAMARKET_WALLET_DEPOSIT_COMPLETED: (
+        "wallet_id",
+        "transaction_id",
+        "amount",
+    ),
+    EventType.NOVAMARKET_WALLET_WITHDRAWAL_COMPLETED: (
+        "wallet_id",
+        "transaction_id",
+        "amount",
+    ),
+    EventType.NOVAMARKET_WALLET_TRANSFER_COMPLETED: (
+        "from_wallet_id",
+        "to_wallet_id",
+        "transaction_id",
+        "amount",
+    ),
+    EventType.NOVAMARKET_WALLET_TRANSACTION_FAILED: ("operation", "reason"),
+    EventType.NOVAMARKET_LEDGER_ENTRY_CREATED: (
+        "entry_id",
+        "transaction_id",
+        "wallet_id",
+    ),
+    EventType.NOVAMARKET_LEDGER_RECONCILIATION_COMPLETED: (
+        "wallets_checked",
+        "ok",
+    ),
+    EventType.NOVAMARKET_LEDGER_INTEGRITY_VIOLATION: ("wallet_id", "code"),
+
+    EventType.NOVAMARKET_MARKET_EVENT_DISCOVERED: ("event_id", "source_id"),
+    EventType.NOVAMARKET_MARKET_EVENT_EXTRACTED: ("event_id", "category"),
+    EventType.NOVAMARKET_MARKET_EVENT_NORMALIZED: ("event_id", "instruments"),
+    EventType.NOVAMARKET_MARKET_EVENT_VERIFIED: ("event_id", "state"),
+    EventType.NOVAMARKET_MARKET_EVENT_CLASSIFIED: ("event_id", "importance"),
+    EventType.NOVAMARKET_MARKET_EVENT_UPDATED: ("event_id", "version"),
+    EventType.NOVAMARKET_MARKET_EVENT_RETRACTED: ("event_id", "reason"),
+    EventType.NOVAMARKET_MARKET_EVENT_EXPIRED: ("event_id", "reason"),
+    EventType.NOVAMARKET_MARKET_EVENT_SOURCE_UNAVAILABLE: ("source_id", "code"),
+    EventType.NOVAMARKET_MARKET_EVENT_EVIDENCE_CONFLICT: ("event_id", "detail"),
+    EventType.NOVAMARKET_ASSET_DISCOVERED: ("instrument_id", "score", "reason"),
+    EventType.NOVAMARKET_ASSET_CANDIDATE_EVALUATED: (
+        "instrument_id",
+        "score",
+        "data_quality",
+    ),
+    EventType.NOVAMARKET_ASSET_CANDIDATE_RANKED: (
+        "instrument_id",
+        "score",
+        "tier",
+        "rank",
+    ),
+    EventType.NOVAMARKET_WATCHLIST_CREATED: ("watchlist_id", "kind", "name"),
+    EventType.NOVAMARKET_WATCHLIST_RENAMED: (
+        "watchlist_id",
+        "name",
+        "previous_name",
+    ),
+    EventType.NOVAMARKET_WATCHLIST_INSTRUMENT_ADDED: (
+        "watchlist_id",
+        "instrument_id",
+        "score",
+        "reason",
+    ),
+    EventType.NOVAMARKET_WATCHLIST_INSTRUMENT_UPDATED: (
+        "watchlist_id",
+        "instrument_id",
+        "status",
+    ),
+    EventType.NOVAMARKET_WATCHLIST_INSTRUMENT_DOWNGRADED: (
+        "watchlist_id",
+        "instrument_id",
+        "from_status",
+        "to_status",
+    ),
+    EventType.NOVAMARKET_WATCHLIST_INSTRUMENT_REMOVED: (
+        "watchlist_id",
+        "instrument_id",
+        "reason",
+    ),
+    EventType.NOVAMARKET_WATCHLIST_EVALUATION_COMPLETED: (
+        "evaluated",
+        "upgraded",
+        "downgraded",
+        "removed",
+    ),
+    EventType.NOVAMARKET_ASSET_DISCOVERY_FAILED: ("reason", "source_id"),
+    EventType.NOVAMARKET_FORECAST_CREATED: (
+        "forecast_id",
+        "instrument_id",
+        "horizon",
+        "model_id",
+    ),
+    EventType.NOVAMARKET_FORECAST_COMPLETED: (
+        "forecast_id",
+        "instrument_id",
+        "horizon",
+        "model_id",
+        "predicted_return",
+        "p_up",
+    ),
+    EventType.NOVAMARKET_FORECAST_EVALUATION_PENDING: (
+        "forecast_id",
+        "instrument_id",
+        "reason",
+    ),
+    EventType.NOVAMARKET_FORECAST_EVALUATED: (
+        "forecast_id",
+        "instrument_id",
+        "horizon",
+        "model_id",
+        "direction_correct",
+        "brier",
+    ),
+    EventType.NOVAMARKET_FORECAST_MODEL_TRAINED: (
+        "model_id",
+        "instrument_id",
+        "horizon",
+        "state",
+    ),
+    EventType.NOVAMARKET_FORECAST_MODEL_VALIDATED: (
+        "instrument_id",
+        "horizon",
+        "selected_model",
+        "baseline_brier",
+    ),
+    EventType.NOVAMARKET_FORECAST_MODEL_ACTIVATED: (
+        "model_id",
+        "instrument_id",
+        "horizon",
+    ),
+    EventType.NOVAMARKET_FORECAST_MODEL_DEGRADED: (
+        "model_id",
+        "horizon",
+        "brier",
+        "coverage",
+    ),
+    EventType.NOVAMARKET_FORECAST_MODEL_SUSPENDED: (
+        "model_id",
+        "horizon",
+        "unresolved",
+    ),
+    EventType.NOVAMARKET_FORECAST_CALIBRATION_COMPLETED: (
+        "model_id",
+        "horizon",
+        "status",
+        "samples",
+    ),
+    EventType.NOVAMARKET_FORECAST_PERFORMANCE_UPDATED: (
+        "model_id",
+        "horizon",
+        "samples",
+    ),
+    # NM-07: three-horizon portfolios. Payloads name stored records or
+    # measured counts; none carries a price promise.
+    EventType.NOVAMARKET_PORTFOLIO_CREATED: ("portfolio_id", "horizon", "name"),
+    EventType.NOVAMARKET_PORTFOLIO_ACTIVATED: ("portfolio_id",),
+    EventType.NOVAMARKET_PORTFOLIO_ALLOCATION_UPDATED: (
+        "portfolio_id",
+        "positions",
+    ),
+    EventType.NOVAMARKET_PORTFOLIO_POSITION_ADDED: (
+        "portfolio_id",
+        "instrument_id",
+        "quantity",
+    ),
+    EventType.NOVAMARKET_PORTFOLIO_POSITION_UPDATED: (
+        "portfolio_id",
+        "instrument_id",
+        "quantity",
+        "price",
+    ),
+    EventType.NOVAMARKET_PORTFOLIO_POSITION_REMOVED: (
+        "portfolio_id",
+        "instrument_id",
+        "reason",
+    ),
+    EventType.NOVAMARKET_PORTFOLIO_VALUATION_UPDATED: (
+        "portfolio_id",
+        "total_value",
+    ),
+    EventType.NOVAMARKET_PORTFOLIO_REBALANCE_PROPOSED: (
+        "portfolio_id",
+        "proposal_id",
+        "turnover",
+    ),
+    EventType.NOVAMARKET_PORTFOLIO_REBALANCE_COMPLETED: (
+        "portfolio_id",
+        "proposal_id",
+        "turnover",
+    ),
+    EventType.NOVAMARKET_PORTFOLIO_PERFORMANCE_UPDATED: (
+        "portfolio_id",
+        "observations",
+    ),
+    EventType.NOVAMARKET_PORTFOLIO_PAUSED: ("portfolio_id", "reason"),
+    EventType.NOVAMARKET_PORTFOLIO_SUSPENDED: ("portfolio_id", "reason"),
+    EventType.NOVAMARKET_PORTFOLIO_CLOSED: ("portfolio_id", "reason"),
+    EventType.NOVAMARKET_RISK_ASSESSMENT_REQUESTED: ("action", "portfolio_id", "proposal_id"),
+    EventType.NOVAMARKET_RISK_ASSESSMENT_COMPLETED: ("decision_id", "outcome", "alerts", "latency_ms"),
+    EventType.NOVAMARKET_RISK_ACTION_APPROVED: ("decision_id", "action", "portfolio_id", "proposal_id", "outcome", "policy_id", "policy_version", "violations"),
+    EventType.NOVAMARKET_RISK_ACTION_REJECTED: ("decision_id", "action", "portfolio_id", "proposal_id", "outcome", "policy_id", "policy_version", "violations"),
+    EventType.NOVAMARKET_RISK_ACTION_RESTRICTED: ("decision_id", "action", "portfolio_id", "proposal_id", "outcome", "policy_id", "policy_version", "violations"),
+    EventType.NOVAMARKET_RISK_REVIEW_REQUIRED: ("decision_id", "action", "portfolio_id", "proposal_id", "outcome", "policy_id", "policy_version", "violations"),
+    EventType.NOVAMARKET_RISK_INSUFFICIENT_DATA: ("decision_id", "action", "portfolio_id", "proposal_id", "outcome", "policy_id", "policy_version", "violations"),
+    EventType.NOVAMARKET_RISK_LIMIT_BREACHED: ("decision_id", "portfolio_id", "codes"),
+    EventType.NOVAMARKET_RISK_ALERT_CREATED: ("alert_id", "severity", "category", "portfolio_id"),
+    EventType.NOVAMARKET_RISK_ALERT_ACKNOWLEDGED: ("alert_id", "actor"),
+    EventType.NOVAMARKET_RISK_ALERT_RESOLVED: ("alert_id", "actor"),
+    EventType.NOVAMARKET_RISK_SCENARIO_COMPLETED: ("stress_id", "portfolio_id", "scenario", "impact"),
+    EventType.NOVAMARKET_RISK_POLICY_UPDATED: ("policy_id", "version", "actor", "fields"),
+    EventType.NOVAMARKET_RISK_OVERRIDE_RECORDED: ("override_id", "decision_id", "actor", "expires_at"),
+    EventType.NOVAMARKET_STRATEGY_CREATED: ('strategy_id', 'catalog_id', 'category'),
+    EventType.NOVAMARKET_STRATEGY_ACTIVATED: ('strategy_id', 'reason', 'actor'),
+    EventType.NOVAMARKET_STRATEGY_PAUSED: ('strategy_id', 'reason', 'actor'),
+    EventType.NOVAMARKET_STRATEGY_DEGRADED: ('strategy_id', 'reason', 'actor'),
+    EventType.NOVAMARKET_STRATEGY_SUSPENDED: ('strategy_id', 'reason', 'actor'),
+    EventType.NOVAMARKET_STRATEGY_RETIRED: ('strategy_id', 'reason', 'actor'),
+    EventType.NOVAMARKET_STRATEGY_EVALUATED: ('strategy_id', 'portfolio_id', 'signals'),
+    EventType.NOVAMARKET_STRATEGY_SIGNAL_GENERATED: ('signal_id', 'strategy_id', 'instrument_id', 'signal_type', 'confidence'),
+    EventType.NOVAMARKET_STRATEGY_SIGNAL_EXPIRED: ('signal_id',),
+    EventType.NOVAMARKET_STRATEGY_PROPOSAL_CREATED: ('proposal_id', 'strategy_id', 'signal_id', 'instrument_id'),
+    EventType.NOVAMARKET_STRATEGY_PROPOSAL_RISK_REQUESTED: ('proposal_id', 'signal_id'),
+    EventType.NOVAMARKET_STRATEGY_PROPOSAL_APPROVED: ('proposal_id', 'strategy_id', 'signal_id', 'risk_decision_id', 'outcome'),
+    EventType.NOVAMARKET_STRATEGY_PROPOSAL_REJECTED: ('proposal_id', 'strategy_id', 'signal_id', 'risk_decision_id', 'outcome'),
+    EventType.NOVAMARKET_STRATEGY_PROPOSAL_RESTRICTED: ('proposal_id', 'strategy_id', 'signal_id', 'risk_decision_id', 'outcome'),
+    EventType.NOVAMARKET_STRATEGY_PROPOSAL_FORWARDED: ('proposal_id', 'strategy_id', 'signal_id', 'order_id', 'order_status'),
+    EventType.NOVAMARKET_STRATEGY_CONFLICT_DETECTED: ('conflict_id', 'portfolio_id', 'instrument_id', 'conflict_type'),
+    EventType.NOVAMARKET_STRATEGY_CONFLICT_RESOLVED: ('conflict_id', 'outcome'),
+    EventType.NOVAMARKET_STRATEGY_PERFORMANCE_UPDATED: ('strategy_id', 'observations', 'degradation'),
+    EventType.NOVAMARKET_RISK_ACTION_APPLIED: ("decision_id", "proposal_id", "portfolio_id", "actor"),
+    EventType.NOVAMARKET_ORDER_CREATED: ("order_id", "proposal_id", "portfolio_id", "status", "reason"),
+    EventType.NOVAMARKET_ORDER_VALIDATED: ("order_id", "proposal_id", "portfolio_id", "status", "reason"),
+    EventType.NOVAMARKET_ORDER_OPENED: ("order_id", "proposal_id", "portfolio_id", "status", "reason"),
+    EventType.NOVAMARKET_ORDER_PARTIALLY_FILLED: ("order_id", "proposal_id", "portfolio_id", "status", "reason"),
+    EventType.NOVAMARKET_ORDER_FILLED: ("order_id", "proposal_id", "portfolio_id", "status", "reason"),
+    EventType.NOVAMARKET_ORDER_CANCEL_REQUESTED: ("order_id", "proposal_id", "portfolio_id", "status", "reason"),
+    EventType.NOVAMARKET_ORDER_CANCELLED: ("order_id", "proposal_id", "portfolio_id", "status", "reason"),
+    EventType.NOVAMARKET_ORDER_REJECTED: ("order_id", "proposal_id", "portfolio_id", "status", "reason"),
+    EventType.NOVAMARKET_ORDER_EXPIRED: ("order_id", "proposal_id", "portfolio_id", "status", "reason"),
+    EventType.NOVAMARKET_ORDER_FAILED: ("order_id", "proposal_id", "portfolio_id", "status", "reason"),
+    EventType.NOVAMARKET_EXECUTION_FILL_RECORDED: ("fill_id", "order_id", "instrument_id", "quantity", "price", "slippage_pct", "total_fees", "ledger_transaction_ids", "execution_config_version"),
+    EventType.NOVAMARKET_EXECUTION_RECONCILED: ("reconciliation_id", "order_id", "ok", "issues"),
+    EventType.NOVAMARKET_EXECUTION_RECONCILIATION_FAILED: ("reconciliation_id", "order_id", "ok", "issues"),
+    EventType.NOVAMARKET_BACKTEST_CREATED: ("backtest_id", "strategy_id", "dataset_id"),
+    EventType.NOVAMARKET_BACKTEST_STARTED: ("backtest_id", "strategy_id", "start", "end"),
+    EventType.NOVAMARKET_BACKTEST_PROGRESS_UPDATED: ("backtest_id", "phase", "bars_loaded"),
+    EventType.NOVAMARKET_BACKTEST_COMPLETED: ("backtest_id", "status", "trades", "repro_hash"),
+    EventType.NOVAMARKET_BACKTEST_FAILED: ("backtest_id", "error"),
+    EventType.NOVAMARKET_BACKTEST_CANCELLED: ("backtest_id",),
+    EventType.NOVAMARKET_BACKTEST_CHECKPOINT_CREATED: ("backtest_id", "at", "observations"),
+    EventType.NOVAMARKET_BACKTEST_PERFORMANCE_CALCULATED: ("backtest_id", "observations", "total_return"),
+    EventType.NOVAMARKET_BACKTEST_COMPARISON_COMPLETED: ("base_backtest_id", "variants"),
+    EventType.NOVAMARKET_BACKTEST_DATA_QUALITY_WARNING: ("backtest_id", "warnings"),
+    EventType.NOVAMARKET_BACKTEST_REPRODUCIBILITY_VERIFIED: ("backtest_id", "ok"),
+    EventType.NOVAMARKET_SHADOW_SESSION_CREATED: ("session_id", "instruments", "strategies"),
+    EventType.NOVAMARKET_SHADOW_SESSION_STARTED: ("session_id", "baseline_snapshot_id", "portfolio_id"),
+    EventType.NOVAMARKET_SHADOW_SESSION_PAUSED: ("session_id",),
+    EventType.NOVAMARKET_SHADOW_SESSION_RESUMED: ("session_id",),
+    EventType.NOVAMARKET_SHADOW_SESSION_STOPPED: ("session_id",),
+    EventType.NOVAMARKET_SHADOW_SESSION_COMPLETED: ("session_id", "decisions"),
+    EventType.NOVAMARKET_SHADOW_SESSION_CANCELLED: ("session_id",),
+    EventType.NOVAMARKET_SHADOW_SESSION_FAILED: ("session_id", "error"),
+    EventType.NOVAMARKET_SHADOW_DECISION_RECORDED: ("session_id", "decision_id", "strategy_id", "instrument_id", "signal_type", "status"),
+    EventType.NOVAMARKET_SHADOW_RISK_EVALUATED: ("session_id", "decision_id", "outcome", "approved"),
+    EventType.NOVAMARKET_SHADOW_PROJECTION_CREATED: ("session_id", "decision_id", "projection_id", "instrument_id", "side", "simulated"),
+    EventType.NOVAMARKET_SHADOW_OUTCOME_UPDATED: ("session_id", "decision_id", "interval", "status", "hypothetical"),
+    EventType.NOVAMARKET_SHADOW_CYCLE_COMPLETED: ("session_id", "decisions", "duplicates", "data_failures", "latency_ms"),
+    EventType.NOVAMARKET_SHADOW_DATA_QUALITY_FAILED: ("session_id", "kind", "instrument_id"),
+    EventType.NOVAMARKET_SHADOW_RECOVERED: ("sessions", "paused"),
+    EventType.NOVAMARKET_SHADOW_COMPARISON_COMPLETED: ("session_id", "comparison_id", "compatible", "categories"),
+    EventType.NOVAMARKET_SHADOW_ANALYTICS_UPDATED: ("session_id", "decisions", "cycles"),
+    EventType.NOVAMARKET_SHADOW_DIVERGENCE_DETECTED: ("session_id", "comparison_id", "category"),
+    EventType.NOVAMARKET_LEARNING_EVIDENCE_RECORDED: ("evidence_id", "kind", "strategy_id", "confidence"),
+    EventType.NOVAMARKET_LEARNING_EVIDENCE_REJECTED: ("evidence_id", "kind", "strategy_id", "reasons"),
+    EventType.NOVAMARKET_LEARNING_MONITOR_COMPLETED: ("strategy_id", "snapshots", "alerts"),
+    EventType.NOVAMARKET_LEARNING_ALERT_RAISED: ("alert_id", "strategy_id", "kind", "severity"),
+    EventType.NOVAMARKET_LEARNING_ALERT_ACKNOWLEDGED: ("alert_id", "strategy_id"),
+    EventType.NOVAMARKET_LEARNING_EXPERIMENT_CREATED: ("experiment_id", "strategy_id", "candidates", "method"),
+    EventType.NOVAMARKET_LEARNING_EXPERIMENT_STARTED: ("experiment_id", "strategy_id"),
+    EventType.NOVAMARKET_LEARNING_EXPERIMENT_COMPLETED: ("experiment_id", "evaluated", "eligible", "rejected"),
+    EventType.NOVAMARKET_LEARNING_EXPERIMENT_FAILED: ("experiment_id", "error"),
+    EventType.NOVAMARKET_LEARNING_EXPERIMENT_CANCELLED: ("experiment_id",),
+    EventType.NOVAMARKET_LEARNING_CANDIDATE_EVALUATED: ("candidate_id", "experiment_id", "status", "eligible"),
+    EventType.NOVAMARKET_LEARNING_CANDIDATE_REJECTED: ("candidate_id", "experiment_id", "reasons"),
+    EventType.NOVAMARKET_LEARNING_CANDIDATE_APPROVED: ("candidate_id", "experiment_id", "automatic"),
+    EventType.NOVAMARKET_LEARNING_CANDIDATE_SHADOW_VALIDATED: ("candidate_id", "status", "decisions"),
+    EventType.NOVAMARKET_LEARNING_CANDIDATE_PROMOTED: ("candidate_id", "strategy_id", "version_id", "previous_version"),
+    EventType.NOVAMARKET_LEARNING_STRATEGY_ROLLED_BACK: ("strategy_id", "from_version", "to_version", "reason"),
 }
 
 #: Which event a Phase 8 task state publishes when it is entered. Kept here as

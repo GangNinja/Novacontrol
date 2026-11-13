@@ -242,6 +242,7 @@ from novacontrol.novaforge import (
     trial_rows,
     vision_timeout_from_environment,
 )
+from novacontrol.novamarket import NovaMarketModule, NovaMarketService
 from novacontrol.persistence import JsonStateStore
 from novacontrol.phone import PhoneControlController, PhoneControlModule
 from novacontrol.planning import (
@@ -1778,6 +1779,24 @@ class NovaControlApplication:
         # a tool that declares no permission scopes but is destructive or
         # external is still put to a person instead of running unannounced.
         self.risk = PermissionManager(catalog=self.tool_catalog)
+        # ── NovaMarket NM-01: the financial-intelligence subsystem foundation ─
+        # Built after the capability registry and the permission layer because it
+        # DECLARES into both, and after the state store because its validated
+        # configuration persists there. It registers no tool, no action route and
+        # no background worker: NM-01 ships the contract, lifecycle and boundaries
+        # the market phases build on, and the isolation rule is that a NovaMarket
+        # failure reaches ERROR instead of stopping this application from booting.
+        self.novamarket = NovaMarketService(
+            store=self.state_store,
+            event_bus=self.event_bus,
+            permissions=self.risk,
+            capabilities=self.intelligence.capabilities,
+            # NM-02 keeps its append-only market-data repository beside the
+            # application's other local stores (memory.sqlite3, bugs.json) in
+            # the ONE data directory; it is not a second server or database
+            # technology, and its lifecycle is this service's.
+            data_dir=self.data_dir,
+        )
         # ── NovaForge NF-01: the gaming workspace and session foundation ────
         # Built HERE, after the permission layer exists, because a session is a
         # consequential desktop action: it is declared (not inferred from its
@@ -2007,6 +2026,11 @@ class NovaControlApplication:
             sink=JsonlAuditSink(self.data_dir / AUDIT_DIRECTORY / AUDIT_FILENAME),
             retention=self._audit_retention(),
         )
+        # NM-14: NovaMarket was constructed before the application audit trail,
+        # so bind the SAME logger now. Market events then appear in the one
+        # local audit history the rest of the application uses; no second
+        # audit store is created.
+        self.novamarket.attach_audit_logger(self.audit)
         # ── Phase 25: embodied sessions and their ONE input door ─────────────
         # Built here rather than beside the goal planner because it needs the
         # audit trail that was just constructed: every environment input is a
@@ -2237,6 +2261,11 @@ class NovaControlApplication:
         # detection as requests, with a correlated reply, so a module (or a
         # plugin) can ask what this build knows without importing the engine.
         self.runtime.register_module(KnowledgeModule(self.knowledge_engine))
+        # NM-01: the financial-intelligence subsystem joins the SAME runtime as
+        # every other module. Its auto-start contains its own failure (ERROR plus
+        # a status explanation), so a market problem cannot fail NovaControl's
+        # start, and its stop withdraws what it contributed.
+        self.runtime.register_module(NovaMarketModule(self.novamarket))
         self.runtime.register_module(DesktopAutomationModule(self.desktop))
         self.runtime.register_module(PhoneControlModule(self.phone))
         self.runtime.register_module(BrowserAutomationModule(self.browser))
@@ -2885,6 +2914,11 @@ class NovaControlApplication:
         # PowerShell nobody remembers starting".
         await self.desktop.close()
         await self.browser.close()
+        # NM-01: NovaMarket withdraws the capabilities and permission declarations
+        # it contributed and detaches its one control subscription BEFORE the
+        # runtime stops, so nothing still advertises a subsystem that is going
+        # away. The module's own stop() is idempotent and runs afterwards.
+        await self.novamarket.shutdown(reason="application shutdown")
         await self.runtime.stop()
 
     def persist(self) -> None:
@@ -2903,6 +2937,10 @@ class NovaControlApplication:
         self.state_store.write("automation_tasks", self.automation_engine.to_dict())
         self.state_store.write("tasks", self.tasks.to_dict())
         self.state_store.write("settings", self.settings.to_dict())
+        # NM-01: the validated NovaMarket configuration (a secret REFERENCE,
+        # never a value) survives a restart. The service also persists on every
+        # change; this is the boot/shutdown flush.
+        self.novamarket.persist()
         # Phase 22: the world survives a restart — versions, transitions and
         # observation REFERENCES (never contents), one key per world id.
         self.world.save()
@@ -8764,6 +8802,22 @@ class NovaControlApplication:
                 chunks=stats.get("chunks") if isinstance(stats, Mapping) else None,
             )
 
+        def novamarket() -> DiagnosticResult:
+            """The financial subsystem's own report, read from its records.
+
+            A disabled NovaMarket is SKIPPED, not broken; a failed initialisation
+            is FAILING with the reason that stopped it. Nothing here probes a
+            provider, a disk or a model.
+            """
+            report = self.novamarket.health()
+            return row(
+                "NovaMarket",
+                report.state,
+                "; ".join(report.reasons) or "financial subsystem is healthy",
+                lifecycle=self.novamarket.state.value,
+                capabilities=len(self.novamarket.capability_records()),
+            )
+
         def scheduler() -> DiagnosticResult:
             if not self.config.automation.enabled:
                 return row(
@@ -8983,6 +9037,9 @@ class NovaControlApplication:
         self.diagnostics.register("Redis", redis, category="data")
         self.diagnostics.register("Plugin system", plugins, category="systems")
         self.diagnostics.register("Knowledge system", knowledge, category="data")
+        # NM-01: the financial subsystem reports lifecycle and health, and a
+        # disabled one is SKIPPED rather than failing.
+        self.diagnostics.register("NovaMarket", novamarket, category="systems")
         self.diagnostics.register("Scheduler", scheduler, category="systems")
         self.diagnostics.register("Permissions", permissions, category="core")
         self.diagnostics.register("Storage", storage, category="platform")
@@ -11255,6 +11312,10 @@ class NovaControlApplication:
         return {
             "runtime_started": self.runtime.state.started,
             "modules": self.runtime.module_names(),
+            # NM-01: lifecycle, health, capabilities, validated configuration and
+            # the dependency report — read from the subsystem's own records, so a
+            # polled status costs nothing and probes nothing.
+            "novamarket": self.novamarket.status(),
             "skills": [skill.schema.name for skill in self.skills.list()],
             "tools": self.tools_status(),
             # Phase 7: which models this build knows, what each one can do and

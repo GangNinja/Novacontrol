@@ -344,6 +344,10 @@ class CommandExecutionApiTests(_IsolatedApiTestCase):
             "/static/js/voice.js",
             "/static/js/effects.js",
             "/static/nova-mark.svg",
+            "/market/workspace",
+            "/static/market-workspace.html",
+            "/static/market-workspace.css",
+            "/static/market-workspace.js",
         )
         for path in paths:
             with self.subTest(path=path):
@@ -973,6 +977,14 @@ class VisionAndBugsApiTests(_IsolatedApiTestCase):
 class AutomationAuditApiTests(_IsolatedApiTestCase):
     """Phase 13's HTTP surface: scheduling stores, approval arms, audit reads."""
 
+    def setUp(self) -> None:
+        super().setUp()
+        # A fresh application deliberately audits NovaMarket's own lifecycle
+        # (initializing/ready/...).  This class is about automation records,
+        # so start from a clean trail and assert that scheduling adds nothing.
+        cleared = self._client.post("/audit/clear")
+        self.assertEqual(cleared.status_code, 200, cleared.text)
+
     def _schedule(self, request: str, **extra: Any) -> dict:
         response = self._client.post(
             "/automation/schedule", json={"request": request, **extra}
@@ -1167,9 +1179,11 @@ class Phase14ApiTests(_IsolatedApiTestCase):
         payload = self._client.get("/diagnostics").json()
 
         # Phase 16 adds the SFT subsystem's row to the Phase 14 roster, Phase 17 adds
-        # preference optimization's, Phase 18 adds the RLHF / RLAIF row, and Phase 19
-        # adds RLVR + critique learning's.
-        self.assertEqual(len(payload["components"]), 25)
+        # preference optimization's, Phase 18 adds the RLHF / RLAIF row, Phase 19
+        # adds RLVR + critique learning's, and NovaMarket NM-01 adds the financial
+        # subsystem's row.
+        self.assertEqual(len(payload["components"]), 26)
+        self.assertIn("NovaMarket", {row["component"] for row in payload["components"]})
         self.assertIn("RLHF / RLAIF", {row["component"] for row in payload["components"]})
         self.assertIn("RLVR", {row["component"] for row in payload["components"]})
         self.assertIn("Core", {row["component"] for row in payload["components"]})

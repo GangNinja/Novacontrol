@@ -1,0 +1,7683 @@
+{
+  "version": 1,
+  "as_of": "2026-11-05",
+  "source": "NSE published index constituent lists (nsearchives.nseindia.com/content/indices)",
+  "method": "Exact NSE symbol match. Market-cap tier is index-defined: Nifty 100 = large, Nifty Midcap 100 = mid, Nifty Smallcap 100 = small; all other symbols stay unclassified.",
+  "indices": [
+    {
+      "id": "nifty50",
+      "label": "Nifty 50",
+      "count": 50,
+      "source_file": "ind_nifty50list.csv"
+    },
+    {
+      "id": "nifty100",
+      "label": "Nifty 100",
+      "count": 100,
+      "source_file": "ind_nifty100list.csv"
+    },
+    {
+      "id": "niftytotalmarket",
+      "label": "Nifty Total Market",
+      "count": 754,
+      "source_file": "ind_niftytotalmarket_list.csv"
+    },
+    {
+      "id": "nifty500",
+      "label": "Nifty 500",
+      "count": 501,
+      "source_file": "ind_nifty500list.csv"
+    },
+    {
+      "id": "niftymidcap100",
+      "label": "Nifty Midcap 100",
+      "count": 100,
+      "source_file": "ind_niftymidcap100list.csv"
+    },
+    {
+      "id": "niftysmallcap100",
+      "label": "Nifty Smallcap 100",
+      "count": 100,
+      "source_file": "ind_niftysmallcap100list.csv"
+    }
+  ],
+  "symbols": {
+    "360ONE": {
+      "name": "360 ONE WAM Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE466L01038",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "AADHARHFC": {
+      "name": "Aadhar Housing Finance Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE883F01010",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "AARTIIND": {
+      "name": "Aarti Industries Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE769A01020",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "AARTIPHARM": {
+      "name": "Aarti Pharmalabs Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE0LRU01027",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "AAVAS": {
+      "name": "Aavas Financiers Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE216P01012",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ABB": {
+      "name": "ABB India Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE117A01022",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "ABBOTINDIA": {
+      "name": "Abbott India Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE358A01014",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ABCAPITAL": {
+      "name": "Aditya Birla Capital Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE674K01013",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "ABDL": {
+      "name": "Allied Blenders and Distillers Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE552Z01027",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ABFRL": {
+      "name": "Aditya Birla Fashion and Retail Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE647O01011",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ABLBL": {
+      "name": "Aditya Birla Lifestyle Brands Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE14LE01019",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ABREL": {
+      "name": "Aditya Birla Real Estate Ltd.",
+      "industry": "Realty",
+      "isin": "INE055A01016",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ABSLAMC": {
+      "name": "Aditya Birla Sun Life AMC Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE404A01024",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ACC": {
+      "name": "ACC Ltd.",
+      "industry": "Construction Materials",
+      "isin": "INE012A01025",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ACE": {
+      "name": "Action Construction Equipment Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE731H01025",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ACI": {
+      "name": "Archean Chemical Industries Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE128X01021",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ACMESOLAR": {
+      "name": "ACME Solar Holdings Ltd.",
+      "industry": "Power",
+      "isin": "INE622W01025",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ACUTAAS": {
+      "name": "Acutaas Chemicals Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE00FF01025",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "ADANIENSOL": {
+      "name": "Adani Energy Solutions Ltd.",
+      "industry": "Power",
+      "isin": "INE931S01010",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "ADANIENT": {
+      "name": "Adani Enterprises Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE423A01024",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "ADANIGREEN": {
+      "name": "Adani Green Energy Ltd.",
+      "industry": "Power",
+      "isin": "INE364U01010",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "ADANIPORTS": {
+      "name": "Adani Ports and Special Economic Zone Ltd.",
+      "industry": "Services",
+      "isin": "INE742F01042",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "ADANIPOWER": {
+      "name": "Adani Power Ltd.",
+      "industry": "Power",
+      "isin": "INE814H01029",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "ADVENZYMES": {
+      "name": "Advanced Enzyme Tech Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE837H01020",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "AEGISLOG": {
+      "name": "Aegis Logistics Ltd.",
+      "industry": "Oil Gas & Consumable Fuels",
+      "isin": "INE208C01025",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "AEGISVOPAK": {
+      "name": "Aegis Vopak Terminals Ltd.",
+      "industry": "Oil Gas & Consumable Fuels",
+      "isin": "INE0INX01018",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "AEQUS": {
+      "name": "Aequs Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE947N01017",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "AEROFLEX": {
+      "name": "Aeroflex Industries Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE024001021",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "AETHER": {
+      "name": "Aether Industries Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE0BWX01014",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "AFCONS": {
+      "name": "Afcons Infrastructure Ltd.",
+      "industry": "Construction",
+      "isin": "INE101I01011",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "AFFLE": {
+      "name": "Affle 3i Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE00WC01027",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "AIAENG": {
+      "name": "AIA Engineering Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE212H01026",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "AIIL": {
+      "name": "Authum Investment & Infrastructure Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE206F01022",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "AJANTPHARM": {
+      "name": "Ajanta Pharmaceuticals Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE031B01049",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "AKUMS": {
+      "name": "Akums Drugs and Pharmaceuticals Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE09XN01023",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ALKEM": {
+      "name": "Alkem Laboratories Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE540L01014",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ALKYLAMINE": {
+      "name": "Alkyl Amines Chemicals Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE150B01039",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "AMAGI": {
+      "name": "Amagi Media Labs Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE121R01077",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "AMBER": {
+      "name": "Amber Enterprises India Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE371P01015",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "AMBUJACEM": {
+      "name": "Ambuja Cements Ltd.",
+      "industry": "Construction Materials",
+      "isin": "INE079A01024",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "ANANDRATHI": {
+      "name": "Anand Rathi Wealth Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE463V01026",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "ANANTRAJ": {
+      "name": "Anant Raj Ltd.",
+      "industry": "Realty",
+      "isin": "INE242C01024",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "ANGELONE": {
+      "name": "Angel One Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE732I01021",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "ANTHEM": {
+      "name": "Anthem Biosciences Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE0CZ201020",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ANURAS": {
+      "name": "Anupam Rasayan India Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE930P01018",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "APARINDS": {
+      "name": "Apar Industries Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE372A01015",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "APLAPOLLO": {
+      "name": "APL Apollo Tubes Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE702C01027",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "APOLLO": {
+      "name": "Apollo Micro Systems Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE713T01028",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "APOLLOHOSP": {
+      "name": "Apollo Hospitals Enterprise Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE437A01024",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "APOLLOTYRE": {
+      "name": "Apollo Tyres Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE438A01022",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "APTUS": {
+      "name": "Aptus Value Housing Finance India Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE852O01025",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ARE&M": {
+      "name": "Amara Raja Energy & Mobility Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE885A01032",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "ARVIND": {
+      "name": "Arvind Ltd.",
+      "industry": "Textiles",
+      "isin": "INE034A01011",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ARVINDFASN": {
+      "name": "Arvind Fashions Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE955V01021",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ASAHIINDIA": {
+      "name": "Asahi India Glass Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE439A01020",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ASHAPURMIN": {
+      "name": "Ashapura Minechem Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE348A01023",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ASHOKA": {
+      "name": "Ashoka Buildcon Ltd.",
+      "industry": "Construction",
+      "isin": "INE442H01029",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ASHOKLEY": {
+      "name": "Ashok Leyland Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE208A01029",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "ASIANPAINT": {
+      "name": "Asian Paints Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE021A01026",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "ASTERDM": {
+      "name": "Aster DM Quality Care Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE914M01019",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ASTRAL": {
+      "name": "Astral Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE006I01046",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "ASTRAMICRO": {
+      "name": "Astra Microwave Products Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE386C01029",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ATGL": {
+      "name": "Adani Total Gas Ltd.",
+      "industry": "Oil Gas & Consumable Fuels",
+      "isin": "INE399L01023",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "ATHERENERG": {
+      "name": "Ather Energy Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE0LEZ01016",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "ATLANTAELE": {
+      "name": "Atlanta Electricals Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE0Z4F01028",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ATUL": {
+      "name": "Atul Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE100A01010",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "AUBANK": {
+      "name": "AU Small Finance Bank Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE949L01017",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "AURIONPRO": {
+      "name": "Aurionpro Solution Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE132H01018",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "AUROPHARMA": {
+      "name": "Aurobindo Pharma Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE406A01037",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "AVALON": {
+      "name": "Avalon Technologies Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE0LCL01028",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "AVANTIFEED": {
+      "name": "Avanti Feeds Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE871C01038",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "AVL": {
+      "name": "Aditya Vision Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE679V01027",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "AWL": {
+      "name": "AWL Agri Business Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE699H01024",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "AXISBANK": {
+      "name": "Axis Bank Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE238A01034",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "AXISCADES": {
+      "name": "AXISCADES Technologies Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE555B01013",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "AZAD": {
+      "name": "Azad Engineering Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE02IJ01035",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "BAGMANE": {
+      "name": "Bagmane Prime Office REIT",
+      "industry": "Realty",
+      "isin": "INE2OVN25015",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "BAJAJ-AUTO": {
+      "name": "Bajaj Auto Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE917I01010",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "BAJAJCON": {
+      "name": "Bajaj Consumer Care Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE933K01021",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "BAJAJFINSV": {
+      "name": "Bajaj Finserv Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE918I01026",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "BAJAJHFL": {
+      "name": "Bajaj Housing Finance Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE377Y01014",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "BAJAJHLDNG": {
+      "name": "Bajaj Holdings & Investment Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE118A01012",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "BAJFINANCE": {
+      "name": "Bajaj Finance Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE296A01032",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "BALAMINES": {
+      "name": "Balaji Amines Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE050E01027",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "BALKRISIND": {
+      "name": "Balkrishna Industries Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE787D01026",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "BALRAMCHIN": {
+      "name": "Balrampur Chini Mills Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE119A01028",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "BALUFORGE": {
+      "name": "Balu Forge Industries Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE011E01029",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "BANCOINDIA": {
+      "name": "Banco Products (India) Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE213C01025",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "BANDHANBNK": {
+      "name": "Bandhan Bank Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE545U01014",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "BANKBARODA": {
+      "name": "Bank of Baroda",
+      "industry": "Financial Services",
+      "isin": "INE028A01039",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "BANKINDIA": {
+      "name": "Bank of India",
+      "industry": "Financial Services",
+      "isin": "INE084A01016",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "BATAINDIA": {
+      "name": "Bata India Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE176A01028",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "BBOX": {
+      "name": "Black Box Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE676A01027",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "BDL": {
+      "name": "Bharat Dynamics Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE171Z01026",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "BECTORFOOD": {
+      "name": "Mrs. Bectors Food Specialities Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE495P01020",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "BEL": {
+      "name": "Bharat Electronics Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE263A01024",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "BELRISE": {
+      "name": "Belrise Industries Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE894V01022",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "BEML": {
+      "name": "BEML Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE258A01024",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "BERGEPAINT": {
+      "name": "Berger Paints India Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE463A01038",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "BHARATCOAL": {
+      "name": "Bharat Coking Coal Ltd.",
+      "industry": "Oil Gas & Consumable Fuels",
+      "isin": "INE05XR01022",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "BHARATFORG": {
+      "name": "Bharat Forge Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE465A01025",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "BHARTIARTL": {
+      "name": "Bharti Airtel Ltd.",
+      "industry": "Telecommunication",
+      "isin": "INE397D01024",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "BHARTIHEXA": {
+      "name": "Bharti Hexacom Ltd.",
+      "industry": "Telecommunication",
+      "isin": "INE343G01021",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "BHEL": {
+      "name": "Bharat Heavy Electricals Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE257A01026",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "BIOCON": {
+      "name": "Biocon Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE376G01013",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "BIRET": {
+      "name": "Brookfield India Real Estate Trust",
+      "industry": "Realty",
+      "isin": "INE0FDU25010",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "BIRLACORPN": {
+      "name": "Birla Corporation Ltd.",
+      "industry": "Construction Materials",
+      "isin": "INE340A01012",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "BLACKBUCK": {
+      "name": "Blackbuck Ltd.",
+      "industry": "Services",
+      "isin": "INE0UIZ01018",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "BLS": {
+      "name": "BLS International Services Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE153T01027",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "BLUEJET": {
+      "name": "Blue Jet Healthcare Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE0KBH01020",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "BLUESTARCO": {
+      "name": "Blue Star Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE472A01039",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "BLUESTONE": {
+      "name": "BlueStone Jewellery and Lifestyle Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE304W01038",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "BORORENEW": {
+      "name": "Borosil Renewables Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE666D01022",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "BOSCHLTD": {
+      "name": "Bosch Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE323A01026",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "BPCL": {
+      "name": "Bharat Petroleum Corporation Ltd.",
+      "industry": "Oil Gas & Consumable Fuels",
+      "isin": "INE029A01011",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "BRIGADE": {
+      "name": "Brigade Enterprises Ltd.",
+      "industry": "Realty",
+      "isin": "INE791I01019",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "BRITANNIA": {
+      "name": "Britannia Industries Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE216A01030",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "BSE": {
+      "name": "BSE Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE118H01025",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "BSOFT": {
+      "name": "Birlasoft Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE836A01035",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CAMPUS": {
+      "name": "Campus Activewear Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE278Y01022",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CAMS": {
+      "name": "Computer Age Management Services Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE596I01020",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "CANBK": {
+      "name": "Canara Bank",
+      "industry": "Financial Services",
+      "isin": "INE476A01022",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "CANFINHOME": {
+      "name": "Can Fin Homes Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE477A01020",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CANHLIFE": {
+      "name": "Canara HSBC Life Insurance Company Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE01TY01017",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CAPILLARY": {
+      "name": "Capillary Technologies India Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE0ILV01024",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CAPLIPOINT": {
+      "name": "Caplin Point Laboratories Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE475E01026",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CARBORUNIV": {
+      "name": "Carborundum Universal Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE120A01034",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CARTRADE": {
+      "name": "Cartrade Tech Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE290S01011",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CASTROLIND": {
+      "name": "Castrol India Ltd.",
+      "industry": "Oil Gas & Consumable Fuels",
+      "isin": "INE172A01027",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CCL": {
+      "name": "CCL Products (I) Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE421D01022",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CDSL": {
+      "name": "Central Depository Services (India) Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE736A01011",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "CEATLTD": {
+      "name": "Ceat Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE482A01020",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CEIGALL": {
+      "name": "Ceigall India Ltd.",
+      "industry": "Construction",
+      "isin": "INE0AG901020",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CELLO": {
+      "name": "Cello World Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE0LMW01024",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CEMPRO": {
+      "name": "Cemindia Projects Ltd.",
+      "industry": "Construction",
+      "isin": "INE686A01026",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "CENTRALBK": {
+      "name": "Central Bank of India",
+      "industry": "Financial Services",
+      "isin": "INE483A01010",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CENTUM": {
+      "name": "Centum Electronics Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE320B01020",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CERA": {
+      "name": "Cera Sanitaryware Ltd",
+      "industry": "Consumer Durables",
+      "isin": "INE739E01017",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CESC": {
+      "name": "CESC Ltd.",
+      "industry": "Power",
+      "isin": "INE486A01021",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "CGCL": {
+      "name": "Capri Global Capital Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE180C01042",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "CGPOWER": {
+      "name": "CG Power and Industrial Solutions Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE067A01029",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "CHALET": {
+      "name": "Chalet Hotels Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE427F01016",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CHAMBLFERT": {
+      "name": "Chambal Fertilizers & Chemicals Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE085A01013",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CHENNPETRO": {
+      "name": "Chennai Petroleum Corporation Ltd.",
+      "industry": "Oil Gas & Consumable Fuels",
+      "isin": "INE178A01016",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "CHOICEIN": {
+      "name": "Choice International Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE102B01014",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CHOLAFIN": {
+      "name": "Cholamandalam Investment and Finance Company Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE121A01024",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "CHOLAHLDNG": {
+      "name": "Cholamandalam Financial Holdings Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE149A01033",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "CIEINDIA": {
+      "name": "CIE Automotive India Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE536H01010",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CIPLA": {
+      "name": "Cipla Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE059A01026",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "CLEAN": {
+      "name": "Clean Science and Technology Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE227W01023",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CLEANMAX": {
+      "name": "Clean Max Enviro Energy Solutions Ltd.",
+      "industry": "Power",
+      "isin": "INE647U01026",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CMPDI": {
+      "name": "Central Mine Planning & Design Institute Ltd.",
+      "industry": "Services",
+      "isin": "INE05HV01027",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "CMRGREEN": {
+      "name": "CMR Green Technologies Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE00WV01027",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CMSINFO": {
+      "name": "CMS Info Systems Ltd.",
+      "industry": "Services",
+      "isin": "INE925R01014",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "COALINDIA": {
+      "name": "Coal India Ltd.",
+      "industry": "Oil Gas & Consumable Fuels",
+      "isin": "INE522F01014",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "COCHINSHIP": {
+      "name": "Cochin Shipyard Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE704P01025",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "COFORGE": {
+      "name": "Coforge Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE591G01025",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "COHANCE": {
+      "name": "Cohance Lifesciences Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE03QK01018",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "COLPAL": {
+      "name": "Colgate Palmolive (India) Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE259A01022",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "CONCOR": {
+      "name": "Container Corporation of India Ltd.",
+      "industry": "Services",
+      "isin": "INE111A01025",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "CONCORDBIO": {
+      "name": "Concord Biotech Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE338H01029",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "COROMANDEL": {
+      "name": "Coromandel International Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE169A01031",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CPPLUS": {
+      "name": "Aditya Infotech Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE819V01029",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CRAFTSMAN": {
+      "name": "Craftsman Automation Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE00LO01017",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CRAMC": {
+      "name": "Canara Robeco Asset Management Company Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE218I01013",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CREDITACC": {
+      "name": "CreditAccess Grameen Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE741K01010",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "CRISIL": {
+      "name": "CRISIL Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE007A01025",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CROMPTON": {
+      "name": "Crompton Greaves Consumer Electricals Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE299U01018",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "CSBBANK": {
+      "name": "CSB Bank Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE679A01013",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "CUB": {
+      "name": "City Union Bank Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE491A01021",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "CUMMINSIND": {
+      "name": "Cummins India Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE298A01020",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "CUPID": {
+      "name": "Cupid Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE509F01029",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "CYIENT": {
+      "name": "Cyient Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE136B01020",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "DABUR": {
+      "name": "Dabur India Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE016A01026",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "DALBHARAT": {
+      "name": "Dalmia Bharat Ltd.",
+      "industry": "Construction Materials",
+      "isin": "INE00R701025",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "DATAMATICS": {
+      "name": "Datamatics Global Services Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE365B01017",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "DATAPATTNS": {
+      "name": "Data Patterns (India) Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE0IX101010",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "DBL": {
+      "name": "Dilip Buildcon Ltd.",
+      "industry": "Construction",
+      "isin": "INE917M01012",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "DBREALTY": {
+      "name": "VALOR ESTATE Ltd.",
+      "industry": "Realty",
+      "isin": "INE879I01012",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "DCBBANK": {
+      "name": "DCB Bank Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE503A01015",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "DEEPAKFERT": {
+      "name": "Deepak Fertilisers & Petrochemicals Corp. Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE501A01019",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "DEEPAKNTR": {
+      "name": "Deepak Nitrite Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE288B01029",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "DELHIVERY": {
+      "name": "Delhivery Ltd.",
+      "industry": "Services",
+      "isin": "INE148O01028",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "DEVYANI": {
+      "name": "Devyani International Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE872J01023",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "DIACABS": {
+      "name": "Diamond Power Infrastructure Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE989C01038",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "DIVISLAB": {
+      "name": "Divi's Laboratories Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE361B01024",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "DIXON": {
+      "name": "Dixon Technologies (India) Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE935N01020",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "DLF": {
+      "name": "DLF Ltd.",
+      "industry": "Realty",
+      "isin": "INE271C01023",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "DMART": {
+      "name": "Avenue Supermarts Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE192R01011",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "DOMS": {
+      "name": "DOMS Industries Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE321T01012",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "DRREDDY": {
+      "name": "Dr. Reddy's Laboratories Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE089A01031",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "DUMMYHEG": {
+      "name": "Dummy HEG Ltd.",
+      "industry": "Capital Goods",
+      "isin": "DUM545A01024",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "DUMMYINXGN": {
+      "name": "Dummy Inox Green Ltd.",
+      "industry": "Construction",
+      "isin": "DUM510W01014",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "DYNAMATECH": {
+      "name": "Dynamatic Technologies Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE221B01012",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "E2E": {
+      "name": "E2E NETWORKS Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE255Z01027",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "EBGNG": {
+      "name": "GNG Electronics Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE18JU01028",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ECLERX": {
+      "name": "eClerx Services Ltd.",
+      "industry": "Services",
+      "isin": "INE738I01010",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "EDELWEISS": {
+      "name": "Edelweiss Financial Services Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE532F01054",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "EICHERMOT": {
+      "name": "Eicher Motors Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE066A01021",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "EIDPARRY": {
+      "name": "E.I.D. Parry (India) Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE126A01031",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "EIEL": {
+      "name": "Enviro Infra Engineers Ltd.",
+      "industry": "Utilities",
+      "isin": "INE0LLY01014",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "EIHOTEL": {
+      "name": "EIH Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE230A01023",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ELECON": {
+      "name": "Elecon Engineering Co. Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE205B01031",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ELECTCAST": {
+      "name": "Electrosteel Castings Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE086A01029",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ELGIEQUIP": {
+      "name": "Elgi Equipments Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE285A01027",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ELLEN": {
+      "name": "Ellenbarrie Industrial Gases Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE236E01022",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "EMAMILTD": {
+      "name": "Emami Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE548C01032",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "EMBASSY": {
+      "name": "EMBASSY OFFICE PARKS REIT",
+      "industry": "Realty",
+      "isin": "INE041025011",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "EMBDL": {
+      "name": "Embassy Developments Ltd.",
+      "industry": "Realty",
+      "isin": "INE069I01010",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "EMCURE": {
+      "name": "Emcure Pharmaceuticals Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE168P01015",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "EMIL": {
+      "name": "Electronics Mart India Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE02YR01019",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "EMMVEE": {
+      "name": "Emmvee Photovoltaic Power Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE1C6T01020",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "ENDURANCE": {
+      "name": "Endurance Technologies Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE913H01037",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ENGINERSIN": {
+      "name": "Engineers India Ltd.",
+      "industry": "Construction",
+      "isin": "INE510A01028",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ENNATURE": {
+      "name": "Ennature Bio Pharma Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE2WCT01016",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ENRIN": {
+      "name": "Siemens Energy India Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE1NPP01017",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "ENTERO": {
+      "name": "Entero Healthcare Solutions Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE010601016",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "EPL": {
+      "name": "EPL Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE255A01020",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "EQUITASBNK": {
+      "name": "Equitas Small Finance Bank Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE063P01018",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ERIS": {
+      "name": "Eris Lifesciences Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE406M01024",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ESCORTS": {
+      "name": "Escorts Kubota Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE042A01014",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ETERNAL": {
+      "name": "Eternal Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE758T01015",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "EXIDEIND": {
+      "name": "Exide Industries Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE302A01020",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "FACT": {
+      "name": "Fertilisers and Chemicals Travancore Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE188A01015",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "FEDERALBNK": {
+      "name": "Federal Bank Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE171A01029",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "FEDFINA": {
+      "name": "Fedbank Financial Services Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE007N01010",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "FIEMIND": {
+      "name": "Fiem Industries Ltd",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE737H01014",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "FINCABLES": {
+      "name": "Finolex Cables Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE235A01022",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "FINPIPE": {
+      "name": "Finolex Industries Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE183A01024",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "FIRSTCRY": {
+      "name": "Brainbees Solutions Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE02RE01045",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "FIVESTAR": {
+      "name": "Five-Star Business Finance Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE128S01021",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "FLUOROCHEM": {
+      "name": "Gujarat Fluorochemicals Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE09N301011",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "FORCEMOT": {
+      "name": "Force Motors Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE451A01017",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "FORTIS": {
+      "name": "Fortis Healthcare Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE061F01013",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "FRACTAL": {
+      "name": "Fractal Analytics Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE212S01015",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "FSL": {
+      "name": "Firstsource Solutions Ltd.",
+      "industry": "Services",
+      "isin": "INE684F01012",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "GABRIEL": {
+      "name": "Gabriel India Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE524A01029",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "GAEL": {
+      "name": "Gujarat Ambuja Exports Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE036B01030",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "GAIL": {
+      "name": "GAIL (India) Ltd.",
+      "industry": "Oil Gas & Consumable Fuels",
+      "isin": "INE129A01019",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "GALLANTT": {
+      "name": "Gallantt Ispat Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE297H01019",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "GENUSPOWER": {
+      "name": "Genus Power Infrastructures Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE955D01029",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "GESHIP": {
+      "name": "Great Eastern Shipping Co. Ltd.",
+      "industry": "Services",
+      "isin": "INE017A01032",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "GICRE": {
+      "name": "General Insurance Corporation of India",
+      "industry": "Financial Services",
+      "isin": "INE481Y01014",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "GILLETTE": {
+      "name": "Gillette India Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE322A01010",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "GLAND": {
+      "name": "Gland Pharma Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE068V01023",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "GLAXO": {
+      "name": "Glaxosmithkline Pharmaceuticals Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE159A01016",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "GLENMARK": {
+      "name": "Glenmark Pharmaceuticals Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE935A01035",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "GMDCLTD": {
+      "name": "Gujarat Mineral Development Corporation Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE131A01031",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "GMRAIRPORT": {
+      "name": "GMR Airports Ltd.",
+      "industry": "Services",
+      "isin": "INE776C01039",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "GMRP&UI": {
+      "name": "GMR Power and Urban Infra Ltd.",
+      "industry": "Power",
+      "isin": "INE0CU601026",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "GNFC": {
+      "name": "Gujarat Narmada Valley Fertilizers and Chemicals Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE113A01013",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "GODFRYPHLP": {
+      "name": "Godfrey Phillips India Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE260B01028",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "GODREJAGRO": {
+      "name": "Godrej Agrovet Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE850D01014",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "GODREJCP": {
+      "name": "Godrej Consumer Products Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE102D01028",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "GODREJIND": {
+      "name": "Godrej Industries Ltd.",
+      "industry": "Diversified",
+      "isin": "INE233A01035",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "GODREJPROP": {
+      "name": "Godrej Properties Ltd.",
+      "industry": "Realty",
+      "isin": "INE484J01027",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "GOKEX": {
+      "name": "Gokaldas Exports Ltd.",
+      "industry": "Textiles",
+      "isin": "INE887G01027",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "GOKULAGRO": {
+      "name": "Gokul Agro Resources Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE314T01033",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "GOLDIAM": {
+      "name": "Goldiam International Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE025B01025",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "GPIL": {
+      "name": "Godawari Power & Ispat Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE177H01039",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "GPPL": {
+      "name": "Gujarat Pipavav Port Ltd.",
+      "industry": "Services",
+      "isin": "INE517F01014",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "GRANULES": {
+      "name": "Granules India Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE101D01020",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "GRAPHITE": {
+      "name": "Graphite India Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE371A01025",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "GRASIM": {
+      "name": "Grasim Industries Ltd.",
+      "industry": "Construction Materials",
+      "isin": "INE047A01021",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "GRAVITA": {
+      "name": "Gravita India Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE024L01027",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "GREAVESCOT": {
+      "name": "Greaves Cotton Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE224A01026",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "GRINDWELL": {
+      "name": "Grindwell Norton Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE536A01023",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "GROWW": {
+      "name": "Billionbrains Garage Ventures Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE0HOQ01053",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "GRSE": {
+      "name": "Garden Reach Shipbuilders & Engineers Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE382Z01011",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "GRWRHITECH": {
+      "name": "Garware Hi-Tech Films Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE291A01017",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "GSFC": {
+      "name": "Gujarat State Fertilizers & Chemicals Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE026A01025",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "GUJALKALI": {
+      "name": "Gujarat Alkalies & Chemicals Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE186A01019",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "GVT&D": {
+      "name": "GE Vernova T&D India Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE200A01026",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "HAL": {
+      "name": "Hindustan Aeronautics Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE066F01020",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "HAPPSTMNDS": {
+      "name": "Happiest Minds Technologies Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE419U01012",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "HAPPYFORGE": {
+      "name": "Happy Forgings Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE330T01021",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "HAVELLS": {
+      "name": "Havells India Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE176B01034",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "HBLENGINE": {
+      "name": "HBL Engineering Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE292B01021",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "HCC": {
+      "name": "Hindustan Construction Co. Ltd.",
+      "industry": "Construction",
+      "isin": "INE549A01026",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "HCG": {
+      "name": "Healthcare Global Enterprises Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE075I01017",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "HCLTECH": {
+      "name": "HCL Technologies Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE860A01027",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "HDBFS": {
+      "name": "HDB Financial Services Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE756I01012",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "HDFCAMC": {
+      "name": "HDFC Asset Management Company Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE127D01025",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "HDFCBANK": {
+      "name": "HDFC Bank Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE040A01034",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "HDFCLIFE": {
+      "name": "HDFC Life Insurance Company Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE795G01014",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "HEGAM": {
+      "name": "HEG Advanced Materials Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE545A01024",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "HERITGFOOD": {
+      "name": "Heritage Foods Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE978A01027",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "HEROMOTOCO": {
+      "name": "Hero MotoCorp Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE158A01026",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "HEXT": {
+      "name": "Hexaware Technologies Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE093A01041",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "HFCL": {
+      "name": "HFCL Ltd.",
+      "industry": "Telecommunication",
+      "isin": "INE548A01028",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "HGINFRA": {
+      "name": "H.G. Infra Engineering Ltd.",
+      "industry": "Construction",
+      "isin": "INE926X01010",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "HINDALCO": {
+      "name": "Hindalco Industries Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE038A01020",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "HINDCOPPER": {
+      "name": "Hindustan Copper Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE531E01026",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "HINDPETRO": {
+      "name": "Hindustan Petroleum Corporation Ltd.",
+      "industry": "Oil Gas & Consumable Fuels",
+      "isin": "INE094A01015",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "HINDUNILVR": {
+      "name": "Hindustan Unilever Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE030A01027",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "HINDZINC": {
+      "name": "Hindustan Zinc Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE267A01025",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "HOMEFIRST": {
+      "name": "Home First Finance Company India Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE481N01025",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "HONASA": {
+      "name": "Honasa Consumer Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE0J5401028",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "HONAUT": {
+      "name": "Honeywell Automation India Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE671A01010",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "HSCL": {
+      "name": "Himadri Speciality Chemical Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE019C01026",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "HUDCO": {
+      "name": "Housing & Urban Development Corporation Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE031A01017",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "HYUNDAI": {
+      "name": "Hyundai Motor India Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE0V6F01027",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "ICICIAMC": {
+      "name": "ICICI Prudential Asset Management Company Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE346A01027",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "ICICIBANK": {
+      "name": "ICICI Bank Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE090A01021",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "ICICIGI": {
+      "name": "ICICI Lombard General Insurance Company Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE765G01017",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "ICICILIFE": {
+      "name": "ICICI Life Insurance Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE726G01019",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ICIL": {
+      "name": "Indo Count Industries Ltd.",
+      "industry": "Textiles",
+      "isin": "INE483B01026",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "IDBI": {
+      "name": "IDBI Bank Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE008A01015",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "IDEA": {
+      "name": "Vodafone Idea Ltd.",
+      "industry": "Telecommunication",
+      "isin": "INE669E01016",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "IDFCFIRSTB": {
+      "name": "IDFC First Bank Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE092T01019",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "IEX": {
+      "name": "Indian Energy Exchange Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE022Q01020",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "IFBIND": {
+      "name": "IFB Industries Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE559A01017",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "IFCI": {
+      "name": "IFCI Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE039A01010",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "IGIL": {
+      "name": "International Gemological Institute Ltd.",
+      "industry": "Services",
+      "isin": "INE0Q9301021",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "IGL": {
+      "name": "Indraprastha Gas Ltd.",
+      "industry": "Oil Gas & Consumable Fuels",
+      "isin": "INE203G01027",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "IGLSPIRITS": {
+      "name": "IGL Spirits Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE2W6901017",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "IIFL": {
+      "name": "IIFL Finance Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE530B01024",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "IIFLCAPS": {
+      "name": "IIFL Capital Services Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE489L01022",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "IKS": {
+      "name": "Inventurus Knowledge Solutions Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE115Q01022",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "IMFA": {
+      "name": "Indian Metals & Ferro Alloys Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE919H01018",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "INDGN": {
+      "name": "Indegene Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE065X01017",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "INDHOTEL": {
+      "name": "Indian Hotels Co. Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE053A01029",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "INDIACEM": {
+      "name": "India Cements Ltd.",
+      "industry": "Construction Materials",
+      "isin": "INE383A01012",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "INDIAGLYCO": {
+      "name": "India Glycols Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE560A01023",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "INDIAMART": {
+      "name": "Indiamart Intermesh Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE933S01016",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "INDIANB": {
+      "name": "Indian Bank",
+      "industry": "Financial Services",
+      "isin": "INE562A01011",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "INDIGO": {
+      "name": "InterGlobe Aviation Ltd.",
+      "industry": "Services",
+      "isin": "INE646L01027",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "INDIGOPNTS": {
+      "name": "Indigo Paints Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE09VQ01012",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "INDUSINDBK": {
+      "name": "IndusInd Bank Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE095A01012",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "INDUSTOWER": {
+      "name": "Indus Towers Ltd.",
+      "industry": "Telecommunication",
+      "isin": "INE121J01017",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "INFY": {
+      "name": "Infosys Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE009A01021",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "INOXINDIA": {
+      "name": "INOX India Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE616N01034",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "INOXWIND": {
+      "name": "Inox Wind Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE066P01011",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "INTELLECT": {
+      "name": "Intellect Design Arena Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE306R01017",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "IOB": {
+      "name": "Indian Overseas Bank",
+      "industry": "Financial Services",
+      "isin": "INE565A01014",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "IOC": {
+      "name": "Indian Oil Corporation Ltd.",
+      "industry": "Oil Gas & Consumable Fuels",
+      "isin": "INE242A01010",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "IONEXCHANG": {
+      "name": "Ion Exchange (India) Ltd.",
+      "industry": "Utilities",
+      "isin": "INE570A01022",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "IPCALAB": {
+      "name": "Ipca Laboratories Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE571A01038",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "IRB": {
+      "name": "IRB Infrastructure Developers Ltd.",
+      "industry": "Construction",
+      "isin": "INE821I01022",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "IRCON": {
+      "name": "IRCON International Ltd.",
+      "industry": "Construction",
+      "isin": "INE962Y01021",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "IRCTC": {
+      "name": "Indian Railway Catering And Tourism Corporation Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE335Y01020",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "IREDA": {
+      "name": "Indian Renewable Energy Development Agency Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE202E01016",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "IRFC": {
+      "name": "Indian Railway Finance Corporation Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE053F01010",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "ITC": {
+      "name": "ITC Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE154A01025",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "ITCHOTELS": {
+      "name": "ITC Hotels Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE379A01028",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ITI": {
+      "name": "ITI Ltd.",
+      "industry": "Telecommunication",
+      "isin": "INE248A01017",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "IXIGO": {
+      "name": "Le Travenues Technology Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE0HV901016",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "J&KBANK": {
+      "name": "Jammu & Kashmir Bank Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE168A01041",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "JAIBALAJI": {
+      "name": "JAI BALAJI INDUSTRIES Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE091G01026",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "JAINREC": {
+      "name": "Jain Resource Recycling Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE0YD401026",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "JAMNAAUTO": {
+      "name": "Jamna Auto Industries Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE039C01032",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "JAYNECOIND": {
+      "name": "Jayaswal Neco Industries Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE854B01010",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "JBMA": {
+      "name": "JBM Auto Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE927D01051",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "JINDALSAW": {
+      "name": "Jindal Saw Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE324A01032",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "JINDALSTEL": {
+      "name": "Jindal Steel Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE749A01030",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "JIOFIN": {
+      "name": "Jio Financial Services Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE758E01017",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "JKCEMENT": {
+      "name": "J.K. Cement Ltd.",
+      "industry": "Construction Materials",
+      "isin": "INE823G01014",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "JKPAPER": {
+      "name": "JK Paper Ltd.",
+      "industry": "Forest Materials",
+      "isin": "INE789E01012",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "JKTYRE": {
+      "name": "JK Tyre & Industries Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE573A01042",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "JMFINANCIL": {
+      "name": "JM Financial Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE780C01023",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "JPPOWER": {
+      "name": "Jaiprakash Power Ventures Ltd.",
+      "industry": "Power",
+      "isin": "INE351F01018",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "JSFB": {
+      "name": "Jana Small Finance Bank Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE953L01027",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "JSL": {
+      "name": "Jindal Stainless Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE220G01021",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "JSLL": {
+      "name": "Jeena Sikho Lifecare Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE0J5801029",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "JSWCEMENT": {
+      "name": "JSW Cement Ltd.",
+      "industry": "Construction Materials",
+      "isin": "INE718I01012",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "JSWENERGY": {
+      "name": "JSW Energy Ltd.",
+      "industry": "Power",
+      "isin": "INE121E01018",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "JSWINFRA": {
+      "name": "JSW Infrastructure Ltd.",
+      "industry": "Services",
+      "isin": "INE880J01026",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "JSWSTEEL": {
+      "name": "JSW Steel Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE019A01038",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "JUBLFOOD": {
+      "name": "Jubilant Foodworks Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE797F01020",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "JUBLINGREA": {
+      "name": "Jubilant Ingrevia Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE0BY001018",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "JUBLPHARMA": {
+      "name": "Jubilant Pharmova Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE700A01033",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "JUSTDIAL": {
+      "name": "Justdial Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE599M01018",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "JWL": {
+      "name": "Jupiter Wagons Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE209L01016",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "JYOTHYLAB": {
+      "name": "Jyothy Labs Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE668F01031",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "JYOTICNC": {
+      "name": "Jyoti CNC Automation Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE980O01024",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "KAJARIACER": {
+      "name": "Kajaria Ceramics Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE217B01036",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "KALYANKJIL": {
+      "name": "Kalyan Jewellers India Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE303R01014",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "KANSAINER": {
+      "name": "Kansai Nerolac Paints Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE531A01024",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "KARURVYSYA": {
+      "name": "Karur Vysya Bank Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE036D01028",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "KAYNES": {
+      "name": "Kaynes Technology India Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE918Z01012",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "KEC": {
+      "name": "Kec International Ltd.",
+      "industry": "Construction",
+      "isin": "INE389H01022",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "KEI": {
+      "name": "KEI Industries Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE878B01027",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "KFINTECH": {
+      "name": "Kfin Technologies Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE138Y01010",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "KIMS": {
+      "name": "Krishna Institute of Medical Sciences Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE967H01025",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "KIRLOSBROS": {
+      "name": "Kirloskar Brothers Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE732A01036",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "KIRLOSENG": {
+      "name": "Kirloskar Oil Eng Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE146L01010",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "KIRLPNU": {
+      "name": "Kirloskar Pneumatic Company Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE811A01038",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "KISSHT": {
+      "name": "OnEMI Technology Solutions Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE12F801023",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "KITEX": {
+      "name": "Kitex Garments Ltd.",
+      "industry": "Textiles",
+      "isin": "INE602G01020",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "KMEW": {
+      "name": "Knowledge Marine & Engineering Works Ltd.",
+      "industry": "Services",
+      "isin": "INE0CJD01029",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "KNRCON": {
+      "name": "KNR Constructions Ltd.",
+      "industry": "Construction",
+      "isin": "INE634I01029",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "KOTAKBANK": {
+      "name": "Kotak Mahindra Bank Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE237A01036",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "KPIGREEN": {
+      "name": "KPI Green Energy Ltd.",
+      "industry": "Power",
+      "isin": "INE542W01025",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "KPIL": {
+      "name": "Kalpataru Projects International Ltd.",
+      "industry": "Construction",
+      "isin": "INE220B01022",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "KPITTECH": {
+      "name": "KPIT Technologies Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE04I401011",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "KPRMILL": {
+      "name": "K.P.R. Mill Ltd.",
+      "industry": "Textiles",
+      "isin": "INE930H01031",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "KRBL": {
+      "name": "KRBL Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE001B01026",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "KRN": {
+      "name": "KRN HEAT EXCHANGER AND REFRIGERATION Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE0Q3J01015",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "KSB": {
+      "name": "KSB Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE999A01023",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "KSCL": {
+      "name": "Kaveri Seed Company Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE455I01029",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "KTKBANK": {
+      "name": "Karnataka Bank Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE614B01018",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "KWIL": {
+      "name": "Kwality Wall's (India) Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE2KCE01013",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "LALPATHLAB": {
+      "name": "Dr. Lal Path Labs Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE600L01024",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "LATENTVIEW": {
+      "name": "Latent View Analytics Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE0I7C01011",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "LAURUSLABS": {
+      "name": "Laurus Labs Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE947Q01028",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "LEMONTREE": {
+      "name": "Lemon Tree Hotels Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE970X01018",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "LENSKART": {
+      "name": "Lenskart Solutions Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE956O01016",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "LGEINDIA": {
+      "name": "LG Electronics India Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE324D01010",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "LICHSGFIN": {
+      "name": "LIC Housing Finance Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE115A01026",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "LICI": {
+      "name": "Life Insurance Corporation of India",
+      "industry": "Financial Services",
+      "isin": "INE0J1Y01017",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "LINDEINDIA": {
+      "name": "Linde India Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE473A01011",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "LLOYDSENGG": {
+      "name": "Lloyds Engineering Works Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE093R01011",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "LLOYDSENT": {
+      "name": "Lloyds Enterprises Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE080I01025",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "LLOYDSME": {
+      "name": "Lloyds Metals And Energy Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE281B01032",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "LODHA": {
+      "name": "Lodha Developers Ltd.",
+      "industry": "Realty",
+      "isin": "INE670K01029",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "LOTUSDEV": {
+      "name": "SRI LOTUS DEVELOPERS AND REALTY Ltd.",
+      "industry": "Realty",
+      "isin": "INE0V9Q01010",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "LT": {
+      "name": "Larsen & Toubro Ltd.",
+      "industry": "Construction",
+      "isin": "INE018A01030",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "LTF": {
+      "name": "L&T Finance Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE498L01015",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "LTFOODS": {
+      "name": "LT Foods Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE818H01020",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "LTM": {
+      "name": "LTM Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE214T01019",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "LTTS": {
+      "name": "L&T Technology Services Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE010V01017",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "LUMAXIND": {
+      "name": "Lumax Industries Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE162B01018",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "LUMAXTECH": {
+      "name": "Lumax Auto Technologies Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE872H01027",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "LUPIN": {
+      "name": "Lupin Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE326A01037",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "LXCHEM": {
+      "name": "Laxmi Organic Industries Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE576O01020",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "M&M": {
+      "name": "Mahindra & Mahindra Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE101A01026",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "M&MFIN": {
+      "name": "Mahindra & Mahindra Financial Services Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE774D01024",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "MAHABANK": {
+      "name": "Bank of Maharashtra",
+      "industry": "Financial Services",
+      "isin": "INE457A01014",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "MANAPPURAM": {
+      "name": "Manappuram Finance Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE522D01027",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "MANKIND": {
+      "name": "Mankind Pharma Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE634S01028",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "MANORAMA": {
+      "name": "Manorama Industries Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE00VM01036",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "MANYAVAR": {
+      "name": "Vedant Fashions Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE825V01034",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "MAPMYINDIA": {
+      "name": "C.E. Info Systems Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE0BV301023",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "MARICO": {
+      "name": "Marico Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE196A01026",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "MARKSANS": {
+      "name": "Marksans Pharma Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE750C01026",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "MARUTI": {
+      "name": "Maruti Suzuki India Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE585B01010",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "MASTEK": {
+      "name": "Mastek Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE759A01021",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "MAXHEALTH": {
+      "name": "Max Healthcare Institute Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE027H01010",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "MAZDOCK": {
+      "name": "Mazagoan Dock Shipbuilders Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE249Z01020",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "MBAPL": {
+      "name": "Madhya Bharat Agro Products Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE900L01028",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "MCX": {
+      "name": "Multi Commodity Exchange of India Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE745G01043",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "MEDANTA": {
+      "name": "Global Health Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE474Q01031",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "MEDPLUS": {
+      "name": "Medplus Health Services Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE804L01022",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "MEESHO": {
+      "name": "Meesho Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE0VDM01015",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "METROPOLIS": {
+      "name": "Metropolis Healthcare Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE112L01020",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "MFSL": {
+      "name": "Max Financial Services Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE180A01020",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "MGL": {
+      "name": "Mahanagar Gas Ltd.",
+      "industry": "Oil Gas & Consumable Fuels",
+      "isin": "INE002S01010",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "MIDHANI": {
+      "name": "Mishra Dhatu Nigam Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE099Z01011",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "MINDACORP": {
+      "name": "Minda Corporation Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE842C01021",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "MMTC": {
+      "name": "MMTC Ltd.",
+      "industry": "Services",
+      "isin": "INE123F01029",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "MOIL": {
+      "name": "MOIL Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE490G01020",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "MOTHERSON": {
+      "name": "Samvardhana Motherson International Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE775A01035",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "MOTILALOFS": {
+      "name": "Motilal Oswal Financial Services Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE338I01027",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "MPHASIS": {
+      "name": "MphasiS Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE356A01018",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "MRF": {
+      "name": "MRF Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE883A01011",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "MRPL": {
+      "name": "Mangalore Refinery & Petrochemicals Ltd.",
+      "industry": "Oil Gas & Consumable Fuels",
+      "isin": "INE103A01014",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "MSTCLTD": {
+      "name": "MSTC Ltd.",
+      "industry": "Services",
+      "isin": "INE255X01014",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "MSUMI": {
+      "name": "Motherson Sumi Wiring India Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE0FS801015",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "MTARTECH": {
+      "name": "MTAR Technologies Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE864I01014",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "MUTHOOTFIN": {
+      "name": "Muthoot Finance Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE414G01012",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "NAM-INDIA": {
+      "name": "Nippon Life India Asset Management Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE298J01013",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "NATCOPHARM": {
+      "name": "NATCO Pharma Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE987B01026",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "NATIONALUM": {
+      "name": "National Aluminium Co. Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE139A01034",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "NAUKRI": {
+      "name": "Info Edge (India) Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE663F01032",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "NAVA": {
+      "name": "Nava Ltd.",
+      "industry": "Power",
+      "isin": "INE725A01030",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "NAVINFLUOR": {
+      "name": "Navin Fluorine International Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE048G01026",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "NAZARA": {
+      "name": "Nazara Technologies Ltd.",
+      "industry": "Media Entertainment & Publication",
+      "isin": "INE418L01047",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "NBCC": {
+      "name": "NBCC (India) Ltd.",
+      "industry": "Construction",
+      "isin": "INE095N01031",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "NCC": {
+      "name": "NCC Ltd.",
+      "industry": "Construction",
+      "isin": "INE868B01028",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "NEOGEN": {
+      "name": "NEOGEN CHEMICALS LTD.",
+      "industry": "Chemicals",
+      "isin": "INE136S01016",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "NEPHROPLUS": {
+      "name": "Nephrocare Health Services Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE428V01029",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "NESTLEIND": {
+      "name": "Nestle India Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE239A01024",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "NETWEB": {
+      "name": "Netweb Technologies India Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE0NT901020",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "NETWORK18": {
+      "name": "Network18 Media & Investments Ltd.",
+      "industry": "Media Entertainment & Publication",
+      "isin": "INE870H01013",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "NEULANDLAB": {
+      "name": "Neuland Laboratories Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE794A01010",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "NEWGEN": {
+      "name": "Newgen Software Technologies Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE619B01017",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "NFL": {
+      "name": "National Fertilizers Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE870D01012",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "NH": {
+      "name": "Narayana Hrudayalaya Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE410P01011",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "NHPC": {
+      "name": "NHPC Ltd.",
+      "industry": "Power",
+      "isin": "INE848E01016",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "NIACL": {
+      "name": "The New India Assurance Company Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE470Y01017",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "NIVABUPA": {
+      "name": "Niva Bupa Health Insurance Company Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE995S01015",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "NLCINDIA": {
+      "name": "NLC India Ltd.",
+      "industry": "Power",
+      "isin": "INE589A01014",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "NMDC": {
+      "name": "NMDC Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE584A01023",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "NORTHARC": {
+      "name": "Northern Arc Capital Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE850M01015",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "NSLNISP": {
+      "name": "NMDC Steel Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE0NNS01018",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "NTPC": {
+      "name": "NTPC Ltd.",
+      "industry": "Power",
+      "isin": "INE733E01010",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "NTPCGREEN": {
+      "name": "NTPC Green Energy Ltd.",
+      "industry": "Power",
+      "isin": "INE0ONG01011",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "NUVAMA": {
+      "name": "Nuvama Wealth Management Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE531F01023",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "NUVOCO": {
+      "name": "Nuvoco Vistas Corporation Ltd.",
+      "industry": "Construction Materials",
+      "isin": "INE118D01016",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "NYKAA": {
+      "name": "FSN E-Commerce Ventures Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE388Y01029",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "OBEROIRLTY": {
+      "name": "Oberoi Realty Ltd.",
+      "industry": "Realty",
+      "isin": "INE093I01010",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "OFSS": {
+      "name": "Oracle Financial Services Software Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE881D01027",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "OIL": {
+      "name": "Oil India Ltd.",
+      "industry": "Oil Gas & Consumable Fuels",
+      "isin": "INE274J01014",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "OLAELEC": {
+      "name": "Ola Electric Mobility Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE0LXG01040",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "OLECTRA": {
+      "name": "Olectra Greentech Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE260D01016",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "OMNI": {
+      "name": "Omnitech Engineering Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE0UH301010",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ONESOURCE": {
+      "name": "Onesource Specialty Pharma Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE013P01021",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "ONGC": {
+      "name": "Oil & Natural Gas Corporation Ltd.",
+      "industry": "Oil Gas & Consumable Fuels",
+      "isin": "INE213A01029",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "OSWALPUMPS": {
+      "name": "Oswal Pumps Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE0BYP01024",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "PAGEIND": {
+      "name": "Page Industries Ltd.",
+      "industry": "Textiles",
+      "isin": "INE761H01022",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "PAISALO": {
+      "name": "Paisalo Digital Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE420C01059",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "PARADEEP": {
+      "name": "Paradeep Phosphates Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE088F01024",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "PARAS": {
+      "name": "Paras Defence and Space Technologies Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE045601023",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "PARKHOSPS": {
+      "name": "Park Medi World Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE119201023",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "PATANJALI": {
+      "name": "Patanjali Foods Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE619A01035",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "PAYTM": {
+      "name": "One 97 Communications Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE982J01020",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "PCBL": {
+      "name": "PCBL Chemical Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE602A01031",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "PCJEWELLER": {
+      "name": "PC Jeweller Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE785M01021",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "PDSL": {
+      "name": "PDS Ltd.",
+      "industry": "Textiles",
+      "isin": "INE111Q01021",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "PERSISTENT": {
+      "name": "Persistent Systems Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE262H01021",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "PETRONET": {
+      "name": "Petronet LNG Ltd.",
+      "industry": "Oil Gas & Consumable Fuels",
+      "isin": "INE347G01014",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "PFC": {
+      "name": "Power Finance Corporation Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE134E01011",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "PFIZER": {
+      "name": "Pfizer Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE182A01018",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "PFOCUS": {
+      "name": "Prime Focus Ltd.",
+      "industry": "Media Entertainment & Publication",
+      "isin": "INE367G01038",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "PGEL": {
+      "name": "PG Electroplast Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE457L01029",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "PGHL": {
+      "name": "Procter & Gamble Health Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE199A01012",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "PGIL": {
+      "name": "Pearl Global Industries Ltd.",
+      "industry": "Textiles",
+      "isin": "INE940H01022",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "PHOENIXLTD": {
+      "name": "Phoenix Mills Ltd.",
+      "industry": "Realty",
+      "isin": "INE211B01039",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "PICCADIL": {
+      "name": "Piccadily Agro Industries Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE546C01010",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "PIDILITIND": {
+      "name": "Pidilite Industries Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE318A01026",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "PIIND": {
+      "name": "PI Industries Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE603J01030",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "PINELABS": {
+      "name": "Pine Labs Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE15B701018",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "PIRAMALFIN": {
+      "name": "Piramal Finance Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE202B01038",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "PNB": {
+      "name": "Punjab National Bank",
+      "industry": "Financial Services",
+      "isin": "INE160A01022",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "PNBHOUSING": {
+      "name": "PNB Housing Finance Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE572E01012",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "PNCINFRA": {
+      "name": "PNC Infratech Ltd.",
+      "industry": "Construction",
+      "isin": "INE195J01029",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "PNGJL": {
+      "name": "P N Gadgil Jewellers Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE953R01016",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "POLICYBZR": {
+      "name": "PB Fintech Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE417T01026",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "POLYCAB": {
+      "name": "Polycab India Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE455K01017",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "POLYMED": {
+      "name": "Poly Medicure Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE205C01021",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "POONAWALLA": {
+      "name": "Poonawalla Fincorp Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE511C01022",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "POWERGRID": {
+      "name": "Power Grid Corporation of India Ltd.",
+      "industry": "Power",
+      "isin": "INE752E01010",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "POWERICA": {
+      "name": "Powerica Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE921L01032",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "POWERINDIA": {
+      "name": "Hitachi Energy India Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE07Y701011",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "POWERMECH": {
+      "name": "Power Mech Projects Ltd.",
+      "industry": "Construction",
+      "isin": "INE211R01019",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "PPLPHARMA": {
+      "name": "Piramal Pharma Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE0DK501011",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "PRAJIND": {
+      "name": "Praj Industries Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE074A01025",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "PRECWIRE": {
+      "name": "Precision Wires India Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE372C01037",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "PREMIERENE": {
+      "name": "Premier Energies Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE0BS701011",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "PRESTIGE": {
+      "name": "Prestige Estates Projects Ltd.",
+      "industry": "Realty",
+      "isin": "INE811K01011",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "PRICOLLTD": {
+      "name": "Pricol Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE726V01018",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "PRIVISCL": {
+      "name": "Privi Speciality Chemicals Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE959A01019",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "PTC": {
+      "name": "PTC India Ltd.",
+      "industry": "Power",
+      "isin": "INE877F01012",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "PTCIL": {
+      "name": "PTC Industries Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE596F01018",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "PURVA": {
+      "name": "Puravankara Ltd.",
+      "industry": "Realty",
+      "isin": "INE323I01011",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "PVRINOX": {
+      "name": "PVR INOX Ltd.",
+      "industry": "Media Entertainment & Publication",
+      "isin": "INE191H01014",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "PWL": {
+      "name": "Physicswallah Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE0LP301011",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "QPOWER": {
+      "name": "QUALITY POWER ELECTRICAL EQUIPMENTS Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE0SII01026",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "QUESS": {
+      "name": "Quess Corp Ltd.",
+      "industry": "Services",
+      "isin": "INE615P01015",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "RADICO": {
+      "name": "Radico Khaitan Ltd",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE944F01028",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "RAILTEL": {
+      "name": "Railtel Corporation Of India Ltd.",
+      "industry": "Telecommunication",
+      "isin": "INE0DD101019",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "RAIN": {
+      "name": "Rain Industries Ltd",
+      "industry": "Chemicals",
+      "isin": "INE855B01025",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "RAINBOW": {
+      "name": "Rainbow Childrens Medicare Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE961O01016",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "RALLIS": {
+      "name": "Rallis India Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE613A01020",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "RAMCOCEM": {
+      "name": "The Ramco Cements Ltd.",
+      "industry": "Construction Materials",
+      "isin": "INE331A01037",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "RATEGAIN": {
+      "name": "Rategain Travel Technologies Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE0CLI01024",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "RATNAMANI": {
+      "name": "Ratnamani Metals & Tubes Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE703B01027",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "RAYMONDLSL": {
+      "name": "Raymond Lifestyle Ltd.",
+      "industry": "Textiles",
+      "isin": "INE02ID01020",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "RBA": {
+      "name": "Restaurant Brands Asia Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE07T201019",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "RBLBANK": {
+      "name": "RBL Bank Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE976G01028",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "RCF": {
+      "name": "Rashtriya Chemicals & Fertilizers Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE027A01015",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "RECLTD": {
+      "name": "REC Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE020B01018",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "REDINGTON": {
+      "name": "Redington Ltd.",
+      "industry": "Services",
+      "isin": "INE891D01026",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "REFEX": {
+      "name": "Refex Industries Ltd.",
+      "industry": "Utilities",
+      "isin": "INE056I01025",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "RELAXO": {
+      "name": "Relaxo Footwears Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE131B01039",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "RELIANCE": {
+      "name": "Reliance Industries Ltd.",
+      "industry": "Oil Gas & Consumable Fuels",
+      "isin": "INE002A01018",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "RELIGARE": {
+      "name": "Religare Enterprises Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE621H01010",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "RENUKA": {
+      "name": "Shree Renuka Sugars Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE087H01022",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "RESPONIND": {
+      "name": "Responsive Industries Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE688D01026",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "RHIM": {
+      "name": "RHI MAGNESITA INDIA LTD.",
+      "industry": "Capital Goods",
+      "isin": "INE743M01012",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "RITES": {
+      "name": "RITES Ltd.",
+      "industry": "Construction",
+      "isin": "INE320J01015",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "RKFORGE": {
+      "name": "Ramkrishna Forgings Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE399G01023",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ROUTE": {
+      "name": "Route Mobile Ltd.",
+      "industry": "Telecommunication",
+      "isin": "INE450U01017",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "RPOWER": {
+      "name": "Reliance Power Ltd.",
+      "industry": "Power",
+      "isin": "INE614G01033",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "RRKABEL": {
+      "name": "R R Kabel Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE777K01022",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "RTNPOWER": {
+      "name": "RattanIndia Power Ltd.",
+      "industry": "Power",
+      "isin": "INE399K01017",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "RUBICON": {
+      "name": "Rubicon Research Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE506V01022",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "RVNL": {
+      "name": "Rail Vikas Nigam Ltd.",
+      "industry": "Construction",
+      "isin": "INE415G01027",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "SAFARI": {
+      "name": "Safari Industries (India) Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE429E01023",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SAGILITY": {
+      "name": "Sagility Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE0W2G01015",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "SAIL": {
+      "name": "Steel Authority of India Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE114A01011",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "SAILIFE": {
+      "name": "Sai Life Sciences Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE570L01029",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "SAMHI": {
+      "name": "Samhi Hotels Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE08U801020",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SAMMAANCAP": {
+      "name": "Sammaan Capital Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE148I01020",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "SANDUMA": {
+      "name": "Sandur Manganese & Iron Ores Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE149K01016",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SANSERA": {
+      "name": "Sansera Engineering Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE953O01021",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SAPPHIRE": {
+      "name": "Sapphire Foods India Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE806T01020",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SARDAEN": {
+      "name": "Sarda Energy and Minerals Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE385C01021",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SAREGAMA": {
+      "name": "Saregama India Ltd",
+      "industry": "Media Entertainment & Publication",
+      "isin": "INE979A01025",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SBFC": {
+      "name": "SBFC Finance Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE423Y01016",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SBICARD": {
+      "name": "SBI Cards and Payment Services Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE018E01016",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "SBILIFE": {
+      "name": "SBI Life Insurance Company Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE123W01016",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "SBIN": {
+      "name": "State Bank of India",
+      "industry": "Financial Services",
+      "isin": "INE062A01020",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "SCHAEFFLER": {
+      "name": "Schaeffler India Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE513A01022",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SCHNEIDER": {
+      "name": "Schneider Electric Infrastructure Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE839M01018",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SCI": {
+      "name": "Shipping Corporation of India Ltd.",
+      "industry": "Services",
+      "isin": "INE109A01011",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SEDEMAC": {
+      "name": "SEDEMAC Mechatronics Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE00XB01019",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SENCO": {
+      "name": "Senco Gold Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE602W01027",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SENORES": {
+      "name": "Senores Pharmaceuticals Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE0RB801010",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SFL": {
+      "name": "Sheela Foam Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE916U01025",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SGMART": {
+      "name": "SG Mart Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE385F01024",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SHADOWFAX": {
+      "name": "Shadowfax Technologies Ltd.",
+      "industry": "Services",
+      "isin": "INE12UN01015",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SHAILY": {
+      "name": "Shaily Engineering Plastics Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE151G01028",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SHAKTIPUMP": {
+      "name": "Shakti Pumps (India) Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE908D01010",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SHARDACROP": {
+      "name": "Sharda Cropchem Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE221J01015",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SHAREINDIA": {
+      "name": "Share India Securities Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE932X01026",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SHILCTECH": {
+      "name": "Shilchar Technologies Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE024F01011",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SHILPAMED": {
+      "name": "Shilpa Medicare Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE790G01031",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SHREECEM": {
+      "name": "Shree Cement Ltd.",
+      "industry": "Construction Materials",
+      "isin": "INE070A01015",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SHREEJISPG": {
+      "name": "Shreeji Shipping Global Ltd.",
+      "industry": "Services",
+      "isin": "INE1B6101010",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SHRIPISTON": {
+      "name": "SPR Auto Technologies Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE526E01018",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SHRIRAMFIN": {
+      "name": "Shriram Finance Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE721A01047",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "SHYAMMETL": {
+      "name": "Shyam Metalics and Energy Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE810G01011",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SIEMENS": {
+      "name": "Siemens Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE003A01024",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "SIGMAADV": {
+      "name": "SIGMA ADVANCED SYSTEMS LTD.",
+      "industry": "Capital Goods",
+      "isin": "INE933B01012",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SIGNATURE": {
+      "name": "Signatureglobal (India) Ltd.",
+      "industry": "Realty",
+      "isin": "INE903U01023",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SJS": {
+      "name": "S.J.S. Enterprises Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE284S01014",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SJVN": {
+      "name": "SJVN Ltd.",
+      "industry": "Power",
+      "isin": "INE002L01015",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SKIPPER": {
+      "name": "Skipper Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE439E01022",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SKYGOLD": {
+      "name": "SKY GOLD AND DIAMONDS Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE01IU01018",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SMLMAH": {
+      "name": "SML Mahindra Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE294B01019",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SOBHA": {
+      "name": "Sobha Ltd.",
+      "industry": "Realty",
+      "isin": "INE671H01015",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SOLARINDS": {
+      "name": "Solar Industries India Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE343H01029",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "SONACOMS": {
+      "name": "Sona BLW Precision Forgings Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE073K01018",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "SONATSOFTW": {
+      "name": "Sonata Software Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE269A01021",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SOUTHBANK": {
+      "name": "South Indian Bank Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE683A01023",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SPARC": {
+      "name": "Sun Pharma Advanced Research Company Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE232I01014",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SPLPETRO": {
+      "name": "Supreme Petrochem Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE663A01033",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SRF": {
+      "name": "SRF Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE647A01010",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "STAR": {
+      "name": "Strides Pharma Science Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE939A01011",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "STARHEALTH": {
+      "name": "Star Health and Allied Insurance Company Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE575P01011",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "STLTECH": {
+      "name": "Sterlite Technologies Ltd.",
+      "industry": "Telecommunication",
+      "isin": "INE089C01029",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "STYLAMIND": {
+      "name": "Stylam Industries Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE239C01020",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SUBROS": {
+      "name": "Subros Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE287B01021",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SUDARSCHEM": {
+      "name": "Sudarshan Chemical Industries Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE659A01023",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SUDEEPPHRM": {
+      "name": "Sudeep Pharma Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE0QPI01025",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SUMICHEM": {
+      "name": "Sumitomo Chemical India Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE258G01013",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SUNDARMFIN": {
+      "name": "Sundaram Finance Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE660A01013",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SUNDRMFAST": {
+      "name": "Sundram Fasteners Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE387A01021",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SUNFLAG": {
+      "name": "Sunflag Iron & Steel Company Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE947A01014",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SUNPHARMA": {
+      "name": "Sun Pharmaceutical Industries Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE044A01036",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "SUNTECK": {
+      "name": "Sunteck Realty Ltd.",
+      "industry": "Realty",
+      "isin": "INE805D01034",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SUNTV": {
+      "name": "Sun TV Network Ltd.",
+      "industry": "Media Entertainment & Publication",
+      "isin": "INE424H01027",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SUPREMEIND": {
+      "name": "Supreme Industries Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE195A01028",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "SUPRIYA": {
+      "name": "Supriya Lifescience Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE07RO01027",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SURYAROSNI": {
+      "name": "Surya Roshni Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE335A01020",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SUVEN": {
+      "name": "Suven Life Sciences Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE495B01038",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SUZLON": {
+      "name": "Suzlon Energy Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE040H01021",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "SWANCORP": {
+      "name": "Swan Corp Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE665A01038",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SWIGGY": {
+      "name": "Swiggy Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE00H001014",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "SWSOLAR": {
+      "name": "Sterling and Wilson Renewable Energy Ltd.",
+      "industry": "Construction",
+      "isin": "INE00M201021",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "SYNGENE": {
+      "name": "Syngene International Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE398R01022",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "SYRMA": {
+      "name": "Syrma SGS Technology Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE0DYJ01015",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "TANLA": {
+      "name": "Tanla Platforms Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE483C01032",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "TARC": {
+      "name": "TARC Ltd.",
+      "industry": "Realty",
+      "isin": "INE0EK901012",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "TARIL": {
+      "name": "Transformers And Rectifiers (India) Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE763I01026",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "TATACAP": {
+      "name": "Tata Capital Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE976I01016",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "TATACHEM": {
+      "name": "Tata Chemicals Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE092A01019",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "TATACOMM": {
+      "name": "Tata Communications Ltd.",
+      "industry": "Telecommunication",
+      "isin": "INE151A01013",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "TATACONSUM": {
+      "name": "Tata Consumer Products Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE192A01025",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "TATAELXSI": {
+      "name": "Tata Elxsi Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE670A01012",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "TATAINVEST": {
+      "name": "Tata Investment Corporation Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE672A01026",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "TATAPOWER": {
+      "name": "Tata Power Co. Ltd.",
+      "industry": "Power",
+      "isin": "INE245A01021",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "TATASTEEL": {
+      "name": "Tata Steel Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE081A01020",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "TATATECH": {
+      "name": "Tata Technologies Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE142M01025",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "TBOTEK": {
+      "name": "TBO Tek Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE673O01025",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "TCS": {
+      "name": "Tata Consultancy Services Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE467B01029",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "TDPOWERSYS": {
+      "name": "TD Power Systems Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE419M01035",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "TECHM": {
+      "name": "Tech Mahindra Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE669C01036",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "TECHNOE": {
+      "name": "Techno Electric & Engineering Company Ltd.",
+      "industry": "Construction",
+      "isin": "INE285K01026",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "TEGA": {
+      "name": "Tega Industries Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE011K01018",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "TEJASNET": {
+      "name": "Tejas Networks Ltd.",
+      "industry": "Telecommunication",
+      "isin": "INE010J01012",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "TENNIND": {
+      "name": "Tenneco Clean Air India Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE19RI01016",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "TEXRAIL": {
+      "name": "Texmaco Rail & Eng. Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE621L01012",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "THANGAMAYL": {
+      "name": "Thangamayil Jewellery Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE085J01014",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "THELEELA": {
+      "name": "Leela Palaces Hotels & Resorts Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE0AQ201015",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "THERMAX": {
+      "name": "Thermax Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE152A01029",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "THOMASCOOK": {
+      "name": "Thomas Cook (India) Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE332A01027",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "THYROCARE": {
+      "name": "Thyrocare Technologies Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE594H01019",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "TI": {
+      "name": "Tilaknagar Industries Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE133E01013",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "TIINDIA": {
+      "name": "Tube Investments of India Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE974X01010",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "TIMETECHNO": {
+      "name": "Time Technoplast Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE508G01029",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "TIMEX": {
+      "name": "Timex Group India Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE064A01026",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "TIMKEN": {
+      "name": "Timken India Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE325A01013",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "TIPSMUSIC": {
+      "name": "Tips Music Ltd.",
+      "industry": "Media Entertainment & Publication",
+      "isin": "INE716B01029",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "TITAGARH": {
+      "name": "Titagarh Rail Systems Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE615H01020",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "TITAN": {
+      "name": "Titan Company Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE280A01028",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "TMB": {
+      "name": "Tamilnad Mercantile Bank Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE668A01016",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "TMCV": {
+      "name": "Tata Motors Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE1TAE01010",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "TMPV": {
+      "name": "Tata Motors Passenger Vehicles Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE155A01022",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "TORNTPHARM": {
+      "name": "Torrent Pharmaceuticals Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE685A01028",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "TORNTPOWER": {
+      "name": "Torrent Power Ltd.",
+      "industry": "Power",
+      "isin": "INE813H01021",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "TRANSRAILL": {
+      "name": "Transrail Lighting Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE454P01035",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "TRENT": {
+      "name": "Trent Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE849A01020",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "TRIDENT": {
+      "name": "Trident Ltd.",
+      "industry": "Textiles",
+      "isin": "INE064C01022",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "TRITURBINE": {
+      "name": "Triveni Turbine Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE152M01016",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "TTKPRESTIG": {
+      "name": "TTK Prestige Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE690A01028",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "TTML": {
+      "name": "Tata Teleservices (Maharashtra) Ltd.",
+      "industry": "Telecommunication",
+      "isin": "INE517B01013",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "TVSMOTOR": {
+      "name": "TVS Motor Company Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE494B01023",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "TVSSCS": {
+      "name": "TVS Supply Chain Solutions Ltd.",
+      "industry": "Services",
+      "isin": "INE395N01027",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "UBL": {
+      "name": "United Breweries Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE686F01025",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "UCOBANK": {
+      "name": "UCO Bank",
+      "industry": "Financial Services",
+      "isin": "INE691A01018",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "UJJIVANSFB": {
+      "name": "Ujjivan Small Finance Bank Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE551W01018",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ULTRACEMCO": {
+      "name": "UltraTech Cement Ltd.",
+      "industry": "Construction Materials",
+      "isin": "INE481G01011",
+      "indices": [
+        "nifty50",
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "UNIMECH": {
+      "name": "Unimech Aerospace and Manufacturing Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE0U3I01011",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "UNIONBANK": {
+      "name": "Union Bank of India",
+      "industry": "Financial Services",
+      "isin": "INE692A01016",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "UNITDSPR": {
+      "name": "United Spirits Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE854D01024",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "UNOMINDA": {
+      "name": "UNO Minda Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE405E01023",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "UPL": {
+      "name": "UPL Ltd.",
+      "industry": "Chemicals",
+      "isin": "INE628A01036",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "URBANCO": {
+      "name": "Urban Company Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE0CAZ01013",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "USHAMART": {
+      "name": "Usha Martin Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE228A01035",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "UTIAMC": {
+      "name": "UTI Asset Management Company Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE094J01016",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "UTLSOLAR": {
+      "name": "Fujiyama Power Systems Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE12UR01024",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "V2RETAIL": {
+      "name": "V2 Retail Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE945H01021",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "VAIBHAVGBL": {
+      "name": "Vaibhav Global Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE884A01027",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "VAML": {
+      "name": "Vedanta Aluminium Metal Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE1CDF01017",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "VBL": {
+      "name": "Varun Beverages Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE200M01039",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "VEDL": {
+      "name": "Vedanta Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE205A01025",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "VEDPOWER": {
+      "name": "Vedanta Power Ltd.",
+      "industry": "Power",
+      "isin": "INE694L01019",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "VESUVIUS": {
+      "name": "Vesuvius India Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE386A01023",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "VGUARD": {
+      "name": "V-Guard Industries Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE951I01027",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "VIJAYA": {
+      "name": "Vijaya Diagnostic Centre Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE043W01024",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "VIKRAMSOLR": {
+      "name": "Vikram Solar Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE078V01014",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "VIPIND": {
+      "name": "V.I.P. Industries Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE054A01027",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "VISL": {
+      "name": "Vedanta Iron and Steel Ltd.",
+      "industry": "Metals & Mining",
+      "isin": "INE1CLE01013",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "VIYASH": {
+      "name": "Viyash Scientific Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE807F01027",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "VMART": {
+      "name": "V-Mart Retail Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE665J01013",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "VMM": {
+      "name": "Vishal Mega Mart Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE01EA01019",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "VOGL": {
+      "name": "Vedanta Oil and Gas Ltd.",
+      "industry": "Oil Gas & Consumable Fuels",
+      "isin": "INE704J01044",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "VOLTAMP": {
+      "name": "Voltamp Transformers Ltd",
+      "industry": "Capital Goods",
+      "isin": "INE540H01012",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "VOLTAS": {
+      "name": "Voltas Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE226A01021",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "VTL": {
+      "name": "Vardhman Textiles Ltd.",
+      "industry": "Textiles",
+      "isin": "INE825A01020",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "WAAREEENER": {
+      "name": "Waaree Energies Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE377N01017",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "WAAREERTL": {
+      "name": "Waaree Renewable Technologies Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE299N01021",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "WABAG": {
+      "name": "Va Tech Wabag Ltd.",
+      "industry": "Utilities",
+      "isin": "INE956G01038",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "WAKEFIT": {
+      "name": "Wakefit Innovations Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE0E7301029",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "WEBELSOLAR": {
+      "name": "Websol Energy System Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE855C01023",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "WELCORP": {
+      "name": "Welspun Corp Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE191B01025",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "WELENT": {
+      "name": "Welspun Enterprises Ltd.",
+      "industry": "Construction",
+      "isin": "INE625G01013",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "WELSPUNLIV": {
+      "name": "Welspun Living Ltd.",
+      "industry": "Textiles",
+      "isin": "INE192B01031",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "WESTLIFE": {
+      "name": "Westlife Foodworld Ltd.",
+      "industry": "Consumer Services",
+      "isin": "INE274F01020",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "WEWORK": {
+      "name": "WeWork India Management Ltd.",
+      "industry": "Services",
+      "isin": "INE085001019",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "WHIRLPOOL": {
+      "name": "Whirlpool of India Ltd.",
+      "industry": "Consumer Durables",
+      "isin": "INE716A01013",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "WIPRO": {
+      "name": "Wipro Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE075A01022",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "WOCKPHARMA": {
+      "name": "Wockhardt Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE049B01025",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftysmallcap100"
+      ],
+      "market_cap": "small"
+    },
+    "YATHARTH": {
+      "name": "Yatharth Hospital & Trauma Care Services Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE0JO301016",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "YESBANK": {
+      "name": "Yes Bank Ltd.",
+      "industry": "Financial Services",
+      "isin": "INE528G01035",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500",
+        "niftymidcap100"
+      ],
+      "market_cap": "mid"
+    },
+    "ZAGGLE": {
+      "name": "Zaggle Prepaid Ocean Services Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE07K301024",
+      "indices": [
+        "niftytotalmarket"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ZEEL": {
+      "name": "Zee Entertainment Enterprises Ltd.",
+      "industry": "Media Entertainment & Publication",
+      "isin": "INE256A01028",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ZENSARTECH": {
+      "name": "Zensar Technolgies Ltd.",
+      "industry": "Information Technology",
+      "isin": "INE520A01027",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ZENTEC": {
+      "name": "Zen Technologies Ltd.",
+      "industry": "Capital Goods",
+      "isin": "INE251B01027",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ZFCVINDIA": {
+      "name": "ZF Commercial Vehicle Control Systems India Ltd.",
+      "industry": "Automobile and Auto Components",
+      "isin": "INE342J01019",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    },
+    "ZYDUSLIFE": {
+      "name": "Zydus Lifesciences Ltd.",
+      "industry": "Healthcare",
+      "isin": "INE010B01027",
+      "indices": [
+        "nifty100",
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "large"
+    },
+    "ZYDUSWELL": {
+      "name": "Zydus Wellness Ltd.",
+      "industry": "Fast Moving Consumer Goods",
+      "isin": "INE768C01028",
+      "indices": [
+        "niftytotalmarket",
+        "nifty500"
+      ],
+      "market_cap": "unclassified"
+    }
+  }
+}

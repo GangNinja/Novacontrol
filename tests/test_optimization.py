@@ -958,9 +958,12 @@ class Phase14ApplicationTests(unittest.IsolatedAsyncioTestCase):
             # Phase 19 adds RLVR + critique learning: verifiers and rewards are
             # reported as present (or switched off) like the rest.
             "RLVR",
+            # NovaMarket NM-01 adds the financial subsystem, which reports its
+            # own lifecycle/health and is SKIPPED while disabled.
+            "NovaMarket",
         ):
             self.assertIn(name, components)
-        self.assertEqual(len(report["components"]), 25)
+        self.assertEqual(len(report["components"]), 26)
         for row in report["components"]:
             self.assertIn(row["status"], {state.value for state in HealthState})
             self.assertTrue(row["message"])

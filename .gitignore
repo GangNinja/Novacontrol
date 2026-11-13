@@ -43,3 +43,11 @@ build_workspace/
 # command recreates the script, and the measurements it quoted stay in the report.
 /.nc*/
 /.nc_*
+
+# NovaMarket frontend dependencies and generated TypeScript metadata
+web/node_modules/
+web/*.tsbuildinfo
+
+# Local NovaMarket QA, browser, screenshot, and runtime output
+.ui_audit/
+.runtime/

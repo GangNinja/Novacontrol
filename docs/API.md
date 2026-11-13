@@ -1,6 +1,6 @@
-# API
+# API Reference
 
-The Phase 12 API subsystem provides REST and WebSocket entrypoints through FastAPI.
+This generated reference covers the REST routes registered by the NovaControl application, including NovaMarket's `/market/*` surface. For NovaMarket-specific authentication, conventions, examples and route groups, see [API_GUIDE.md](API_GUIDE.md).
 
 ## REST Routes
 
@@ -62,6 +62,264 @@ The Phase 12 API subsystem provides REST and WebSocket entrypoints through FastA
 - `POST /vision/model/clear`: Remove the configured vision model; element location returns to OCR-only. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /vision/describe`: Capture the screen and describe it (vision model or window probe). *(frontend: web panel `renderGeneric`)*
 - `POST /vision/click`: Vision-locate a labeled element on screen, click it, and verify. *(frontend: web panel `renderGeneric`)*
+- `GET /market/status`: NovaMarket lifecycle, health, capabilities, dependencies and configuration. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/overview`: Integrated NM-14 operational overview with real component state, recent records, activity and audit entries. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/contracts`: NovaMarket's versioned contracts: lifecycle, events, permissions, horizons, domains and storage. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/config`: NovaMarket's resolved configuration (secret references only) and its schema. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/config`: Validate and apply a NovaMarket configuration change; invalid fields are refused with the reason. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/notifications/test`: Send one real test email through the configured NovaMarket SMTP transport. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/universe/sync`: Register the public NSE equity catalogue and its BSE listings in bulk; source coverage is reported honestly. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/enable`: Initialise and start NovaMarket through its real lifecycle, reporting an initialization failure. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/disable`: Disable NovaMarket and withdraw the capabilities, permissions and subscription it contributed. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/contracts`: AT-01 autonomy modes, transitions, storage, safety flags and limitations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/status`: Current autonomy mode, runtime state, lease ownership and safety flags; no order capability is claimed. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/health`: Autonomy lease/health slice; a missing or foreign lease is reported as degraded. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/reliability`: AT-06 read-only reliability view: runtime/scheduler health, pipeline and financial counts, reconciliation pending, recovery state and failure domains. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/autonomy/recover`: Reconcile durable execution and exit work after a restart and return to disabled mode without auto-resume; requires the operator token. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/autonomy/start`: Start/renew the autonomy shell in monitoring or non-trading autonomous mode; requires the operator token. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/autonomy/pause`: Pause autonomous work while retaining the runtime shell and lease; requires the operator token. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/autonomy/resume`: Resume a paused autonomy shell in monitoring or autonomous mode; requires the operator token. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/autonomy/stop`: Disable the autonomy shell and release its lease; requires the operator token. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/session`: Verified exchange-local session decision for an exchange (`exchange` query): open, not yet open, closed, weekend, holiday, unverified or unavailable; fail closed. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/monitoring/contracts`: Static AT-02 capabilities, batch cap, refresh floor, cycle statuses and refusal reasons; no trading capability is claimed. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/monitoring`: Session, scheduler, rotation, last cycle and health of the single AT-02 monitoring runner. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/monitoring/cycles`: Persistent monitoring-cycle history, newest first (`limit` 1-200). *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/monitoring/cycles/{cycle_id}`: One monitoring cycle with its processed, deferred and rejected instruments. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/autonomy/monitoring/run`: Run one monitoring cycle through the session, lease and rotation gates; requires the operator token and never creates an order or proposal. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/autonomy/monitoring/config`: Persist validated monitoring configuration (interval floor, 20-instrument cap); requires the operator token. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/decisions/contracts`: Static AT-03 decision/risk capabilities, statuses, error codes and explicit non-goals. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/decisions/status`: Decision pipeline health, latest run, recent signals/proposals and record counts. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/decisions/runs`: Decision-run history, newest first (`limit` 1-200). *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/decisions/runs/{run_id}`: One decision run with evaluations, signals, proposals, risk and lifecycle events. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/decisions/signals`: Generated signals with validation and provenance; filters: `run_id`, `strategy_id`, `portfolio_id`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/decisions/proposals`: Proposal history with NM-08 outcomes; filters: `run_id`, `portfolio_id`, `instrument_id`, `status`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/decisions/proposals/{proposal_id}`: One proposal with its signal, evaluation, NM-08 decision and events; never an order. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/autonomy/decisions/run`: Run AT-03 strategy evaluation and NM-08 risk assessment; requires the operator token and never submits an order, fill or financial mutation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/executions/contracts`: Static AT-04 paper-execution capabilities, statuses, idempotency rules, error codes and non-goals. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/executions/status`: AT-04 journal health, counts, runtime mode/lease gate and recent execution intents. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/executions`: Autonomous paper-execution intents, newest first; filters: `status`, `portfolio_id`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/executions/failures`: Execution intents with a failure, unknown submission or unresolved reconciliation; `limit` 1-500. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/executions/{execution_id}`: One execution with its durable journal, authoritative NM-10 order, fills and transitions. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/executions/{execution_id}/events`: Append-only AT-04 journal events for one execution; `limit` 1-1000. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/autonomy/executions/run`: Forward eligible risk-approved AT-03 proposals to NM-10 paper execution; requires autonomous mode, a valid lease and the operator token. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/autonomy/executions/{execution_id}/reconcile`: Reconcile one execution with NM-10 order, fill and ledger records; never creates an order or fill; requires the operator token. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/exits/contracts`: Static AT-05 stop-loss exit capabilities, supported/unsupported conditions, safety boundaries and non-goals. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/exits/status`: AT-05 mode, last supervision cycle, decision counts and supervised position state. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/exits/positions`: Durable supervision and exit-trigger state for positions seen by AT-05, including target price, trailing stop, high-water mark and freshness; `limit` 1-500. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/exits/configurations`: Persisted target-price and trailing-stop definitions for long paper positions; `limit` 1-500. *(frontend: no web panel - API/CLI or infrastructure)*
+- `PUT /market/autonomy/exits/configurations/{portfolio_id}/{instrument_id}`: Create or version one long-position target/trailing exit configuration; target must exceed average cost and trailing percent must be in (0, 100); requires the operator token. *(frontend: no web panel - API/CLI or infrastructure)*
+- `DELETE /market/autonomy/exits/configurations/{portfolio_id}/{instrument_id}`: Remove one persisted target/trailing exit configuration; the position is unchanged and stop-loss supervision remains active; requires the operator token. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/exits/decisions`: Protective-exit decisions, newest first; filters: `portfolio_id`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/exits/decisions/{decision_id}`: One exit decision with NM-08 provenance, NM-10 order, fills and reconciliation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/exits/decisions/{decision_id}/events`: Append-only AT-05 exit journal events for one decision; `limit` 1-1000. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/exits/learning`: Advisory entry-to-exit learning evidence with completeness and attribution state; `decision_id`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/autonomy/exits/run`: Run one configured exit-supervision cycle (stop-loss, target or trailing); monitoring evaluates only, autonomous and paused may submit risk-approved paper exits through NM-10; requires the operator token. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/autonomy/exits/decisions/{decision_id}/reconcile`: Reconcile an exit with NM-10 order, fills, position and ledger records; never creates an order or fill; requires the operator token. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/workspace`: The standalone NovaMarket operational workspace HTML; it consumes the authenticated market API and embeds no market values. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/data/status`: Market-data repository, enabled and installed providers, ingestion worker, cache and verification state. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/data/providers`: Installed provider adapters with declared limits, measured health and verified operations; `probe=true` runs a real liveness check. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/instruments`: The registered canonical instrument catalogue; query parameters: `asset_class`, `exchange`, `limit`, `offset`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/instruments`: Register one canonical instrument identity (exchange MIC + symbol) with explicit currency and timezone. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/instruments/lookup`: Resolve and register instrument metadata through one provider (`provider`, `symbol`). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/data/ingest`: Run one bounded collection cycle over the configured universe or named instruments and report per-instrument outcomes. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/data/quote/{instrument_id}`: The latest reconciled price observation with quality, freshness and provenance; `refresh=true` fetches first. Path values contain a colon, e.g. XNSE:RELIANCE. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/data/history/{instrument_id}`: Paginated price observations; query parameters: `provider`, `start`, `end`, `limit`, `offset`, `ascending`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/data/bars/{instrument_id}`: Paginated validated OHLCV bars; query parameters: `interval`, `provider`, `start`, `end`, `limit`, `offset`, `ascending`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/screener`: Market Overview rows with stored quote freshness plus exchange, Nifty-index, market-cap, sector, mover, search and arrangement filters; query parameters: `exchange`, `cap`, `index`, `sector`, `sort`, `movers`, `query`, `available_only`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/orderblock`: Ranked bullish and bearish structure boards, F&O coverage, liquidity, Market X-Ray and sector flow over stored OHLCV; query parameters: `interval`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/orderblock/{instrument_id}`: One instrument's closed-candle structure, order blocks, liquidity, invalidation levels and chart; query parameter: `interval`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/tradingwatch`: Momentum radar, zone board, heatmap, market flow and explicit index-options availability; query parameters: `interval`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/tradingwatch/watchlists`: Persisted watchlists enriched with the latest stored price and its freshness. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/tradingwatch/replay/{instrument_id}`: Historical replay cut at `end_date`, with indicator values computed only from the prefix at each cursor. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/wallet/status`: Ledger totals, schema version and the last reconciliation result. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/wallets`: List NovaCoin wallets with available and total balances. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/wallets`: Create a NovaCoin wallet; it always opens with a zero balance. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/wallets/transfer`: Transfer NC between two wallets in one atomic, balanced transaction. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/wallets/{wallet_id}`: One wallet with its balance and the transaction/entry counts behind it. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/wallets/{wallet_id}/transactions`: The wallet's transactions, including transfers it received; query parameters: `limit`, `offset`, `ascending`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/wallets/{wallet_id}/ledger`: The immutable ledger entries that produced the wallet's balance; query parameters: `limit`, `offset`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/wallets/{wallet_id}/deposit`: Deposit simulated NC from the issuance account into one wallet. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/wallets/{wallet_id}/withdraw`: Withdraw simulated NC from one wallet back to the issuance account. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/wallets/{wallet_id}/status`: Freeze or close a wallet; closing requires a zero balance. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/wallets/{wallet_id}/reconcile`: Recompute one wallet's balance from its ledger and report integrity. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/wallet/reconcile`: Reconcile every wallet, the whole-ledger zero sum included. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/wallet/reversals`: Reverse a posted transaction with mirrored entries; the original is never edited. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/events`: Search market events by category, verification, importance, instrument, sector or text. Query parameters: `since`, `until`, `limit`, `offset`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/events/sources`: Every declared event feed with its enablement and last fetch outcome. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/events/sources/{source_id}/enabled`: Enable or disable one declared feed. Body: `enabled`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/events/refresh`: Fetch one source, or every enabled source, and ingest what it reports. Body: optional `source_id`; nothing is stored when a fetch fails. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/events/expire`: Expire events outside their category review window; history is retained. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/events/instrument/{instrument_id}`: Events mapped to one canonical instrument (`MIC:SYMBOL`). Query parameters: `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/events/{event_id}`: One event version with its evidence and lifecycle transitions. Query parameters: `version`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/events/{event_id}/evidence`: Every source record behind one event, preserved as retrieved. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/events/{event_id}/history`: An event's version history and lifecycle transitions, oldest first. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/discovery/status`: Discovery cycles, universe boundaries, sources and totals. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/discovery/candidates`: Scored candidates, newest first. Query parameters: `limit`, `min_score`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/discovery/candidates/{instrument_id}`: One candidate with its latest evaluation and evaluation history. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/discovery/cycle`: Run one bounded discovery cycle. Body: optional `force`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/discovery/reevaluate`: Reevaluate watchlist members and apply lifecycle changes. Body: optional `watchlist_id`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/discovery/events/{event_id}`: Evaluate the instruments an NM-04 event names; unverified events never add members. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/discovery/scheduler`: Start or stop the periodic cycle runner. Body: `action` (`start`/`stop`) and optional `interval_seconds`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/discovery/history`: Membership history and evaluation records. Query parameters: `watchlist_id`, `instrument_id`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/watchlists`: Every watchlist with its kind and active member count. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/watchlists`: Create a watchlist. Body: `name`, optional `kind` and `description`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/watchlists/{watchlist_id}`: One watchlist with its ranked members. Query parameters: `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/watchlists/{watchlist_id}/members`: Add an instrument. Body: `instrument_id`, optional `reason`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `DELETE /market/watchlists/{watchlist_id}/members/{instrument_id}`: Remove a member, keeping its membership history. Query parameter: optional `reason`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/watchlists/{watchlist_id}/rename`: Rename a watchlist in place without changing its stable id or membership history. Body: `name`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/forecasts`: Generate and store one probabilistic forecast. Body: `instrument_id`, `horizon`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecasts`: Stored forecasts, newest first. Query parameters: `instrument_id`, `horizon`, `status`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecasts/status`: Forecast horizons, policy, model states and totals. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecasts/models`: Model versions, lifecycle states and measured metrics. Query parameters: `instrument_id`, `horizon`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecasts/performance`: Measured performance snapshots and the live aggregate. Query parameters: `model_id`, `instrument_id`, `horizon`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecasts/calibration`: The calibration report for one model and horizon. Query parameters: `model_id`, `horizon`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/forecasts/train`: Run chronological walk-forward comparison and calibration. Body: `instrument_id`, `horizon`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/forecasts/evaluate`: Resolve every forecast whose target data now exists. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/forecasts/models/{model_id}/promote`: Promote a model that already has walk-forward evidence. Body: `instrument_id`, `horizon`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecasts/{forecast_id}`: One immutable forecast record. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecasts/{forecast_id}/outcome`: The recorded outcome, or a pending state with the reason. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/portfolios`: Create and fund one simulated portfolio. Body: `horizon`, `funding_wallet_id`, `capital`, optional `name`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolios`: Every portfolio. Query parameters: `horizon`, `status`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolios/status`: Portfolio counts, states and the three horizon policies. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolios/horizons`: The three horizon policies as data. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolios/{portfolio_id}`: One portfolio with its valuation, holdings and constraints. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolios/{portfolio_id}/holdings`: Current holdings with weights and unpriced markers. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolios/{portfolio_id}/valuation`: Value the book, store a snapshot and publish the result. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolios/{portfolio_id}/valuations`: Stored valuation snapshots. Query parameter: `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolios/{portfolio_id}/performance`: Measured performance, gated on enough observations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolios/{portfolio_id}/decisions`: Decision history. Query parameter: `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolios/{portfolio_id}/proposals`: Rebalance proposals. Query parameters: `status`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolios/{portfolio_id}/lifecycle`: Lifecycle transitions. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolios/{portfolio_id}/reconcile`: Compare recorded funding and realised P&L with history. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/portfolios/{portfolio_id}/rebalance`: Propose a validated rebalance. Body: optional `force`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/portfolios/{portfolio_id}/apply`: Apply a validated proposal. Body: `proposal_id`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/portfolios/{portfolio_id}/status`: Pause, resume or suspend. Body: `action`, optional `reason`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/portfolios/{portfolio_id}/close`: Liquidate and release capital. Body: optional `reason`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/risk/assess`: Assess a proposed action and persist one enforceable decision. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk/status`: Risk counts, policies and assessment latency. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk/contracts`: Versioned risk outcomes, metrics, guarantees and limits. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk/decisions`: Risk decision history, newest first. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk/decisions/{decision_id}`: One risk decision with its evidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/risk/decisions/{decision_id}/apply`: Apply an approved decision to its bound proposal. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk/portfolio/{portfolio_id}`: Portfolio risk metrics, breaches and positions. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk/portfolio/{portfolio_id}/positions`: Position-level risk for one portfolio. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk/position/{portfolio_id}/{instrument_id}`: Risk for one held instrument. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk/exposure`: Combined exposure across all three portfolios. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk/policies`: Current risk policies and their version history. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/risk/policies/{policy_id}`: Create a new audited policy version. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk/alerts`: Risk alerts by lifecycle status. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/risk/alerts/{alert_id}/acknowledge`: Acknowledge an alert. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/risk/alerts/{alert_id}/resolve`: Resolve an alert. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/risk/stress`: Run a labelled hypothetical stress scenario. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk/stress`: Stored stress-scenario results. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk/overrides`: Risk override history. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/risk/overrides`: Record a time-bounded override for a reviewable decision. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/strategies/catalog`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/strategies`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/strategies`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/strategies/status`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/strategies/contracts`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/strategies/proposals`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/strategies/proposals/{proposal_id}`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/strategies/proposals/{proposal_id}/forward`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/strategies/conflicts`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/strategies/signals`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/strategies/signals/{signal_id}`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/strategies/{strategy_id}`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/strategies/{strategy_id}/config`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/strategies/{strategy_id}/versions`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/strategies/{strategy_id}/activate`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/strategies/{strategy_id}/pause`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/strategies/{strategy_id}/suspend`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/strategies/{strategy_id}/retire`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/strategies/{strategy_id}/degrade`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/strategies/{strategy_id}/evaluate`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/strategies/{strategy_id}/signals`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/strategies/{strategy_id}/performance`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/strategies/{strategy_id}/lifecycle`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/strategies/run`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/execution/orders`: Submit an approved NM-09 proposal as a simulated paper order. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/execution/orders`: List simulated orders with optional `status` and `portfolio_id` filters. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/execution/orders/{order_id}`: One paper order with transitions, fills and reservations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/execution/orders/{order_id}/fills`: Fills recorded for one paper order. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/execution/orders/{order_id}/history`: The audited order-state transition history. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/execution/orders/{order_id}/process`: Re-evaluate and fill an open paper order against fresh market data. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/execution/orders/{order_id}/cancel`: Cancel remaining quantity, preserving completed fills and releasing reservations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/execution/fills`: All recorded paper fills, newest first. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/execution/status`: Paper execution counts, latency, configuration and safety flags. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/execution/contracts`: Versioned paper-execution contract, order types and lifecycle. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/execution/fees`: The configured simulated fee schedule and disclaimer. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/execution/slippage`: The configured slippage model, assumptions and limitations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/execution/reconcile`: Run independent reconciliation for one order or all orders; never repairs. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/execution/reconciliations`: Stored reconciliation reports, newest first. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/backtests/status`: Backtest counts, active runs and isolation guarantees. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/backtests/contracts`: Backtest frequencies, order types, guarantees and limitations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/backtests/validate`: Validate a backtest configuration and optionally its historical data coverage. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/backtests`: Create an immutable historical backtest configuration. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/backtests`: List persisted backtests, newest first. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/backtests/compare`: Compare completed runs across several metrics without ranking by final value. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/backtests/comparisons`: Persisted comparisons and parameter-sensitivity runs, newest first. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/backtests/{backtest_id}/walk-forward`: Run sequential out-of-sample train/test folds for a configuration. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/backtests/{backtest_id}/start`: Replay a created backtest against point-in-time historical bars. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/backtests/{backtest_id}/cancel`: Cancel a created or active backtest. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/backtests/{backtest_id}`: One backtest with its configuration, result and evidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/backtests/{backtest_id}/results`: Stored performance, benchmark, robustness and data-quality results. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/backtests/{backtest_id}/metrics`: Performance and execution metrics for one completed run. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/backtests/{backtest_id}/trades`: Simulated fills with fees and slippage. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/backtests/{backtest_id}/orders`: Simulated order lifecycle records including partial fills and expiry. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/backtests/{backtest_id}/risk-decisions`: Historical risk-policy decisions for every proposed action. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/backtests/{backtest_id}/signals`: Strategy signals generated from point-in-time history. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/backtests/{backtest_id}/data-quality`: Dataset provenance, unavailable bars and documented limitations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/backtests/{backtest_id}/verify`: Replay the persisted bars and verify the reproducibility hash. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/backtests/{backtest_id}/sensitivity`: Run explicit parameter variants without claiming out-of-sample validity. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/shadow/status`: Shadow session counts and non-execution guarantees. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/shadow/contracts`: Shadow lifecycle, pipeline, projection semantics and safety boundaries. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/shadow/sessions`: Create a non-executing shadow session with an immutable baseline. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/shadow/sessions`: List persisted shadow sessions, newest first. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/shadow/sessions/{session_id}`: One shadow session with its captured baseline and lifecycle. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/shadow/sessions/{session_id}/history`: Session lifecycle timestamps and record counts. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/shadow/sessions/{session_id}/start`: Capture the baseline and start observing. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/shadow/sessions/{session_id}/pause`: Pause observation without discarding the session. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/shadow/sessions/{session_id}/resume`: Resume a paused shadow session. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/shadow/sessions/{session_id}/stop`: Stop observation while preserving records. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/shadow/sessions/{session_id}/complete`: Complete a shadow session. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/shadow/sessions/{session_id}/cancel`: Cancel a non-completed shadow session. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/shadow/sessions/{session_id}/cycle`: Run one shadow observation cycle against NM-02 data or explicit observations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/shadow/sessions/{session_id}/track-outcomes`: Measure hypothetical outcomes from later market observations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/shadow/sessions/{session_id}/decisions`: Shadow strategy decisions, market references and risk results. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/shadow/sessions/{session_id}/projections`: Hypothetical order projections; never execution records. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/shadow/sessions/{session_id}/outcomes`: Hypothetical outcomes, MFE/MAE and unresolved intervals. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/shadow/sessions/{session_id}/analytics`: Session analytics with explicit small-sample handling. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/shadow/sessions/{session_id}/errors`: Structured data, strategy, risk and cycle failures. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/shadow/sessions/{session_id}/health`: Session freshness, cycle count and recent failures. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/shadow/sessions/{session_id}/compare`: Compare shadow evidence with NM-08/09/10/11 references. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/shadow/sessions/{session_id}/comparisons`: Persisted shadow comparison records, newest first. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/learning/status`: Learning counts, evidence quality and non-execution guarantees. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/learning/contracts`: Evidence kinds, experiment states, governance and limitations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/learning/dashboard`: Active versions, approvals, experiments, alerts and rollback history. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/learning/health`: Learning-system health and open alert count. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/learning/evidence`: Record or import backtest, paper or shadow evidence with provenance. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/learning/evidence`: Read persisted evidence filtered by strategy, kind and status. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/learning/evidence/{evidence_id}`: One evidence record with its eligibility reasons and provenance. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/learning/monitor`: Monitor one strategy by evidence origin and raise deterioration alerts. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/learning/alerts`: Learning alerts, newest first. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/learning/alerts/{alert_id}/acknowledge`: Acknowledge one learning alert. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/learning/experiments`: Create an idempotent bounded strategy-configuration experiment. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/learning/experiments`: List learning experiments, newest first. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/learning/experiments/{experiment_id}`: One experiment with its windows, policy and results. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/learning/experiments/{experiment_id}/start`: Start an experiment in the background under the concurrency limit. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/learning/experiments/{experiment_id}/run`: Run an experiment synchronously for deterministic operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/learning/experiments/{experiment_id}/cancel`: Cancel a created or running experiment. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/learning/experiments/{experiment_id}/candidates`: Candidates generated for one experiment. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/learning/candidates/{candidate_id}`: One candidate with its evaluation, risk and approval state. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/learning/candidates/{candidate_id}/evaluate`: Evaluate one generated candidate against the baseline. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/learning/candidates/{candidate_id}/approve`: Approve a pending candidate after its risk and shadow gates. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/learning/candidates/{candidate_id}/reject`: Reject a candidate with a recorded reason. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/learning/candidates/{candidate_id}/shadow-validate`: Validate an approved candidate through NM-12 Shadow Mode. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/learning/candidates/{candidate_id}/promote`: Promote an approved candidate and record an immutable version. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/learning/strategies/{strategy_id}/versions`: Immutable learning versions and the active pointer. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/learning/strategies/{strategy_id}/active-version`: The currently active learning version for one strategy. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/learning/strategies/{strategy_id}/rollback`: Roll back to an earlier promoted version with audit history. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /novaforge/status`: NovaForge readiness, saved mission draft and the active session. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /novaforge/library`: Discovered games with installation evidence, launchability status and this process's own launch claim; query parameter: `q`. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /novaforge/library/resolve`: One game name's catalog status without launching anything; query parameter: `name`. *(frontend: no web panel - API/CLI or infrastructure)*

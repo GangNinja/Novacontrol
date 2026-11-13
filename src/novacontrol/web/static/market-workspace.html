@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#050b15">
+    <title>NovaMarket — Integrated Workspace</title>
+    <link rel="icon" href="/static/nova-mark.svg">
+    <link rel="stylesheet" href="/static/market-workspace.css?v=__NC_ASSET_VERSION__">
+  </head>
+  <body>
+    <a href="#marketMain" class="skip-link">Skip to market content</a>
+    <div class="shell">
+      <aside class="rail" aria-label="NovaMarket sections">
+        <div class="brand">
+          <img src="/static/nova-mark.svg" alt="" width="30" height="30">
+          <div>
+            <h1>NovaMarket</h1>
+            <p>Integrated workspace</p>
+          </div>
+        </div>
+
+        <div class="market-state" aria-live="polite">
+          <span id="phaseBadge" class="badge">NM-14</span>
+          <span id="lifecycleBadge" class="badge muted">loading</span>
+          <span id="healthBadge" class="badge muted">health —</span>
+        </div>
+
+        <nav class="nav" aria-label="Market workspace">
+          <button type="button" class="nav-item is-active" data-section="overview">Overview</button>
+          <span class="nav-label">Intelligence</span>
+          <button type="button" class="nav-item" data-section="market">Market Intelligence</button>
+          <button type="button" class="nav-item" data-section="events">Market Events</button>
+          <button type="button" class="nav-item" data-section="discovery">Asset Discovery</button>
+          <button type="button" class="nav-item" data-section="forecasts">Forecasts</button>
+          <span class="nav-label">Capital</span>
+          <button type="button" class="nav-item" data-section="portfolios">Portfolios</button>
+          <button type="button" class="nav-item" data-section="risk">Risk</button>
+          <button type="button" class="nav-item" data-section="wallet">Wallet &amp; Ledger</button>
+          <span class="nav-label">Evaluation</span>
+          <button type="button" class="nav-item" data-section="strategies">Strategies</button>
+          <button type="button" class="nav-item" data-section="paper">Paper Trading</button>
+          <button type="button" class="nav-item" data-section="backtests">Backtesting</button>
+          <button type="button" class="nav-item" data-section="shadow">Shadow Mode</button>
+          <button type="button" class="nav-item" data-section="learning">Adaptive Learning</button>
+          <span class="nav-label">Operations</span>
+          <button type="button" class="nav-item" data-section="activity">Activity &amp; Audit</button>
+          <button type="button" class="nav-item" data-section="health">System Health</button>
+          <button type="button" class="nav-item" data-section="settings">Settings</button>
+        </nav>
+
+        <div class="rail-footer">
+          <label for="tokenInput">API token (tab memory only)</label>
+          <input id="tokenInput" type="password" autocomplete="off" placeholder="Paste when auth is enabled">
+          <button id="refreshButton" type="button" class="button small">Refresh</button>
+          <span id="uiVersion" class="version">UI v__NC_UI_VERSION__</span>
+        </div>
+      </aside>
+
+      <main id="marketMain" class="workspace">
+        <header class="topbar">
+          <div>
+            <h2 id="sectionTitle">Overview</h2>
+            <p id="lastUpdated" class="muted">Loading live state…</p>
+          </div>
+          <div class="actions">
+            <button id="enableButton" type="button" class="button">Enable NovaMarket</button>
+            <button id="disableButton" type="button" class="button ghost">Disable</button>
+          </div>
+        </header>
+
+        <div id="message" class="message" role="status" aria-live="polite"></div>
+
+        <section id="panel-overview" class="panel is-active" aria-labelledby="sectionTitle">
+          <div id="summaryCards" class="cards"></div>
+          <div class="split">
+            <div class="card">
+              <h3>Safety boundaries</h3>
+              <div id="safetyList" class="pill-list"></div>
+            </div>
+            <div class="card">
+              <h3>Subsystem state</h3>
+              <div id="componentGrid" class="component-grid"></div>
+            </div>
+          </div>
+          <div class="split">
+            <div class="card">
+              <h3>Recent activity</h3>
+              <div id="overviewActivity" class="rows"></div>
+            </div>
+            <div class="card">
+              <h3>Audit trail</h3>
+              <div id="overviewAudit" class="rows"></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="panel-market" class="panel" aria-label="Market Intelligence">
+          <p class="section-copy">Canonical instruments, stored quotes and the market-data provider state. Prices are never synthesized by this page.</p>
+          <div id="marketContent" class="content"></div>
+        </section>
+
+        <section id="panel-events" class="panel" aria-label="Market Events">
+          <p class="section-copy">Evidence-backed events from NM-04, including verification and source state.</p>
+          <div id="eventsContent" class="content"></div>
+        </section>
+
+        <section id="panel-discovery" class="panel" aria-label="Asset Discovery">
+          <p class="section-copy">Candidates and watchlist coverage produced by NM-05.</p>
+          <div id="discoveryContent" class="content"></div>
+        </section>
+
+        <section id="panel-forecasts" class="panel" aria-label="Forecasts">
+          <p class="section-copy">Probabilistic forecasts and measured model state from NM-06.</p>
+          <div id="forecastsContent" class="content"></div>
+        </section>
+
+        <section id="panel-portfolios" class="panel" aria-label="Portfolios">
+          <p class="section-copy">Three-horizon portfolios, their state and recent decisions from NM-07.</p>
+          <div id="portfoliosContent" class="content"></div>
+        </section>
+
+        <section id="panel-risk" class="panel" aria-label="Risk">
+          <p class="section-copy">The independent NM-08 risk decisions, limits and alerts.</p>
+          <div id="riskContent" class="content"></div>
+        </section>
+
+        <section id="panel-strategies" class="panel" aria-label="Strategies">
+          <p class="section-copy">Versioned strategies, signals and lifecycle state from NM-09.</p>
+          <div id="strategiesContent" class="content"></div>
+        </section>
+
+        <section id="panel-paper" class="panel" aria-label="Paper Trading">
+          <p class="section-copy">Simulated paper orders and fills from NM-10. No broker or exchange is connected.</p>
+          <div id="paperContent" class="content"></div>
+        </section>
+
+        <section id="panel-backtests" class="panel" aria-label="Backtesting">
+          <p class="section-copy">Reproducible historical runs from NM-11, with their own isolated data and results.</p>
+          <div id="backtestsContent" class="content"></div>
+        </section>
+
+        <section id="panel-shadow" class="panel" aria-label="Shadow Mode">
+          <p class="section-copy">Non-executing observation sessions from NM-12. Hypothetical projections are not trades.</p>
+          <div id="shadowContent" class="content"></div>
+        </section>
+
+        <section id="panel-learning" class="panel" aria-label="Adaptive Learning">
+          <p class="section-copy">Evidence, experiments, approvals and versions from NM-13. Learning never changes balances or risk limits.</p>
+          <div id="learningContent" class="content"></div>
+        </section>
+
+        <section id="panel-wallet" class="panel" aria-label="Wallet and Ledger">
+          <p class="section-copy">NovaCoin wallets and the deterministic INR ledger: 1 NC = ₹1, exact decimal arithmetic, append-only entries.</p>
+          <div id="walletContent" class="content"></div>
+        </section>
+
+        <section id="panel-activity" class="panel" aria-label="Activity and Audit">
+          <p class="section-copy">The live market event feed and the shared local audit trail. Activity is kept in memory; audit records are bounded and persisted by NovaControl.</p>
+          <div class="split">
+            <div class="card"><h3>Market activity</h3><div id="activityContent" class="rows"></div></div>
+            <div class="card"><h3>Audit records</h3><div id="auditContent" class="rows"></div></div>
+          </div>
+        </section>
+
+        <section id="panel-health" class="panel" aria-label="System Health">
+          <p class="section-copy">Health and dependencies as reported by the live subsystem, not a separate health model.</p>
+          <div id="healthContent" class="content"></div>
+        </section>
+
+        <section id="panel-settings" class="panel" aria-label="Settings">
+          <p class="section-copy">The resolved, secret-reference-only configuration. Secrets are not returned by any API.</p>
+          <div id="settingsContent" class="content"></div>
+        </section>
+      </main>
+    </div>
+    <script src="/static/market-workspace.js?v=__NC_ASSET_VERSION__"></script>
+  </body>
+</html>
