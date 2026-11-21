@@ -2109,12 +2109,28 @@ class SubsystemIsolationTests(unittest.TestCase):
         api_source = (_ROOT / "src" / "novacontrol" / "api" / "app.py").read_text(
             encoding="utf-8"
         )
-        # Every /market-prefixed route, including the standalone NM-14 workspace
-        # page (HTML, so deliberately outside ApiSurface) and the AT-01–AT-06
-        # autonomy surface.
+        # The rule is the namespace, not a total: the market surface grows with
+        # every NM/PI phase (299 routes when this was written, 561 now), and a
+        # hardcoded count turned that growth into a failing assertion that had
+        # nothing to do with isolation.  Instead pin the shape: no /home/
+        # namespace, a non-empty market namespace, and every market route
+        # strictly under /market/ (including the standalone NM-14 workspace page,
+        # HTML and deliberately outside ApiSurface, and the AT-01–AT-06 surface).
+        paths = re.findall(
+            r'@app\.(?:get|post|put|delete|patch)\(\s*"([^"]+)"', api_source
+        )
+        self.assertTrue(paths, "the handler parse must find routes, not nothing")
         self.assertEqual(
-            len(re.findall(r'@app\.(?:get|post|put|delete)\("/market/', api_source)),
-            299,
+            [path for path in paths if path == "/home" or path.startswith("/home/")],
+            [],
+            "NovaMarket must not add a /home/ namespace",
+        )
+        market = [path for path in paths if path.startswith("/market")]
+        self.assertGreater(len(market), 0, "the market namespace must be registered")
+        self.assertEqual(
+            [path for path in market if not path.startswith("/market/")],
+            [],
+            "every market route must live under /market/",
         )
 
 

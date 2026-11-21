@@ -37,6 +37,19 @@ class CycleState(StrEnum):
     FAILED = "failed"
 
 
+#: Cycle states that still have work outstanding: the initial/final checkpoints
+#: or the outcome evaluation have not all run yet.  The operator-facing cycle
+#: list groups these ahead of purely historical cycles (evaluated, cancelled,
+#: failed) so an older cycle that is still due is never buried under today's
+#: finished history.
+OUTSTANDING_CYCLE_STATES: tuple[CycleState, ...] = (
+    CycleState.SCHEDULED,
+    CycleState.ACTIVE,
+    CycleState.CONFIRMED,
+    CycleState.UNCONFIRMED,
+)
+
+
 class CheckpointKind(StrEnum):
     INITIAL = "initial"
     FIRST = "first_confirmation"
@@ -654,6 +667,7 @@ __all__ = [
     "HORIZON_SCHEDULE_POLICIES",
     "HorizonSchedulePolicy",
     "OUTCOME_CONTRACT_VERSION",
+    "OUTSTANDING_CYCLE_STATES",
     "PI09_PHASE",
     "RevisionClass",
     "SCHEDULE_CONTRACT_VERSION",

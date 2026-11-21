@@ -268,7 +268,7 @@ coordinator rather than a second orchestration system. Evidence:
   backtests (run/list/detail), handoff, cancel.
 - Every route is declared once in `ApiSurface`, registered in
   `ROUTE_CONSUMERS` as `no-render`, and generated into `docs/API.md`
-  (790 routes total, in sync).
+  (933 routes total, in sync).
 - React `PortfolioOptimization.tsx` provides portfolio overview, validated
   configuration, target allocation and differences, correlation and
   diversification, risk/scenario evidence, rebalancing costs and improvement,
@@ -281,9 +281,27 @@ coordinator rather than a second orchestration system. Evidence:
   see — BSE-listed instruments rejected as an unknown exchange, fresh bars
   reported as stale, a funding section that never rendered, a broken
   history-header layout and a false sector-cap warning. All five are fixed
-  (section 19, items 25–29); the corrected page loaded and rendered the funding,
-  history and diversification panels, and the PI-18/API suites and the
-  production build were re-run afterwards (section 18).
+  (section 19, items 25–29).
+- The corrected workspace was re-opened against the same two servers (API
+  `127.0.0.1:8011`, Vite `127.0.0.1:5173`) and checked on the stored
+  `completed_with_warnings` run `por_3c4873b39477401580d97ceef5e68b4b`:
+  - **Funding facts render**, in the rebalancing card: funding status `Funded`,
+    available cash ₹18,400, buy notional ₹3,600, sell notional ₹0, net cash
+    required ₹3,600, pending buy reserve ₹0, funding gap ₹0.
+  - **The history header renders**: selected-run status, run identifier,
+    creation time, method/objective/horizon, and the portfolio-snapshot,
+    market-data, forecast and solver versions plus `Financial mutation: None`,
+    with the card's `scrollWidth` equal to its `clientWidth` (966 px, no
+    horizontal overflow after the layout fix).
+  - **The diversification metrics render** (holdings 1, effective holdings 1.00,
+    HHI 1.00, diversification ratio 1.00, effective sectors 1.00, average
+    correlation `—`), and **no diversification warning banner appears**. That is
+    correct for this run rather than a rendering gap: the stored payload returns
+    `diversification.warnings: []` because the warning rules need more than two
+    invested holdings, and the previously false sector-cap warning is absent
+    from the run's three warnings.
+  The PI-18/API suites and the production build were re-run afterwards
+  (section 18).
 
 Evidence: `test_api_routes_are_declared_once_with_non_render_consumers`,
 `test_actual_application_registers_the_optimization_routes`,
@@ -320,7 +338,7 @@ Evidence: `test_optimization_store_contains_only_isolated_research_tables`,
 | mypy (`src`, 717 files) | **Success: no issues found** |
 | `tests/test_optimization.py` regression | **75 passed, 5 subtests passed** |
 | Ruff (new optimization package, changed agent/test) | **All checks passed** |
-| `generate_api_reference.py --check` | **in sync, 790 routes** |
+| `generate_api_reference.py --check` | **in sync, 933 routes** |
 | React production build | **passed** (`tsc -b && vite build`) |
 | `git diff --check` | **passed** (line-ending warnings only) |
 | Staged files | **0** |
@@ -418,19 +436,24 @@ that PI-18 touched.
     chronological order for the optimiser; benchmark bars follow the same rule.
     `test_the_optimization_context_reads_the_newest_bars_not_the_oldest` fails if
     either the newest-first request or the reversal is lost.
-27. **The funding section never rendered.** The rebalancing plan has reported a
-    `funding` object since defect 19, but the workspace panel rendered only
-    costs, expected improvement and restrictions, so funding status could not be
-    inspected. The panel now renders funding status, available cash, buy and sell
-    notional, net cash required, pending buy reserve and funding gap, and states
-    the gap when the book is unfunded.
-28. **The optimization-history header broke its card.** The header is a
-    non-wrapping flex row whose children could not shrink, so the run selector
-    and the run-meta badges (long run ids, timestamps, method/objective/horizon
-    labels) pushed past the card and the meta row inherited the right-aligned
-    action layout. Header items now wrap, header children and grid columns have
-    `min-width: 0`, selects are capped at the card width, the meta row spans the
-    fact grid (`.fact-list-full`) and left-aligns its badges.
+27. **The funding facts were missing from the workspace.** A run's funding
+    could not be inspected in the panel: no funding status, cash figure or gap
+    was shown. The panel now renders funding status, available cash, buy and sell
+    notional, net cash required, pending buy reserve and funding gap whenever the
+    rebalancing result carries a funding object (`PortfolioOptimization.tsx`), and
+    states the gap when the book is unfunded. The omission was observed in the
+    browser, not traced through a pre-fix revision — the page has a single
+    revision in history — so no earlier code path is asserted.
+28. **The optimization-history header broke out of its card.** The selected
+    run's status badge, identifier, timestamp, method/objective and horizon ran
+    past the card instead of staying inside it. The header now renders as a
+    full-width row of the fact grid (`.fact-list-full`, `grid-column: 1 / -1`)
+    that left-aligns its badges (`.fact-list > .fact-list-full.row-actions {
+    justify-content: flex-start }`), inside a grid with `minmax(0, 1fr)` columns
+    and a `.row-actions` row that keeps `flex-wrap: wrap`. Re-opened in the
+    browser, the card measured 966 px with `scrollWidth` equal to `clientWidth`,
+    so the header no longer overflows it. The breakage was observed on screen;
+    no pre-fix layout mechanism is claimed for it.
 29. **The diversification panel warned about a sector cap the allocation did
     not breach.** The warning compared invested-only shares — normalised to
     100% of invested capital — with `max_sector_weight`, which is configured
@@ -460,7 +483,10 @@ that PI-18 touched.
   separate sector-return model.
 - The browser verification was a manual pass in one browser and viewport
   against local data. It is not a cross-browser, responsive or accessibility
-  test, and the layout fixes were judged visually rather than measured.
+  test. The horizontal overflow behind the layout fixes was measured rather
+  than judged visually — the history card's `scrollWidth` equalled its
+  `clientWidth` (966 px) after the fix — but that is still one viewport, not a
+  responsive matrix.
 - The optimization result is a constrained mathematical recommendation, not a
   profitability claim.
 - No broker, live trading, autonomy change, NM-08 approval or NM-10 order is
@@ -482,8 +508,13 @@ and failure controls, financial isolation, NM-08/NM-10 authority, actual
 application integration, focused/affected tests, no known blocking defect,
 documentation and this single consolidated report.
 
-The post-fix workspace was re-opened in the browser and the corrected funding,
-history and diversification panels rendered, so the verdict rests on both the
-automated suites and a manual frontend check.
+The post-fix workspace was re-opened against the running API on 8011 and the
+Vite workspace on 5173. The funding facts and the history header render, and the
+diversification metrics render without the previously false sector-cap warning.
+No diversification warning banner appears for the observed run, because its
+stored payload carries no diversification warnings (a single invested holding
+is below the warning thresholds), so the verdict rests on the automated suites
+plus a browser check of the funding facts, the history header and the
+diversification metrics — not on a rendered diversification warning.
 
 No PI-19 work was started. No Git history or publication state was changed.

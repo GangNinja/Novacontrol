@@ -1526,5 +1526,34 @@ class EvaluationCoverageTests(unittest.TestCase):
         )
         coverage = dataset.to_dict()["coverage"]
         self.assertEqual(coverage["feature_breakdown"]["disabled"], len(self.bars))
-        self.assertEqual(coverage["feature_ratio"], 0.0)
         self.assertEqual(coverage["forecast_breakdown"]["disabled"], len(self.bars))
+        # Disabled is not 0% coverage: the source was not requested at all.
+        self.assertIsNone(coverage["feature_ratio"])
+        self.assertEqual(coverage["feature_ratio_status"], "not_applicable")
+        self.assertIsNone(coverage["forecast_ratio"])
+        self.assertEqual(coverage["forecast_ratio_status"], "not_applicable")
+
+    def test_only_the_disabled_source_is_not_applicable(self) -> None:
+        config = RLEnvironmentConfig.from_mapping(
+            environment_payload(self.bars, include_features=False, include_forecasts=True)
+        )
+        dataset = EvaluationDataset(
+            config=config,
+            split="all",
+            bars=self.bars,
+            features={},
+            forecasts={
+                bar.observed_at: forecast(bar.observed_at) for bar in self.bars
+            },
+            bars_hash="bars_hash",
+            start=self.bars[0].observed_at,
+            end=self.bars[-1].observed_at,
+        )
+        coverage = dataset.to_dict()["coverage"]
+        self.assertEqual(coverage["feature_breakdown"]["disabled"], len(self.bars))
+        self.assertIsNone(coverage["feature_ratio"])
+        self.assertEqual(coverage["feature_ratio_status"], "not_applicable")
+        # The source that was requested still reports a measured ratio.
+        self.assertEqual(coverage["forecasts"], len(self.bars))
+        self.assertEqual(coverage["forecast_ratio"], 1.0)
+        self.assertEqual(coverage["forecast_ratio_status"], "measured")

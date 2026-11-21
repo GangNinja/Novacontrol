@@ -9,6 +9,8 @@ from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
+from novacontrol.novamarket.filings import FILING_SOURCE_ID
+
 from .models import (
     CompanyProfile,
     EvidenceKind,
@@ -20,6 +22,7 @@ from .models import (
     VerificationStatus,
     clean,
     digest_payload,
+    publication_available,
     stable_id,
 )
 
@@ -152,11 +155,23 @@ def verify_evidence(
     warnings: list[str] = []
     for record in records:
         reason = ""
+        # Filing data has no source publication time, so it is dated by its
+        # first observation and compared by calendar day; the row's own
+        # timestamp is never rounded back to the run's cutoff.
+        filing = record.source_id == FILING_SOURCE_ID
         if record.published_at is None:
             reason = "missing publication timestamp"
-        elif record.published_at > cutoff:
+        elif (
+            not publication_available(record.published_at, cutoff)
+            if filing
+            else record.published_at > cutoff
+        ):
             reason = "published after the research cutoff"
-        elif record.retrieved_at > as_of and record.published_at > as_of:
+        elif record.retrieved_at > as_of and (
+            not publication_available(record.published_at, as_of)
+            if filing
+            else record.published_at > as_of
+        ):
             reason = "evidence was not available at the research time"
         elif allowed and record.source_id.lower() not in allowed:
             reason = "source is not in the configured allowlist"
@@ -369,7 +384,12 @@ def build_company_profile(
     """Assemble profile fields only from timestamped evidence or registry identity."""
     field_candidates: dict[str, list[EvidenceRecord]] = defaultdict(list)
     for record in evidence:
-        if record.published_at is None or record.published_at > cutoff:
+        if record.published_at is None:
+            continue
+        if record.source_id == FILING_SOURCE_ID:
+            if not publication_available(record.published_at, cutoff):
+                continue
+        elif record.published_at > cutoff:
             continue
         if record.kind != EvidenceKind.COMPANY_PROFILE.value:
             continue

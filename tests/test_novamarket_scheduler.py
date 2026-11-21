@@ -84,6 +84,7 @@ class FakeEnsemble:
         self.abstain = False
         self.failures = 0
         self.kwargs: list[dict[str, Any]] = []
+        self.event_metadata: dict[str, Any] = {}
 
     async def generate(self, instrument_id: str, horizon: str, *, as_of: datetime, **kwargs: Any) -> dict[str, Any]:
         self.kwargs.append(dict(kwargs))
@@ -143,7 +144,7 @@ class FakeEnsemble:
             validity_conditions=(),
             disagreement=0.0,
             digest="a" * 64,
-            metadata={"phase": "PI-08"},
+            metadata={"phase": "PI-08", **self.event_metadata},
             feature_set_version="features-test",
             dataset_version="dataset-test",
         )
@@ -700,11 +701,12 @@ def test_automatic_cycle_planner_prioritizes_caps_throttles_and_isolates_errors(
 
 
 def test_the_cycle_list_puts_the_newest_lifecycle_first() -> None:
-    """A cycle scheduled now must lead the list, not sort behind older history.
+    """A cycle scheduled now must lead its group, not sort behind older cycles.
 
     The store's default order stays chronological for the scheduler's own
-    scans; the operator-facing list asks for ``newest_first`` so a lifecycle
-    targeting tomorrow is never pushed off the page by its limit.
+    scans; the operator-facing list asks for ``outstanding_first`` so a
+    lifecycle targeting tomorrow is never pushed off the page by its limit.
+    Both cycles here are still scheduled, so creation order decides.
     """
     store = PredictionStore(":memory:")
     try:
@@ -729,11 +731,74 @@ def test_the_cycle_list_puts_the_newest_lifecycle_first() -> None:
             older.cycle_id
         ]
         assert [
-            item.cycle_id for item in store.forecast_cycles(limit=1, newest_first=True)
+            item.cycle_id
+            for item in store.forecast_cycles(limit=1, outstanding_first=True)
         ] == [newer.cycle_id]
         assert [
-            item.cycle_id for item in store.forecast_cycles(newest_first=True)
+            item.cycle_id for item in store.forecast_cycles(outstanding_first=True)
         ] == [newer.cycle_id, older.cycle_id]
+    finally:
+        store.close()
+
+
+def test_the_cycle_list_surfaces_outstanding_cycles_before_finished_history() -> None:
+    """An older cycle that still has work to do leads newer finished cycles.
+
+    Ordering only by creation buried a still-scheduled lifecycle under today's
+    evaluated history once the limit was reached.
+    """
+    store = PredictionStore(":memory:")
+    try:
+        outstanding = build_cycle(
+            instrument_id=INSTRUMENT,
+            exchange=EXCHANGE,
+            horizon="20m",
+            now=T0,
+            target_at=TARGET,
+        )
+        historical = replace(
+            build_cycle(
+                instrument_id="XNSE:TCS",
+                exchange=EXCHANGE,
+                horizon="20m",
+                now=T0 + timedelta(minutes=1),
+                target_at=TARGET,
+            ),
+            state=CycleState.EVALUATED,
+        )
+        assert store.save_forecast_cycle(outstanding) is True
+        assert store.save_forecast_cycle(historical) is True
+        assert [
+            item.cycle_id for item in store.forecast_cycles(outstanding_first=True)
+        ] == [outstanding.cycle_id, historical.cycle_id]
+        # The limit keeps the outstanding cycle on the page instead of spending
+        # the only slot on the newer, finished one.
+        assert [
+            item.cycle_id
+            for item in store.forecast_cycles(limit=1, outstanding_first=True)
+        ] == [outstanding.cycle_id]
+        # Two outstanding cycles are still newest-created first.
+        newer_outstanding = build_cycle(
+            instrument_id="XNSE:INFY",
+            exchange=EXCHANGE,
+            horizon="20m",
+            now=T0 + timedelta(minutes=2),
+            target_at=TARGET,
+        )
+        assert store.save_forecast_cycle(newer_outstanding) is True
+        ordered = store.forecast_cycles(outstanding_first=True)
+        assert [item.cycle_id for item in ordered] == [
+            newer_outstanding.cycle_id,
+            outstanding.cycle_id,
+            historical.cycle_id,
+        ]
+        # The scheduler's own scans keep the chronological default: same target,
+        # so creation order decides there and history is never silently dropped.
+        assert [item.cycle_id for item in store.forecast_cycles()] == [
+            outstanding.cycle_id,
+            historical.cycle_id,
+            newer_outstanding.cycle_id,
+        ]
     finally:
         store.close()
 
@@ -836,3 +901,30 @@ def test_api_exposes_cycle_scheduler_and_missed_surfaces() -> None:
                 assert pending.status_code == 200
                 accuracy = client.get("/market/forecasts/accuracy")
                 assert accuracy.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_pi09_persists_the_declared_event_feature_provenance() -> None:
+    """A PI-09 forecast keeps the ensemble's event declaration, not a guess.
+
+    The PI-24 comparison labels a forecast event-aware from its own metadata;
+    this is the hand-off that put a real label on a lifecycle forecast.
+    """
+
+    scheduler, store, _, ensemble = make_scheduler()
+    ensemble.event_metadata = {
+        "event_aware": True,
+        "event_ids": ["evt_earnings"],
+        "event_feature_set_version": "pi04-feature-set-1.0",
+        "event_feature_names": ["news_count_5d"],
+        "event_aware_constituents": ["gradient"],
+    }
+    await scheduler.tick(now=T0, limit=1)
+    cycle = store.forecast_cycles()[0]
+    forecast = store.forecasts(cycle.cycle_id)[0]
+    metadata = dict(forecast.metadata)
+    assert metadata["event_aware"] is True
+    assert metadata["event_ids"] == ["evt_earnings"]
+    assert metadata["event_feature_set_version"] == "pi04-feature-set-1.0"
+    assert metadata["pi09"]["cycle_id"] == cycle.cycle_id
+    assert forecast.feature_set_version == "features-test"

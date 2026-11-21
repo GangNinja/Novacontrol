@@ -312,6 +312,58 @@ class SanitizerTests(unittest.TestCase):
             )
         )
 
+    def test_a_record_without_an_instrument_is_never_evidence(self) -> None:
+        """An unscoped record is not evidence for every instrument.
+
+        A missing ``instrument_id`` used to read as a wildcard, so one record
+        saved without it attached to any proposal.  The instrument must match
+        explicitly; a record that names none is dropped, even when its horizon
+        matches exactly.
+        """
+
+        self.assertIsNone(
+            forecast_optimization_evidence(
+                selection(instrument_id=""),
+                None,
+                None,
+                instrument_id="XNSE:ALPHA",
+                horizon="5d",
+            )
+        )
+        self.assertIsNone(
+            forecast_optimization_evidence(
+                selection(instrument_id="   "),
+                reliability(instrument_id=""),
+                fallback(instrument_id=""),
+                instrument_id="XNSE:ALPHA",
+                horizon="5d",
+            )
+        )
+
+    def test_an_unscoped_record_is_dropped_rather_than_blended(self) -> None:
+        body = forecast_optimization_evidence(
+            selection(instrument_id="", selection_id="fisel_unscoped"),
+            None,
+            fallback(instrument_id="XNSE:ALPHA", horizon="5d"),
+            instrument_id="XNSE:ALPHA",
+            horizon="5d",
+        )
+        assert body is not None
+        self.assertEqual(body["available"], ["fallback"])
+        self.assertNotIn("selection", body)
+        self.assertEqual(body["fallback"]["fallback_id"], FALLBACK_ID)
+
+    def test_the_instrument_match_ignores_case_and_surrounding_space(self) -> None:
+        body = forecast_optimization_evidence(
+            selection(instrument_id=" xnse:alpha ", horizon="5D"),
+            None,
+            None,
+            instrument_id="XNSE:ALPHA",
+            horizon="5d",
+        )
+        assert body is not None
+        self.assertEqual(body["available"], ["selection"])
+
     def test_no_usable_record_returns_none(self) -> None:
         self.assertIsNone(
             forecast_optimization_evidence(None, None, None, instrument_id="XNSE:ALPHA")

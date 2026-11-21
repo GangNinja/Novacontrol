@@ -186,7 +186,7 @@ This generated reference covers the REST routes registered by the NovaControl ap
 - `GET /market/forecasts/{forecast_id}`: One immutable forecast record. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/forecasts/{forecast_id}/outcome`: The recorded outcome, or a pending state with the reason. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /market/forecasts/cycles`: Schedule one durable forecast lifecycle for an instrument and horizon; optional `target_at`, `resolution`. *(frontend: no web panel - API/CLI or infrastructure)*
-- `GET /market/forecasts/cycles`: Forecast cycles, most recently scheduled first so a new lifecycle is always on the first page. Query parameters: `instrument_id`, `exchange`, `horizon`, `state`, `target_date`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecasts/cycles`: Forecast cycles, those still having outstanding work (scheduled, active, awaiting confirmation or outcome) before purely historical ones, newest first inside each group. Query parameters: `instrument_id`, `exchange`, `horizon`, `state`, `target_date`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/forecasts/cycles/{cycle_id}`: One forecast cycle with checkpoint timeline, immutable versions, revisions and outcomes. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/forecasts/scheduler`: PI-09 scheduler health, durable queue state, missed checkpoints and forecast-only authority. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /market/forecasts/scheduler/tick`: Run a bounded authenticated due-checkpoint batch; never creates an order or fill. Body: optional `limit` 1-20. *(frontend: no web panel - API/CLI or infrastructure)*
@@ -559,7 +559,7 @@ This generated reference covers the REST routes registered by the NovaControl ap
 - `POST /market/event-intelligence/forecast-context`: Event-aware forecast context without forecast or model mutation. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /market/event-intelligence/outcomes`: Record an observed event outcome from stored market bars. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /market/event-intelligence/outcomes/study`: Reproducible historical event-outcome study. *(frontend: no web panel - API/CLI or infrastructure)*
-- `POST /market/event-intelligence/forecast-evaluation`: Event-aware versus non-event-aware forecast error comparison. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/event-intelligence/forecast-evaluation`: Event-aware versus non-event-aware forecast error comparison, split on declared event awareness. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /market/event-intelligence/agents`: Read-only verified event evidence for existing PI-17 agents. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/event-intelligence/portfolio/{portfolio_id}/context`: Portfolio event exposure and uncertainty for PI-21/PI-22. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /market/event-intelligence/sync`: Normalize current NM-04 events into the PI-24 evidence store. *(frontend: no web panel - API/CLI or infrastructure)*

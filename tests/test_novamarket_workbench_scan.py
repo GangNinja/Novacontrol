@@ -316,6 +316,25 @@ def test_instrument_analysis_reads_the_newest_bars_not_the_oldest_page() -> None
     assert result["coverage"]["first_bar"] == oldest_in_window.observed_at.isoformat()
 
 
+def test_latest_price_reads_the_newest_bars_not_the_oldest_page() -> None:
+    """An ascending read would report the oldest stored bar as the latest close."""
+
+    engine = _CappedSeriesEngine()
+    result = _workbench(engine).latest_price("XNSE:LONG", interval="1d")
+
+    newest = _bar("XNSE:LONG", engine.count - 1)
+    prior = _bar("XNSE:LONG", engine.count - 2)
+    newest_close = float(newest.close)
+    prior_close = float(prior.close)
+
+    assert result["available"] is True
+    assert result["as_of"] == newest.observed_at.isoformat()
+    assert result["price"] == round(newest_close, 4)
+    assert result["previous_close"] == round(prior_close, 4)
+    assert result["change_pct"] == round(((newest_close / prior_close) - 1.0) * 100.0, 4)
+    assert result["price_basis"] == "last stored 1d close"
+
+
 class _CappedReplayEngine(_FakeEngine):
     """A series longer than the store's page cap, capped and cut off like the store."""
 

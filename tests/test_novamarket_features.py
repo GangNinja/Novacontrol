@@ -27,6 +27,7 @@ from novacontrol.novamarket.features import (
     RegimeLabel,
     MissingPolicy,
     diagnose,
+    event_feature_usage,
     fit_preprocessor,
     profile_features,
     transform,
@@ -1220,3 +1221,69 @@ def test_incremental_identical_input_reuses_the_cached_feature_row() -> None:
     assert engine.cache_entries == 1
     engine.clear_cache()
     assert engine.cache_entries == 0
+
+
+class TestEventFeatureProvenance:
+    """A forecast may declare event-feature usage only when it has evidence.
+
+    PI-24's event-aware comparison splits on ``metadata.event_aware`` /
+    ``metadata.event_ids``; those labels must come from the features the model
+    actually consumed, not from an event happening to be nearby.
+    """
+
+    @staticmethod
+    def _feature_set(**overrides: object) -> FeatureSet:
+        payload: dict[str, object] = {
+            "feature_set_id": "fs_event_provenance",
+            "version": FEATURE_SET_VERSION,
+            "instrument_id": "XNSE:ALPHA",
+            "as_of": datetime(2026, 3, 11, 9, tzinfo=UTC),
+            "resolution": "1d",
+            "profile": FeatureProfileName.SWING,
+            "values": {"close": 100.0, "news_count_5d": 2.0, "news_age_days": 1.0},
+            "statuses": {
+                "close": FeatureStatus.VALUE,
+                "news_count_5d": FeatureStatus.VALUE,
+                "news_age_days": FeatureStatus.VALUE,
+            },
+            "lineage": {
+                "news_provenance": [
+                    {"radar_event_id": "evt_earnings", "evidence_id": "ev_1"},
+                    {"evidence_id": "ev_2"},
+                    {"radar_event_id": "evt_earnings"},
+                ]
+            },
+        }
+        payload.update(overrides)
+        return FeatureSet(**payload)  # type: ignore[arg-type]
+
+    def test_a_model_that_consumed_event_features_declares_them(self) -> None:
+        usage = event_feature_usage(self._feature_set(), ("close", "news_count_5d"))
+        assert usage["event_aware"] is True
+        assert usage["event_ids"] == ["ev_2", "evt_earnings"]
+        assert usage["event_feature_set_version"] == FEATURE_SET_VERSION
+        assert usage["event_feature_names"] == ["news_count_5d"]
+
+    def test_a_schema_without_event_features_declares_none(self) -> None:
+        usage = event_feature_usage(self._feature_set(), ("close", "return_1"))
+        assert usage["event_aware"] is False
+        assert usage["event_ids"] == []
+
+    def test_events_without_computed_features_are_not_awareness(self) -> None:
+        usage = event_feature_usage(
+            self._feature_set(
+                statuses={
+                    "close": FeatureStatus.VALUE,
+                    "news_count_5d": FeatureStatus.UNAVAILABLE,
+                    "news_age_days": FeatureStatus.MISSING,
+                }
+            ),
+            ("news_count_5d", "news_age_days"),
+        )
+        assert usage["event_aware"] is False
+        assert usage["event_ids"] == []
+
+    def test_no_provenance_declares_no_events(self) -> None:
+        usage = event_feature_usage(self._feature_set(lineage={}), ("news_count_5d",))
+        assert usage["event_aware"] is False
+        assert usage["event_ids"] == []

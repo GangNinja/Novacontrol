@@ -167,6 +167,48 @@ class RegimeClassifierOwnershipTests(unittest.TestCase):
         self.assertIn(RegimeLabel.WEAK_UP.value, labels)
         self.assertIn(RegimeLabel.WEAK_DOWN.value, labels)
 
+    def test_a_regime_bucket_reports_every_source_that_contributed(self) -> None:
+        """One label can mix PI-04 feature rows and market-fallback rows.
+
+        The bucket used to take its ``label_source`` from the first row, so a
+        mixed bucket claimed one provenance for transitions it did not produce.
+        """
+
+        feature_row = FakeView(
+            regime_market={"return_20": 0.0, "volatility_20": 0.001},
+            net_return=0.01,
+        )
+        feature_row.observation = {
+            **observation(return_20=0.0, volatility_20=0.001),
+            "features": {
+                "values": {
+                    "close": 102.0,
+                    "sma_20": 100.0,
+                    "sma_50": 99.0,
+                    "rsi_14": 56.0,
+                    "adx_14": 12.0,
+                    "return_20": 0.025,
+                },
+                "status": "valid",
+            },
+        }
+        market_row = FakeView(regime_market={"return_20": 0.05}, net_return=-0.01)
+
+        rows = regime_breakdown(transitions=[feature_row, market_row])["rows"]
+        self.assertEqual([row["regime"] for row in rows], ["weak_up"])
+        row = rows[0]
+        self.assertEqual(row["samples"], 2)
+        self.assertEqual(row["label_sources"], {"features": 1, "market": 1})
+        self.assertEqual(row["label_source"], "mixed")
+
+    def test_a_single_source_bucket_keeps_its_provenance(self) -> None:
+        breakdown = regime_breakdown(
+            transitions=[FakeView(regime_market={"return_20": 0.05}, net_return=0.01)]
+        )
+        row = breakdown["rows"][0]
+        self.assertEqual(row["label_source"], "market")
+        self.assertEqual(row["label_sources"], {"market": 1})
+
     def test_the_fallback_runs_only_without_a_feature_snapshot(self) -> None:
         breakdown = regime_breakdown(
             transitions=[FakeView(regime_market={"return_20": 0.05}, net_return=0.01)]
@@ -397,3 +439,107 @@ if __name__ == "__main__":  # pragma: no cover
     import unittest as _unittest
 
     _unittest.main()
+
+
+class TrainingRegimeFeatureProvenanceTests(unittest.TestCase):
+    """A run given a feature loader reports PI-04's labels as feature-labelled.
+
+    ``TrainingRegimeReportTests`` covers the no-feature path end to end, where
+    every slice uses the market-only fallback.  Here the same training flow is
+    given a feature loader, so every PI-13 observation carries a snapshot and
+    the slices must be labelled by PI-04's classifier and say so.
+    """
+
+    STRONG_UP: dict[str, float] = {
+        "close": 110.0,
+        "sma_20": 100.0,
+        "sma_50": 95.0,
+        "ema_50": 96.0,
+        "rsi_14": 62.0,
+        "plus_di_14": 30.0,
+        "minus_di_14": 10.0,
+        "adx_14": 30.0,
+        "return_20": 0.05,
+    }
+    STRONG_DOWN: dict[str, float] = {
+        "close": 90.0,
+        "sma_20": 100.0,
+        "sma_50": 105.0,
+        "ema_50": 104.0,
+        "rsi_14": 38.0,
+        "plus_di_14": 10.0,
+        "minus_di_14": 30.0,
+        "adx_14": 30.0,
+        "return_20": -0.05,
+    }
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.path = Path(self.temp.name) / "novamarket_rl.sqlite3"
+        self.bars = mixed_regime_bars(90)
+        self.forecasts = {bar.observed_at: forecast(bar.observed_at) for bar in self.bars}
+        positions = {bar.observed_at: index for index, bar in enumerate(self.bars)}
+        self.feature_calls: list[Any] = []
+
+        def feature_loader(
+            config: Any, at: Any, history: Any
+        ) -> dict[str, Any]:
+            self.feature_calls.append(at)
+            values = self.STRONG_UP if positions[at] % 2 == 0 else self.STRONG_DOWN
+            return {
+                "as_of": at.isoformat(),
+                "values": dict(values),
+                "status": "valid",
+                "version": "pi04-test",
+            }
+
+        self.rewards = RewardService(
+            self.path,
+            transition_reader=lambda episode_id: [],
+            bar_loader=lambda config: self.bars,
+            feature_loader=feature_loader,
+            forecast_loader=lambda config, at: self.forecasts.get(at),
+        )
+        self.manager = TrainingManager(
+            self.path,
+            bar_loader=lambda config: self.bars,
+            feature_loader=feature_loader,
+            forecast_loader=lambda config, at: self.forecasts.get(at),
+            reward_service=self.rewards,
+        )
+
+    def tearDown(self) -> None:
+        self.manager.close()
+        self.rewards.close()
+        self.temp.cleanup()
+
+    def run_once(self) -> dict[str, Any]:
+        started = self.manager.start({"config": config_payload(self.bars)})
+        run_id = started["run"]["run_id"]
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
+            run = self.manager.run(run_id)
+            if run["status"] in {"completed", "failed", "cancelled"}:
+                return run
+            time.sleep(0.03)
+        self.fail("the focused training run did not finish")
+
+    def test_slices_of_a_feature_backed_run_report_pi04_labels_and_features(self) -> None:
+        run = self.run_once()
+        self.assertEqual(run["status"], "completed", run.get("error"))
+        self.assertTrue(self.feature_calls, "the feature loader was never consulted")
+        for split in ("validation", "test"):
+            summary = run["metrics"][split]
+            regimes = summary["regimes"]
+            self.assertTrue(regimes["available"], split)
+            self.assertEqual(regimes["samples"], summary["policy"]["transitions"], split)
+            # No row fell back to market evidence: every transition carried its
+            # own feature snapshot.
+            self.assertEqual(regimes["label_sources"], {"features": regimes["samples"]}, split)
+            labels = {row["regime"] for row in regimes["rows"]}
+            self.assertEqual(labels, {"strong_up", "strong_down"}, split)
+            self.assertLessEqual(labels, {item.value for item in RegimeLabel})
+            for row in regimes["rows"]:
+                self.assertEqual(row["label_source"], "features", split)
+                self.assertEqual(row["label_sources"], {"features": row["samples"]}, split)
+                self.assertGreater(row["samples"], 0, split)

@@ -7,6 +7,7 @@ news article or corporate event.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -30,8 +31,10 @@ from novacontrol.novamarket.research import (
     ResearchStateError,
     ResearchValidationError,
 )
+from novacontrol.novamarket.filings import FilingBundle
 from novacontrol.novamarket.research.financials import normalize_statement
 from novacontrol.novamarket.research.models import FinancialStatement
+from novacontrol.novamarket.service import NovaMarketService
 
 NOW = datetime(2026, 6, 30, 12, 0, tzinfo=UTC)
 INSTRUMENT = "XNSE:ACME"
@@ -624,6 +627,87 @@ def test_zero_and_negative_denominators_are_unavailable_not_misleading(tmp_path:
     assert values["current_ratio"] is None
     assert values["debt_to_equity"] is None
     assert values["net_profit_margin"] == pytest.approx(-0.1)
+
+
+def test_a_caller_context_statement_without_a_publication_time_is_never_stamped(
+    tmp_path: Path,
+) -> None:
+    """The caller context is parsed with default_time=cutoff; publication must not inherit it.
+
+    A statement supplied through the explicit caller context carries no source
+    timestamp, so the parser is given the research cutoff as its default time
+    for observation metadata.  That default must never reach ``published_at``:
+    a statement with no known publication time has to arrive at the
+    point-in-time gate as missing, or the gate would report a filing as
+    available at the cutoff that nobody observed being published.
+    """
+    row: dict[str, object] = {
+        "statement_id": "st-no-publication",
+        "statement_type": "income",
+        "period_type": "annual",
+        "basis": "consolidated",
+        "period_end": "2026-03-31T00:00:00+00:00",
+        "currency": "INR",
+        "unit": "absolute",
+        "values": {"revenue": 1_000_000, "net_income": 100_000},
+    }
+
+    parsed = FinancialStatement.from_payload(
+        row, instrument_id=INSTRUMENT, default_time=NOW
+    )
+    assert parsed.published_at is None
+    assert parsed.retrieved_at == NOW
+
+    ctx = context(without_statements=True)
+    ctx["statements"] = [row]
+    result = report(tmp_path, ctx)
+
+    assert result["financials"]["statements"] == []
+    assert "st-no-publication: missing publication timestamp" in result["warnings"]
+    assert {
+        "evidence_id": "st-no-publication",
+        "reason": "missing publication timestamp",
+    } in result["evidence_excluded"]
+
+
+def test_a_caller_context_statement_without_a_reporting_period_is_never_dated_to_the_cutoff(
+    tmp_path: Path,
+) -> None:
+    """The cutoff default must not become a statement's reporting period either.
+
+    ``default_time=cutoff`` dates the observation metadata of a caller-supplied
+    statement.  It must never fill a missing ``period_end``: that would date an
+    undated statement to the run reading it, and the gate's "reporting period
+    ends after the research cutoff" check would then pass against an invented
+    date.  A period-less statement is rejected with its own reason instead.
+    """
+    row: dict[str, object] = {
+        "statement_id": "st-no-period",
+        "statement_type": "income",
+        "period_type": "annual",
+        "basis": "consolidated",
+        "published_at": "2026-05-15T00:00:00+00:00",
+        "currency": "INR",
+        "unit": "absolute",
+        "values": {"revenue": 1_000_000, "net_income": 100_000},
+    }
+
+    with pytest.raises(ResearchValidationError, match="period_end is required"):
+        FinancialStatement.from_payload(row, instrument_id=INSTRUMENT, default_time=NOW)
+
+    ctx = context(without_statements=True)
+    ctx["statements"] = [row]
+    result = report(tmp_path, ctx)
+
+    assert result["financials"]["statements"] == []
+    assert any(
+        "financial statement rejected" in warning and "period_end is required" in warning
+        for warning in result["warnings"]
+    )
+    assert not any(
+        (item.get("metadata") or {}).get("statement_id") == "st-no-period"
+        for item in result["evidence"]
+    )
 
 
 def test_unit_normalization_preserves_original_and_does_not_scale_per_share_items() -> None:
@@ -1652,3 +1736,111 @@ class TestResearchHttpSurface(unittest.TestCase):
                 json=payload(research_id="prr_duplicate"),
             )
             assert duplicate.status_code == 409, duplicate.text
+
+
+class _StubFilingsReader:
+    """The adapter contract the service depends on.
+
+    It returns one bundle whose rows are stamped with the REAL first
+    observation (``NOW``), exactly as the Yahoo adapter now does, whatever
+    ``as_of`` the run passes: the cutoff must gate that observation, never
+    rewrite it.
+    """
+
+    def __init__(self, bundle: FilingBundle) -> None:
+        self.bundle = bundle
+        self.as_of_calls: list[datetime | None] = []
+
+    def load(
+        self,
+        instrument: object,
+        *,
+        instrument_id: str = "",
+        as_of: datetime | None = None,
+    ) -> FilingBundle:
+        self.as_of_calls.append(as_of)
+        return self.bundle
+
+
+def _filings_bundle() -> FilingBundle:
+    observed = NOW.isoformat()
+    statement = {
+        "statement_id": "st-filing-income-2026-03-31",
+        "statement_type": "income",
+        "period_type": "annual",
+        "basis": "consolidated",
+        "period_end": "2026-03-31T00:00:00+00:00",
+        "published_at": observed,
+        "retrieved_at": observed,
+        "currency": "INR",
+        "unit": "absolute",
+        "values": {"revenue": 1_000_000, "net_income": 180_000, "eps": 18},
+    }
+    return FilingBundle(
+        instrument_id=INSTRUMENT,
+        symbol="ACME.NS",
+        statements=(statement,),
+        fetched_at=NOW,
+    )
+
+
+def test_the_service_wires_the_filings_reader_and_gates_its_observation(tmp_path: Path) -> None:
+    """A past as_of excludes the statements the reader just fetched; a live run keeps them.
+
+    The stub returns the same FIRST-observation-stamped bundle to both runs, so
+    only the service's own wiring and gates can differ: that is what pins
+    ``NovaMarketService._research_context -> reader.load(as_of=...)`` and the
+    day-granular point-in-time gate end to end, instead of the adapter alone.
+    """
+
+    past_as_of = NOW - timedelta(days=45)
+    reader = _StubFilingsReader(_filings_bundle())
+    svc = NovaMarketService(data_dir=tmp_path, clock=lambda: NOW)
+    try:
+        svc._filings_reader = reader
+        # The suite disables the free reader process-wide; enable it for this
+        # run so the injected reader is the one the service consults.
+        with mock.patch.dict(os.environ, {"NOVACONTROL_DISABLE_FILINGS": "0"}):
+            past_id = svc.research_create(
+                payload(
+                    research_id="prr_filings_gate_past",
+                    as_of=past_as_of.isoformat(),
+                    analysis_types=["statements", "ratios"],
+                )
+            )["run_id"]
+            past = svc.research_run(past_id)
+            live_id = svc.research_create(
+                payload(
+                    research_id="prr_filings_gate_live",
+                    as_of=NOW.isoformat(),
+                    analysis_types=["statements", "ratios"],
+                )
+            )["run_id"]
+            live = svc.research_run(live_id)
+    finally:
+        # NovaMarketService itself has no close(); the research store it opened
+        # for these runs does.
+        if svc._research_service is not None:
+            svc._research_service.close()
+
+    # The service passed each run's cutoff to the adapter it was given.
+    assert reader.as_of_calls == [past_as_of, NOW]
+
+    # A past run cannot use a statement first observed today: the row keeps its
+    # real publication time and the gate excludes it rather than back-dating it.
+    assert past["financials"]["statements"] == []
+    assert any(
+        "publication is after the research cutoff" in warning
+        for warning in past["warnings"]
+    ), past["warnings"]
+
+    # The live run keeps the filing it just fetched, still stamped at the real
+    # observation.
+    live_statements = live["financials"]["statements"]
+    assert live_statements
+    assert live_statements[0]["period_end"].startswith("2026-03-31")
+    assert live_statements[0]["published_at"] == NOW.isoformat()
+    assert not any(
+        "publication is after the research cutoff" in warning
+        for warning in live["warnings"]
+    ), live["warnings"]

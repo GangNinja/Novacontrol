@@ -189,6 +189,41 @@ def _freshness_rank(value: Freshness) -> int:
     }.get(value, 5)
 
 
+def event_declaration(outputs: Sequence[ForecastOutput]) -> dict[str, Any]:
+    """Union of the constituents' declared event-feature usage.
+
+    A blend used event features only when at least one constituent did, and only
+    a constituent that says so contributes ids.  This is the declaration PI-24
+    reads; it is never inferred from an event happening to be nearby.
+    """
+
+    ids: set[str] = set()
+    versions: set[str] = set()
+    names: set[str] = set()
+    models: set[str] = set()
+    for output in outputs:
+        metadata = output.metadata if isinstance(output.metadata, Mapping) else {}
+        if metadata.get("event_aware") is not True:
+            continue
+        ids.update(str(item) for item in metadata.get("event_ids") or () if str(item))
+        version = str(metadata.get("event_feature_set_version") or "")
+        if version:
+            versions.add(version)
+        names.update(
+            str(item) for item in metadata.get("event_feature_names") or () if str(item)
+        )
+        model = str(output.model_id or "")
+        if model:
+            models.add(model)
+    return {
+        "event_aware": bool(models),
+        "event_ids": sorted(ids),
+        "event_feature_set_version": ",".join(sorted(versions)),
+        "event_feature_names": sorted(names),
+        "event_aware_constituents": sorted(models),
+    }
+
+
 def _point_in_time_data(
     output: ForecastOutput,
     *,
@@ -1522,6 +1557,7 @@ class EnsembleForecastingService:
             ],
             "disagreement": detail,
             "calibration": calibration_detail,
+            **event_declaration(compatible),
             "fallback": False,
             "abstained": False,
             "automatic_promotion": False,
@@ -1746,6 +1782,7 @@ class EnsembleForecastingService:
             "fallback_model_version": output.model_version,
             "fallback_reason": reason,
             "ensemble_id": fallback_ref,
+            **event_declaration([output]),
             "automatic_promotion": False,
             "production_ready": False,
             "risk_authority": "NM-08",

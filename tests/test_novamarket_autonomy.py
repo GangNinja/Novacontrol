@@ -535,5 +535,87 @@ class LoopbackAdminKeyTests(unittest.TestCase):
         self.assertEqual(wrong_key.status_code, 403, wrong_key.text)
 
 
+class OptInAdminKeyTests(unittest.TestCase):
+    """The predictable local key is opt-in, never a built-in default.
+
+    A deployment that configures ``NOVACONTROL_API_TOKEN`` but never exports
+    ``NOVACONTROL_ADMIN_TOKEN`` must refuse the old launcher default from
+    loopback: an unset admin token disables that credential entirely, so a
+    backend reached through a loopback reverse proxy cannot inherit a guessable
+    admin key.
+    """
+
+    _API = "api-secret"
+    _OPERATOR = "operator-secret"
+    _OLD_DEFAULT = "narasimha-novacontrol"
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory(ignore_cleanup_errors=True)
+        self._env = mock.patch.dict(
+            os.environ,
+            {
+                "NOVACONTROL_API_TOKEN": self._API,
+                "NOVACONTROL_AUTONOMY_OPERATOR_TOKEN": self._OPERATOR,
+            },
+            clear=False,
+        )
+        self._env.start()
+        # patch.dict snapshots the environment, so popping here is restored by
+        # tearDown and the surrounding suite keeps its own admin token.
+        os.environ.pop("NOVACONTROL_ADMIN_TOKEN", None)
+        from novacontrol.api.app import create_app
+
+        self.app = create_app(data_dir=self._tmp.name)
+        self.loopback = TestClient(self.app, client=("127.0.0.1", 51100))
+
+    def tearDown(self) -> None:
+        self.loopback.close()
+        self._env.stop()
+        self._tmp.cleanup()
+
+    def _old_key_headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self._OLD_DEFAULT}",
+            "X-Autonomy-Operator-Token": self._OLD_DEFAULT,
+        }
+
+    def test_an_unset_admin_token_refuses_the_old_default_from_loopback(self) -> None:
+        ordinary = self.loopback.get(
+            "/status", headers={"Authorization": f"Bearer {self._OLD_DEFAULT}"}
+        )
+        self.assertEqual(ordinary.status_code, 401, ordinary.text)
+
+        status = self.loopback.get(
+            "/market/autonomy/status", headers=self._old_key_headers()
+        )
+        self.assertEqual(status.status_code, 401, status.text)
+
+        started = self.loopback.post(
+            "/market/autonomy/start",
+            headers=self._old_key_headers(),
+            json={"mode": "monitoring"},
+        )
+        self.assertEqual(started.status_code, 401, started.text)
+
+        # Nothing ran: the configured credentials still see a disabled runtime.
+        configured = self.loopback.get(
+            "/market/autonomy/status",
+            headers={
+                "Authorization": f"Bearer {self._API}",
+                "X-Autonomy-Operator-Token": self._OPERATOR,
+            },
+        )
+        self.assertEqual(configured.status_code, 200, configured.text)
+        self.assertEqual(configured.json()["mode"], "disabled")
+        # The deployment bearer token still works from loopback, so the refusal
+        # above is about the old admin key and not about loopback access.
+        self.assertEqual(
+            self.loopback.get(
+                "/status", headers={"Authorization": f"Bearer {self._API}"}
+            ).status_code,
+            200,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

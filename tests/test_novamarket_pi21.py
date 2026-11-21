@@ -179,7 +179,14 @@ class FakeSources:
 
     def sources(self) -> ManagementSources:
         return ManagementSources(
-            portfolio_list=lambda limit: {"portfolios": [{"portfolio_id": PORTFOLIO}]},
+            portfolio_list=lambda limit: {
+                "portfolios": [
+                    {
+                        "portfolio_id": PORTFOLIO,
+                        "status": str(self.detail["portfolio"].get("status") or "active"),
+                    }
+                ]
+            },
             portfolio_detail=lambda portfolio_id: self.detail,
             pending_orders=lambda portfolio_id: {"orders": list(self.pending)},
             reservations=lambda portfolio_id: {"reservations": list(self.reservations)},
@@ -1259,6 +1266,95 @@ class ApplicationAndApiIntegrationTests(unittest.TestCase):
             self.assertNotIn(forbidden, page)
 
 
+class ReviewHorizonApiTests(unittest.TestCase):
+    """The review route forwards an absent horizon so policy decides it."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        try:
+            from fastapi.testclient import TestClient
+        except Exception as exc:  # pragma: no cover - optional dev dependency
+            raise unittest.SkipTest(f"fastapi.testclient requires httpx: {exc}") from exc
+        cls._tmp = TemporaryDirectory()
+        cls._env = mock.patch.dict(
+            os.environ,
+            {
+                "NOVACONTROL_API_TOKEN": "pi21-horizon-token",
+                "NOVACONTROL_AUTONOMY_OPERATOR_TOKEN": "pi21-horizon-operator",
+            },
+            clear=False,
+        )
+        cls._env.start()
+        from novacontrol.api.app import create_app
+
+        cls._client = TestClient(create_app(data_dir=cls._tmp.name))
+        cls._client.__enter__()
+        cls._headers = {"Authorization": "Bearer pi21-horizon-token"}
+        cls._operator = {
+            **cls._headers,
+            "X-Autonomy-Operator-Token": "pi21-horizon-operator",
+        }
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._client.__exit__(None, None, None)
+        cls._env.stop()
+        cls._tmp.cleanup()
+
+    def test_a_review_posted_without_a_horizon_uses_the_declared_policy_horizon(self) -> None:
+        wallet = self._client.post(
+            "/market/wallets", headers=self._headers, json={"owner": "policy-horizon"}
+        )
+        self.assertEqual(wallet.status_code, 200, wallet.text)
+        wallet_id = wallet.json()["wallet"]["wallet_id"]
+        deposit = self._client.post(
+            f"/market/wallets/{wallet_id}/deposit",
+            headers=self._headers,
+            json={"amount": "20000.00"},
+        )
+        self.assertEqual(deposit.status_code, 200, deposit.text)
+        created = self._client.post(
+            "/market/portfolios",
+            headers=self._headers,
+            json={
+                "horizon": "short_term",
+                "name": "Policy horizon book",
+                "funding_wallet_id": wallet_id,
+                "capital": "20000.00",
+            },
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        portfolio_id = created.json()["portfolio"]["portfolio_id"]
+
+        # No "horizon" key at all: the route's empty-string forwarding must let
+        # the service read the book's declared short_term policy (1d), not 5d.
+        review = self._client.post(
+            "/market/portfolio-management/review",
+            headers=self._operator,
+            json={"portfolio_id": portfolio_id, "trigger": "manual"},
+        )
+        self.assertEqual(review.status_code, 200, review.text)
+        body = review.json()
+        self.assertEqual(body["horizon"], "1d")
+        self.assertEqual(body["trigger"], "manual")
+
+        stored = self._client.get(
+            f"/market/portfolio-management/cycles/{body['cycle_id']}",
+            headers=self._headers,
+        )
+        self.assertEqual(stored.status_code, 200, stored.text)
+        self.assertEqual(stored.json()["horizon"], "1d")
+
+        # A supplied horizon still wins over the declaration, through the route.
+        explicit = self._client.post(
+            "/market/portfolio-management/review",
+            headers=self._operator,
+            json={"portfolio_id": portfolio_id, "trigger": "manual", "horizon": "60m"},
+        )
+        self.assertEqual(explicit.status_code, 200, explicit.text)
+        self.assertEqual(explicit.json()["horizon"], "60m")
+
+
 class ScheduledReviewTests(unittest.TestCase):
     """The scheduled trigger is invoked by the one autonomy runtime tick."""
 
@@ -1357,9 +1453,9 @@ class ScheduledReviewTests(unittest.TestCase):
         """Every portfolio gets a review; the cursor is durable and wraps."""
 
         book = [
-            {"portfolio_id": "pf-a"},
-            {"portfolio_id": "pf-b"},
-            {"portfolio_id": "pf-c"},
+            {"portfolio_id": "pf-a", "status": "active"},
+            {"portfolio_id": "pf-b", "status": "active"},
+            {"portfolio_id": "pf-c", "status": "active"},
         ]
         detail = self.sources.detail
 
@@ -1412,6 +1508,86 @@ class ScheduledReviewTests(unittest.TestCase):
         finally:
             resumed.close()
         self.assertEqual(seen, ["pf-a", "pf-b", "pf-c", "pf-a"])
+
+    def test_rotation_skips_inactive_portfolios_and_wraps_across_active_ones(self) -> None:
+        """A closed or suspended book never receives a scheduled review."""
+
+        book = [
+            {"portfolio_id": "pf-closed", "status": "closed"},
+            {"portfolio_id": "pf-a", "status": "active"},
+            {"portfolio_id": "pf-suspended", "status": "suspended"},
+            {"portfolio_id": "pf-paused", "status": "paused"},
+            {"portfolio_id": "pf-b", "status": "active"},
+        ]
+        detail = self.sources.detail
+
+        def portfolio_detail(portfolio_id: str) -> dict[str, object]:
+            return {
+                **detail,
+                "portfolio": {**detail["portfolio"], "portfolio_id": portfolio_id},
+            }
+
+        sources = replace(
+            self.sources.sources(),
+            portfolio_list=lambda limit: {"portfolios": [dict(row) for row in book]},
+            portfolio_detail=portfolio_detail,
+        )
+        service = PortfolioManagementService(
+            sources,
+            store_path=Path(self.tmp.name) / "active-rotation.sqlite3",
+            clock=lambda: self.now,
+            scheduled_interval_seconds=60,
+        )
+        seen: list[str] = []
+        try:
+            for _ in range(3):
+                outcome = asyncio.run(service.maybe_run())
+                self.assertEqual(outcome["status"], "completed", outcome)
+                seen.append(str(outcome["portfolio_id"]))
+                self.now = self.now + timedelta(seconds=61)
+            # A manual review with no portfolio id uses the same active-only
+            # rule: the closed first row must never be the fallback.
+            manual = asyncio.run(
+                service.run_cycle(portfolio_id="", trigger="manual")
+            )
+            self.assertEqual(manual["status"], "completed", manual)
+            self.assertEqual(manual["portfolio_id"], "pf-a")
+            cycles = service.cycles()["items"]
+        finally:
+            service.close()
+
+        # The rotation wraps across the active rows only.
+        self.assertEqual(seen, ["pf-a", "pf-b", "pf-a"])
+        self.assertEqual(
+            {row["portfolio_id"] for row in cycles}, {"pf-a", "pf-b"}
+        )
+        self.assertNotIn("pf-closed", seen)
+        self.assertNotIn("pf-suspended", seen)
+
+    def test_without_an_active_portfolio_the_manual_fallback_refuses(self) -> None:
+        """A book with no active row refuses; a closed row is not a fallback."""
+
+        book = [
+            {"portfolio_id": "pf-closed", "status": "closed"},
+            {"portfolio_id": "pf-suspended", "status": "suspended"},
+            {"portfolio_id": "pf-paused", "status": "paused"},
+        ]
+        sources = replace(
+            self.sources.sources(),
+            portfolio_list=lambda limit: {"portfolios": [dict(row) for row in book]},
+        )
+        service = PortfolioManagementService(
+            sources,
+            store_path=Path(self.tmp.name) / "no-active-fallback.sqlite3",
+            clock=lambda: self.now,
+        )
+        try:
+            with self.assertRaises(PortfolioManagementValidationError) as caught:
+                asyncio.run(service.run_cycle(portfolio_id="", trigger="manual"))
+            self.assertIn("an active portfolio is required", str(caught.exception))
+            self.assertEqual(service.cycles()["total"], 0)
+        finally:
+            service.close()
 
     def test_without_a_portfolio_it_refuses_instead_of_inventing_one(self) -> None:
         with mock.patch.object(self.service, "_portfolio_rows", return_value=[]):
@@ -1483,6 +1659,104 @@ class RuntimeTickHostingTests(unittest.TestCase):
         asyncio.run(self.service._runtime_tick())
         self.assertIsNone(self.service._portfolio_management_service)
         self.assertEqual(self.service._portfolio_management_scheduler_error, "")
+
+
+def test_a_manual_review_without_a_horizon_follows_the_portfolios_declared_horizon() -> None:
+    """The API and the Portfolio Management page send no horizon by default.
+
+    A manual review must then analyse the window the portfolio's own NM-07
+    policy declares, not a hardcoded 5d; an explicit horizon still wins and an
+    unreadable declaration keeps the documented default.
+    """
+    with TemporaryDirectory() as directory:
+        sources = FakeSources()
+        service = _service(sources, directory)
+        try:
+            for declared, expected in (
+                ("short_term", "1d"),
+                ("medium_term", "5d"),
+                ("long_term", "90d"),
+            ):
+                sources.detail["portfolio"]["horizon"] = declared
+                cycle = asyncio.run(
+                    service.run_cycle(
+                        portfolio_id=PORTFOLIO,
+                        trigger="manual",
+                        request_id=f"manual-{declared}",
+                    )
+                )
+                assert cycle["horizon"] == expected, cycle["horizon"]
+                stored = next(
+                    row
+                    for row in service.cycles()["items"]
+                    if row["cycle_id"] == cycle["cycle_id"]
+                )
+                assert stored["horizon"] == expected
+
+            # An explicit horizon still wins over the declaration.
+            sources.detail["portfolio"]["horizon"] = "long_term"
+            explicit = asyncio.run(
+                service.run_cycle(
+                    portfolio_id=PORTFOLIO,
+                    horizon="60m",
+                    trigger="manual",
+                    request_id="manual-explicit",
+                )
+            )
+            assert explicit["horizon"] == "60m"
+
+            # A declaration that cannot be read keeps the documented default.
+            sources.detail["portfolio"]["horizon"] = ""
+            defaulted = asyncio.run(
+                service.run_cycle(
+                    portfolio_id=PORTFOLIO,
+                    trigger="manual",
+                    request_id="manual-default",
+                )
+            )
+            assert defaulted["horizon"] == "5d"
+        finally:
+            service.close()
+
+
+def test_the_review_horizon_table_matches_each_nm07_policy_primary_forecast_horizon() -> None:
+    """A review must analyse the window its own NM-07 policy declares first.
+
+    ``PORTFOLIO_HORIZON_REVIEW_HORIZONS`` is hand-written, so every row is
+    derived here from the policy's declared primary ``forecast_horizons`` entry:
+    the table cannot name a window the policy does not target, and its keys
+    cannot outlive the policy set it claims to represent.
+    """
+    from novacontrol.novamarket.portfolio import HORIZON_POLICIES, PortfolioHorizon
+    from novacontrol.novamarket.portfolio_management.models import (
+        PORTFOLIO_HORIZON_REVIEW_HORIZONS,
+        review_horizon,
+    )
+
+    # next_session is one session, one_week is five sessions, three_months is
+    # ninety days; the intervals are the window labels the review accepts.
+    primary_window = {"next_session": "1d", "one_week": "5d", "three_months": "90d"}
+    primary = {
+        policy.horizon.value: policy.forecast_horizons[0]
+        for policy in HORIZON_POLICIES.values()
+    }
+
+    assert set(HORIZON_POLICIES) == set(PortfolioHorizon)
+    assert primary == {
+        "short_term": "next_session",
+        "medium_term": "one_week",
+        "long_term": "three_months",
+    }
+    assert set(primary.values()) == set(primary_window)
+    assert set(PORTFOLIO_HORIZON_REVIEW_HORIZONS) == set(primary)
+
+    for horizon, forecast_horizon in primary.items():
+        expected = primary_window[forecast_horizon]
+        assert PORTFOLIO_HORIZON_REVIEW_HORIZONS[horizon] == expected, (
+            f"{horizon} policy targets {forecast_horizon} ({expected}) but the review "
+            f"table says {PORTFOLIO_HORIZON_REVIEW_HORIZONS[horizon]}"
+        )
+        assert review_horizon(horizon) == expected
 
 
 if __name__ == "__main__":

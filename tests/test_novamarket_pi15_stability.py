@@ -11,6 +11,7 @@ from __future__ import annotations
 import tempfile
 import time
 import unittest
+from collections import Counter, deque
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from unittest import mock
 
 from novacontrol.novamarket.agent_training import TrainingManager, training as training_module
 from novacontrol.novamarket.agent_training.agent import DQNAgent
+from novacontrol.novamarket.agent_training.models import TrainingRun
 from novacontrol.novamarket.agent_training.stability import (
     DEFAULT_STABILITY_LIMITS,
     PAUSE,
@@ -345,3 +347,117 @@ class WalkForwardPauseTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class MetricsUpdateStabilityRecordTests(unittest.TestCase):
+    """The metrics update owns which stability record stays visible.
+
+    A prior pause/fail record must survive a healthy (``ok``) update, so a run
+    resumed by an operator does not look as if it had never paused.  A fresh
+    healthy run writes its own ``ok`` record with no codes, and a paused or
+    failed run keeps exposing its record after the update runs.
+    """
+
+    PAUSE_RECORD: dict[str, Any] = {
+        "action": "pause",
+        "codes": ["action_repetition"],
+        "signals": [],
+        "limits": DEFAULT_STABILITY_LIMITS.to_dict(),
+        "policy": {},
+        "checked_at": "2026-11-19T00:00:00+00:00",
+        "simulated": True,
+        "advisory_only": True,
+        "production_authority": False,
+    }
+    FAIL_RECORD: dict[str, Any] = {
+        **PAUSE_RECORD,
+        "action": "fail",
+        "codes": ["invalid_action_spike"],
+        "checked_at": "2026-11-19T00:01:00+00:00",
+    }
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.path = Path(self.temp.name) / "novamarket_rl.sqlite3"
+        self.bars = price_bars(90)
+        self.forecasts = {bar.observed_at: forecast(bar.observed_at) for bar in self.bars}
+        self.rewards = RewardService(
+            self.path,
+            transition_reader=lambda episode_id: [],
+            bar_loader=lambda config: self.bars,
+            forecast_loader=lambda config, at: self.forecasts.get(at),
+        )
+        self.manager = TrainingManager(
+            self.path,
+            bar_loader=lambda config: self.bars,
+            forecast_loader=lambda config, at: self.forecasts.get(at),
+            reward_service=self.rewards,
+        )
+        self.agent = DQNAgent(input_dim=8, hidden_layers=(4,), replay_capacity=8, seed=7)
+
+    def tearDown(self) -> None:
+        self.manager.close()
+        self.rewards.close()
+        self.temp.cleanup()
+
+    def make_run(
+        self, *, status: str = "running", prior: dict[str, Any] | None = None
+    ) -> TrainingRun:
+        metrics: dict[str, Any] = {} if prior is None else {"stability": prior}
+        return TrainingRun(
+            run_id="run_stability_record",
+            status=status,
+            current_step=10,
+            total_steps=100,
+            metrics=metrics,
+        )
+
+    def update(self, run: TrainingRun) -> TrainingRun:
+        """One healthy metrics update: balanced actions, stable rewards, no refusals."""
+
+        return self.manager._update_training_metrics(
+            run,
+            0,
+            1.0,
+            10,
+            [1.0],
+            [10],
+            deque([1.0], maxlen=5),
+            [0.5],
+            Counter({"hold": 5, "buy": 5}),
+            0,
+            self.agent,
+            0.0,
+            "",
+        )
+
+    def test_a_fresh_healthy_update_writes_an_ok_record_with_no_codes(self) -> None:
+        updated = self.update(self.make_run())
+        record = dict(updated.metrics)["stability"]
+        self.assertEqual(record["action"], "ok")
+        self.assertEqual(record["codes"], [])
+
+    def test_a_prior_pause_record_survives_a_healthy_update(self) -> None:
+        updated = self.update(self.make_run(prior=dict(self.PAUSE_RECORD)))
+        record = dict(updated.metrics)["stability"]
+        self.assertEqual(record["action"], "pause")
+        self.assertEqual(record["codes"], ["action_repetition"])
+        self.assertEqual(record, self.PAUSE_RECORD)
+        self.assertEqual(record["checked_at"], self.PAUSE_RECORD["checked_at"])
+
+    def test_a_fail_record_also_survives_a_healthy_update(self) -> None:
+        updated = self.update(self.make_run(prior=dict(self.FAIL_RECORD)))
+        record = dict(updated.metrics)["stability"]
+        self.assertEqual(record["action"], "fail")
+        self.assertEqual(record["codes"], ["invalid_action_spike"])
+
+    def test_a_paused_or_failed_run_keeps_exposing_its_record(self) -> None:
+        for status, prior in (
+            ("paused", self.PAUSE_RECORD),
+            ("failed", self.FAIL_RECORD),
+        ):
+            with self.subTest(status=status):
+                updated = self.update(self.make_run(status=status, prior=dict(prior)))
+                record = dict(updated.metrics)["stability"]
+                self.assertEqual(record["action"], prior["action"])
+                self.assertEqual(record["codes"], prior["codes"])

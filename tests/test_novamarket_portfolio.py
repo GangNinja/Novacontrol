@@ -46,19 +46,34 @@ class _Market:
     def __init__(self) -> None:
         self.prices = {instrument: Decimal("100.00") for instrument in INSTRUMENTS}
         self.observed_at = NOW
+        self.provider = "nse"
+        self.quote_present = True
+        self.bar_prices: list[Decimal] = []
 
     def latest(self, instrument_id: str) -> Any:
         if instrument_id not in self.prices:
             raise LookupError(instrument_id)
+        if not self.quote_present:
+            return SimpleNamespace(selected=None)
         return SimpleNamespace(
             selected=SimpleNamespace(
                 price=str(self.prices[instrument_id]),
                 observed_at=self.observed_at,
+                provider=self.provider,
             )
         )
 
     def bars(self, instrument_id: str, limit: int = 60, ascending: bool = True) -> Any:
-        return SimpleNamespace(items=[])
+        return SimpleNamespace(
+            items=[
+                SimpleNamespace(
+                    close=str(price),
+                    observed_at=self.observed_at,
+                    provider=self.provider,
+                )
+                for price in self.bar_prices[-limit:]
+            ]
+        )
 
     def get_instrument(self, instrument_id: str) -> Any:
         return SimpleNamespace(
@@ -387,6 +402,31 @@ class SelectionGateTests(Harness):
 
 
 class ValuationTests(Harness):
+    async def test_holdings_and_valuation_agree_on_one_price(self) -> None:
+        """Both reads must use the newest observable price, not the fill price.
+
+        O-1 from the PI-01…PI-24 audit: `/holdings` read the stored position
+        (still at its fill price) while `/valuation` refreshed it first, so the
+        same position was reported at two different prices in one read
+        sequence.
+        """
+
+        portfolio_id = await self.make()
+        self.market.prices["XNSE:ALPHA"] = Decimal("110.00")
+        holdings = self.engine.holdings(portfolio_id)["holdings"]
+        moved = {row["instrument_id"]: row for row in holdings}["XNSE:ALPHA"]
+        self.assertEqual(moved["last_price"], "110.00")
+
+        valuation = (await self.engine.valuate(portfolio_id))["valuation"]
+        holdings = self.engine.holdings(portfolio_id)["holdings"]
+        priced = [row for row in holdings if row["instrument_id"] == "XNSE:ALPHA"][0]
+        self.assertEqual(priced["last_price"], "110.00")
+        # One price per position, so the two endpoints' totals agree exactly.
+        self.assertEqual(
+            sum(Decimal(row["market_value"]) for row in holdings),
+            Decimal(valuation["invested"]),
+        )
+
     async def test_a_price_rise_is_reported_as_unrealized_profit(self) -> None:
         portfolio_id = await self.make()
         self.market.prices["XNSE:ALPHA"] = Decimal("110.00")
@@ -688,3 +728,42 @@ class PortfolioApiTests(unittest.TestCase):
             "/market/portfolios/pf_missing/rebalance", json={}
         )
         self.assertEqual(response.status_code, 404)
+
+
+class PriceProvenanceTests(Harness):
+    """A fixture-priced position says so; it never reads as live-priced."""
+
+    async def test_fixture_priced_positions_are_named_in_the_book(self) -> None:
+        portfolio_id = await self.make()
+        live = self.engine.holdings(portfolio_id)
+        self.assertTrue(live["holdings"])
+        for row in live["holdings"]:
+            self.assertEqual(row["price_provider"], "nse")
+            self.assertEqual(row["price_from"], "quote")
+            self.assertFalse(row["fixture_priced"])
+        self.assertEqual(live["provenance"], {"fixture_priced": [], "note": ""})
+
+        self.market.provider = "fixture"
+        detail = self.engine.detail(portfolio_id)
+        instruments = [row["instrument_id"] for row in detail["holdings"]]
+        for row in detail["holdings"]:
+            self.assertEqual(row["price_provider"], "fixture")
+            self.assertEqual(row["price_from"], "quote")
+            self.assertTrue(row["fixture_priced"])
+        self.assertEqual(detail["provenance"]["fixture_priced"], instruments)
+        self.assertIn("fixture data", detail["provenance"]["note"])
+        self.assertIn(instruments[0], detail["provenance"]["note"])
+
+        # A bar-only price is reported as a bar, and its provider decides the flag.
+        self.market.quote_present = False
+        self.market.bar_prices = [Decimal("100.00")]
+        bar_only = self.engine.holdings(portfolio_id)
+        for row in bar_only["holdings"]:
+            self.assertEqual(row["price_from"], "bar")
+            self.assertTrue(row["fixture_priced"])
+
+        # A live provider clears the provenance: it follows the price actually used.
+        self.market.provider = "NSE"
+        cleared = self.engine.detail(portfolio_id)
+        self.assertEqual(cleared["provenance"], {"fixture_priced": [], "note": ""})
+        self.assertTrue(all(not row["fixture_priced"] for row in cleared["holdings"]))

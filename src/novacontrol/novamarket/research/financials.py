@@ -18,6 +18,7 @@ from .models import (
     RatioResult,
     StatementBasis,
     clean,
+    publication_available,
 )
 
 UNIT_MULTIPLIERS: dict[str, float] = {
@@ -269,7 +270,7 @@ def select_point_in_time(
                 }
             )
             continue
-        if statement.published_at > cutoff:
+        if not publication_available(statement.published_at, cutoff):
             skipped.append(
                 {
                     "statement_id": statement.statement_id,

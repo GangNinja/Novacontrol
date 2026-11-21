@@ -3290,11 +3290,13 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         limit: int = 50,
         _principal: str = Depends(require_auth),
     ) -> list[dict[str, Any]]:
-        """Scheduled and historical PI-09 cycles, most recently scheduled first.
+        """PI-09 cycles, those still outstanding first, then newest scheduled.
 
-        The operator-facing list is ordered by creation so a lifecycle scheduled
-        a moment ago is always on the first page instead of being cut off by the
-        limit behind older, earlier-dated cycles.
+        A cycle that still has checkpoints to run (scheduled, active, awaiting
+        confirmation or its outcome evaluation) is listed before purely
+        historical cycles, so an older lifecycle that is still due is never
+        buried under recently finished history or cut off by the limit; each
+        group is newest-created first.
         """
         try:
             return nova.novamarket.forecast_cycles(
@@ -3304,7 +3306,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
                 state=state or None,
                 target_date=target_date or None,
                 limit=limit,
-                newest_first=True,
+                outstanding_first=True,
             )
         except Exception as exc:  # noqa: BLE001
             raise _forecast_http_error(exc) from exc
@@ -11257,7 +11259,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         try:
             return await nova.novamarket.portfolio_management_run(
                 portfolio_id=str(body.get("portfolio_id") or ""),
-                horizon=str(body.get("horizon") or "5d"),
+                # No horizon: the service follows the portfolio's declared
+                # NM-07 policy horizon instead of a hardcoded 5d window.
+                horizon=str(body.get("horizon") or ""),
                 trigger=str(body.get("trigger") or "manual"),
                 request_id=str(body.get("request_id") or ""),
                 actor=_operator,
@@ -11505,7 +11509,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         try:
             return await nova.novamarket.risk_intelligence_analyze(
                 portfolio_id=str(body.get("portfolio_id") or ""),
-                horizon=str(body.get("horizon") or "5d"),
+                horizon=str(body.get("horizon") or ""),
                 trigger=str(body.get("trigger") or "manual"),
                 request_id=str(body.get("request_id") or ""),
                 actor=_operator,
@@ -12253,7 +12257,11 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         payload: dict[str, Any] | None = None,
         _operator: str = Depends(require_autonomy_operator),
     ) -> dict[str, Any]:
-        """Event-aware versus non-event-aware forecast error (persisted evidence)."""
+        """Event-aware versus non-event-aware forecast error (persisted evidence).
+
+        The cohorts split on declared event awareness; records that only sit near
+        a stored event are reported separately and excluded from the comparison.
+        """
 
         try:
             return nova.novamarket.event_intelligence_forecast_evaluation(payload or {})

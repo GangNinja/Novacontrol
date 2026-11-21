@@ -5455,7 +5455,7 @@ class NovaMarketService:
         self,
         *,
         portfolio_id: str = "",
-        horizon: str = "5d",
+        horizon: str = "",
         trigger: str = "manual",
         request_id: str = "",
         actor: str = "operator",
@@ -8822,6 +8822,13 @@ class NovaMarketService:
             LifecycleState.DISABLED,
             LifecycleState.SHUTTING_DOWN,
         ):
+            # A service that only served read-only calls still opened lazily
+            # created stores; withdraw closes them, so shutdown never leaves
+            # SQLite file handles open (Windows refuses to unlink those).
+            try:
+                await self._withdraw()
+            except Exception as exc:  # noqa: BLE001 - shutdown must continue
+                _LOGGER.warning("NovaMarket withdraw on a stopped service failed: %s", exc)
             return self.status()
         previous_health = self._health_state.value
         self._lifecycle.transition(LifecycleState.SHUTTING_DOWN, reason=reason or "shutdown")

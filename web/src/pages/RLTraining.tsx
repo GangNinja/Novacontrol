@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { apiPost } from "../api";
 import { useApi, useDocumentTitle } from "../hooks";
-import { arrayFrom, dateTime, num, pct, shortId, title } from "../lib";
+import { arrayFrom, dateTime, measured, num, pct, shortId, title } from "../lib";
 import {
   Badge,
   Banner,
@@ -607,7 +607,7 @@ export function RLTrainingPage() {
                   columns={[
                     { key: "kind", label: "Kind", render: (row) => <Badge tone={row.kind === "best_validation" ? "good" : "neutral"}>{title(String(row.kind).replace(/_/g, " "))}</Badge> },
                     { key: "step", label: "Step", render: (row) => `${row.step} / episode ${row.episode}` },
-                    { key: "size", label: "Size", render: (row) => `${num(row.size_bytes).toLocaleString("en-IN")} B` },
+                    { key: "size", label: "Size", render: (row) => row.size_bytes == null ? "—" : `${num(row.size_bytes).toLocaleString("en-IN")} B` },
                     { key: "integrity", label: "Integrity", render: (row) => shortId(row.integrity_hash || "", 18) },
                     { key: "created", label: "Created", render: (row) => dateTime(row.created_at) },
                     { key: "resume", label: "", render: (row) => <Button size="sm" variant="quiet" onClick={() => resumeCheckpoint(row.checkpoint_id)} loading={busy.includes(`/checkpoints/${row.checkpoint_id}/resume`)}>Resume</Button> },
@@ -715,7 +715,7 @@ export function RLTrainingPage() {
                     { key: "policy", label: "Baseline", render: (row) => row.policy_name },
                     { key: "status", label: "Status", render: (row) => <StatusBadge value={row.status} /> },
                     { key: "return", label: "Return", render: (row) => row.metrics?.financial?.total_return == null ? "—" : pct(num(row.metrics.financial.total_return) * 100) },
-                    { key: "reward", label: "Reward", render: (row) => num(row.reward_summary?.total_reward).toFixed(5) },
+                    { key: "reward", label: "Reward", render: (row) => measured(row.reward_summary?.total_reward, 5) },
                   ]}
                 />
               )}

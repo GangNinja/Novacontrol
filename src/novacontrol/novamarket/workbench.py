@@ -446,11 +446,15 @@ class MarketWorkbench:
         """Latest stored close, with a reconciled quote only as a fallback."""
         data_interval = self._interval(interval)
         try:
+            # Newest window first: the store caps one page below the 30 rows
+            # requested, so an ascending read returns the OLDEST page of a long
+            # series and the "latest" close would be years old.  ``_normalize``
+            # restores chronological order for the last/prior pair below.
             page = self._engine.bars(
                 instrument_id,
                 interval=data_interval,
                 limit=30,
-                ascending=True,
+                ascending=False,
             )
             bars = [bar for bar in self._normalize(page.items) if not bar.partial]
         except Exception:

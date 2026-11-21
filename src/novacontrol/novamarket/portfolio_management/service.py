@@ -865,7 +865,7 @@ class PortfolioManagementService(PortfolioManagementAnalysisMixin, PortfolioMana
             )
         # The review analyses the horizon the portfolio itself declares; the 5d
         # default applied only when nothing usable is declared.
-        horizon = self._scheduled_horizon(portfolio_id)
+        horizon = self._declared_review_horizon(portfolio_id)
         # Record the attempt before the work so a failing review is not retried
         # by every later tick inside its own cadence window.
         self._store.set_meta(SCHEDULED_LAST_ATTEMPT_KEY, now.isoformat(), at=now)
@@ -912,12 +912,13 @@ class PortfolioManagementService(PortfolioManagementAnalysisMixin, PortfolioMana
             "orders_possible": False,
         }
 
-    def _scheduled_horizon(self, portfolio_id: str) -> str:
-        """The horizon a scheduled review analyses for this portfolio.
+    def _declared_review_horizon(self, portfolio_id: str) -> str:
+        """The horizon a review analyses for this portfolio by declaration.
 
         The authoritative detail is what :meth:`run_cycle` will snapshot, so its
-        declared horizon is the source of truth.  An unreadable detail falls
-        through to the documented default instead of refusing the whole tick;
+        declared horizon is the source of truth for a scheduled run and for a
+        manual run that supplies none.  An unreadable detail falls through to
+        the documented 5d default instead of refusing the review;
         ``run_cycle`` reports the read failure itself.
         """
 
@@ -929,15 +930,17 @@ class PortfolioManagementService(PortfolioManagementAnalysisMixin, PortfolioMana
         return review_horizon(declared)
 
     def _scheduled_portfolio(self) -> str:
-        """The next portfolio in the book, rotating from a durable cursor.
+        """The next active portfolio in the book, rotating from a durable cursor.
 
         Every scheduled review used to re-read the first row, so a book of six
         portfolios only ever reviewed one.  The cursor is the portfolio the last
-        selection chose: the row after it is picked and the end of the book
-        wraps to the first row.  A cursor whose portfolio has left the book
-        starts the rotation again instead of refusing.  The cursor advances at
-        selection, so a portfolio that keeps failing cannot stall coverage; the
-        failure itself is reported on the review result.
+        selection chose: the next active row is picked and the end of the active
+        book wraps to its first row.  A portfolio whose status is not ``active``
+        (closed, suspended, paused, ...) is never selected, and a cursor whose
+        portfolio has left the active book starts the rotation again instead of
+        refusing.  The cursor advances at selection, so a portfolio that keeps
+        failing cannot stall coverage; the failure itself is reported on the
+        review result.
         """
 
         try:
@@ -947,6 +950,12 @@ class PortfolioManagementService(PortfolioManagementAnalysisMixin, PortfolioMana
             return ""
         book: list[str] = []
         for row in rows:
+            if _text(row.get("status"), 30).lower() != "active":
+                continue
+            # Only an explicitly active portfolio receives scheduled work: the
+            # listing also returns closed and suspended books, and reviewing one
+            # of those is not a rotation.  The wrap runs across the active rows
+            # alone.
             portfolio_id = _text(row.get("portfolio_id") or row.get("id"), 160)
             if portfolio_id and portfolio_id not in book:
                 book.append(portfolio_id)
@@ -975,7 +984,7 @@ class PortfolioManagementService(PortfolioManagementAnalysisMixin, PortfolioMana
         self,
         *,
         portfolio_id: str,
-        horizon: str = "5d",
+        horizon: str = "",
         trigger: str = "manual",
         request_id: str = "",
         actor: str = "operator",
@@ -985,16 +994,38 @@ class PortfolioManagementService(PortfolioManagementAnalysisMixin, PortfolioMana
         canonical_portfolio = _text(portfolio_id, 160)
         if not canonical_portfolio:
             rows = self._portfolio_rows(limit=100)
-            if not rows:
+            # The listing also returns closed, suspended and paused books.  A
+            # manual review that omits its portfolio must land on an active
+            # book, never on whichever row happens to sort first.
+            active_ids = [
+                portfolio_id
+                for portfolio_id in (
+                    _text(row.get("portfolio_id") or row.get("id"), 160)
+                    for row in rows
+                    if _text(row.get("status"), 30).lower() == "active"
+                )
+                if portfolio_id
+            ]
+            if not active_ids:
+                if any(
+                    _text(row.get("status"), 30).lower() == "active" for row in rows
+                ):
+                    raise PortfolioManagementValidationError(
+                        "the portfolio listing has no portfolio id"
+                    )
                 raise PortfolioManagementValidationError(
                     "an active portfolio is required to run a management review"
                 )
-            canonical_portfolio = _text(rows[0].get("portfolio_id") or rows[0].get("id"), 160)
-            if not canonical_portfolio:
-                raise PortfolioManagementValidationError(
-                    "the portfolio listing has no portfolio id"
-                )
-        chosen_horizon = canonical_horizon(horizon)
+            canonical_portfolio = active_ids[0]
+        # An explicit horizon is validated and used; an omitted one follows the
+        # portfolio's own NM-07 policy instead of a hardcoded 5d window, so a
+        # manual review reads the horizon the portfolio declares (and a
+        # portfolio with no readable declaration keeps the documented 5d).
+        chosen_horizon = (
+            canonical_horizon(horizon)
+            if _text(horizon, 16)
+            else self._declared_review_horizon(canonical_portfolio)
+        )
         selected_trigger = _text(trigger or "manual", 30).lower()
         if selected_trigger not in {"manual", "scheduled"}:
             raise PortfolioManagementValidationError("trigger must be manual or scheduled")

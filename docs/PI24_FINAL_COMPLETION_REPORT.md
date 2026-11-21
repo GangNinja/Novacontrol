@@ -13,11 +13,12 @@ report was written. The existing working-tree changes from PI-01 through PI-23
 were preserved.
 
 > **Commit status (21 November 2026):** the PI-01 through PI-24 working tree,
-> including this report, is committed and pushed on `feature/novamarket`.
-> README status, `.gitignore` scratch rules and `docs/API.md` (932 routes) were
-> refreshed in that commit, together with the API reference at **933 routes**
-> (the `/market/training/datasets` handler is now declared); the limitations
-> above and in the README remain open.
+> including this report, the README status and `docs/API.md`, was committed and
+> pushed on `feature/novamarket` after the final closure cycle. The generated
+> API reference is in sync at **933 routes** (the `/market/training/datasets`
+> handler is declared). The limitations above and in the README remain open;
+> see `docs/FINAL_PI01_PI24_CLOSURE_AND_READINESS_REPORT.md` for the verified
+> closure state.
 
 ---
 

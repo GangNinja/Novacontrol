@@ -265,3 +265,47 @@ No commit, staging, push or tag was performed. No production database, broker cr
 **PARTIAL** for operational release acceptance because the live paper lifecycle, continuous autonomy and live provider failure drill remain environment-dependent.
 
 No P0/P1, financial-correctness, security or authorization defect is open. The accepted NM-01–NM-14 and AT-01–AT-06 baseline is intact.
+
+---
+
+## 11. PI-01–PI-24 closure addendum (21 November 2026)
+
+**Scope:** final engineering closure of PI-01 through PI-24. No PI-25 and no
+feature was added.
+
+| ID | Severity | Type | Title | Status | Verification |
+|---|---|---|---|---|---|
+| BUG-PI-CLOSE-01 (O-1) | P2 | Read path / consistency | `/holdings` served the stored fill price while `/valuation` refreshed to the latest observable, so the same position was reported at two prices | **FIXED 2026-11-21** | deterministic reproduction (100.00 vs 110.00), regression test, E2E re-run (both 100.50) |
+| BUG-PI-CLOSE-02 | P3 | Test harness | LSTM unavailable-runtime test crashed on an empty matrix instead of reporting unavailability | **FIXED (prior)** | forced unavailable-backend test |
+| BUG-PI-CLOSE-03 | P3 | Resource lifecycle | Shutdown returned before withdrawing lazily opened stores, leaving a SQLite handle open on Windows | **FIXED (prior)** | gateway shutdown test |
+| BUG-PI-CLOSE-04 | P3 | Test contract | Route-contract test omitted `/market/training/datasets` | **FIXED (prior)** | set-equality route test |
+| BUG-PI-CLOSE-05 | P2 | Review routing | Manual review fallback with no active book could target a closed portfolio | **FIXED (prior)** | rotation + no-active-book tests |
+| ENV-PI-CLOSE-01 | Process | Test environment | 20 tests failed on a base install (13 LSTM + 7 gradient) solely because optional ML backends were absent | **RESOLVED** | extras installed; full suite 1907 passed / 0 failed |
+
+### O-1 root cause and fix
+
+A fill stores its execution price as the position's `last_price`. The holdings
+read model returned that stored value unchanged, while valuation refreshed the
+position to the newest observable quote/bar before valuing it. Both endpoints
+claimed to report the book's current value, so the divergence was a read-path
+defect, not an intended difference.
+
+`PortfolioEngine.holdings()` now calls `_refresh_positions(record, now)` before
+building its payload, exactly as valuation does. The regression test
+`test_holdings_and_valuation_agree_on_one_price` checks the refreshed price and
+that the sum of holdings market values equals valuation `invested`.
+
+**Verification:** full suite **1907 passed, 0 failed, 0 errors, 2 skipped, 445
+subtests in 736.50 s**; `mypy src` clean (721 files); API reference in sync (933
+routes); 14 stores integrity-clean; paper E2E consistent at 100.50.
+
+### Still open (not addressed by this addendum)
+
+- The 20m → 5m → 1m decision hierarchy is not implemented; 1 minute is only the
+  T−1m checkpoint and a data interval.
+- PI-23 portfolio-horizon to forecast-horizon mapping and the AT-03 venue /
+  instrument-identifier mismatch recorded in the README remain open.
+- No live-market validation or sustained live paper session exists.
+
+No commit, staging or push was performed as part of the audit itself; the
+resulting tree is committed separately with the closure report.

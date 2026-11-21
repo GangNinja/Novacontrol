@@ -20,9 +20,13 @@ What this adapter promises, and what it refuses:
 * **Publication timestamps are never invented.** Yahoo publishes the reporting
   period end but no filing/announcement time. The adapter therefore records the
   FIRST observation time as ``published_at`` — a point-in-time-safe proxy that
-  can never back-date a statement to its period end — keeps that first
-  observation stable through the cache, and states the basis on the run's
-  ``source_notes``. A period end is a calendar date and is anchored at 00:00 UTC.
+  can never back-date a statement to its period end or to the run's cutoff —
+  keeps that first observation stable through the cache, and states the basis on
+  the run's ``source_notes``. The source also publishes no time of day, so the
+  point-in-time gates admit filing evidence by its observation's calendar day: a
+  15:00 fetch still says 15:00 and a same-day run that started earlier may use
+  it, while a run whose cutoff is an earlier day may not. A period end is a
+  calendar date and is anchored at 00:00 UTC.
 * **Rate limits are enforced locally.** One bounded request budget per process
   day, a minimum interval between calls, a short read cache, and a bounded body
   read. A refusal is reported in ``notes``; it never becomes an empty dataset.
@@ -284,22 +288,6 @@ def _series(payload: Mapping[str, Any]) -> dict[str, list[Mapping[str, Any]]]:
     return indexed
 
 
-def _publication_time(as_of: datetime | None, observed: datetime) -> datetime:
-    """The point-in-time stamp for data this process first observed at ``observed``.
-
-    The source publishes no filing timestamp, so a statement's publication time
-    is its first observation.  A research run executing on the day of its own
-    cutoff is the run doing the observing: its filings belong to that day's
-    knowledge, so the cutoff is kept and today's live runs keep their evidence.
-    A cutoff on an earlier day is a historical replay — what we observe now was
-    not available then — so the real observation is stamped and the existing
-    point-in-time gate excludes the statement instead of back-dating it.
-    """
-    if as_of is not None and as_of.astimezone(UTC).date() == observed.astimezone(UTC).date():
-        return as_of
-    return observed
-
-
 def _row_key(row: Mapping[str, Any], kind: str) -> str:
     if kind == "statement":
         return "|".join(
@@ -375,7 +363,9 @@ class YahooFundamentalsAdapter:
             "enabled": True,
             "requires_credentials": False,
             "publication_timestamp_basis": (
-                "first observation time; the source publishes no filing timestamp"
+                "first observation time, never the run cutoff or the reporting "
+                "period end; the source publishes no filing timestamp or time of "
+                "day, so point-in-time checks compare the observation's calendar day"
             ),
             "min_interval_seconds": self._budget.min_interval_seconds,
             "daily_request_limit": self._budget.daily_limit,
@@ -393,19 +383,18 @@ class YahooFundamentalsAdapter:
         """Return statements and profile facts, or a bundle of stated gaps.
 
         ``as_of`` is the research cutoff, never the fetched data's timestamp: the
-        source publishes no filing timestamp, so a statement is dated by the
-        first observation of the data.  A run executing on the day of its own
-        cutoff is the run that observed it, so today's live runs keep the
-        evidence they just fetched; a cutoff on an earlier day is a historical
-        replay, and the existing point-in-time gate excludes statements this
-        process could not have seen then.
+        source publishes no filing timestamp, so every statement and profile
+        fact is stamped with the real first observation of the data, however
+        much later in the day the fetch happened.  The point-in-time gates then
+        compare that observation by calendar day (the source has no time of
+        day), so a live run keeps the filings it just fetched while a run whose
+        cutoff is an earlier day still excludes them.  Nothing is back-dated.
         """
+        del as_of  # the cutoff gates the evidence; it never re-dates it
         identifier = str(instrument_id or instrument.get("instrument_id") or "").strip()
         symbol = self._symbol(instrument)
-        # The fetch time is the real observation; ``as_of`` only decides which
-        # day's knowledge this run belongs to (see ``_publication_time``).
+        # The fetch time is the only publication time this source can support.
         observed = self._clock()
-        publication = _publication_time(as_of, observed)
         if not symbol:
             return FilingBundle(
                 instrument_id=identifier,
@@ -454,7 +443,7 @@ class YahooFundamentalsAdapter:
             notes.append(f"filings: {symbol} fundamentals returned no JSON body")
         else:
             statements, statement_notes = self._statements(
-                payload, symbol=symbol, observed=publication
+                payload, symbol=symbol, observed=observed
             )
             notes.extend(statement_notes)
 
@@ -464,7 +453,7 @@ class YahooFundamentalsAdapter:
             notes.append(f"filings: {symbol} company profile unavailable: {failure}")
         elif profile_payload:
             evidence, profile_notes = self._profile_evidence(
-                profile_payload, symbol=symbol, observed=publication
+                profile_payload, symbol=symbol, observed=observed
             )
             notes.extend(profile_notes)
 
@@ -647,7 +636,10 @@ class YahooFundamentalsAdapter:
             notes.append(
                 f"filings: {symbol} statements are {FILING_SOURCE_NAME} aggregates; "
                 "the source publishes no filing timestamp, so each publication time "
-                "is its first observation and never the reporting period end"
+                "is its first observation and never the run cutoff or the reporting "
+                "period end, and because the source gives no time of day a "
+                "point-in-time check treats it as available from that observation's "
+                "calendar day"
             )
         return statements, notes
 

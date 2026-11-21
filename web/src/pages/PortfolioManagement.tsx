@@ -77,7 +77,7 @@ function positionColumns(): Column<any>[] {
     { key: "instrument_id", label: "Instrument", render: (row) => <strong>{row.instrument_id || "—"}</strong> },
     { key: "quantity", label: "Qty", align: "right", render: (row) => row.quantity == null ? "—" : num(row.quantity, 0).toLocaleString("en-IN") },
     { key: "average_cost", label: "Entry", align: "right", render: (row) => money(row.average_cost) },
-    { key: "current_price", label: "Price", align: "right", render: (row) => money(row.current_price) },
+    { key: "current_price", label: "Price", align: "right", render: (row) => row.fixture_priced ? <div className="stack-tight"><span>{money(row.current_price)}</span><Badge tone="warn">Fixture</Badge></div> : money(row.current_price) },
     { key: "current_value", label: "Value", align: "right", render: (row) => money(row.current_value) },
     {
       key: "unrealized_pnl",
@@ -227,7 +227,7 @@ export function PortfolioManagementPage() {
   const toast = useToast();
   const [view, setView] = useState<View>("overview");
   const [portfolio, setPortfolio] = useState("");
-  const [horizon, setHorizon] = useState("5d");
+  const [horizon, setHorizon] = useState("");
   const [operatorToken, setOperatorToken] = useState("");
   const [busy, setBusy] = useState("");
   const [revision, setRevision] = useState(0);
@@ -292,7 +292,14 @@ export function PortfolioManagementPage() {
     try {
       await apiPost(
         `${BASE}/review`,
-        { portfolio_id: selected, horizon, trigger: "manual", request_id: crypto.randomUUID() },
+        {
+          portfolio_id: selected,
+          // Without a chosen horizon the backend follows the portfolio's own
+          // declared policy horizon instead of a hardcoded 5d window.
+          ...(horizon ? { horizon } : {}),
+          trigger: "manual",
+          request_id: crypto.randomUUID(),
+        },
         undefined,
         { operatorToken: handles.operatorToken },
       );
@@ -376,6 +383,7 @@ export function PortfolioManagementPage() {
               onChange={(event) => setHorizon(event.target.value)}
               aria-label="Management horizon"
             >
+              <option value="">Policy horizon</option>
               {HORIZONS.map((item) => (
                 <option key={item} value={item}>{item}</option>
               ))}

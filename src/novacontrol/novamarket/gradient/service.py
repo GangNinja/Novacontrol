@@ -23,6 +23,7 @@ from novacontrol.novamarket.contracts import (
     ForecastValidationError,
 )
 from novacontrol.novamarket.features.models import FeatureProfileName, FeatureRequest
+from novacontrol.novamarket.features.provenance import event_feature_usage
 from novacontrol.novamarket.forecasting.store import ForecastStore
 from novacontrol.novamarket.marketdata.calendar import calendar_for
 from novacontrol.novamarket.marketdata.models import DataInterval, DataQuality, Freshness
@@ -1365,6 +1366,9 @@ class GradientForecastingService(StatisticalForecastingService):
                 "dataset_id": chosen_dataset_id,
                 "dataset_version": chosen_dataset_version,
                 "feature_set_id": feature_set.feature_set_id,
+                # PI-24 needs the forecast to say whether event features were
+                # consumed; the schema decides, not proximity to an event.
+                **event_feature_usage(feature_set, loaded.schema.names),
                 "horizon_steps": horizon_steps(chosen_horizon, chosen_resolution),
                 "promotion": "not_promoted",
                 "automatic_promotion": False,

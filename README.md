@@ -6,7 +6,7 @@ NovaMarket is a standalone web application for market research, portfolio constr
 
 > **Safety boundary:** NovaMarket has no broker client, no live-order route and no real-money trading path. `GET /market/execution/status` reports `paper_only: true`, `live_trading: false` and `broker_connected: false`. Paper fills are simulation results, not exchange executions. Market-data availability does not imply live trading capability.
 
-**Status:** NM-01 through NM-14 accepted baseline (9 November 2026), extended by the PI-01 through PI-24 prediction-intelligence roadmap (18 November 2026). NM-14 acceptance is **PASS within internal acceptance scope** (25/25 routes, 480/480 recorded controls, 792 passed tests, 2 skipped); PI-24 closes at **PASS for implementation and integration scope**, with its production/live-data qualification **PARTIAL**. The generated API reference covers **933 routes**. External WCAG certification and independent penetration testing are **not** claimed. See [Release Notes](docs/RELEASE_NOTES.md), the [NM-14 final report](docs/NM14_FINAL_ACCEPTANCE_REPORT.md) and the [PI-24 final report](docs/PI24_FINAL_COMPLETION_REPORT.md).
+**Status:** NM-01 through NM-14 accepted baseline (9 November 2026), extended by the PI-01 through PI-24 prediction-intelligence roadmap (18 November 2026). NM-14 acceptance is **PASS within internal acceptance scope** (25/25 routes, 480/480 recorded controls, 792 passed tests, 2 skipped); PI-24 closes at **PASS for implementation and integration scope**, with its production/live-data qualification **PARTIAL**. Final PI closure verification (21 November 2026): **1907 passed, 0 failed, 0 errors, 2 skipped, 445 subtests in 736.50 s**, `mypy src` clean (721 files), API reference in sync (**933 routes**), and all 14 SQLite stores integrity-clean. Readiness: **software integration PASS; forecasting/strategy intelligence PARTIAL; paper trading PASS (controlled, simulated); live market BLOCKED.** The 20-minute → 5-minute → 1-minute decision hierarchy is **not implemented** (1-minute exists only as the T−1m checkpoint and a data interval), measured forecast skill is weak, and no live data or sustained live paper session was used. External WCAG certification and independent penetration testing are **not** claimed. See the [final closure and readiness report](docs/FINAL_PI01_PI24_CLOSURE_AND_READINESS_REPORT.md), [Release Notes](docs/RELEASE_NOTES.md), the [NM-14 final report](docs/NM14_FINAL_ACCEPTANCE_REPORT.md) and the [PI-24 final report](docs/PI24_FINAL_COMPLETION_REPORT.md).
 
 ![NovaMarket dashboard](docs/screenshots/dashboard-desktop.png)
 
@@ -125,6 +125,10 @@ python -m venv .venv
 
 cd novamarket
 ..\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+# Full test environment: gradient and LSTM backends (optional by design)
+..\.venv\Scripts\python.exe -m pip install -e ".[prediction,lstm]"
+# On Windows CPU-only machines install torch from the CPU index first:
+# ..\.venv\Scripts\python.exe -m pip install "torch>=2.2,<3" --index-url https://download.pytorch.org/whl/cpu
 
 cd web
 npm install
@@ -211,7 +215,7 @@ cd web
 npm run build
 ```
 
-The 9 November full regression was **792 passed, 2 skipped, 938 subtests passed in 176.90 s**. The production build succeeded with 1,598 modules; the chunk-size warning is informational.
+The 21 November 2026 closure run (Python 3.13, `prediction` and `lstm` extras installed) was **1907 passed, 0 failed, 0 errors, 2 skipped, 445 subtests passed in 736.50 s**; `mypy src` was clean over 721 files and `docs/API.md` was in sync at 933 routes. Without the optional extras, 20 tests fail honestly (13 LSTM needing PyTorch, 7 gradient needing XGBoost/LightGBM) instead of skipping — install the extras before treating the suite as green. The 9 November production build succeeded with 1,598 modules; the chunk-size warning is informational.
 
 These checks verify software behavior. They do **not** constitute an external accessibility audit, penetration test or investment-performance validation.
 
@@ -230,12 +234,16 @@ These checks verify software behavior. They do **not** constitute an external ac
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Symptoms, supported causes, diagnostics and safe resolutions |
 | [Release Notes](docs/RELEASE_NOTES.md) | NM-14 acceptance baseline, evidence, performance and limitations |
 | [PI-24 final report](docs/PI24_FINAL_COMPLETION_REPORT.md) | PI-01 through PI-24 reconciliation, event-aware intelligence, verdict and limitations |
+| [Final closure and readiness report](docs/FINAL_PI01_PI24_CLOSURE_AND_READINESS_REPORT.md) | Full regression closure, O-1 fix, model/strategy/risk/RL/paper-trading evidence and A–D readiness verdicts |
 | [Prediction Intelligence architecture](docs/PREDICTION_INTELLIGENCE_ARCHITECTURE.md) | Datasets, models, ensembles, evaluation, forecast optimisation and decision evidence |
 | [Filings](docs/FILINGS.md) | Filing ingestion, evidence and research integration |
 | [Documentation Completion Report](docs/DOCUMENTATION_COMPLETION_REPORT.md) | What was documented, verified and left open |
 
 ## Known limitations
 
+- **The 20m → 5m → 1m decision hierarchy is not implemented.** 5m, 15m, 20m and 1h cycles and their checkpoints are real and tested; 1 minute exists only as the T−1m confirmation checkpoint and a data interval, and no strategy consumes higher-timeframe context.
+- **Measured forecast skill is weak.** On the closure samples directional accuracy was ≈0.40–0.60 and the multi-class Brier score was at or below the uninformed 0.667 baseline; no accuracy or profitability claim is made.
+- **The full test suite needs optional ML backends.** A base install fails 13 LSTM and 7 gradient tests by design; install `.[prediction,lstm]` for a green run.
 - **Paper-only by design.** There is no broker integration and no real-money path.
 - **Data coverage is incomplete.** The full audit catalogue is not the default store, BSE has 99 zero-bar names and 151 recent listings have short histories.
 - **Derivatives coverage is an official EOD snapshot.** There is no live option-chain or provider IV feed.

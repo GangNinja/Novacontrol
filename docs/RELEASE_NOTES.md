@@ -25,6 +25,7 @@
 9. [Known limitations](#9-known-limitations)
 10. [Compatibility and upgrade notes](#10-compatibility-and-upgrade-notes)
 11. [Release gate and change control](#11-release-gate-and-change-control)
+12. [PI-01–PI-24 closure addendum (21 November 2026)](#12-pi-01pi-24-closure-addendum-21-november-2026)
 
 ## 1. What this release is
 
@@ -208,3 +209,47 @@ A release based on this baseline must preserve:
 Reverification for a code change should include focused regression tests, both mypy views, the API reference check and a real browser check of affected routes. Do **not** rerun the entire NM-14 acceptance suite merely for documentation edits, and do not claim a new PASS from partial evidence.
 
 The documentation milestone that accompanies this baseline changes documentation only. It does not add brokers, live execution, NM-15 functionality, or changes to NovaControl/NovaForge behavior.
+
+## 12. PI-01–PI-24 closure addendum (21 November 2026)
+
+This addendum records the final verification of the already accepted NM-01–NM-14
+baseline plus the PI-01–PI-24 prediction-intelligence roadmap. It adds no phase
+and no feature.
+
+**Verified**
+
+- Full NovaMarket suite with the declared `prediction` and `lstm` extras:
+  **1907 passed, 0 failed, 0 errors, 2 skipped, 445 subtests in 736.50 s**
+  (Python 3.13.0, pytest 9.1.1).
+- `mypy src`: clean over 721 files; `docs/API.md` in sync at **933 routes**.
+- All 14 SQLite stores: `integrity_check` ok, zero foreign-key violations.
+- Paper chain end-to-end: fixture data → forecast → strategy proposal →
+  independent risk decision → simulated fill → holdings/valuation → ledger →
+  exit → realized P&L, with deterministic backtest replay.
+- Every filled backtest order mapped 1:1 to an approved risk decision; rejected
+  proposals could not be forwarded, and duplicate forwarding created no second
+  order.
+
+**Fixed**
+
+- **O-1** — `/holdings` served a stored fill price while `/valuation` refreshed
+  to the latest observable. `PortfolioEngine.holdings()` now refreshes positions
+  through the same path; a regression test pins one price per position.
+- Earlier cycle: LSTM unavailable-runtime crash, shutdown SQLite handle leak,
+  stale route contract, and manual-review fallback targeting a closed book.
+
+**Readiness**
+
+| Area | Verdict |
+|---|---|
+| Software integration | PASS |
+| Forecasting/strategy intelligence | PARTIAL (weak measured skill; no 1m horizon) |
+| Paper trading | PASS (controlled, simulated; no sustained live session) |
+| Live market | BLOCKED (no live data or broker) |
+
+**Still open:** the 20m → 5m → 1m decision hierarchy is not implemented (1m is
+only the T−1m checkpoint and a data interval); the PI-23 portfolio-horizon to
+forecast-horizon mapping and the AT-03 venue/instrument identifier mismatch
+recorded in the README remain open; no live-market validation is claimed.
+
+See `docs/FINAL_PI01_PI24_CLOSURE_AND_READINESS_REPORT.md` for the full evidence.

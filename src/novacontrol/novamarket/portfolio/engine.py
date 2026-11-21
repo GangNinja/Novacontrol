@@ -61,6 +61,16 @@ CONFIRMED_EVENT_STATES = frozenset(
 )
 PROPOSAL_TTL_HOURS = 24
 PRICE_TOLERANCE = Decimal("0.02")
+# Providers that supply seeded bars or synthetic quotes: a book priced from
+# them is reported as fixture-priced so it can never read as live-priced.
+FIXTURE_PRICE_PROVIDERS = frozenset({"fixture", "synthetic", "seed", "seeded"})
+
+
+def provider_name(value: object) -> str:
+    """A provider id in one spelling (the enum's value when it is an enum)."""
+
+    raw = getattr(value, "value", value)
+    return str(raw or "").strip().lower()
 
 
 class PortfolioEngine:
@@ -180,6 +190,52 @@ class PortfolioEngine:
             getattr(bar, "observed_at", None),
             "valued from the latest bar (no live quote)",
         )
+
+    def _price_origin(self, instrument_id: str) -> tuple[str, str]:
+        """The provider and surface the book's current price came from.
+
+        A seeded bar or a synthetic quote arrives through a fixture provider;
+        reporting the provider (and whether the price came from a quote or a
+        bar) keeps that provenance visible on the position instead of letting
+        it read as a live market price.
+        """
+
+        if self._market_data is None:
+            return "", ""
+        try:
+            result = self._market_data.latest(instrument_id)
+        except Exception:  # noqa: BLE001 - provenance never blocks a book read
+            return "", ""
+        selected = getattr(result, "selected", None)
+        if selected is not None and getattr(selected, "price", None) is not None:
+            return provider_name(getattr(selected, "provider", "")), "quote"
+        try:
+            page = self._market_data.bars(instrument_id, limit=1, ascending=False)
+        except Exception:  # noqa: BLE001
+            return "", ""
+        items = list(getattr(page, "items", ()) or ())
+        if not items:
+            return "", ""
+        return provider_name(getattr(items[0], "provider", "")), "bar"
+
+    @staticmethod
+    def _provenance(holdings: list[dict[str, Any]]) -> dict[str, Any]:
+        """The book's fixture-priced positions, named so they cannot be mistaken."""
+
+        fixture = [
+            str(row.get("instrument_id") or "")
+            for row in holdings
+            if row.get("fixture_priced")
+        ]
+        return {
+            "fixture_priced": fixture,
+            "note": (
+                "Priced from fixture data (seeded bars or a synthetic quote), "
+                "not a live market price: " + ", ".join(fixture)
+                if fixture
+                else ""
+            ),
+        }
 
     def _refresh_positions(
         self, record: PortfolioRecord, at: datetime
@@ -454,12 +510,14 @@ class PortfolioEngine:
             stale_after_hours=self.max_price_age_hours,
             at=self._now(),
         )
+        holdings = self._holdings_payload(record, positions, valuation)
         return {
             "portfolio": record.to_dict(),
             "policy": policy.to_dict(),
             "cash": money_text(cash),
             "valuation": valuation.to_dict(),
-            "holdings": self._holdings_payload(record, positions, valuation),
+            "holdings": holdings,
+            "provenance": self._provenance(holdings),
             "constraints": self.constraints(portfolio_id),
             "counts": {
                 "positions": len(positions),
@@ -478,6 +536,10 @@ class PortfolioEngine:
         payload: list[dict[str, Any]] = []
         for position in positions:
             body = position.to_dict()
+            provider, surface = self._price_origin(position.instrument_id)
+            body["price_provider"] = provider or "unknown"
+            body["price_from"] = surface or "none"
+            body["fixture_priced"] = provider in FIXTURE_PRICE_PROVIDERS
             body["stale"] = bool(
                 position.priced_at is None
                 or (self._now() - position.priced_at).total_seconds() / 3600.0
@@ -493,16 +555,22 @@ class PortfolioEngine:
     def holdings(self, portfolio_id: str) -> dict[str, Any]:
         record = self._record(portfolio_id)
         cash = self._wallet_balance(record)
-        positions = self._store.positions(portfolio_id)
+        # Price every open position first.  Without this, a holding still
+        # carried its fill price while `/valuation` refreshed to the newest
+        # observable, so the same position was quoted at two prices in one read
+        # sequence (audit observation O-1).
+        positions, _stale = self._refresh_positions(record, self._now())
         valuation = value_portfolio(
             record, positions, cash, history_totals=self._history_totals(portfolio_id),
             stale_after_hours=self.max_price_age_hours,
             at=self._now(),
         )
+        holdings = self._holdings_payload(record, positions, valuation)
         return {
             "ok": True,
             "portfolio_id": portfolio_id,
-            "holdings": self._holdings_payload(record, positions, valuation),
+            "holdings": holdings,
+            "provenance": self._provenance(holdings),
             "cash": money_text(cash),
             "invested": money_text(valuation.invested),
             "total_value": money_text(valuation.total),

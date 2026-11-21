@@ -764,6 +764,11 @@ class ResearchService:
         for row in _rows(context.get("statements"))[:MAX_STATEMENTS]:
             try:
                 statements.append(
+                    # ``default_time`` only dates the observation (retrieved_at).
+                    # The parse never derives published_at or the reporting period
+                    # from it, so a statement with no publication time reaches the
+                    # point-in-time gate as missing instead of looking available at
+                    # the research cutoff.
                     FinancialStatement.from_payload(
                         row, instrument_id=request.instrument_id, default_time=cutoff
                     )

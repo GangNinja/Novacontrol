@@ -67,10 +67,16 @@ def _lines(value: object) -> list[str]:
 def _scope_matches(
     record: Mapping[str, Any], *, instrument_id: str, horizon: str
 ) -> bool:
-    """A record is usable only for the scope the decision asked about."""
+    """A record is usable only for the scope the decision asked about.
+
+    The instrument must match explicitly.  A record that names no instrument is
+    unscoped, not universal: treating the missing field as a wildcard let one
+    such record attach to every proposal, which is a blend across instruments
+    this layer exists to prevent.
+    """
 
     record_instrument = _text(record.get("instrument_id")).upper()
-    if record_instrument and record_instrument != instrument_id.upper():
+    if not record_instrument or record_instrument != instrument_id.upper():
         return False
     record_horizon = _text(record.get("horizon")).lower()
     if horizon and record_horizon and record_horizon != horizon.lower():
@@ -146,9 +152,11 @@ def forecast_optimization_evidence(
 ) -> dict[str, Any] | None:
     """Sanitise PI-23 records into one evidence block, or ``None``.
 
-    Every supplied record must belong to the decision's instrument (and its
-    horizon when both sides know one).  A record for another scope is dropped
-    rather than blended, so a 5d selection can never be attached to a 1h signal.
+    Every supplied record must name the decision's instrument (and its horizon
+    when both sides know one).  A record for another scope -- or one that names
+    no instrument at all -- is dropped rather than blended, so a 5d selection
+    can never be attached to a 1h signal and an unscoped record can never be
+    attached to anything.
     """
 
     instrument = _text(instrument_id).upper()

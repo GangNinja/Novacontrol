@@ -1535,14 +1535,20 @@ class EventIntelligenceService:
 
         The records come from PI-11's own collector (stored lifecycle and NM-06
         outcomes, filtered and de-duplicated exactly as an evaluation report),
-        and are scored with PI-11's metric functions. A record counts as
-        event-labelled when it declares event awareness (`metadata.event_aware`,
-        `metadata.event_ids`, or an event feature-set version), or when a stored
-        event was already published inside the point-in-time window
-        `[generated_at - lookback_days, generated_at]` for that instrument.
+        and are scored with PI-11's metric functions.
 
-        A comparison is only reported when BOTH cohorts reach the configured
-        minimum sample size; otherwise the result is an explicit
+        The comparison splits on DECLARED event awareness: `metadata.event_aware`
+        is true, `metadata.event_ids` is non-empty, or the feature-set version
+        names events. That is what a model that consumed event features actually
+        records. A record that only had a stored event published inside the
+        point-in-time window `[generated_at - lookback_days, generated_at]` is
+        proximity-labelled: it is reported as its own cohort and excluded from
+        both comparison cohorts, because in a busy period nearly every forecast
+        is near some event and the two cohorts would stop meaning different
+        things.
+
+        A comparison is only reported when BOTH declared/non-event cohorts reach
+        the configured minimum sample size; otherwise the result is an explicit
         ``insufficient_data`` record and no improvement is claimed. Nothing here
         is causal: the move may have had other drivers.
         """
@@ -1612,33 +1618,47 @@ class EventIntelligenceService:
             return moments
 
         window = timedelta(days=self._config.lookback_days)
-        basis: dict[str, int] = {"declared": 0, "event_proximity": 0}
 
-        def labelled(record: Any) -> bool:
+        def declares_event_awareness(record: Any) -> bool:
             metadata = getattr(record, "metadata", None)
             metadata = metadata if isinstance(metadata, Mapping) else {}
             feature = str(getattr(record, "feature_set_version", "") or "").lower()
-            if (
+            return (
                 metadata.get("event_aware") is True
-                or metadata.get("event_ids")
+                or bool(metadata.get("event_ids"))
                 or "event" in feature
-            ):
-                basis["declared"] += 1
-                return True
+            )
+
+        def has_event_in_lookback(record: Any) -> bool:
             generated = getattr(record, "generated_at", None)
             if not isinstance(generated, datetime):
                 return False
-            for moment in event_times(str(getattr(record, "instrument_id", ""))):
-                if generated - window <= moment <= generated:
-                    basis["event_proximity"] += 1
-                    return True
-            return False
+            return any(
+                generated - window <= moment <= generated
+                for moment in event_times(str(getattr(record, "instrument_id", "")))
+            )
 
         # Label every record exactly once: a second pass would double-count the
-        # basis breakdown and compare frozen records by value.
-        flags = [labelled(row) for row in records]
-        event_aware = [row for row, flag in zip(records, flags) if flag]
-        non_event = [row for row, flag in zip(records, flags) if not flag]
+        # basis breakdown and compare frozen records by value.  Declared
+        # awareness wins and is the comparison split; proximity alone is
+        # reported separately, never counted as event-feature usage.
+        declared_flags = [declares_event_awareness(row) for row in records]
+        proximity_flags = [
+            False if declared else has_event_in_lookback(row)
+            for row, declared in zip(records, declared_flags)
+        ]
+        event_aware = [row for row, flag in zip(records, declared_flags) if flag]
+        proximity_labelled = [row for row, flag in zip(records, proximity_flags) if flag]
+        non_event = [
+            row
+            for row, declared, proximate in zip(records, declared_flags, proximity_flags)
+            if not declared and not proximate
+        ]
+        basis: dict[str, int] = {
+            "declared": len(event_aware),
+            "event_proximity": len(proximity_labelled),
+            "baseline": len(non_event),
+        }
 
         def cohort(items: Sequence[Any]) -> dict[str, Any]:
             if not items:
@@ -1657,6 +1677,7 @@ class EventIntelligenceService:
 
         aware_block = cohort(event_aware)
         baseline_block = cohort(non_event)
+        proximity_block = cohort(proximity_labelled)
         sufficient = len(event_aware) >= min_samples and len(non_event) >= min_samples
         threshold = 0.02
         comparison: dict[str, Any] | None = None
@@ -1724,21 +1745,30 @@ class EventIntelligenceService:
                 "total": len(records),
                 "event_aware": len(event_aware),
                 "non_event_aware": len(non_event),
+                "proximity_labelled": len(proximity_labelled),
                 "rejected": rejected,
                 "label_basis": dict(basis),
             },
-            "cohorts": {"event_aware": aware_block, "non_event_aware": baseline_block},
+            "cohorts": {
+                "event_aware": aware_block,
+                "non_event_aware": baseline_block,
+                "proximity_labelled": proximity_block,
+            },
             "comparison": comparison,
             "method": (
                 "PI-11 collected records scored by PI-11 return, price and direction "
-                "metrics; cohorts split by declared event awareness or by a stored "
-                "event published inside the point-in-time lookback window."
+                "metrics; cohorts split on DECLARED event awareness (metadata or "
+                "feature-set version). Records whose only signal is a stored event "
+                "inside the point-in-time lookback window are reported as a "
+                "separate cohort and excluded from both comparison cohorts."
             ),
             "label_policy": (
-                "A record is event-labelled when metadata.event_aware is true, "
-                "metadata.event_ids is non-empty, the feature-set version names "
-                "events, or a stored event was published within lookback_days "
-                "before the forecast was generated."
+                "Event-aware means the record declares it: metadata.event_aware is "
+                "true, metadata.event_ids is non-empty, or the feature-set version "
+                "names events. A record that only has a stored event published "
+                "within lookback_days before it was generated is proximity-labelled "
+                "and excluded from the comparison, because proximity is not evidence "
+                "that the model used event features."
             ),
             "causation_established": False,
             "correlation_only": True,
@@ -1748,8 +1778,9 @@ class EventIntelligenceService:
                 "claim about the events.",
                 "A cohort below the minimum sample size yields insufficient_data, "
                 "never a claimed improvement.",
-                "Event proximity labels context availability, not that the forecast "
-                "model consumed the event features.",
+                "Proximity-labelled records are reported separately and excluded from "
+                "both cohorts; they are context availability, not evidence that the "
+                "forecast model consumed the event features.",
             ],
             "errors": self.errors,
         }
@@ -1764,6 +1795,11 @@ class EventIntelligenceService:
                     f"{min_samples} are required"
                 ),
             ]
+            if proximity_labelled:
+                result["reasons"].append(
+                    f"{len(proximity_labelled)} proximity-labelled records are "
+                    "reported separately and excluded from both cohorts"
+                )
         self._store.save(
             "forecast_evaluation",
             result,

@@ -908,3 +908,29 @@ def test_newest_training_run_wins_when_runs_share_a_finished_cutoff(tmp_path: Pa
     )
     assert reversed_selection["run_id"] == "run_newer"
     assert reversed_selection["samples"] == 5
+
+
+def test_event_declaration_unions_only_the_declaring_constituents() -> None:
+    """A blend must not claim event features a constituent never used."""
+
+    from novacontrol.novamarket.ensemble.service import event_declaration
+
+    declaring = SimpleNamespace(
+        model_id="gradient-boosting",
+        metadata={
+            "event_aware": True,
+            "event_ids": ["evt_earnings", "evt_macro"],
+            "event_feature_set_version": "pi04-feature-set-1.0",
+            "event_feature_names": ["news_count_5d"],
+        },
+    )
+    statistical = SimpleNamespace(model_id="ema", metadata={"event_aware": False})
+
+    declaration = event_declaration([declaring, statistical])
+    assert declaration["event_aware"] is True
+    assert declaration["event_ids"] == ["evt_earnings", "evt_macro"]
+    assert declaration["event_aware_constituents"] == ["gradient-boosting"]
+
+    alone = event_declaration([statistical])
+    assert alone["event_aware"] is False
+    assert alone["event_ids"] == []

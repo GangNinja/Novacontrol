@@ -515,7 +515,7 @@ export function PortfolioOptimizationPage() {
                 <Metric label="Holdings" value={diversification.holdings ?? 0} />
                 <Metric label="Effective holdings" value={ratio(diversification.effective_holdings)} />
                 <Metric label="HHI" value={ratio(diversification.hhi)} />
-                <Metric label="Average correlation" value={ratio(diversification.average_correlation)} tone={num(diversification.average_correlation) > 0.65 ? "warn" : "neutral"} />
+                <Metric label="Average correlation" value={ratio(diversification.average_correlation)} tone={diversification.average_correlation == null ? "neutral" : num(diversification.average_correlation) > 0.65 ? "warn" : "neutral"} />
                 <Metric label="Diversification ratio" value={ratio(diversification.diversification_ratio)} />
                 <Metric label="Effective sectors" value={ratio(diversification.effective_sectors)} />
               </div>

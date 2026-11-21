@@ -37,6 +37,10 @@ from novacontrol.novamarket.features.models import (
     TransformResult,
 )
 from novacontrol.novamarket.features.preprocessing import fit_preprocessor, transform
+from novacontrol.novamarket.features.provenance import (
+    EVENT_FEATURE_NAMES,
+    event_feature_usage,
+)
 from novacontrol.novamarket.features.regime import RegimeDetector
 from novacontrol.novamarket.features.selection import diagnose
 from novacontrol.novamarket.features.service import FeatureService
@@ -76,7 +80,9 @@ __all__ = [
     "SelectionIssue",
     "SelectionReport",
     "TransformResult",
+    "EVENT_FEATURE_NAMES",
     "diagnose",
+    "event_feature_usage",
     "feature_spec",
     "fit_preprocessor",
     "profile_features",

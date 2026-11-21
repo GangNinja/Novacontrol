@@ -39,6 +39,7 @@ from novacontrol.novamarket.scheduling.models import (
     ForecastCheckpoint,
     ForecastCycle,
     ForecastOutcome,
+    OUTSTANDING_CYCLE_STATES,
 )
 
 _SCHEMA = """
@@ -964,14 +965,17 @@ class PredictionStore:
         cycle_id: str | None = None,
         target_date: str | None = None,
         limit: int = 50,
-        newest_first: bool = False,
+        outstanding_first: bool = False,
     ) -> list[ForecastCycle]:
         """Cycles matching the filters, chronological by target by default.
 
-        ``newest_first`` orders by creation, then target, so a cycle scheduled a
-        moment ago is on the first page even when older cycles already fill the
-        limit.  Live scans that walk this list (the scheduler's own status and
-        checkpoint sweeps) keep the default chronological order.
+        ``outstanding_first`` is the operator-facing order: cycles whose
+        checkpoints still have work to do (``OUTSTANDING_CYCLE_STATES``) come
+        before purely historical ones (evaluated, cancelled, failed), and each
+        group is newest-created first.  An older cycle that is still due is
+        therefore never pushed off the page by recently finished history.  Live
+        scans that walk this list (the scheduler's own status and checkpoint
+        sweeps) keep the default chronological order.
         """
         clauses: list[str] = []
         params: list[Any] = []
@@ -989,11 +993,15 @@ class PredictionStore:
             clauses.append("substr(target_at, 1, 10) = ?")
             params.append(str(target_date)[:10])
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-        order = (
-            "ORDER BY created_at DESC, target_at DESC"
-            if newest_first
-            else "ORDER BY target_at ASC, created_at ASC"
-        )
+        if outstanding_first:
+            marks = ", ".join("?" for _ in OUTSTANDING_CYCLE_STATES)
+            order = (
+                f"ORDER BY CASE WHEN state IN ({marks}) THEN 0 ELSE 1 END, "
+                "created_at DESC, target_at DESC"
+            )
+            params.extend(str(state.value) for state in OUTSTANDING_CYCLE_STATES)
+        else:
+            order = "ORDER BY target_at ASC, created_at ASC"
         with self._lock:
             rows = self._conn.execute(
                 f"SELECT payload FROM prediction_forecast_cycles{where} "

@@ -605,3 +605,6 @@ class ServiceGatewayIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("gateway", service.status())
             self.assertIn("gateway", service.contracts())
             await service.gateway_stop()
+            # Close the lazily opened stores before the temporary directory is
+            # removed; Windows refuses to unlink an open SQLite file.
+            await service.shutdown(reason="gateway status test")

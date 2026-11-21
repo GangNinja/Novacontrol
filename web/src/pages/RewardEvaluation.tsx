@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { apiPost } from "../api";
 import { useApi, useDocumentTitle } from "../hooks";
-import { arrayFrom, dateTime, num, pct, shortId, title } from "../lib";
+import { arrayFrom, dateTime, measured, num, pct, shortId, title } from "../lib";
 import {
   Badge,
   Banner,
@@ -344,17 +344,17 @@ export function RewardEvaluationPage() {
             ) : (
               <>
                 <div className="metric-grid metric-grid-four">
-                  <Metric label="Latest total reward" value={latestReward ? num(latestReward.total).toFixed(6) : "—"} help={latestReward ? `transition ${shortId(latestReward.transition_id, 18)}` : "not calculated"} />
+                  <Metric label="Latest total reward" value={latestReward ? measured(latestReward.total, 6) : "—"} help={latestReward ? `transition ${shortId(latestReward.transition_id, 18)}` : "not calculated"} />
                   <Metric label="Results" value={rewardRows.length} help="BOUNDED · EPISODE" />
                   <Metric label="Missing components" value={latestReward?.missing_components?.length ?? "—"} help="EXPLICIT, NOT SILENT" />
                   <Metric label="Result hash" value={latestReward ? shortId(latestReward.result_hash, 12) : "—"} help="REPRODUCIBLE" />
                 </div>
                 <div className="fact-list">
                   {Object.entries(totalComponents).map(([key, value]) => (
-                    <div key={key}><span>{title(key.replace(/_/g, " "))} contribution</span><strong>{num(value).toFixed(6)}</strong></div>
+                    <div key={key}><span>{title(key.replace(/_/g, " "))} contribution</span><strong>{measured(value, 6)}</strong></div>
                   ))}
                   {latestReward?.penalties && Object.entries(latestReward.penalties).map(([key, value]) => (
-                    <div key={key}><span>Penalty · {title(key.replace(/_/g, " "))}</span><strong>{num(value).toFixed(6)}</strong></div>
+                    <div key={key}><span>Penalty · {title(key.replace(/_/g, " "))}</span><strong>{measured(value, 6)}</strong></div>
                   ))}
                 </div>
                 <DataTable
@@ -364,13 +364,13 @@ export function RewardEvaluationPage() {
                   empty={<EmptyState title="No reward results" description="Calculate rewards for this episode." />}
                   columns={[
                     { key: "transition", label: "Transition", render: (row) => shortId(row.transition_id, 20) },
-                    { key: "total", label: "Total", render: (row) => num(row.total).toFixed(6) },
-                    { key: "profitability", label: "Profit", render: (row) => num(row.components?.profitability?.contribution).toFixed(4) },
-                    { key: "risk", label: "Risk", render: (row) => num(row.components?.risk?.contribution).toFixed(4) },
-                    { key: "decision", label: "Decision", render: (row) => num(row.components?.decision_quality?.contribution).toFixed(4) },
-                    { key: "forecast", label: "Forecast", render: (row) => num(row.components?.forecast_utilization?.contribution).toFixed(4) },
-                    { key: "execution", label: "Execution", render: (row) => num(row.components?.execution_quality?.contribution).toFixed(4) },
-                    { key: "penalties", label: "Penalties", render: (row) => Object.entries(row.penalties || {}).map(([key, value]) => `${key}:${num(value).toFixed(2)}`).join(" ") || "none" },
+                    { key: "total", label: "Total", render: (row) => measured(row.total, 6) },
+                    { key: "profitability", label: "Profit", render: (row) => measured(row.components?.profitability?.contribution, 4) },
+                    { key: "risk", label: "Risk", render: (row) => measured(row.components?.risk?.contribution, 4) },
+                    { key: "decision", label: "Decision", render: (row) => measured(row.components?.decision_quality?.contribution, 4) },
+                    { key: "forecast", label: "Forecast", render: (row) => measured(row.components?.forecast_utilization?.contribution, 4) },
+                    { key: "execution", label: "Execution", render: (row) => measured(row.components?.execution_quality?.contribution, 4) },
+                    { key: "penalties", label: "Penalties", render: (row) => Object.entries(row.penalties || {}).map(([key, value]) => `${key}:${measured(value, 2)}`).join(" ") || "none" },
                   ]}
                 />
               </>
@@ -435,7 +435,7 @@ export function RewardEvaluationPage() {
                   { key: "costs", label: "Trading costs", render: (row) => row.metrics?.trading?.total_costs ?? "—" },
                   { key: "turnover", label: "Turnover", render: (row) => row.metrics?.trading?.turnover ?? "—" },
                   { key: "actions", label: "Actions", render: (row) => Object.entries(row.metrics?.decision?.action_distribution || {}).map(([key, value]) => `${key}:${num(value)}`).join(" · ") },
-                  { key: "reward", label: "Episode reward", render: (row) => num(row.reward_summary?.total_reward).toFixed(6) },
+                  { key: "reward", label: "Episode reward", render: (row) => measured(row.reward_summary?.total_reward, 6) },
                   { key: "transitions", label: "Transitions", render: (row) => row.transitions ?? 0 },
                   { key: "at", label: "Evaluation date", render: (row) => row.created_at ? dateTime(row.created_at) : "—" },
                 ]}

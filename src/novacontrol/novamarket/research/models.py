@@ -296,6 +296,19 @@ def aware(value: datetime, name: str) -> datetime:
     return value
 
 
+def publication_available(publication: datetime, cutoff: datetime) -> bool:
+    """Whether statement-style evidence is available at ``cutoff``, by day.
+
+    The free filing source publishes no time of day, so a statement or profile
+    fact is dated by the first observation of the data and belongs to that
+    observation's calendar day: a fetch at 15:00 is available to a run whose
+    cutoff is 09:00 the same day, and still excluded by a cutoff on an earlier
+    day.  The row keeps the real observation timestamp; only this comparison is
+    day-granular.  Evidence with a real publication timestamp never uses it.
+    """
+    return publication.astimezone(UTC).date() <= cutoff.astimezone(UTC).date()
+
+
 def optional_time(value: object, name: str = "timestamp") -> datetime | None:
     if value in (None, ""):
         return None
@@ -813,15 +826,23 @@ class FinancialStatement:
             payload.get("basis"),
             payload.get("restatement_version") or 1,
         )
+        # The reporting period is an identity fact, never a default: filling a
+        # missing period_end from default_time (the research cutoff in the
+        # caller-context path) dated an undated statement to the run that read
+        # it and let the point-in-time gate's "reporting period ends after the
+        # cutoff" check pass against an invented date.  A publication time is
+        # likewise never defaulted, so a statement with no published_at keeps
+        # None and the gate reports it as missing.
+        period_end = optional_time(payload.get("period_end"), "period_end")
+        if period_end is None:
+            raise ResearchValidationError("financial statement period_end is required")
         return cls(
             statement_id=statement_id,
             instrument_id=instrument_id,
             statement_type=payload.get("statement_type") or StatementType.INCOME.value,
             period_type=payload.get("period_type") or PeriodType.ANNUAL.value,
             basis=payload.get("basis") or StatementBasis.CONSOLIDATED.value,
-            period_end=optional_time(payload.get("period_end"), "period_end")
-            or default_time
-            or utcnow(),
+            period_end=period_end,
             currency=payload.get("currency") or "INR",
             values=values,
             published_at=optional_time(payload.get("published_at"), "published_at"),

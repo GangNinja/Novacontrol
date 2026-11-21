@@ -844,9 +844,11 @@ class EventAwareEvaluationTests(unittest.TestCase):
         self.assertEqual(body["comparison"]["verdict"], "no_material_difference")
         self.assertFalse(body["improvement_claimed"])
 
-    def test_event_proximity_labels_an_undeclared_record_point_in_time(self) -> None:
+    def test_event_proximity_is_reported_separately_not_as_event_awareness(self) -> None:
         # The fixture event was published 2026-03-10; a forecast generated the
-        # next day had that event in its lookback window.
+        # next day had that event in its lookback window.  That is context, not
+        # declared event-feature usage, so it is reported on its own and never
+        # counted as event-aware evidence.
         near = _evaluation_record(
             0, event_aware=False, error=0.01, generated=datetime(2026, 3, 11, 9, tzinfo=UTC)
         )
@@ -860,10 +862,77 @@ class EventAwareEvaluationTests(unittest.TestCase):
             body = service.forecast_evaluation({})
         finally:
             service.close()
-        self.assertEqual(body["samples"]["event_aware"], 1)
+        self.assertEqual(body["samples"]["event_aware"], 0)
         self.assertEqual(body["samples"]["non_event_aware"], 1)
+        self.assertEqual(body["samples"]["proximity_labelled"], 1)
+        self.assertEqual(body["samples"]["total"], 2)
         self.assertEqual(body["samples"]["label_basis"]["event_proximity"], 1)
         self.assertEqual(body["samples"]["label_basis"]["declared"], 0)
+        self.assertEqual(body["samples"]["label_basis"]["baseline"], 1)
+        self.assertEqual(body["cohorts"]["proximity_labelled"]["samples"], 1)
+        self.assertEqual(body["cohorts"]["event_aware"]["samples"], 0)
+
+    def test_proximity_labelled_records_never_change_the_verdict(self) -> None:
+        """The comparison must reflect forecasts that used event features.
+
+        Twenty proximate-but-undeclared records with a huge error used to be
+        counted as event-aware, which could flip the verdict even though no
+        forecast in that cohort consumed an event feature.
+        """
+
+        declared = [
+            _evaluation_record(index, event_aware=True, error=0.001)
+            for index in range(5)
+        ]
+        baseline = [
+            _evaluation_record(
+                index + 5,
+                event_aware=False,
+                error=0.05,
+                generated=datetime(2025, 6, 2, 9, tzinfo=UTC),
+            )
+            for index in range(5)
+        ]
+        proximate = [
+            _evaluation_record(
+                index + 10,
+                event_aware=False,
+                error=0.5,
+                generated=datetime(2026, 3, 11, 9, tzinfo=UTC),
+            )
+            for index in range(20)
+        ]
+        for row in proximate:
+            row["feature_set_version"] = "pi04-features-1.0"
+        service = _evaluation_service(declared + baseline + proximate, min_evaluation_samples=5)
+        try:
+            body = service.forecast_evaluation({})
+        finally:
+            service.close()
+        self.assertEqual(body["status"], "completed")
+        self.assertEqual(body["samples"]["event_aware"], 5)
+        self.assertEqual(body["samples"]["non_event_aware"], 5)
+        self.assertEqual(body["samples"]["proximity_labelled"], 20)
+        self.assertEqual(body["comparison"]["verdict"], "event_aware_better")
+        self.assertEqual(body["cohorts"]["proximity_labelled"]["samples"], 20)
+        self.assertEqual(body["cohorts"]["event_aware"]["samples"], 5)
+
+    def test_a_proximate_record_that_declares_awareness_counts_once_as_declared(
+        self,
+    ) -> None:
+        record = _evaluation_record(
+            0, event_aware=True, error=0.01, generated=datetime(2026, 3, 11, 9, tzinfo=UTC)
+        )
+        service = _evaluation_service([record])
+        try:
+            body = service.forecast_evaluation({})
+        finally:
+            service.close()
+        self.assertEqual(body["samples"]["event_aware"], 1)
+        self.assertEqual(body["samples"]["proximity_labelled"], 0)
+        self.assertEqual(body["samples"]["label_basis"]["declared"], 1)
+        self.assertEqual(body["samples"]["label_basis"]["event_proximity"], 0)
+        self.assertEqual(body["samples"]["total"], 1)
 
     def test_declared_event_awareness_is_honoured(self) -> None:
         record = _evaluation_record(0, event_aware=True, error=0.01)

@@ -11,6 +11,7 @@ import {
   FilePlus2,
   Gauge,
   History,
+  Info,
   Landmark,
   Pause,
   Play,
@@ -117,6 +118,7 @@ export function PortfoliosPage({ horizon }: { horizon: string }) {
   const valuation = detail.data?.valuation || {};
   const portfolio = detail.data?.portfolio || current || {};
   const holdings = arrayFrom(detail.data, "holdings");
+  const provenance = detail.data?.provenance;
   const snapshots = useMemo(() => valuationPoints(valuations.data).map((point) => ({ ...point, label: shortDate(point.label) })), [valuations.data]);
   const allocation = holdings.map((holding, index) => ({ label: holding.instrument_id || "Holding", value: num(holding.market_value), color: COLORS[index % COLORS.length] })).filter((item) => item.value > 0);
   const metrics = performance.data?.metrics || {};
@@ -237,6 +239,9 @@ export function PortfoliosPage({ horizon }: { horizon: string }) {
             </Card>
           </div>
 
+          {Array.isArray(provenance?.fixture_priced) && provenance.fixture_priced.length > 0 ? (
+            <div className="contract-list"><div><Info size={15} /><span>{provenance.note}</span></div></div>
+          ) : null}
           <Card className="tabs-card">
             <div className="tabs-head"><PortfolioTabs active={tab} onChange={setTab} /><Button size="sm" variant="ghost" icon={<RefreshCw size={13} />} onClick={() => { detail.refresh(); valuations.refresh(); performance.refresh(); proposals.refresh(); }}>Reload book</Button></div>
             {tab === "holdings" && (detail.loading ? <LoadingBlock rows={4} label="Reading holdings…" /> : <DataTable rows={holdings} rowKey={(row) => row.instrument_id} empty={<EmptyState title="No open positions" description="The book is currently all cash, or the backend has not recorded a holding." />} columns={[
@@ -247,7 +252,7 @@ export function PortfoliosPage({ horizon }: { horizon: string }) {
               { key: "market_value", label: "Market value", align: "right", sortable: true, sortValue: (row) => num(row.market_value), render: (row) => <Money value={row.market_value} /> },
               { key: "unrealized_pnl", label: "Unrealized", align: "right", render: (row) => <Delta value={num(row.unrealized_pnl) / Math.max(num(row.cost_basis), 1) * 100} /> },
               { key: "weight", label: "Weight", align: "right", render: (row) => <span>{row.weight == null ? "—" : pct(num(row.weight) * 100)}</span> },
-              { key: "stale", label: "Price", render: (row) => <Badge tone={row.stale ? "warn" : "good"}>{row.stale ? "Stale" : "Current"}</Badge> },
+              { key: "stale", label: "Price", render: (row) => row.fixture_priced ? <Badge tone="warn">Fixture</Badge> : <Badge tone={row.stale ? "warn" : "good"}>{row.stale ? "Stale" : "Current"}</Badge> },
             ]} />)}
             {tab === "performance" && (
               <div className="performance-panel">
@@ -267,7 +272,7 @@ export function PortfoliosPage({ horizon }: { horizon: string }) {
         </>
       )}
 
-      <Modal open={createOpen} onClose={() => setCreateOpen(false)} title={`Create a ${meta.label.toLowerCase()} book`} description="The backend validates the horizon, funds the book through the ledger and records the new portfolio." footer={<><Button variant="ghost" onClick={() => setCreateOpen(false)}>Cancel</Button><Button variant="primary" loading={saving} disabled={!name.trim() || !fundingWalletId || num(capital) <= 0} onClick={create}>Create and fund</Button></>}>
+      <Modal open={createOpen} onClose={() => setCreateOpen(false)} title={`Create a ${meta.label.toLowerCase()} book`} description="The backend validates the horizon, funds the book through the ledger and records the new portfolio." footer={<><Button variant="ghost" onClick={() => setCreateOpen(false)}>Cancel</Button><Button variant="primary" loading={saving} disabled={!name.trim() || !fundingWalletId || capital.trim() === "" || num(capital) <= 0} onClick={create}>Create and fund</Button></>}>
         <div className="form-grid"><Field label="Book name"><TextInput value={name} onChange={(event) => setName(event.target.value)} placeholder={`${meta.label} book`} /></Field><Field label="Initial capital (INR)"><TextInput inputMode="decimal" value={capital} onChange={(event) => setCapital(event.target.value)} /></Field></div>
         <Field label="Funding wallet" hint={walletRows.length ? "The ledger transfer is atomic; insufficient funds are refused." : "Create a wallet first."}><SelectInput value={fundingWalletId} onChange={(event) => setFundingWalletId(event.target.value)}><option value="">Choose a wallet…</option>{walletRows.map((wallet) => <option key={wallet.wallet_id} value={wallet.wallet_id}>{wallet.label || wallet.owner || wallet.wallet_id} · {money(wallet.balance?.available)}</option>)}</SelectInput></Field>
         {!walletRows.length && <Button variant="secondary" size="sm" onClick={() => { setCreateOpen(false); navigate("wallet"); }}>Create a wallet</Button>}

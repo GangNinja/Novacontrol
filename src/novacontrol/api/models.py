@@ -1197,7 +1197,7 @@ class ApiSurface:
                 ApiRoute(
                     "GET",
                     "/market/forecasts/cycles",
-                    "Forecast cycles, most recently scheduled first so a new lifecycle is always on the first page. Query parameters: `instrument_id`, `exchange`, `horizon`, `state`, `target_date`, `limit`.",
+                    "Forecast cycles, those still having outstanding work (scheduled, active, awaiting confirmation or outcome) before purely historical ones, newest first inside each group. Query parameters: `instrument_id`, `exchange`, `horizon`, `state`, `target_date`, `limit`.",
                     authenticated=True,
                 ),
                 ApiRoute(
@@ -3449,7 +3449,7 @@ class ApiSurface:
                 ApiRoute(
                     "POST",
                     "/market/event-intelligence/forecast-evaluation",
-                    "Event-aware versus non-event-aware forecast error comparison.",
+                    "Event-aware versus non-event-aware forecast error comparison, split on declared event awareness.",
                     authenticated=True,
                 ),
                 ApiRoute(

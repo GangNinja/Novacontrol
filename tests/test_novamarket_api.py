@@ -1637,6 +1637,7 @@ class NovaMarketRouteContractTests(unittest.TestCase):
                 "/market/training/health",
                 "/market/training/configurations",
                 "/market/training/configurations/{config_id}",
+                "/market/training/datasets",
                 "/market/training/validate",
                 "/market/training/runs",
                 "/market/training/runs/{run_id}",

@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import { apiPost } from "../api";
 import { useApi, useDocumentTitle } from "../hooks";
-import { arrayFrom, dateTime, num, shortId, statusTone, title } from "../lib";
+import { arrayFrom, dateTime, measured, num, shortId, statusTone, title } from "../lib";
 import {
   Badge,
   Banner,
@@ -281,7 +281,7 @@ export function MultiAgentIntelligencePage() {
     { key: "agent_id", label: "Agent", render: (row) => <span className="mono">{row.agent_id}</span> },
     { key: "status", label: "Status", render: (row) => <StatusBadge value={row.status} /> },
     { key: "action", label: "Advisory", render: (row) => <Badge tone={actionTone(row.action)}>{title(row.action)}</Badge> },
-    { key: "latency_ms", label: "Latency", align: "right", render: (row) => `${num(row.latency_ms).toFixed(0)} ms` },
+    { key: "latency_ms", label: "Latency", align: "right", render: (row) => `${measured(row.latency_ms, 0)} ms` },
     { key: "supporting", label: "Support", render: (row) => `${arrayFrom({ items: row.supporting }).length} / ${arrayFrom({ items: row.contradicting }).length}` },
     { key: "missing", label: "Missing", render: (row) => arrayFrom({ items: row.missing }).length || "—" },
   ];
@@ -477,7 +477,7 @@ export function MultiAgentIntelligencePage() {
                     <aside className="detail-aside">
                       <KeyValue label="Started">{dateTime(response.started_at)}</KeyValue>
                       <KeyValue label="Finished">{dateTime(response.finished_at)}</KeyValue>
-                      <KeyValue label="Latency">{num(response.latency_ms).toFixed(0)} ms</KeyValue>
+                      <KeyValue label="Latency">{measured(response.latency_ms, 0)} ms</KeyValue>
                       <KeyValue label="Config version">{response.config_version}</KeyValue>
                       <KeyValue label="Model version">{response.model_version}</KeyValue>
                       <KeyValue label="Source references">{arrayFrom({ items: response.source_references }).length}</KeyValue>

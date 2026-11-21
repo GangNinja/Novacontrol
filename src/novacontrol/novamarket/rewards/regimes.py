@@ -58,10 +58,14 @@ REGIME_THRESHOLDS: dict[str, float] = {
 }
 
 #: Which evidence produced a label.  Reported per row so a slice never claims a
-#: PI-04 label for a row that actually used the market-only fallback.
+#: PI-04 label for a row that actually used the market-only fallback.  A bucket
+#: holds every transition with the same label, which can mix both kinds of row,
+#: so it reports each contributing source and calls itself ``mixed`` rather than
+#: attributing the whole bucket to whichever row happened to come first.
 SOURCE_FEATURES = "features"
 SOURCE_MARKET = "market"
 SOURCE_NONE = "none"
+SOURCE_MIXED = "mixed"
 
 
 def _number(value: Any) -> float | None:
@@ -167,6 +171,11 @@ def regime_breakdown(
     ``transitions`` are PI-14 ``TransitionView`` rows whose ``observation`` is
     the PI-13 observation that produced the decision, so the label always comes
     from evidence available before that decision was taken.
+
+    PI-04's feature labels and the market-only fallback share one vocabulary, so
+    one regime bucket can contain both kinds of row.  Each row therefore carries
+    ``label_sources`` with the count from every source that contributed, and
+    reports ``label_source: "mixed"`` when more than one did.
     """
     minimum = max(1, int(min_samples))
     buckets: dict[str, dict[str, Any]] = {}
@@ -185,9 +194,11 @@ def regime_breakdown(
                 "reward_sum": 0.0,
                 "reward_count": 0,
                 "invalid_actions": 0,
-                "label_source": source,
+                "label_sources": {},
             },
         )
+        bucket_sources = bucket["label_sources"]
+        bucket_sources[source] = bucket_sources.get(source, 0) + 1
         bucket["samples"] += 1
         net_return = _number(getattr(view, "net_return", None))
         if net_return is not None:
@@ -210,10 +221,16 @@ def regime_breakdown(
     for label in sorted(buckets):
         bucket = buckets[label]
         sufficient = bucket["samples"] >= minimum
+        bucket_sources = bucket["label_sources"]
         rows.append(
             {
                 "regime": label,
-                "label_source": bucket["label_source"],
+                "label_source": (
+                    next(iter(bucket_sources))
+                    if len(bucket_sources) == 1
+                    else SOURCE_MIXED
+                ),
+                "label_sources": dict(sorted(bucket_sources.items())),
                 "samples": bucket["samples"],
                 "share": round(bucket["samples"] / total_samples, 6) if total_samples else 0.0,
                 "sufficient": sufficient,
@@ -284,6 +301,7 @@ __all__ = [
     "REGIME_THRESHOLDS",
     "SOURCE_FEATURES",
     "SOURCE_MARKET",
+    "SOURCE_MIXED",
     "SOURCE_NONE",
     "TREND_THRESHOLD",
     "UNCLASSIFIED",

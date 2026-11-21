@@ -460,6 +460,21 @@ class RiskIntelligenceUnitTests(unittest.TestCase):
             all(row["market_depth"] == "quote_only" for row in result["liquidity"]["positions"])
         )
 
+    def test_liquidity_rows_name_the_instrument_they_describe(self) -> None:
+        fake = FakeSources()
+        result = analyze(service(fake))
+        positions = result["positions"]
+        rows = result["liquidity"]["positions"]
+        self.assertTrue(positions)
+        self.assertEqual(len(rows), len(positions))
+        self.assertEqual(
+            [row.get("instrument_id") for row in rows],
+            [position["instrument_id"] for position in positions],
+        )
+        self.assertTrue(all(row.get("instrument_id") for row in rows))
+        worst = result["liquidity"]["worst_position"]
+        self.assertIn(worst["instrument_id"], {row["instrument_id"] for row in rows})
+
     def test_regime_exposure_is_weighted_and_uncertainty_is_preserved(self) -> None:
         fake = FakeSources()
         result = analyze(service(fake))

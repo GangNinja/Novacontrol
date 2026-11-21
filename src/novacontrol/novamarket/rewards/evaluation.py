@@ -67,6 +67,11 @@ class EvaluationDataset:
         bar_count = len(self.bars)
         feature_bars = feature_counts["available"]
         forecast_bars = forecast_counts["available"]
+        # A source the environment config excluded was never requested, so its
+        # ratio is not 0% coverage -- that reads as "nothing was available".
+        # The ratio is not applicable and the disabled count stays as evidence.
+        features_disabled = bar_count > 0 and feature_counts["disabled"] == bar_count
+        forecasts_disabled = bar_count > 0 and forecast_counts["disabled"] == bar_count
         return {
             "dataset_id": "ds_"
             + canonical_hash(
@@ -85,14 +90,32 @@ class EvaluationDataset:
             "coverage": {
                 "bars": bar_count,
                 "features": feature_bars,
-                "feature_ratio": round(feature_bars / bar_count, 6) if bar_count else 0.0,
+                "feature_ratio": (
+                    None
+                    if features_disabled
+                    else round(feature_bars / bar_count, 6)
+                    if bar_count
+                    else 0.0
+                ),
+                "feature_ratio_status": (
+                    "not_applicable" if features_disabled else "measured"
+                ),
                 "feature_breakdown": feature_counts,
                 "feature_basis": (
                     "bars with a point-in-time feature snapshot carrying at least "
                     "one usable value"
                 ),
                 "forecasts": forecast_bars,
-                "forecast_ratio": round(forecast_bars / bar_count, 6) if bar_count else 0.0,
+                "forecast_ratio": (
+                    None
+                    if forecasts_disabled
+                    else round(forecast_bars / bar_count, 6)
+                    if bar_count
+                    else 0.0
+                ),
+                "forecast_ratio_status": (
+                    "not_applicable" if forecasts_disabled else "measured"
+                ),
                 "forecast_breakdown": forecast_counts,
                 "forecast_basis": (
                     "bars with a forecast generated at or before the observation "

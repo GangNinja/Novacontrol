@@ -16,7 +16,10 @@ from novacontrol.novamarket.filings import (
     HttpReply,
     YahooFundamentalsAdapter,
 )
-from novacontrol.novamarket.research.evidence import build_company_profile
+from novacontrol.novamarket.research.evidence import (
+    build_company_profile,
+    verify_evidence,
+)
 from novacontrol.novamarket.research.financials import (
     analyze_financials,
     select_point_in_time,
@@ -174,11 +177,18 @@ def test_publication_time_is_the_first_observation_and_is_never_backdated() -> N
     # Never the reporting period: that would claim a filing time the source
     # does not publish.
     assert annual["published_at"] != annual["period_end"]
-    # The run states the basis it used instead of leaving it implicit.
-    assert any(
-        "each publication time is its first observation" in note for note in first.notes
-    ), first.notes
-    assert any("publishes no filing timestamp" in note for note in first.notes), first.notes
+    # The run states the exact basis it used instead of leaving it implicit,
+    # including the day-scoped admission the point-in-time gate really applies.
+    basis_note = next(note for note in first.notes if "statements are" in note)
+    assert "the source publishes no filing timestamp" in basis_note
+    assert "each publication time is its first observation" in basis_note
+    assert "never the run cutoff or the reporting period end" in basis_note
+    assert (
+        "treats it as available from that observation's calendar day" in basis_note
+    ), basis_note
+    described = _adapter(fake).describe()["publication_timestamp_basis"]
+    assert "first observation time" in described
+    assert "calendar day" in described
 
     # A run whose cutoff is on an earlier day cannot claim the data as its own:
     # the stamp stays the real observation, so the gate excludes every statement.
@@ -195,6 +205,7 @@ def test_publication_time_is_the_first_observation_and_is_never_backdated() -> N
     # statement it returned carries the observation stamp, not the cutoff.
     assert any(
         "each publication time is its first observation" in note
+        and "treats it as available from that observation's calendar day" in note
         for note in historical.notes
     ), historical.notes
     assert historical.statements
@@ -223,6 +234,11 @@ def test_publication_time_is_the_first_observation_and_is_never_backdated() -> N
     # it keeps the evidence it just fetched instead of losing it to the gate.
     same_day_as_of = AS_OF - timedelta(hours=2)
     same_day_bundle = _adapter(fake, clock=_at(AS_OF)).load(INSTRUMENT, as_of=same_day_as_of)
+    # The run's earlier cutoff never re-dates the fetch: the statement keeps the
+    # real observation behind it.
+    assert all(
+        row["published_at"] == AS_OF.isoformat() for row in same_day_bundle.statements
+    ), [row["published_at"] for row in same_day_bundle.statements]
     same_day_statements = [
         FinancialStatement.from_payload(
             row, instrument_id="XBOM:ADANIENT", default_time=same_day_as_of
@@ -234,6 +250,68 @@ def test_publication_time_is_the_first_observation_and_is_never_backdated() -> N
     )
     assert kept
     assert kept_skipped == []
+
+
+def test_a_same_day_late_fetch_is_stamped_late_and_still_clears_the_gate() -> None:
+    """A 15:00 fetch with a 09:00 cutoff: the statement says 15:00, not 09:00.
+
+    The statement keeps the real first-observation timeand the gate compares the
+    filing's calendar day, so a live run keeps the data it just fetched while a
+    cutoff on an earlier day still excludes it.
+    """
+    fetch_at = datetime(2026, 11, 19, 15, tzinfo=UTC)
+    cutoff = datetime(2026, 11, 19, 9, tzinfo=UTC)
+    bundle = _adapter(FakeYahoo(), clock=_at(fetch_at)).load(INSTRUMENT, as_of=cutoff)
+
+    assert bundle.statements
+    assert {row["published_at"] for row in bundle.statements} == {fetch_at.isoformat()}
+    assert {row["retrieved_at"] for row in bundle.statements} == {fetch_at.isoformat()}
+    assert cutoff.isoformat() not in {row["published_at"] for row in bundle.statements}
+    # The note says what the gate does: stamped at the observation, admitted by
+    # its calendar day. It never claims the run's cutoff is the publication time.
+    note = next(item for item in bundle.notes if "calendar day" in item)
+    assert "first observation" in note
+    assert "never the run cutoff" in note
+
+    statements = [
+        FinancialStatement.from_payload(row, instrument_id="XBOM:ADANIENT", default_time=cutoff)
+        for row in bundle.statements
+    ]
+    selected, skipped, _restatements, _warnings = select_point_in_time(
+        statements, as_of=cutoff, cutoff=cutoff, max_age_hours=720.0
+    )
+    assert selected
+    assert skipped == []
+
+    records = [
+        EvidenceRecord.from_payload(row, instrument_id="XBOM:ADANIENT", default_time=cutoff)
+        for row in bundle.evidence
+    ]
+    retained, _claims, excluded, _warnings = verify_evidence(
+        records, as_of=cutoff, cutoff=cutoff, max_age_hours=720.0
+    )
+    assert retained
+    assert excluded == []
+    profile = build_company_profile(
+        instrument_id="XBOM:ADANIENT",
+        identity={},
+        evidence=retained,
+        as_of=cutoff,
+        cutoff=cutoff,
+    )
+    assert profile.sector == "energy"
+
+    # A cutoff on an earlier day is a replay: the real observation excludes the
+    # statement instead of it being back-dated into that day.
+    earlier = cutoff - timedelta(days=1)
+    replayed, replay_skipped, _replay_restatements, _replay_warnings = select_point_in_time(
+        statements, as_of=earlier, cutoff=earlier, max_age_hours=720.0
+    )
+    assert replayed == []
+    assert replay_skipped
+    assert all(
+        row["reason"] == "publication is after the research cutoff" for row in replay_skipped
+    )
 
 
 def test_cache_keeps_the_first_observation_across_a_refetch(tmp_path: Path) -> None:

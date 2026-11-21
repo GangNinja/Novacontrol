@@ -21,6 +21,7 @@ from novacontrol.novamarket.contracts import (
     ForecastValidationError,
 )
 from novacontrol.novamarket.features.models import FeatureProfileName
+from novacontrol.novamarket.features.provenance import event_feature_usage
 from novacontrol.novamarket.gradient.models import (
     ClassifierReport,
     FeatureSchema,
@@ -553,7 +554,10 @@ class LSTMForecastingService(GradientForecastingService):
                 "",
                 dataset_version or "unspecified",
                 "",
-                {},
+                # No matrix exists when the training runtime is unavailable;
+                # an empty mapping would be read as a matrix and crash the
+                # report instead of returning the honest unavailable result.
+                None,
                 result,
                 {},
                 {},
@@ -1328,6 +1332,9 @@ class LSTMForecastingService(GradientForecastingService):
                 "dataset_id": chosen_dataset_id,
                 "dataset_version": chosen_dataset_version,
                 "feature_set_id": feature_set.feature_set_id,
+                # PI-24 needs the forecast to say whether event features were
+                # consumed; the schema decides, not proximity to an event.
+                **event_feature_usage(feature_set, loaded.schema.names),
                 "horizon_steps": horizon_steps(chosen_horizon, chosen_resolution),
                 "promotion": "not_promoted",
                 "automatic_promotion": False,

@@ -932,6 +932,9 @@ class RiskIntelligenceService:
                 or _dict(instrument_evidence.get("instrument")).get("bid_ask_spread_bps")
             )
             liquidity = liquidity_metrics(points, value, config, spread_bps=spread)
+            # The per-position liquidity row describes this instrument; without
+            # the identity a liquidity table cannot say which position it is.
+            liquidity["instrument_id"] = instrument
             forecast = self._forecast_view(evidence, instrument, horizon, config, now)
             research = self._research_view(instrument_evidence)
             agent = evidence.agent(instrument)

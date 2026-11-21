@@ -497,6 +497,39 @@ class TestTrainingAndEvaluation:
                 )
             )
 
+    def test_unavailable_runtime_reports_instead_of_crashing(self) -> None:
+        """A missing PyTorch runtime is a reported state, never an AttributeError."""
+
+        tmp = TemporaryDirectory()
+        service = LSTMForecastingService(
+            store_path=Path(tmp.name) / "novamarket.sqlite3",
+            feature_service=SimpleNamespace(engine=FeatureEngine()),
+        )
+        rows = _bars()
+        try:
+            with mock.patch(
+                "novacontrol.novamarket.lstm.service.backend_available",
+                return_value=False,
+            ):
+                report = asyncio.run(
+                    service.evaluate(
+                        "XNSE:ALPHA",
+                        "1d",
+                        as_of=rows[-1].observed_at,
+                        bars=_request_bars(rows),
+                        config=_config().to_dict(),
+                    )
+                )
+            family = report["families"]["lstm"]
+            assert family["status"] == "failed"
+            assert "PyTorch is not installed" in family["reason"]
+            assert report["splits"]["train"]["samples"] == 0
+            assert report["splits"]["validation"]["samples"] == 0
+            assert report["splits"]["test"]["samples"] == 0
+        finally:
+            service.close()
+            tmp.cleanup()
+
     def test_one_training_failure_is_isolated_and_comparisons_survive(self) -> None:
         tmp = TemporaryDirectory()
         service = LSTMForecastingService(

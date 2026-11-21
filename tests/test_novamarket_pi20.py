@@ -1594,3 +1594,140 @@ class OperationAnnouncementTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self._names(), ["novamarket.policy.degraded"])
         self.assertTrue(self.events[0].payload["retraining_recommended"])
+
+
+def _balanced_call(text: str, open_index: int) -> tuple[str, int] | None:
+    """The text inside the parentheses opening at ``open_index`` and their index."""
+
+    depth = 0
+    index = open_index
+    while index < len(text):
+        char = text[index]
+        if char in "\"'`":
+            quote = char
+            index += 1
+            while index < len(text) and text[index] != quote:
+                index += 2 if text[index] == "\\" else 1
+            index += 1
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return text[open_index + 1: index], index
+        index += 1
+    return None
+
+
+def _call_arguments(inner: str) -> list[str]:
+    """Split a call's arguments on its top-level commas."""
+
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    for index, char in enumerate(inner):
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == "," and depth == 0:
+            parts.append(inner[start:index])
+            start = index + 1
+    parts.append(inner[start:])
+    return parts
+
+
+_NUM_CALL = re.compile(r"\bnum\(")
+_RENDERED_VALUE = re.compile(r"\.(?:toFixed|toLocaleString|toPrecision)\(")
+_SIGN_COMPARISON = re.compile(r"\s*(?:>=|<=|>|<)\s*0\b")
+
+
+
+def _measurement_is_guarded(argument: str, window: str) -> bool:
+    """Whether ``window`` checks this measurement (or a parent) for absence."""
+
+    path = re.sub(r"\s+", "", argument).replace("?.", ".")
+    # A guard may spell the same path with optional chaining.
+    window = window.replace("?.", ".")
+    probes = {path}
+    for separator in ("?.", "."):
+        pieces = path.split(separator)
+        for length in range(1, len(pieces)):
+            probes.add(separator.join(pieces[:length]))
+    for probe in probes:
+        if not probe:
+            continue
+        escaped = re.escape(probe)
+        if re.search(escaped + r"\s*(?:!==|===|!=|==)\s*(?:null|undefined)", window):
+            return True
+        if re.search(escaped + r"\s*\?\?", window):
+            return True
+        # A form field is guarded by an emptiness check rather than by null.
+        if re.search(escaped + r"(?:\.trim\(\))?\s*===?\s*\"\"", window):
+            return True
+    return False
+
+
+class PageMeasurementAbsenceTests(unittest.TestCase):
+    """A page never prints an absent measurement as a confident zero.
+
+    ``num()`` falls back to ``0``, so ``num(x).toFixed(2)`` and
+    ``num(x) >= 0`` turn "the API did not measure this" into "0.00" and "not
+    negative".  Every page under ``web/src/pages`` is scanned for that use; a
+    guarded expression that names the measurement (``x == null ? \"—\" : ...``,
+    ``x ?? ...``, an empty form field) or an explicit fallback argument
+    (``num(x, 0)``) is left alone, because those state what should happen
+    without a measurement.
+    """
+
+    def test_no_page_renders_an_unguarded_num_measurement_as_a_value_or_sign(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        pages = sorted((root / "web/src/pages").rglob("*.tsx"))
+        self.assertGreater(len(pages), 20, "the page scan found no pages to check")
+
+        problems: list[str] = []
+        for page in pages:
+            text = page.read_text(encoding="utf-8")
+            lines = text.splitlines()
+            for match in _NUM_CALL.finditer(text):
+                call = _balanced_call(text, match.end() - 1)
+                if call is None:
+                    continue
+                inner, close = call
+                if len(_call_arguments(inner)) > 1:
+                    # num(x, fallback) is an explicit decision, not the silent
+                    # zero this scan forbids.
+                    continue
+                argument = inner.strip()
+                if re.fullmatch(r"\w+\[\d+\]", argument):
+                    # A tuple slot destructured from a numeric payload.
+                    continue
+                rest = text[close + 1: close + 1 + 40]
+                rendered = bool(_RENDERED_VALUE.match(rest))
+                signed = bool(_SIGN_COMPARISON.match(rest))
+                if not (rendered or signed):
+                    continue
+                line = text.count("\n", 0, match.start()) + 1
+                # The guard names the measurement itself and sits in the same
+                # statement, so a guard elsewhere in the page does not excuse
+                # this render.
+                boundary = max(
+                    text.rfind(";", 0, match.start()),
+                    text.rfind("=>", 0, match.start()),
+                )
+                window = text[max(boundary, match.start() - 600): match.start()]
+                if _measurement_is_guarded(argument, window):
+                    continue
+                problems.append(
+                    f"{page.relative_to(root).as_posix()}:{line} "
+                    f"renders num({argument}) without an absence guard: "
+                    f"{lines[line - 1].strip()[:140]}"
+                )
+
+        self.assertEqual(
+            problems,
+            [],
+            "a null measurement is rendered as a zero value or sign:\n"
+            + "\n".join(problems),
+        )
