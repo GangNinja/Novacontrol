@@ -79,6 +79,22 @@ class SignalDecision:
     horizon_days: int = 5
 
 
+#: The holding period follows the forecast horizon the signal is based on.  It
+#: is not a second, independent strategy setting: a replay of a one-month
+#: forecast that held for five days would no longer test that forecast.
+FORECAST_HOLDING_DAYS: dict[str, int] = {
+    "next_session": 1,
+    "few_sessions": 3,
+    "one_week": 5,
+    "one_month": 30,
+    "three_months": 90,
+}
+
+
+def _forecast_holding_days(horizon: object) -> int:
+    return FORECAST_HOLDING_DAYS.get(str(horizon or ""), 5)
+
+
 def _number(value: Decimal | None) -> float | None:
     return None if value is None else float(value)
 
@@ -445,6 +461,7 @@ def evaluate_event(context: StrategyContext, config: dict[str, Any]) -> SignalDe
 def evaluate_forecast(
     context: StrategyContext, config: dict[str, Any]
 ) -> SignalDecision:
+    holding_days = _forecast_holding_days(config.get("forecast_horizon"))
     rows = _forecast_rows(context, str(config["forecast_horizon"]))
     if not rows:
         return SignalDecision(
@@ -531,7 +548,7 @@ def evaluate_forecast(
             indicators_payload,
             f"Forecast return {predicted_value} with probability {probability_value} passes the entry rule.",
             forecast_refs=(forecast_ref,) if forecast_ref else (),
-            horizon_days=int(config.get("horizon_days", 5)),
+            horizon_days=holding_days,
         )
     if predicted_value <= -threshold and probability_value <= (Decimal("1") - probability_threshold) and context.held:
         return SignalDecision(
@@ -541,7 +558,7 @@ def evaluate_forecast(
             indicators_payload,
             f"Forecast return {predicted_value} with probability {probability_value} is negative for a held position.",
             forecast_refs=(forecast_ref,) if forecast_ref else (),
-            horizon_days=int(config.get("horizon_days", 5)),
+            horizon_days=holding_days,
         )
     return SignalDecision(
         SignalType.HOLD if context.held else SignalType.NO_SIGNAL,
@@ -624,6 +641,9 @@ def validate_config(catalog_id: str, overrides: dict[str, Any] | None = None) ->
             "next_session", "few_sessions", "one_week", "one_month", "three_months"
         }:
             raise ValueError("forecast_horizon is not an NM-06 horizon")
+        # Canonicalise the stored holding period from the forecast horizon so
+        # an old/default five-day value cannot silently outlive its forecast.
+        config["horizon_days"] = _forecast_holding_days(config["forecast_horizon"])
         states = config.get("allowed_model_states")
         if not isinstance(states, list) or not states:
             raise ValueError("allowed_model_states must be a non-empty list")
@@ -765,6 +785,9 @@ STRATEGIES: dict[str, StrategyDefinition] = {
             "allowed_model_states": ["active", "validated"],
             "horizon_days": 5,
             "max_data_age_hours": 72,
+            # Optional provenance link written by the PI-11 replay workspace.
+            # It is not used for signal generation and does not authorize action.
+            "evaluation_id": "",
         },
     ),
 }

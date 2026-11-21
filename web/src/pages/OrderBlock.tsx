@@ -13,7 +13,7 @@ import {
   TrendingUp,
 } from "lucide-react";
 import { navigate, useApi } from "../hooks";
-import { arrayFrom, money, num, pct, shortDate, timeAgo, title } from "../lib";
+import { arrayFrom, money, num, pct, shortDate, signTone, timeAgo, title } from "../lib";
 import {
   Badge,
   Button,
@@ -55,10 +55,6 @@ function zoneText(zone: any): string {
     if (low !== undefined || high !== undefined) return `${money(low)} – ${money(high)}`;
   }
   return "No entry zone";
-}
-
-function changeClass(value: unknown): string {
-  return num(value, 0) >= 0 ? "positive" : "negative";
 }
 
 const buildupTone = (value: unknown): "good" | "bad" | "neutral" => {
@@ -125,7 +121,7 @@ function Board({
       label: "Change",
       align: "right" as const,
       render: (row: Row) => (
-        <span className={`delta ${changeClass(row.change_pct)}`}>{pct(row.change_pct)}</span>
+        <span className={`delta ${signTone(row.change_pct)}`}>{pct(row.change_pct)}</span>
       ),
     },
     {
@@ -395,9 +391,9 @@ export function OrderBlockPage() {
                     { key: "expiry", label: "Expiry", render: (row: Row) => <span className="mono">{shortDate(row.expiry)}</span> },
                     { key: "instrument_type", label: "Type", render: (row: Row) => <Badge tone={row.instrument_type === "IDF" ? "info" : "neutral"}>{row.instrument_type || "FUT"}</Badge> },
                     { key: "close", label: "Close", align: "right", render: (row: Row) => money(row.close) },
-                    { key: "price_change_pct", label: "Price Δ", align: "right", render: (row: Row) => <span className={changeClass(row.price_change_pct)}>{pct(row.price_change_pct)}</span> },
+                    { key: "price_change_pct", label: "Price Δ", align: "right", render: (row: Row) => <span className={signTone(row.price_change_pct)}>{pct(row.price_change_pct)}</span> },
                     { key: "open_interest", label: "Open interest", align: "right", render: (row: Row) => Number(row.open_interest ?? 0).toLocaleString("en-IN") },
-                    { key: "change_in_open_interest", label: "Δ OI", align: "right", render: (row: Row) => <span className={changeClass(row.change_in_open_interest)}>{Number(row.change_in_open_interest ?? 0).toLocaleString("en-IN")}</span> },
+                    { key: "change_in_open_interest", label: "Δ OI", align: "right", render: (row: Row) => <span className={signTone(row.change_in_open_interest)}>{row.change_in_open_interest == null ? "—" : Number(row.change_in_open_interest).toLocaleString("en-IN")}</span> },
                     { key: "oi_change_pct", label: "OI Δ %", align: "right", render: (row: Row) => pct(row.oi_change_pct) },
                     { key: "volume", label: "Volume", align: "right", render: (row: Row) => Number(row.volume ?? 0).toLocaleString("en-IN") },
                     { key: "lot_size", label: "Lot", align: "right", render: (row: Row) => Number(row.lot_size ?? 0).toLocaleString("en-IN") },
@@ -467,7 +463,7 @@ export function OrderBlockPage() {
                 <Metric label="Declining" value={xray.declining ?? "—"} tone="bad" />
                 <Metric label="Unchanged" value={xray.unchanged ?? "—"} />
                 <Metric label="Breadth" value={xray.breadth_ratio_pct == null ? "—" : `${num(xray.breadth_ratio_pct).toFixed(1)}%`} tone="accent" />
-                <Metric label="Avg. change" value={pct(xray.average_change_pct)} tone={num(xray.average_change_pct) >= 0 ? "good" : "bad"} />
+                <Metric label="Avg. change" value={pct(xray.average_change_pct)} tone={xray.average_change_pct == null ? "neutral" : num(xray.average_change_pct) >= 0 ? "good" : "bad"} />
                 <Metric label="A / D ratio" value={xray.advance_decline_ratio ?? "—"} help={`${xray.sample_size ?? 0} instruments`} />
               </div>
               <div className="workbench-bars">
@@ -508,7 +504,7 @@ export function OrderBlockPage() {
                       </div>
                     ),
                   },
-                  { key: "average_change_pct", label: "Avg", align: "right", render: (row: Row) => <span className={`delta ${changeClass(row.average_change_pct)}`}>{pct(row.average_change_pct)}</span> },
+                  { key: "average_change_pct", label: "Avg", align: "right", render: (row: Row) => <span className={`delta ${signTone(row.average_change_pct)}`}>{pct(row.average_change_pct)}</span> },
                   { key: "average_momentum_score", label: "Momentum", width: "150px", render: (row: Row) => <ScoreBar value={row.average_momentum_score} /> },
                   { key: "volume_activity", label: "RV", align: "right", render: (row: Row) => row.volume_activity == null ? "—" : `${num(row.volume_activity).toFixed(2)}×` },
                   {
@@ -516,9 +512,9 @@ export function OrderBlockPage() {
                     label: "Bull / bear",
                     render: (row: Row) => (
                       <span className="workbench-participation-cell">
-                        <span className="positive">{num(row.bullish_participation_pct).toFixed(0)}%</span>
+                        <span className="positive">{row.bullish_participation_pct == null ? "—" : `${num(row.bullish_participation_pct).toFixed(0)}%`}</span>
                         <span className="muted">/</span>
-                        <span className="negative">{num(row.bearish_participation_pct).toFixed(0)}%</span>
+                        <span className="negative">{row.bearish_participation_pct == null ? "—" : `${num(row.bearish_participation_pct).toFixed(0)}%`}</span>
                       </span>
                     ),
                   },

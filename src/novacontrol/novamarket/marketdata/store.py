@@ -601,6 +601,24 @@ class MarketDataStore:
             ).fetchone()
         return self._observation(row) if row is not None else None
 
+    def observation_stored_at(self, observation_id: str) -> datetime | None:
+        """The durable write timestamp for one observation, if it exists.
+
+        ``retrieved_at`` is when the provider response was received; this is
+        the separate persistence instant, used by the PI-03 latency trace.
+        """
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT created_at FROM market_observations WHERE observation_id=?",
+                (str(observation_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            return _aware(str(row["created_at"]))
+        except (TypeError, ValueError):
+            return None
+
     def latest_observations(
         self, instrument_id: str, *, providers: Sequence[str] | None = None
     ) -> tuple[PriceObservation, ...]:
@@ -764,6 +782,29 @@ class MarketDataStore:
                 "SELECT * FROM market_bars WHERE bar_id=?", (str(bar_id),)
             ).fetchone()
         return self._bar(row) if row is not None else None
+
+    def get_bars(self, bar_ids: Sequence[str]) -> dict[str, OhlcvBar]:
+        """Bulk read for dataset retrieval, chunked below SQLite's parameter cap.
+
+        A dataset version stores exact bar ids.  Reading them one at a time would
+        turn a page into hundreds of round trips, so this is the one batched
+        door; a missing id is simply absent from the result (the caller reports
+        it rather than substituting another bar).
+        """
+        wanted = [str(value) for value in dict.fromkeys(bar_ids) if str(value)]
+        found: dict[str, OhlcvBar] = {}
+        for index in range(0, len(wanted), 500):
+            chunk = wanted[index : index + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            with self._lock:
+                rows = self._connection.execute(
+                    f"SELECT * FROM market_bars WHERE bar_id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+            for row in rows:
+                bar = self._bar(row)
+                found[bar.bar_id] = bar
+        return found
 
     def bar_inventory(
         self,

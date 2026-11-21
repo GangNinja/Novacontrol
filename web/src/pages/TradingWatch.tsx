@@ -16,7 +16,7 @@ import {
   TrendingUp,
 } from "lucide-react";
 import { navigate, useApi } from "../hooks";
-import { arrayFrom, money, num, pct, shortDate, timeAgo, title } from "../lib";
+import { arrayFrom, money, num, pct, shortDate, signTone, timeAgo, title } from "../lib";
 import {
   Badge,
   Button,
@@ -51,7 +51,13 @@ import {
 type Row = Record<string, any>;
 
 const sectorOf = (row: Row) => String(row?.sector || "Unclassified");
-const directionOf = (row: Row) => String(row?.directional_bias || (num(row?.change_pct) >= 0 ? "bullish" : "bearish"));
+const directionOf = (row: Row) => {
+  const declared = String(row?.directional_bias || "");
+  if (declared) return declared;
+  // An unmeasured change carries no direction; it must not read as "bullish".
+  const change = num(row?.change_pct, NaN);
+  return Number.isFinite(change) ? (change >= 0 ? "bullish" : "bearish") : "unknown";
+};
 
 function heatClass(value: unknown): string {
   const number = num(value, NaN);
@@ -443,7 +449,7 @@ export function TradingWatchPage() {
                   render: (row: Row) => (
                     <div className="workbench-block-cell">
                       <Badge tone={directionOf(row) === "bullish" ? "good" : directionOf(row) === "bearish" ? "bad" : "neutral"}>{title(directionOf(row))}</Badge>
-                      <small><span className={`delta ${num(row.change_pct) >= 0 ? "positive" : "negative"}`}>{pct(row.change_pct)}</span></small>
+                      <small><span className={`delta ${signTone(row.change_pct)}`}>{pct(row.change_pct)}</span></small>
                     </div>
                   ),
                 },
@@ -517,7 +523,7 @@ export function TradingWatchPage() {
                 {sectorParticipation.slice(0, 7).map((item: Row) => (
                   <button type="button" className="flow-sector-row" key={item.sector} onClick={() => setSector(String(item.sector))}>
                     <span>{item.sector || "Unclassified"}</span>
-                    <strong className={num(item.average_change_pct) >= 0 ? "positive" : "negative"}>{pct(item.average_change_pct)}</strong>
+                    <strong className={signTone(item.average_change_pct)}>{pct(item.average_change_pct)}</strong>
                     <small>{item.count ?? 0} names · M {item.average_momentum_score == null ? "—" : num(item.average_momentum_score).toFixed(0)}</small>
                   </button>
                 ))}
@@ -553,11 +559,11 @@ export function TradingWatchPage() {
                   columns={[
                     { key: "strike", label: "Strike", align: "right", render: (row: Row) => money(row.strike) },
                     { key: "call_oi", label: "Call OI", align: "right", render: (row: Row) => optionOi(row.CE) },
-                    { key: "call_chg", label: "Call Δ OI", align: "right", render: (row: Row) => <span className={num(row.CE?.change_in_open_interest) >= 0 ? "positive" : "negative"}>{optionDelta(row.CE)}</span> },
+                    { key: "call_chg", label: "Call Δ OI", align: "right", render: (row: Row) => <span className={signTone(row.CE?.change_in_open_interest)}>{optionDelta(row.CE)}</span> },
                     { key: "call_iv", label: "Call IV", align: "right", render: (row: Row) => optionIv(row.CE) },
                     { key: "put_iv", label: "Put IV", align: "right", render: (row: Row) => optionIv(row.PE) },
                     { key: "put_oi", label: "Put OI", align: "right", render: (row: Row) => optionOi(row.PE) },
-                    { key: "put_chg", label: "Put Δ OI", align: "right", render: (row: Row) => <span className={num(row.PE?.change_in_open_interest) >= 0 ? "positive" : "negative"}>{optionDelta(row.PE)}</span> },
+                    { key: "put_chg", label: "Put Δ OI", align: "right", render: (row: Row) => <span className={signTone(row.PE?.change_in_open_interest)}>{optionDelta(row.PE)}</span> },
                   ]}
                   empty={<EmptyState icon={<ShieldAlert size={20} />} title="No strikes" description="The official snapshot contains no rows for this expiry." />}
                 />
@@ -606,7 +612,7 @@ export function TradingWatchPage() {
                     { key: "expiry", label: "Expiry", render: (row: Row) => shortDate(row.expiry) },
                     { key: "close", label: "Close", align: "right", render: (row: Row) => money(row.close) },
                     { key: "oi", label: "Open interest", align: "right", render: (row: Row) => row.open_interest == null ? "—" : Number(row.open_interest).toLocaleString("en-IN") },
-                    { key: "change", label: "Δ Open interest", align: "right", render: (row: Row) => <span className={num(row.change_in_open_interest) >= 0 ? "positive" : "negative"}>{row.change_in_open_interest == null ? "—" : `${num(row.change_in_open_interest) > 0 ? "+" : ""}${Number(row.change_in_open_interest).toLocaleString("en-IN")}`}</span> },
+                    { key: "change", label: "Δ Open interest", align: "right", render: (row: Row) => <span className={signTone(row.change_in_open_interest)}>{row.change_in_open_interest == null ? "—" : `${num(row.change_in_open_interest) > 0 ? "+" : ""}${Number(row.change_in_open_interest).toLocaleString("en-IN")}`}</span> },
                     { key: "volume", label: "Volume", align: "right", render: (row: Row) => row.volume == null ? "—" : Number(row.volume).toLocaleString("en-IN") },
                     { key: "lot", label: "Lot size", align: "right", render: (row: Row) => row.lot_size == null ? "—" : Number(row.lot_size).toLocaleString("en-IN") },
                   ]}

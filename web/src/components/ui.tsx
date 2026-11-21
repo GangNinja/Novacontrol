@@ -244,16 +244,20 @@ export function EmptyState({
   title: heading,
   description,
   action,
+  level = 3,
 }: {
   icon?: ReactNode;
   title: string;
   description?: string;
   action?: ReactNode;
+  /** Heading level; 2 when the empty state is a page section rather than card content. */
+  level?: 2 | 3;
 }) {
+  const Heading = level === 2 ? "h2" : "h3";
   return (
     <div className="empty-state">
       {icon && <div className="empty-icon">{icon}</div>}
-      <h3>{heading}</h3>
+      <Heading>{heading}</Heading>
       {description && <p>{description}</p>}
       {action}
     </div>

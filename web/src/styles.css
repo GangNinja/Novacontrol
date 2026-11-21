@@ -67,6 +67,9 @@ a { color: var(--accent); text-decoration: none; }
 a:hover { color: var(--accent-bright); }
 p, h1, h2, h3, h4 { margin: 0; }
 ul, ol { margin: 0; }
+.plain-list { display: grid; gap: 4px; padding-left: 18px; }
+/* A long identifier or serialized payload must wrap, never widen the page. */
+.plain-list li { overflow-wrap: anywhere; }
 code, pre, .mono { font-family: var(--mono); }
 ::selection { background: rgba(85, 214, 194, 0.28); color: #fff; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -208,7 +211,9 @@ code, pre, .mono { font-family: var(--mono); }
 
 /* cards */
 .card { background: linear-gradient(155deg, rgba(13, 29, 47, 0.9), rgba(8, 20, 34, 0.92)); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: inset 0 1px 0 rgba(255,255,255,0.028); min-width: 0; }
-.card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 20px 21px 15px; }
+.card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 20px 21px 15px; flex-wrap: wrap; }
+.card-header > * { min-width: 0; }
+.card-header .select-wrap, .card-header .select { max-width: 100%; }
 .card-title { font-size: 14px; line-height: 1.3; letter-spacing: -0.2px; font-weight: 600; color: var(--text); }
 .card-subtitle { font-size: 10.5px; color: var(--faint); margin-top: 5px; line-height: 1.5; }
 .card-action { display: flex; align-items: center; gap: 8px; flex-shrink: 0; color: var(--faint); }
@@ -220,6 +225,7 @@ code, pre, .mono { font-family: var(--mono); }
 .stack { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
 .stack-tight { display: flex; flex-direction: column; gap: 10px; }
 .two-col-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; }
+.two-col-grid > * { min-width: 0; }
 .dashboard-grid { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(300px, 1fr); gap: 18px; margin-bottom: 18px; align-items: start; }
 .dashboard-grid-main { grid-template-columns: minmax(0, 1.62fr) minmax(320px, 1fr); }
 .inline-link { display: inline-flex; align-items: center; gap: 5px; color: var(--accent); border: 0; padding: 0; background: transparent; font-size: 10.5px; cursor: pointer; margin: 8px 20px 17px; }
@@ -320,10 +326,19 @@ tbody tr:hover td { background: rgba(111,169,255,0.026); }
 .symbol-mark { width: 27px; height: 27px; border-radius: 7px; background: rgba(111,169,255,0.09); border: 1px solid rgba(111,169,255,0.14); color: var(--blue); display: grid; place-items: center; font-family: var(--mono); font-size: 8.5px; font-weight: 600; text-transform: uppercase; flex-shrink: 0; }
 .row-chevron { color: #4c657e; }
 .row-actions { display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; flex-wrap: wrap; }
+.row-actions.run-meta { display: flex; justify-content: flex-start; }
 .row-action { display: inline-flex; align-items: center; gap: 4px; border: 0; background: transparent; color: var(--muted); font-size: 9.5px; cursor: pointer; padding: 3px 0; }
 .row-action:hover { color: var(--accent); }
 .row-action-danger:hover { color: var(--danger); }
 .clamp-cell { display: block; max-width: 280px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); }
+/* The checkpoint timeline must fit its card: fixed columns keep the five
+   fields inside the card and the Evidence cell wraps instead of pushing the
+   table into a horizontal scrollbar. */
+.checkpoint-timeline .table-wrap { overflow-x: hidden; }
+.checkpoint-timeline table { table-layout: fixed; min-width: 0; }
+.checkpoint-timeline th { white-space: normal; }
+.checkpoint-timeline td { overflow-wrap: anywhere; }
+.checkpoint-timeline .clamp-cell { max-width: none; overflow: visible; white-space: normal; text-overflow: clip; overflow-wrap: anywhere; }
 .score-pill { color: var(--accent); font-family: var(--mono); font-size: 11px; }
 .score-pill small { color: var(--faint); font-size: 8px; }
 .range-cell { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 9.5px; color: var(--muted); white-space: nowrap; }
@@ -412,6 +427,8 @@ body.modal-open { overflow: hidden; }
 .fact-list > div { padding: 8px 0; border-bottom: 1px solid rgba(148,177,208,0.07); }
 .fact-list span { display: block; color: var(--faint); font-size: 9px; }
 .fact-list strong { display: block; color: var(--text-soft); font-size: 10.5px; font-weight: 500; margin-top: 3px; overflow-wrap: anywhere; }
+.fact-list-full { grid-column: 1 / -1; }
+.fact-list > .fact-list-full.row-actions { justify-content: flex-start; }
 .detail-grid { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(180px, 0.8fr); gap: 24px; }
 .detail-main { min-width: 0; }
 .detail-prose { color: var(--text-soft); font-size: 12px; line-height: 1.7; margin-bottom: 17px; }

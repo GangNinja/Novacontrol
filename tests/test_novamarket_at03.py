@@ -577,6 +577,9 @@ class DecisionApiTests(unittest.TestCase):
             "/market/autonomy/decisions/runs",
             "/market/autonomy/decisions/signals",
             "/market/autonomy/decisions/proposals",
+            "/market/autonomy/decisions/predictions",
+            "/market/autonomy/decisions/outcomes",
+            "/market/autonomy/decisions/forecast-policy",
         ):
             self.assertEqual(self.client.get(path).status_code, 401, path)
         contracts = self.client.get(
@@ -593,6 +596,21 @@ class DecisionApiTests(unittest.TestCase):
         )
         self.assertEqual(status.status_code, 200, status.text)
         self.assertTrue(status.json()["paper_only"])
+        policy = self.client.get(
+            "/market/autonomy/decisions/forecast-policy", headers=self.auth
+        )
+        self.assertEqual(policy.status_code, 200, policy.text)
+        self.assertTrue(policy.json()["policy"]["horizons"]["short_term"])
+        decisions = self.client.get(
+            "/market/autonomy/decisions/predictions", headers=self.auth
+        )
+        self.assertEqual(decisions.status_code, 200, decisions.text)
+        self.assertEqual(decisions.json()["total"], 0)
+        outcomes = self.client.get(
+            "/market/autonomy/decisions/outcomes", headers=self.auth
+        )
+        self.assertEqual(outcomes.status_code, 200, outcomes.text)
+        self.assertEqual(outcomes.json()["total"], 0)
 
     def test_decision_run_requires_the_operator_permission(self) -> None:
         refused = self.client.post(
@@ -622,6 +640,8 @@ class DecisionApiTests(unittest.TestCase):
             "/market/autonomy/decisions/runs",
             "/market/autonomy/decisions/signals",
             "/market/autonomy/decisions/proposals",
+            "/market/autonomy/decisions/predictions",
+            "/market/autonomy/decisions/outcomes",
         ):
             response = self.client.get(
                 path, params={"limit": 0}, headers=self.auth
@@ -636,6 +656,33 @@ class DecisionApiTests(unittest.TestCase):
             headers=self.auth,
         )
         self.assertEqual(missing_proposal.status_code, 404, missing_proposal.text)
+        missing_prediction = self.client.get(
+            "/market/autonomy/decisions/predictions/pdec_missing",
+            headers=self.auth,
+        )
+        self.assertEqual(missing_prediction.status_code, 404, missing_prediction.text)
+        invalid_type = self.client.get(
+            "/market/autonomy/decisions/predictions",
+            params={"decision_type": "SHORT"},
+            headers=self.auth,
+        )
+        self.assertEqual(invalid_type.status_code, 422, invalid_type.text)
+        refused_policy = self.client.put(
+            "/market/autonomy/decisions/forecast-policy",
+            headers=self.auth,
+            json={},
+        )
+        self.assertEqual(refused_policy.status_code, 403, refused_policy.text)
+        refused_outcomes = self.client.post(
+            "/market/autonomy/decisions/outcomes/run", headers=self.auth, json={}
+        )
+        self.assertEqual(refused_outcomes.status_code, 403, refused_outcomes.text)
+        invalid_limit = self.client.post(
+            "/market/autonomy/decisions/outcomes/run",
+            headers=self.operator,
+            json={"limit": "many"},
+        )
+        self.assertEqual(invalid_limit.status_code, 422, invalid_limit.text)
 
     def test_every_at03_route_has_a_contract_and_consumer(self) -> None:
         expected = {
@@ -646,6 +693,12 @@ class DecisionApiTests(unittest.TestCase):
             ("GET", "/market/autonomy/decisions/signals"),
             ("GET", "/market/autonomy/decisions/proposals"),
             ("GET", "/market/autonomy/decisions/proposals/{proposal_id}"),
+            ("GET", "/market/autonomy/decisions/predictions"),
+            ("GET", "/market/autonomy/decisions/predictions/{decision_id}"),
+            ("GET", "/market/autonomy/decisions/outcomes"),
+            ("POST", "/market/autonomy/decisions/outcomes/run"),
+            ("GET", "/market/autonomy/decisions/forecast-policy"),
+            ("PUT", "/market/autonomy/decisions/forecast-policy"),
             ("POST", "/market/autonomy/decisions/run"),
         }
         self.assertTrue(expected.issubset(ROUTE_CONSUMERS))

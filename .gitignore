@@ -51,3 +51,9 @@ web/*.tsbuildinfo
 # Local NovaMarket QA, browser, screenshot, and runtime output
 .ui_audit/
 .runtime/
+
+# One-off PI evaluation scratch written to the repository root (driver output,
+# server logs). The PI reports keep their measured results; these files do not
+# need to be in the tree.
+/tmp_pi*.json
+/tmp_pi*.log

@@ -236,6 +236,11 @@ class EventType(StrEnum):
     NOVAMARKET_HEALTH_CHANGED = "novamarket.health_changed"
     NOVAMARKET_WARNING = "novamarket.warning"
     NOVAMARKET_ERROR = "novamarket.error"
+    NOVAMARKET_RL_EPISODE_STARTED = "novamarket.rl.episode_started"
+    NOVAMARKET_RL_STEP = "novamarket.rl.step"
+    NOVAMARKET_RL_EPISODE_COMPLETED = "novamarket.rl.episode_completed"
+    NOVAMARKET_RL_EPISODE_RESET = "novamarket.rl.episode_reset"
+    NOVAMARKET_RL_EPISODE_CANCELLED = "novamarket.rl.episode_cancelled"
     NOVAMARKET_SHUTDOWN = "novamarket.shutdown"
 
     # NM-02: market-data reliability. A data event describes what was observed,
@@ -433,6 +438,48 @@ class EventType(StrEnum):
     NOVAMARKET_LEARNING_CANDIDATE_SHADOW_VALIDATED = "novamarket.learning.candidate.shadow.validated"
     NOVAMARKET_LEARNING_CANDIDATE_PROMOTED = "novamarket.learning.candidate.promoted"
     NOVAMARKET_LEARNING_STRATEGY_ROLLED_BACK = "novamarket.learning.strategy.rolled_back"
+    # PI-01: prediction-intelligence lifecycle and read-only evidence. These are
+    # separate from the NM-06 forecast vocabulary; a prediction lifecycle is not
+    # a model-training result.
+    NOVAMARKET_PREDICTION_LIFECYCLE_CREATED = "novamarket.prediction.lifecycle.created"
+    NOVAMARKET_PREDICTION_MODEL_REGISTERED = "novamarket.prediction.model.registered"
+    NOVAMARKET_PREDICTION_ABSTAINED = "novamarket.prediction.abstained"
+    NOVAMARKET_PREDICTION_FORECAST_GENERATED = "novamarket.prediction.forecast.generated"
+    NOVAMARKET_PREDICTION_FORECAST_CONFIRMED = "novamarket.prediction.forecast.confirmed"
+    NOVAMARKET_PREDICTION_CONFIRMATION_SKIPPED = "novamarket.prediction.confirmation.skipped"
+    NOVAMARKET_PREDICTION_FORECAST_EVALUATED = "novamarket.prediction.forecast.evaluated"
+    NOVAMARKET_PREDICTION_DECISION_EVIDENCE_READY = "novamarket.prediction.evidence.ready"
+    # PI-02: historical dataset builds. These carry version/coverage evidence,
+    # never a price vector or a financial action.
+    NOVAMARKET_DATASET_BUILD_STARTED = "novamarket.dataset.build.started"
+    NOVAMARKET_DATASET_BUILD_COMPLETED = "novamarket.dataset.build.completed"
+    NOVAMARKET_DATASET_BUILD_FAILED = "novamarket.dataset.build.failed"
+    NOVAMARKET_DATASET_VERSION_CREATED = "novamarket.dataset.version.created"
+    NOVAMARKET_DATASET_VALIDATION_INCOMPLETE = (
+        "novamarket.dataset.validation.incomplete"
+    )
+    # PI-04: feature generation and market regimes. These carry identifiers and
+    # measured quality only; a regime is not a prediction or an order.
+    NOVAMARKET_FEATURES_GENERATED = "novamarket.features.generated"
+    NOVAMARKET_FEATURES_FAILED = "novamarket.features.failed"
+    NOVAMARKET_REGIME_DETECTED = "novamarket.regime.detected"
+    NOVAMARKET_REGIME_TRANSITIONED = "novamarket.regime.transitioned"
+    NOVAMARKET_PREPROCESSING_FITTED = "novamarket.features.preprocessing.fitted"
+    NOVAMARKET_FEATURE_SELECTION_COMPLETED = "novamarket.features.selection.completed"
+    # PI-17: advisory multi-agent decision cycles. Published after the cycle,
+    # its decision and evidence are committed; never an order.
+    NOVAMARKET_AGENT_CYCLE_COMPLETED = "novamarket.agent.cycle.completed"
+    # PI-18: portfolio optimization. Published after the run and its
+    # recommendation are stored; advisory, with no portfolio mutation.
+    NOVAMARKET_OPTIMIZATION_RECOMMENDATION_CREATED = (
+        "novamarket.optimization.recommendation.created"
+    )
+    # PI-19: financial research. Published after the report and its evidence are
+    # committed; no estimate is presented as a reported fact.
+    NOVAMARKET_RESEARCH_RUN_COMPLETED = "novamarket.research.run.completed"
+    # PI-14/PI-15/PI-16: policy health. Published when monitoring records
+    # degradation or recommends retraining; nothing is activated or promoted.
+    NOVAMARKET_POLICY_DEGRADED = "novamarket.policy.degraded"
 
 
 #: The payload fields each lifecycle event MUST carry. Checked when an event of
@@ -587,6 +634,11 @@ EVENT_PAYLOAD_FIELDS: Mapping[EventType, tuple[str, ...]] = {
     EventType.NOVAMARKET_HEALTH_CHANGED: ("health", "previous"),
     EventType.NOVAMARKET_WARNING: ("code", "detail"),
     EventType.NOVAMARKET_ERROR: ("error_type", "error"),
+    EventType.NOVAMARKET_RL_EPISODE_STARTED: ("environment_id", "episode_id"),
+    EventType.NOVAMARKET_RL_STEP: ("environment_id", "episode_id", "sequence", "action"),
+    EventType.NOVAMARKET_RL_EPISODE_COMPLETED: ("environment_id", "episode_id", "status", "steps"),
+    EventType.NOVAMARKET_RL_EPISODE_RESET: ("environment_id", "episode_id"),
+    EventType.NOVAMARKET_RL_EPISODE_CANCELLED: ("environment_id", "episode_id"),
     EventType.NOVAMARKET_SHUTDOWN: ("reason",),
     EventType.NOVAMARKET_DATA_AVAILABLE: ("assets", "sources"),
     EventType.NOVAMARKET_DATA_UNAVAILABLE: ("reason",),
@@ -892,6 +944,165 @@ EVENT_PAYLOAD_FIELDS: Mapping[EventType, tuple[str, ...]] = {
     EventType.NOVAMARKET_LEARNING_CANDIDATE_SHADOW_VALIDATED: ("candidate_id", "status", "decisions"),
     EventType.NOVAMARKET_LEARNING_CANDIDATE_PROMOTED: ("candidate_id", "strategy_id", "version_id", "previous_version"),
     EventType.NOVAMARKET_LEARNING_STRATEGY_ROLLED_BACK: ("strategy_id", "from_version", "to_version", "reason"),
+    EventType.NOVAMARKET_PREDICTION_LIFECYCLE_CREATED: (
+        "lifecycle_id",
+        "request_id",
+        "instrument_id",
+        "horizon",
+        "target_at",
+    ),
+    EventType.NOVAMARKET_PREDICTION_MODEL_REGISTERED: (
+        "model_id",
+        "version",
+        "state",
+        "calibration",
+        "horizons",
+    ),
+    EventType.NOVAMARKET_PREDICTION_ABSTAINED: (
+        "lifecycle_id",
+        "stage",
+        "reasons",
+    ),
+    EventType.NOVAMARKET_PREDICTION_FORECAST_GENERATED: (
+        "forecast_id",
+        "lifecycle_id",
+        "instrument_id",
+        "horizon",
+        "direction",
+        "stage",
+        "target_at",
+    ),
+    EventType.NOVAMARKET_PREDICTION_FORECAST_CONFIRMED: (
+        "lifecycle_id",
+        "stage",
+        "forecast_id",
+        "direction",
+        "changed_fields",
+    ),
+    EventType.NOVAMARKET_PREDICTION_CONFIRMATION_SKIPPED: (
+        "lifecycle_id",
+        "stage",
+        "status",
+        "reason",
+    ),
+    EventType.NOVAMARKET_PREDICTION_FORECAST_EVALUATED: (
+        "lifecycle_id",
+        "forecast_id",
+        "stage",
+        "direction_correct",
+        "status",
+    ),
+    EventType.NOVAMARKET_PREDICTION_DECISION_EVIDENCE_READY: (
+        "evidence_id",
+        "lifecycle_id",
+        "instrument_id",
+        "eligible",
+    ),
+    EventType.NOVAMARKET_DATASET_BUILD_STARTED: (
+        "build_id",
+        "dataset_id",
+        "instruments",
+        "resolution",
+        "start_at",
+        "end_at",
+    ),
+    EventType.NOVAMARKET_DATASET_BUILD_COMPLETED: (
+        "build_id",
+        "dataset_id",
+        "version",
+        "duplicate",
+    ),
+    EventType.NOVAMARKET_DATASET_BUILD_FAILED: (
+        "build_id",
+        "dataset_id",
+        "error",
+    ),
+    EventType.NOVAMARKET_DATASET_VERSION_CREATED: (
+        "build_id",
+        "dataset_id",
+        "version",
+        "quality",
+        "bar_count",
+        "content_digest",
+    ),
+    EventType.NOVAMARKET_DATASET_VALIDATION_INCOMPLETE: (
+        "build_id",
+        "dataset_id",
+        "version",
+        "quality",
+        "missing",
+    ),
+    EventType.NOVAMARKET_FEATURES_GENERATED: (
+        "feature_set_id",
+        "instrument_id",
+        "as_of",
+        "resolution",
+        "profile",
+        "quality",
+        "completeness",
+        "persisted",
+        "duplicate",
+    ),
+    EventType.NOVAMARKET_FEATURES_FAILED: (
+        "instrument_id",
+        "resolution",
+        "profile",
+        "error",
+    ),
+    EventType.NOVAMARKET_REGIME_DETECTED: (
+        "regime_id",
+        "feature_set_id",
+        "instrument_id",
+        "as_of",
+        "primary_regime",
+        "secondary",
+        "method_version",
+    ),
+    EventType.NOVAMARKET_REGIME_TRANSITIONED: (
+        "regime_id",
+        "instrument_id",
+        "previous",
+        "current",
+        "as_of",
+    ),
+    EventType.NOVAMARKET_PREPROCESSING_FITTED: (
+        "preprocessing_id",
+        "method",
+        "version",
+        "training_digest",
+    ),
+    EventType.NOVAMARKET_FEATURE_SELECTION_COMPLETED: (
+        "report_id",
+        "version",
+        "observations",
+        "decision_count",
+    ),
+    EventType.NOVAMARKET_AGENT_CYCLE_COMPLETED: (
+        "cycle_id",
+        "instrument_id",
+        "horizon",
+        "status",
+        "action",
+    ),
+    EventType.NOVAMARKET_OPTIMIZATION_RECOMMENDATION_CREATED: (
+        "run_id",
+        "portfolio_id",
+        "status",
+        "rebalance_action",
+        "recommendation_count",
+    ),
+    EventType.NOVAMARKET_RESEARCH_RUN_COMPLETED: (
+        "run_id",
+        "instrument_id",
+        "status",
+        "stance",
+    ),
+    EventType.NOVAMARKET_POLICY_DEGRADED: (
+        "policy_id",
+        "status",
+        "trigger_count",
+        "retraining_recommended",
+    ),
 }
 
 #: Which event a Phase 8 task state publishes when it is entered. Kept here as

@@ -29,7 +29,8 @@ NovaMarket configuration is validated, versioned and secret-free. This reference
 | Application config | `GET /market/config`, posted through `POST /market/config`; persisted at the configured data directory (`data/novamarket.json`) | Validated by `NovaMarketConfig`; unknown fields and secret-shaped fields are refused |
 | Server environment | Process environment at API start | Read by the shared FastAPI/auth layer and optional SMTP transport |
 | Frontend build/dev environment | `NOVAMARKET_API_ORIGIN` at Vite dev-server start; `VITE_API_BASE_URL` at build time | Changes the API target/origin; never provides server authority |
-| Runtime browser token | `sessionStorage["novamarket.apiToken"]` | A session credential entered in the UI; never persisted in `localStorage` or source |
+| Local Vite proxy | `NOVACONTROL_ADMIN_TOKEN` at Vite dev-server start | Supplies the loopback-only admin session for `/market` and `/events`; the credential stays in the dev server, not the browser bundle |
+| Runtime browser token | `sessionStorage["novamarket.apiToken"]` | A session credential entered in the UI for separately hosted frontends; never persisted in `localStorage` or source |
 
 The stored payload has `schema_version: 1` and `contract_version: "1.0.0"` in the accepted baseline. A newer/incompatible schema is refused rather than best-effort parsed. `POST /market/config` is a full validated configuration application; inspect the current payload before editing it.
 
@@ -41,6 +42,7 @@ These are verified names. All are optional for a local first run.
 |---|---|---|---|
 | `NOVACONTROL_API_TOKEN` | Shared bearer token for protected API routes | unset | Any non-empty local secret; `/health` stays public. Send `Authorization: Bearer <token>` |
 | `NOVACONTROL_AUTONOMY_OPERATOR_TOKEN` | Dedicated token for autonomy mutations (`start`, `pause`, `resume`, `stop`, `recover`, decision/execution/exit runs) | unset | Must be a non-empty secret distinct from `NOVACONTROL_API_TOKEN`; a missing or equal value fails closed with 403. Send `X-Autonomy-Operator-Token: <token>` with ordinary authentication. Never put it in frontend source or `VITE_*`. |
+| `NOVACONTROL_ADMIN_TOKEN` | Local admin credential accepted only from loopback clients | unset; the local `start.ps1` launchers set `narasimha-novacontrol` | Accepted only when explicitly set, so a deployed backend behind a loopback reverse proxy cannot inherit a predictable key. Acts as both the ordinary API credential and the autonomy-operator credential for `127.0.0.1` requests, from either `Authorization: Bearer <key>` or `X-Autonomy-Operator-Token: <key>`. The Vite dev proxy sends it automatically; a key pasted into the API dialog also unlocks operator actions. Remote clients are always refused this credential; a deployed backend still requires the two configured tokens above. |
 | `NOVAMARKET_CORS_ORIGINS` | Exact browser origins allowed by CORS | empty | Comma-separated origins, e.g. `http://127.0.0.1:5173`; exact match, no wildcard |
 | `NOVAMARKET_ALLOWED_ORIGINS` | Additional exact origins accepted by the application's mutation origin guard | built-in loopback entries, including `http://127.0.0.1:5173` | Comma-separated; do not disable the guard |
 | `NOVACONTROL_TRUSTED_HOSTS` | Accepted `Host` headers | `127.0.0.1,localhost,::1,testserver` | Comma-separated host names; keep loopback values for local use |
@@ -63,6 +65,9 @@ PowerShell session example:
 ```powershell
 $env:NOVACONTROL_API_TOKEN = "use-a-long-random-local-token"
 $env:NOVACONTROL_AUTONOMY_OPERATOR_TOKEN = "use-a-different-long-random-local-token"
+# The loopback-only key used by the backend and the local Vite proxy; the
+# launchers set it for local runs. Optional here: change it, or unset it.
+# $env:NOVACONTROL_ADMIN_TOKEN = "narasimha-novacontrol"
 $env:NOVAMARKET_CORS_ORIGINS = "http://127.0.0.1:5173"
 $env:NOVAMARKET_API_ORIGIN = "http://127.0.0.1:8011"
 ```

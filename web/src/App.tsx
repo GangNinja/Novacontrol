@@ -11,7 +11,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { setToken, getToken } from "./api";
+import { setToken, getToken, hasApiAccess } from "./api";
 import { useApi, useLocalState, useRoute, navigate } from "./hooks";
 import { ALL_NAV_ITEMS, NAV_GROUPS, titleForRoute } from "./nav";
 import { arrayFrom, dateTime, num, timeAgo } from "./lib";
@@ -35,6 +35,19 @@ import { ShadowPage, LearningPage } from "./pages/ShadowLearning";
 import { WalletPage, TransactionsPage, LedgerPage } from "./pages/Records";
 import { NotificationsPage, ActivityPage, HealthPage, SettingsPage } from "./pages/System";
 import { AutonomyPage } from "./pages/Autonomy";
+import { PredictionEvaluationPage } from "./pages/PredictionEvaluation";
+import { RLResearchPage } from "./pages/RLResearch";
+import { RewardEvaluationPage } from "./pages/RewardEvaluation";
+import { RLTrainingPage } from "./pages/RLTraining";
+import { AdaptiveIntelligencePage } from "./pages/AdaptiveIntelligence";
+import { MultiAgentIntelligencePage } from "./pages/MultiAgentIntelligence";
+import { PortfolioOptimizationPage } from "./pages/PortfolioOptimization";
+import { FinancialResearchPage } from "./pages/FinancialResearch";
+import { PredictionIntelligencePage } from "./pages/PredictionIntelligence";
+import { ForecastOptimizationPage } from "./pages/ForecastOptimization";
+import { EventIntelligencePage } from "./pages/EventIntelligence";
+import { PortfolioManagementPage } from "./pages/PortfolioManagement";
+import { RiskIntelligencePage } from "./pages/RiskIntelligence";
 
 function Brand() {
   return (
@@ -185,12 +198,25 @@ function PageForRoute({ route }: { route: ReturnType<typeof useRoute> }) {
     case "discovery": return <DiscoveryPage />;
     case "watchlists": return <WatchlistsPage />;
     case "forecasts": return <ForecastsPage />;
+    case "evaluation": return <PredictionEvaluationPage />;
     case "portfolios": return <PortfoliosPage horizon={route.section || "short"} />;
+    case "portfoliomanagement": return <PortfolioManagementPage />;
+    case "riskintelligence": return <RiskIntelligencePage />;
     case "analytics": return <PortfolioAnalyticsPage />;
     case "strategies": return <StrategiesPage />;
     case "risk": return <RiskPage />;
     case "paper": return <PaperPage />;
     case "backtesting": return <BacktestingPage />;
+    case "rlresearch": return <RLResearchPage />;
+    case "rewards": return <RewardEvaluationPage />;
+    case "rltraining": return <RLTrainingPage />;
+    case "adaptive": return <AdaptiveIntelligencePage />;
+    case "multiagent": return <MultiAgentIntelligencePage />;
+    case "optimization": return <PortfolioOptimizationPage />;
+    case "financialresearch": return <FinancialResearchPage />;
+    case "predictionintel": return <PredictionIntelligencePage />;
+    case "forecastoptimization": return <ForecastOptimizationPage />;
+    case "eventintelligence": return <EventIntelligencePage />;
     case "shadow": return <ShadowPage />;
     case "learning": return <LearningPage />;
     case "wallet": return <WalletPage />;
@@ -328,7 +354,7 @@ export default function App() {
             </button>
             <button type="button" className="api-key-button" onClick={() => setAuthOpen(true)} title="API session">
               <KeyRound size={15} />
-              <span>{getToken() ? "API connected" : "API key"}</span>
+              <span>{hasApiAccess() ? "API connected" : "API key"}</span>
             </button>
             <button type="button" className="profile-button" onClick={() => navigate("settings")} aria-label="Open settings">
               <span>OP</span>

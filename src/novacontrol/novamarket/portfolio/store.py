@@ -505,14 +505,17 @@ class PortfolioStore:
             )
             self._commit()
 
-    def valuations(self, portfolio_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
+    def valuations(
+        self, portfolio_id: str, *, limit: int = 200, latest: bool = False
+    ) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._connection.execute(
                 "SELECT payload FROM portfolio_valuations WHERE portfolio_id=? "
-                "ORDER BY at ASC LIMIT ?",
+                + ("ORDER BY at DESC LIMIT ?" if latest else "ORDER BY at ASC LIMIT ?"),
                 (portfolio_id, max(1, min(int(limit), 500))),
             ).fetchall()
-        return [json.loads(row["payload"]) for row in rows]
+        payloads = [json.loads(row["payload"]) for row in rows]
+        return list(reversed(payloads)) if latest else payloads
 
     # -- proposals ------------------------------------------------------------
 

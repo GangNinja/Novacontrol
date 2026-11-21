@@ -1,0 +1,68 @@
+"""PI-14 reward calculation and policy evaluation, isolated from production."""
+
+from .engine import RewardEngine
+from .models import (
+    DEFAULT_COMPONENTS,
+    DEFAULT_PENALTIES,
+    DEFAULT_SCALES,
+    DEFAULT_THRESHOLDS,
+    DEFAULT_WEIGHTS,
+    ComponentResult,
+    EvaluationConfig,
+    PolicyEvaluationError,
+    PolicyEvaluationResult,
+    RewardConfig,
+    RewardContext,
+    RewardError,
+    RewardResult,
+    RewardValidationError,
+    SplitDefinition,
+    TransitionView,
+    default_reward_config,
+)
+from .policies import (
+    BASELINE_POLICIES,
+    ExperimentalRLPolicy,
+    NoActionPolicy,
+    PI12AdapterPolicy,
+    Policy,
+    PolicyDecision,
+    RuleBasedPolicy,
+    policy_catalogue,
+    policy_for,
+)
+from .service import RewardService
+from .store import RewardStore, RewardStoreError
+
+__all__ = [
+    "BASELINE_POLICIES",
+    "ComponentResult",
+    "DEFAULT_COMPONENTS",
+    "DEFAULT_PENALTIES",
+    "DEFAULT_SCALES",
+    "DEFAULT_THRESHOLDS",
+    "DEFAULT_WEIGHTS",
+    "EvaluationConfig",
+    "ExperimentalRLPolicy",
+    "NoActionPolicy",
+    "PI12AdapterPolicy",
+    "Policy",
+    "PolicyDecision",
+    "PolicyEvaluationError",
+    "PolicyEvaluationResult",
+    "RewardConfig",
+    "RewardContext",
+    "RewardEngine",
+    "RewardError",
+    "RewardResult",
+    "RewardService",
+    "RewardStore",
+    "RewardStoreError",
+    "RewardValidationError",
+    "RuleBasedPolicy",
+    "SplitDefinition",
+    "TransitionView",
+    "default_reward_config",
+    "policy_catalogue",
+    "policy_for",
+]

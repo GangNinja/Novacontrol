@@ -82,6 +82,16 @@ class MarketOperation(StrEnum):
     MANAGE_LEARNING = "market.learning.manage"
     RUN_LEARNING = "market.learning.run"
     APPROVE_LEARNING = "market.learning.approve"
+    READ_PREDICTIONS = "market.prediction.read"
+    RUN_PREDICTIONS = "market.prediction.run"
+    MANAGE_PREDICTION_MODELS = "market.prediction.models"
+    READ_DECISION_EVIDENCE = "market.prediction.evidence"
+    READ_DATASETS = "market.dataset.read"
+    BUILD_DATASETS = "market.dataset.build"
+    MANAGE_DATASETS = "market.dataset.manage"
+    READ_FEATURES = "market.feature.read"
+    GENERATE_FEATURES = "market.feature.generate"
+    MANAGE_FEATURES = "market.feature.manage"
 
 
 @dataclass(frozen=True, slots=True)
@@ -532,6 +542,138 @@ _POLICIES: tuple[MarketOperationPolicy, ...] = (
         reason=(
             "approval, promotion and rollback change the active strategy record; "
             "each is explicit, versioned and reversible"
+        ),
+    ),
+    # PI-01: prediction intelligence. These grants cover local forecasting and
+    # immutable evidence only; they never authorize a financial action.
+    MarketOperationPolicy(
+        operation=MarketOperation.READ_PREDICTIONS,
+        declaration=PermissionDeclaration(risk_level=RiskLevel.LOW),
+        granted=True,
+        phase="PI-01",
+        reason=(
+            "reading prediction forecasts, lifecycle stages and evaluations is "
+            "read-only and never authorizes a trade"
+        ),
+    ),
+    MarketOperationPolicy(
+        operation=MarketOperation.RUN_PREDICTIONS,
+        declaration=PermissionDeclaration(
+            risk_level=RiskLevel.LOW,
+            required_permission=PermissionScope.NETWORK_ACCESS,
+            reversible=True,
+        ),
+        granted=True,
+        phase="PI-01",
+        reason=(
+            "generating and confirming forecasts performs local computation over "
+            "the existing market-data authority; it cannot order or settle"
+        ),
+    ),
+    MarketOperationPolicy(
+        operation=MarketOperation.MANAGE_PREDICTION_MODELS,
+        declaration=PermissionDeclaration(
+            risk_level=RiskLevel.MEDIUM,
+            required_permission=PermissionScope.FILESYSTEM_WRITE,
+            requires_confirmation=True,
+            reversible=True,
+        ),
+        granted=True,
+        phase="PI-01",
+        reason=(
+            "registering model metadata is versioned and reversible; it cannot "
+            "promote a model automatically or modify NM-08 risk policy"
+        ),
+    ),
+    MarketOperationPolicy(
+        operation=MarketOperation.READ_DECISION_EVIDENCE,
+        declaration=PermissionDeclaration(risk_level=RiskLevel.LOW),
+        granted=True,
+        phase="PI-01",
+        reason=(
+            "decision evidence is read-only and explicitly carries "
+            "authorizes_action=false; NM-08 and NM-10 remain authoritative"
+        ),
+    ),
+    # PI-02: historical datasets. Reading and building a dataset is local
+    # evidence work; it never creates a second collector, order or fill.
+    MarketOperationPolicy(
+        operation=MarketOperation.READ_DATASETS,
+        declaration=PermissionDeclaration(risk_level=RiskLevel.LOW),
+        granted=True,
+        phase="PI-02",
+        reason=(
+            "reading dataset versions, coverage, quality, missing data and "
+            "training metadata is read-only"
+        ),
+    ),
+    MarketOperationPolicy(
+        operation=MarketOperation.BUILD_DATASETS,
+        declaration=PermissionDeclaration(
+            risk_level=RiskLevel.MEDIUM,
+            required_permission=PermissionScope.NETWORK_ACCESS,
+            reversible=True,
+        ),
+        granted=True,
+        phase="PI-02",
+        reason=(
+            "a bounded historical acquisition uses the existing approved "
+            "providers, their rate limits and the fair-rotation policy; it cannot "
+            "order or settle"
+        ),
+    ),
+    MarketOperationPolicy(
+        operation=MarketOperation.MANAGE_DATASETS,
+        declaration=PermissionDeclaration(
+            risk_level=RiskLevel.MEDIUM,
+            required_permission=PermissionScope.FILESYSTEM_WRITE,
+            requires_confirmation=True,
+            reversible=True,
+        ),
+        granted=True,
+        phase="PI-02",
+        reason=(
+            "recording corporate actions and market annotations writes versioned "
+            "metadata only; it never rewrites a stored observation"
+        ),
+    ),
+    MarketOperationPolicy(
+        operation=MarketOperation.READ_FEATURES,
+        declaration=PermissionDeclaration(risk_level=RiskLevel.LOW),
+        granted=True,
+        phase="PI-04",
+        reason=(
+            "reading feature definitions, sets, regimes and quality evidence "
+            "changes nothing and confers no execution authority"
+        ),
+    ),
+    MarketOperationPolicy(
+        operation=MarketOperation.GENERATE_FEATURES,
+        declaration=PermissionDeclaration(
+            risk_level=RiskLevel.MEDIUM,
+            required_permission=PermissionScope.FILESYSTEM_WRITE,
+            reversible=True,
+        ),
+        granted=True,
+        phase="PI-04",
+        reason=(
+            "generation derives and persists versioned analytical features from "
+            "already validated observations; it cannot acquire prices or place an order"
+        ),
+    ),
+    MarketOperationPolicy(
+        operation=MarketOperation.MANAGE_FEATURES,
+        declaration=PermissionDeclaration(
+            risk_level=RiskLevel.MEDIUM,
+            required_permission=PermissionScope.FILESYSTEM_WRITE,
+            requires_confirmation=True,
+            reversible=True,
+        ),
+        granted=True,
+        phase="PI-04",
+        reason=(
+            "recording preprocessing fits and selection diagnostics adds versioned "
+            "metadata; it never deletes a feature or changes a stored feature row"
         ),
     ),
 )

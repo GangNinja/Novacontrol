@@ -41,6 +41,34 @@ ROADMAP: tuple[tuple[str, str], ...] = (
 ROADMAP_PHASES: tuple[str, ...] = tuple(phase for phase, _ in ROADMAP)
 ROADMAP_TITLES: dict[str, str] = dict(ROADMAP)
 
+#: The Prediction Intelligence program is a separate, additive roadmap. It does
+#: not rename, replace or reorder NM-01..NM-14; it gives the new capability its
+#: own sixteen phases and its own acceptance gate. PI-01 establishes contracts
+#: only. Later phases may implement models, schedulers and learning, but they may
+#: never replace NM-08 risk or NM-10 paper execution.
+PREDICTION_ROADMAP: tuple[tuple[str, str], ...] = (
+    ("PI-01", "Architecture, Contracts & Existing-System Integration"),
+    ("PI-02", "Market Data, Features & Dataset Foundations"),
+    ("PI-03", "Low-Latency Market Data Gateway"),
+    ("PI-04", "Feature Engineering & Market Regime Detection"),
+    ("PI-05", "Statistical Baseline Forecasting Models"),
+    ("PI-06", "Gradient-Boosting Forecasting Models"),
+    ("PI-07", "LSTM Deep Learning Forecasting Models"),
+    ("PI-08", "Intraday Prediction Intelligence"),
+    ("PI-09", "Swing Prediction Intelligence"),
+    ("PI-10", "Long-Term Fundamental Intelligence"),
+    ("PI-11", "Prediction Evaluation & Backtesting"),
+    ("PI-12", "Paper-Trading Feedback & Outcome Learning"),
+    ("PI-13", "Reinforcement-Learning Environment"),
+    ("PI-14", "Controlled Policy Evaluation & Governance"),
+    ("PI-15", "Observability, Model Registry & Drift"),
+    ("PI-16", "Performance, Hardening & Program Acceptance"),
+)
+PREDICTION_ROADMAP_PHASES: tuple[str, ...] = tuple(
+    phase for phase, _ in PREDICTION_ROADMAP
+)
+PREDICTION_ROADMAP_TITLES: dict[str, str] = dict(PREDICTION_ROADMAP)
+
 
 @dataclass(frozen=True, slots=True)
 class DomainBoundary:
@@ -289,6 +317,210 @@ STORAGE_BOUNDARIES: tuple[StorageBoundary, ...] = (
 )
 
 
+#: The seven capability domains of the Prediction Intelligence program. They
+#: are capability boundaries inside NovaMarket, not independent execution
+#: systems. None of them executes an action; NM-08 and NM-10 remain the sole
+#: financial authorities.
+PREDICTION_DOMAIN_BOUNDARIES: tuple[DomainBoundary, ...] = (
+    DomainBoundary(
+        domain="virtual_market",
+        title="Virtual stock market and financial system",
+        responsibility=(
+            "Keep NovaCoin, portfolios, positions, valuation and accounting under "
+            "the existing financial authorities; prediction never mutates them."
+        ),
+        owned_data=("prediction_market_context",),
+        interface="Existing portfolio, wallet, ledger and market-data contracts",
+        phase="PI-01",
+    ),
+    DomainBoundary(
+        domain="market_data_intelligence",
+        title="Market data intelligence",
+        responsibility=(
+            "Consume timestamped quotes, bars, fundamentals, news and events through "
+            "the existing market-data authority, preserving provenance and freshness."
+        ),
+        owned_data=(
+            "prediction_snapshots",
+            "historical_dataset_versions",
+            "historical_dataset_members",
+            "dataset_gap_records",
+            "corporate_action_records",
+            "dataset_annotations",
+            "feature_definitions",
+            "feature_sets",
+            "feature_regimes",
+            "feature_preprocessing_fits",
+            "feature_selection_reports",
+        ),
+        interface=(
+            "MarketDataGateway and PredictionDataGateway over MarketDataEngine; "
+            "HistoricalDatasetService over MarketDataStore"
+        ),
+        phase="PI-01",
+    ),
+    DomainBoundary(
+        domain="prediction_intelligence",
+        title="Prediction intelligence",
+        responsibility=(
+            "Assemble eligible model outputs into versioned, calibrated where "
+            "possible forecasts, and abstain when evidence is insufficient."
+        ),
+        owned_data=(
+            "prediction_requests",
+            "prediction_forecasts",
+            "training_dataset_versions",
+            "training_dataset_samples",
+        ),
+        interface="PredictionForecastContract / EnsembleAssembler / DatasetTrainingContract",
+        phase="PI-01",
+    ),
+    DomainBoundary(
+        domain="forecast_lifecycle",
+        title="Forecast lifecycle and confirmation",
+        responsibility=(
+            "Preserve T-20, T-5 and T-1 forecasts as immutable stages; never let a "
+            "confirmation overwrite the initial prediction."
+        ),
+        owned_data=("prediction_lifecycles", "prediction_stages"),
+        interface="PredictionLifecycleContract",
+        phase="PI-01",
+    ),
+    DomainBoundary(
+        domain="autonomous_trading_intelligence",
+        title="Autonomous trading intelligence",
+        responsibility=(
+            "Provide read-only decision evidence to the existing decision pipeline; "
+            "risk, permission and paper execution remain with NM-08, the autonomy "
+            "controls and NM-10."
+        ),
+        owned_data=("prediction_evidence",),
+        interface="DecisionForecastEvidence (authorizes_action=False)",
+        phase="PI-01",
+    ),
+    DomainBoundary(
+        domain="reinforcement_learning",
+        title="Reinforcement learning and adaptive intelligence",
+        responsibility=(
+            "Define advisory experience, policy and evaluation boundaries; no "
+            "automatic promotion, no risk-policy mutation and no order authority."
+        ),
+        owned_data=("prediction_learning_experience",),
+        interface="LearningBoundaryContract (advisory only)",
+        phase="PI-01",
+    ),
+    DomainBoundary(
+        domain="performance_observability",
+        title="Performance, evaluation and observability",
+        responsibility=(
+            "Evaluate forecasts against actual outcomes, expose errors and keep "
+            "provider/data limitations visible without creating a second telemetry bus."
+        ),
+        owned_data=("prediction_evaluations", "prediction_models"),
+        interface="PredictionEvaluationContract / existing NovaMarket events",
+        phase="PI-01",
+    ),
+)
+
+#: Prediction-owned persistence. The physical store is the existing NovaMarket
+#: SQLite database; this declaration makes ownership and append-only behaviour
+#: explicit without creating a second database engine.
+PREDICTION_STORAGE_BOUNDARIES: tuple[StorageBoundary, ...] = (
+    StorageBoundary("prediction_requests", "prediction_intelligence", "prediction SQLite tables; append-only", True, "PI-01"),
+    StorageBoundary("prediction_forecasts", "prediction_intelligence", "prediction SQLite tables; immutable trigger", True, "PI-01"),
+    StorageBoundary("prediction_lifecycles", "forecast_lifecycle", "prediction SQLite tables; status may advance", False, "PI-01"),
+    StorageBoundary("prediction_stages", "forecast_lifecycle", "prediction SQLite tables; immutable trigger", True, "PI-01"),
+    StorageBoundary("prediction_snapshots", "market_data_intelligence", "prediction SQLite tables; append-only", True, "PI-01"),
+    StorageBoundary("prediction_evidence", "autonomous_trading_intelligence", "prediction SQLite tables; immutable trigger", True, "PI-01"),
+    StorageBoundary("prediction_evaluations", "performance_observability", "prediction SQLite tables; immutable trigger", True, "PI-01"),
+    StorageBoundary("prediction_models", "performance_observability", "prediction SQLite tables; versioned, state updatable", False, "PI-01"),
+    StorageBoundary("prediction_learning_experience", "reinforcement_learning", "contract only in PI-01; no training store written", False, "PI-01"),
+    StorageBoundary("prediction_market_context", "virtual_market", "references existing portfolio/valuation records; no copy", False, "PI-01"),
+    StorageBoundary("historical_dataset_versions", "market_data_intelligence", "dataset SQLite tables; immutable version + exact bar references", True, "PI-02"),
+    StorageBoundary("historical_dataset_members", "market_data_intelligence", "dataset SQLite tables; bar_id references, no price copy", True, "PI-02"),
+    StorageBoundary("dataset_gap_records", "market_data_intelligence", "dataset SQLite tables; classified missing observations", True, "PI-02"),
+    StorageBoundary("corporate_action_records", "market_data_intelligence", "dataset SQLite tables; sourced and verified actions only", True, "PI-02"),
+    StorageBoundary("dataset_annotations", "market_data_intelligence", "dataset SQLite tables; caller-supplied halts/suspensions/closures", True, "PI-02"),
+    StorageBoundary("training_dataset_versions", "prediction_intelligence", "dataset SQLite tables; immutable chronological splits", True, "PI-02"),
+    StorageBoundary("training_dataset_samples", "prediction_intelligence", "dataset SQLite tables; decision/window/target bar references", True, "PI-02"),
+    StorageBoundary("feature_definitions", "market_data_intelligence", "feature SQLite tables; immutable versioned definitions", True, "PI-04"),
+    StorageBoundary("feature_sets", "market_data_intelligence", "feature SQLite tables; immutable point-in-time rows", True, "PI-04"),
+    StorageBoundary("feature_regimes", "market_data_intelligence", "feature SQLite tables; immutable regime results tied to a feature set", True, "PI-04"),
+    StorageBoundary("feature_preprocessing_fits", "market_data_intelligence", "feature SQLite tables; immutable fitted parameters and training digest", True, "PI-04"),
+    StorageBoundary("feature_selection_reports", "market_data_intelligence", "feature SQLite tables; diagnostics only, never automatic deletion", True, "PI-04"),
+)
+
+
+def validate_prediction_architecture() -> tuple[str, ...]:
+    """Structural checks for the PI-01 architecture and its authority boundaries."""
+    problems: list[str] = []
+    phases = set(PREDICTION_ROADMAP_PHASES)
+    if len(PREDICTION_ROADMAP) != 16 or len(phases) != 16:
+        problems.append("the prediction roadmap must contain exactly sixteen unique phases")
+    if PREDICTION_ROADMAP[0][0] != "PI-01" or PREDICTION_ROADMAP[-1][0] != "PI-16":
+        problems.append("the prediction roadmap must begin at PI-01 and end at PI-16")
+    expected_domains = {
+        "virtual_market",
+        "market_data_intelligence",
+        "prediction_intelligence",
+        "forecast_lifecycle",
+        "autonomous_trading_intelligence",
+        "reinforcement_learning",
+        "performance_observability",
+    }
+    found = {item.domain for item in PREDICTION_DOMAIN_BOUNDARIES}
+    if found != expected_domains or len(PREDICTION_DOMAIN_BOUNDARIES) != 7:
+        problems.append(
+            "prediction architecture must declare exactly the seven capability domains"
+        )
+    owners = {item.domain for item in PREDICTION_DOMAIN_BOUNDARIES}
+    data_owners: dict[str, str] = {}
+    declared: set[str] = set()
+    for boundary in PREDICTION_DOMAIN_BOUNDARIES:
+        if boundary.phase not in phases:
+            problems.append(
+                f"prediction domain {boundary.domain!r} names unknown phase {boundary.phase!r}"
+            )
+        if boundary.executes_actions:
+            problems.append(
+                f"prediction domain {boundary.domain!r} must not execute actions"
+            )
+        if not boundary.interface.strip():
+            problems.append(f"prediction domain {boundary.domain!r} has no interface")
+        declared.update(boundary.owned_data)
+    for storage in PREDICTION_STORAGE_BOUNDARIES:
+        if storage.owner not in owners:
+            problems.append(
+                f"prediction data {storage.data!r} has unknown owner {storage.owner!r}"
+            )
+        if storage.phase not in phases:
+            problems.append(
+                f"prediction data {storage.data!r} names unknown phase {storage.phase!r}"
+            )
+        if storage.data in data_owners:
+            problems.append(f"prediction data {storage.data!r} has more than one owner")
+        data_owners[storage.data] = storage.owner
+    for item in sorted(declared):
+        if item not in data_owners:
+            problems.append(f"prediction owned data {item!r} has no storage boundary")
+    for item in sorted(data_owners):
+        if item not in declared:
+            problems.append(f"prediction storage {item!r} is not owned by a prediction domain")
+    forbidden_data = {"paper_orders", "execution_records", "ledger_entries", "risk_limits"}
+    overlap = forbidden_data & set(data_owners)
+    if overlap:
+        problems.append(
+            "prediction may not own financial authority data: " + ", ".join(sorted(overlap))
+        )
+    if not any(
+        item.domain == "autonomous_trading_intelligence"
+        and "read-only" in item.responsibility.lower()
+        for item in PREDICTION_DOMAIN_BOUNDARIES
+    ):
+        problems.append("prediction decision evidence must be declared read-only")
+    return tuple(problems)
+
+
 def validate_architecture() -> tuple[str, ...]:
     """Every architectural declaration's consistency problems, or ``()``.
 
@@ -356,6 +588,7 @@ def validate_architecture() -> tuple[str, ...]:
         for boundary in DOMAIN_BOUNDARIES
     ):
         problems.append("the risk boundary must not execute the actions it evaluates")
+    problems.extend(validate_prediction_architecture())
 
     return tuple(problems)
 
@@ -363,10 +596,16 @@ def validate_architecture() -> tuple[str, ...]:
 __all__ = [
     "DOMAIN_BOUNDARIES",
     "DomainBoundary",
+    "PREDICTION_DOMAIN_BOUNDARIES",
+    "PREDICTION_ROADMAP",
+    "PREDICTION_ROADMAP_PHASES",
+    "PREDICTION_ROADMAP_TITLES",
+    "PREDICTION_STORAGE_BOUNDARIES",
     "ROADMAP",
     "ROADMAP_PHASES",
     "ROADMAP_TITLES",
     "STORAGE_BOUNDARIES",
     "StorageBoundary",
     "validate_architecture",
+    "validate_prediction_architecture",
 ]

@@ -430,6 +430,7 @@ async def with_retries(
     provider: str,
     policy: RetryPolicy | None = None,
     sleeper: Callable[[float], Any] | None = None,
+    observer: Callable[[str, int, float, ProviderError], None] | None = None,
 ) -> Any:
     """Run an operation with bounded retries for retryable provider failures."""
     retry = policy or RetryPolicy()
@@ -443,6 +444,11 @@ async def with_retries(
             if not exc.retryable or attempt >= retry.max_attempts:
                 raise
             delay = retry.delay_for(attempt, exc.retry_after)
+            if observer is not None:
+                try:
+                    observer(provider, attempt, delay, exc)
+                except Exception:  # noqa: BLE001 - telemetry must not change retry policy
+                    pass
             result = pause(delay)
             if hasattr(result, "__await__"):
                 await result
@@ -581,6 +587,13 @@ class MarketDataAdapter:
         self._retry = retry_policy or RetryPolicy()
         self._secrets = secret_resolver
         self._quota = daily_quota
+        self._retry_observer: Callable[[str, int, float, ProviderError], None] | None = None
+
+    def set_retry_observer(
+        self, observer: Callable[[str, int, float, ProviderError], None] | None
+    ) -> None:
+        """Attach the engine's retry counter without exposing provider internals."""
+        self._retry_observer = observer
 
     async def _get_json(
         self,
@@ -597,7 +610,12 @@ class MarketDataAdapter:
             response = await self._transport.get(url, params=params, headers=headers)
             return self._parse_response(response)
 
-        return await with_retries(attempt, provider=self.name, policy=self._retry)
+        return await with_retries(
+            attempt,
+            provider=self.name,
+            policy=self._retry,
+            observer=self._retry_observer,
+        )
 
     def _parse_response(self, response: HttpResponse) -> Any:
         if response.status in (401, 403):

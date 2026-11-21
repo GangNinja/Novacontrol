@@ -16,7 +16,6 @@ from decimal import Decimal
 from inspect import isawaitable
 from typing import Any, Callable, Mapping
 
-from novacontrol.novamarket.execution.models import execution_id, text
 from novacontrol.novamarket.autonomy_execution.models import (
     ACTIVE_INTENT_STATUSES,
     AT04_CONTRACT_VERSION,
@@ -34,6 +33,8 @@ from novacontrol.novamarket.autonomy_execution.models import (
     is_terminal,
     status_for_order,
 )
+from novacontrol.novamarket.decision.forecast import ForecastDecisionStatus
+from novacontrol.novamarket.execution.models import execution_id, text
 
 _LOGGER = logging.getLogger("novacontrol.novamarket.autonomy_execution")
 
@@ -53,6 +54,28 @@ def _decimal(value: object, default: str = "0") -> Decimal:
         return Decimal(str(value))
     except Exception:  # noqa: BLE001 - malformed stored data is reported, not trusted
         return Decimal(default)
+
+
+def _decision_status_for_intent(status: str) -> str:
+    """Map an authoritative AT-04 intent state to the PI-12 decision state."""
+
+    target = ForecastDecisionStatus
+    return {
+        ExecutionIntentStatus.SUBMITTED.value: target.ORDER_SUBMITTED.value,
+        ExecutionIntentStatus.PARTIALLY_FILLED.value: target.PARTIALLY_FILLED.value,
+        ExecutionIntentStatus.FILLED.value: target.FILLED.value,
+        ExecutionIntentStatus.REJECTED.value: target.ORDER_REJECTED.value,
+        ExecutionIntentStatus.CANCELLED.value: target.ORDER_CANCELLED.value,
+        ExecutionIntentStatus.EXPIRED.value: target.ORDER_CANCELLED.value,
+        ExecutionIntentStatus.FAILED.value: target.EXECUTION_SUBMISSION_FAILED.value,
+        ExecutionIntentStatus.RECONCILIATION_REQUIRED.value: (
+            target.RECONCILIATION_PENDING.value
+        ),
+        ExecutionIntentStatus.UNKNOWN.value: target.EXECUTION_SUBMISSION_FAILED.value,
+        ExecutionIntentStatus.PREFLIGHT_FAILED.value: (
+            target.EXECUTION_PREFLIGHT_FAILED.value
+        ),
+    }.get(status, target.EXECUTION_SUBMISSION_FAILED.value)
 
 
 class AutonomyPaperExecution:
@@ -185,6 +208,56 @@ class AutonomyPaperExecution:
             )
         except Exception as exc:  # noqa: BLE001 - the durable intent remains primary
             _LOGGER.warning("novamarket.autonomy.execution.journal_event_failed: %s", exc)
+
+    def _record_decision_execution(
+        self,
+        proposal_id: str,
+        *,
+        kind: str,
+        status: str,
+        execution_id: str = "",
+        order_id: str = "",
+        order_status: str = "",
+        failure_code: str = "",
+        error: str = "",
+    ) -> None:
+        """Append NM-10 execution evidence to the linked PI-12 decision.
+
+        The prediction decision is immutable, so the status and execution
+        reference are appended as one more decision event.  A missing decision
+        is not an error: not every AT-03 proposal is forecast-driven.
+        """
+
+        if not proposal_id:
+            return
+        try:
+            decision = self._decisions.store.prediction_decision_for_proposal(
+                proposal_id
+            )
+            if not decision:
+                return
+            decision_id = str(decision.get("decision_id") or "")
+            if not decision_id:
+                return
+            self._decisions.store.append_prediction_decision_event(
+                decision_id,
+                kind,
+                {
+                    "status": status,
+                    "execution_id": execution_id,
+                    "order_id": order_id,
+                    "order_status": order_status,
+                    "failure_code": failure_code,
+                    "execution_error": error,
+                },
+                at=self._now(),
+            )
+        except Exception as exc:  # noqa: BLE001 - the AT-04 journal remains primary
+            _LOGGER.warning(
+                "novamarket.autonomy.execution.decision_event_failed proposal=%s error=%s",
+                proposal_id,
+                exc,
+            )
 
     # -- durable intent ------------------------------------------------------
     def _new_intent(
@@ -521,6 +594,16 @@ class AutonomyPaperExecution:
             recovery_info=recovery_info,
         )
         if changed:
+            self._record_decision_execution(
+                proposal_id,
+                kind=f"execution.{next_status}",
+                status=_decision_status_for_intent(next_status),
+                execution_id=str(body.get("execution_id") or ""),
+                order_id=str(body.get("order_id") or ""),
+                order_status=str(body.get("order_status") or ""),
+                failure_code=failure_code,
+                error=failure_reason,
+            )
             event_payload = {
                 "execution_id": body.get("execution_id"),
                 "proposal_id": body.get("proposal_id"),
@@ -567,6 +650,14 @@ class AutonomyPaperExecution:
                 recovery_info="inspect NM-10 orders manually; do not create another order",
             )
             self._event(failed, "retry_exhausted", str(failed.get("failure_reason") or ""))
+            self._record_decision_execution(
+                proposal_id,
+                kind="execution.submission_failed",
+                status=ForecastDecisionStatus.EXECUTION_SUBMISSION_FAILED.value,
+                execution_id=str(failed.get("execution_id") or ""),
+                failure_code="EXECUTION_SUBMISSION_UNKNOWN",
+                error=str(failed.get("failure_reason") or ""),
+            )
             return self._detail(failed)
 
         intent = existing or self._save_new_intent(
@@ -589,6 +680,14 @@ class AutonomyPaperExecution:
                 recovery_info="no order was forwarded; this proposal is not retried automatically",
             )
             self._event(failed, "preflight_failed", reason, {"failure_code": error_code})
+            self._record_decision_execution(
+                proposal_id,
+                kind="execution.preflight_failed",
+                status=ForecastDecisionStatus.EXECUTION_PREFLIGHT_FAILED.value,
+                execution_id=str(failed.get("execution_id") or ""),
+                failure_code=error_code,
+                error=reason,
+            )
             await self._emit(
                 "preflight_failed",
                 {
@@ -650,6 +749,14 @@ class AutonomyPaperExecution:
                 recovery_info="reconcile with NM-10 before any further attempt",
             )
             self._event(unknown, "submission_unknown", str(unknown.get("failure_reason") or ""))
+            self._record_decision_execution(
+                proposal_id,
+                kind="execution.submission_failed",
+                status=ForecastDecisionStatus.EXECUTION_SUBMISSION_FAILED.value,
+                execution_id=str(unknown.get("execution_id") or ""),
+                failure_code="EXECUTION_SUBMISSION_UNKNOWN",
+                error=str(unknown.get("failure_reason") or ""),
+            )
             await self._emit(
                 "submission_unknown",
                 {
@@ -673,6 +780,14 @@ class AutonomyPaperExecution:
                 recovery_info="reconcile with NM-10 before any further attempt",
             )
             self._event(unknown, "submission_unknown", str(unknown.get("failure_reason") or ""))
+            self._record_decision_execution(
+                proposal_id,
+                kind="execution.submission_failed",
+                status=ForecastDecisionStatus.EXECUTION_SUBMISSION_FAILED.value,
+                execution_id=str(unknown.get("execution_id") or ""),
+                failure_code="NM10_UNAVAILABLE",
+                error=str(unknown.get("failure_reason") or ""),
+            )
             self._last_error = str(unknown.get("failure_reason") or "")
             self._last_error_code = "NM10_UNAVAILABLE"
             return self._detail(unknown)
@@ -686,6 +801,14 @@ class AutonomyPaperExecution:
                 recovery_info="inspect NM-10 records directly; no order was confirmed",
             )
             self._event(unknown, "submission_invalid", str(unknown.get("failure_reason") or ""))
+            self._record_decision_execution(
+                proposal_id,
+                kind="execution.submission_failed",
+                status=ForecastDecisionStatus.EXECUTION_SUBMISSION_FAILED.value,
+                execution_id=str(unknown.get("execution_id") or ""),
+                failure_code="EXECUTION_SUBMISSION_UNKNOWN",
+                error=str(unknown.get("failure_reason") or ""),
+            )
             return self._detail(unknown)
         order_payload = dict(result.get("order") or {})
         if not order_payload.get("order_id"):
@@ -697,6 +820,14 @@ class AutonomyPaperExecution:
                 recovery_info="inspect NM-10 records directly; no order was confirmed",
             )
             self._event(unknown, "submission_invalid", str(unknown.get("failure_reason") or ""))
+            self._record_decision_execution(
+                proposal_id,
+                kind="execution.submission_failed",
+                status=ForecastDecisionStatus.EXECUTION_SUBMISSION_FAILED.value,
+                execution_id=str(unknown.get("execution_id") or ""),
+                failure_code="EXECUTION_SUBMISSION_UNKNOWN",
+                error=str(unknown.get("failure_reason") or ""),
+            )
             return self._detail(unknown)
         submitted = self._update_intent(
             forwarding,

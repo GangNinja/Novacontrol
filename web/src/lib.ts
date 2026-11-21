@@ -34,6 +34,25 @@ export function num(value: unknown, fallback = 0): number {
   return Number.isFinite(number) ? number : fallback;
 }
 
+/**
+ * A measured value rendered to `digits` places.  Absence stays absence:
+ * num()'s second argument is a fallback, so num(x, 0).toFixed(2) printed a
+ * confident 0.00 for a measurement the API reported as null.
+ */
+export function measured(value: unknown, digits = 2): string {
+  if (value === null || value === undefined || value === "") return "—";
+  const number = typeof value === "number" ? value : Number(String(value).replace(/,/g, ""));
+  return Number.isFinite(number) ? number.toFixed(digits) : "—";
+}
+
+/** A sign class only for a measured value: an absent one carries no direction. */
+export function signTone(value: unknown): "positive" | "negative" | "muted" {
+  if (value === null || value === undefined || value === "") return "muted";
+  const number = num(value, NaN);
+  if (!Number.isFinite(number)) return "muted";
+  return number >= 0 ? "positive" : "negative";
+}
+
 export function horizonSlug(value: unknown): string {
   const text = String(value ?? "").toLowerCase();
   if (text.startsWith("short")) return "short";
@@ -218,9 +237,9 @@ export function barPoints(body: any): { label: string; value: number }[] {
 
 export function statusTone(status: unknown): "good" | "warn" | "bad" | "neutral" | "info" {
   const value = String(status ?? "").toLowerCase();
-  if (["ok", "healthy", "active", "running", "completed", "promoted", "approved", "passed", "available", "executed", "filled", "open", "validated"].includes(value)) return "good";
-  if (["degraded", "paused", "pending", "pending_approval", "queued", "created", "under_review", "draft", "warning", "warn", "stale", "partial", "waiting_for_approval", "idle"].includes(value)) return "warn";
-  if (["failed", "error", "blocked", "rejected", "cancelled", "canceled", "suspended", "critical", "unhealthy", "offline", "expired", "violated"].includes(value)) return "bad";
+  if (["ok", "healthy", "active", "running", "completed", "evaluated", "promoted", "approved", "passed", "available", "executed", "filled", "open", "validated"].includes(value)) return "good";
+  if (["degraded", "paused", "pending", "evaluation_pending", "pending_approval", "queued", "created", "scheduled", "skipped", "abstained", "unconfirmed", "under_review", "draft", "warning", "warn", "stale", "partial", "waiting_for_approval", "idle"].includes(value)) return "warn";
+  if (["failed", "error", "blocked", "rejected", "cancelled", "canceled", "dead_letter", "suspended", "critical", "unhealthy", "offline", "expired", "violated"].includes(value)) return "bad";
   if (["running", "active", "live"].includes(value)) return "info";
   return "neutral";
 }

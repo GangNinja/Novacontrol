@@ -48,6 +48,12 @@ if (Test-Path -LiteralPath $SmtpEnvironmentFile) {
         }
     }
 }
+# The loopback-only admin key is opt-in in the backend, so a deployed copy
+# cannot inherit a predictable credential.  Local runs opt in here; the API
+# and Vite child processes inherit this value, keeping proxy auto-connect.
+if ([string]::IsNullOrWhiteSpace($env:NOVACONTROL_ADMIN_TOKEN)) {
+    $env:NOVACONTROL_ADMIN_TOKEN = "narasimha-novacontrol"
+}
 $Parent = Split-Path -Parent $Root
 $Python = Join-Path $Parent ".venv\Scripts\python.exe"
 $WebDir = Join-Path $Root "web"

@@ -18,6 +18,11 @@ os.environ.setdefault("NOVACONTROL_DISABLE_OLLAMA", "1")
 # is exactly the degradation the suite pins.
 os.environ.setdefault("NOVACONTROL_DISABLE_TELEMETRY_SAMPLER", "1")
 
+# The PI-19 filing adapter is the one outbound call in the research
+# context (Yahoo public fundamentals). Suites must never reach the network:
+# tests that exercise the adapter inject a fake fetcher instead.
+os.environ.setdefault("NOVACONTROL_DISABLE_FILINGS", "1")
+
 
 def shell_launch_offenders(source_code: str) -> list[str]:
     """AST scan for shell-capable subprocess launches in a module's source.

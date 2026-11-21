@@ -794,6 +794,13 @@ class ProviderCapabilities:
     daily_request_limit: int | None = None
     historical_days: int | None = None
     covers_other_exchanges: bool = False
+    #: Where the values originate.  A delayed third-party API is not an
+    #: exchange feed, and the gateway must never relabel it as one.
+    source_class: str = "third_party_delayed"
+    supports_streaming: bool = False
+    #: True only when the provider supplies a timestamp distinct from the
+    #: observation time (a publication timestamp).
+    publication_timestamp_supported: bool = False
     limitations: tuple[str, ...] = ()
     verified_operations: tuple[str, ...] = ()
     documentation: str = ""
@@ -813,6 +820,25 @@ class ProviderCapabilities:
             raise ValueError(
                 "data_kind must be realtime, delayed, end_of_day or unknown"
             )
+        allowed_source_classes = {
+            "exchange",
+            "authorized_redistribution",
+            "third_party_delayed",
+            "delayed",
+            "cached",
+            "historical",
+            "scraped",
+            "unknown",
+        }
+        if self.source_class not in allowed_source_classes:
+            raise ValueError(
+                "source_class must be exchange, authorized_redistribution, "
+                "third_party_delayed, delayed, cached, historical, scraped or unknown"
+            )
+        if not isinstance(self.supports_streaming, bool):
+            raise ValueError("supports_streaming must be a boolean")
+        if not isinstance(self.publication_timestamp_supported, bool):
+            raise ValueError("publication_timestamp_supported must be a boolean")
         if self.typical_delay_seconds is not None and self.typical_delay_seconds < 0:
             raise ValueError("typical_delay_seconds must not be negative")
         object.__setattr__(
@@ -845,6 +871,9 @@ class ProviderCapabilities:
             },
             "verified_operations": list(self.verified_operations),
             "data_kind": self.data_kind,
+            "source_class": self.source_class,
+            "supports_streaming": self.supports_streaming,
+            "publication_timestamp_supported": self.publication_timestamp_supported,
             "typical_delay_seconds": self.typical_delay_seconds,
             "requires_credentials": self.requires_credentials,
             "credential_reference": self.credential_reference,
@@ -1062,6 +1091,70 @@ class IngestionReport:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class HistoryIngestReport:
+    """The measured outcome of one bounded historical OHLCV acquisition.
+
+    PI-02 uses this to acquire a date range through the existing provider,
+    normalization, quality and store pipeline.  It is a report, not a promise:
+    ``bars_received == 0`` with errors means the provider failed; an incomplete
+    range is visible and can be retried incrementally.
+    """
+
+    instrument_id: str
+    interval: DataInterval
+    requested_start: datetime
+    requested_end: datetime
+    started_at: datetime
+    finished_at: datetime
+    provider: str = ""
+    bars_received: int = 0
+    bars_inserted: int = 0
+    bars_duplicate: int = 0
+    bars_rejected: int = 0
+    bars_outside_range: int = 0
+    errors: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.bars_received < 0 or self.bars_inserted < 0:
+            raise ValueError("historical ingest counters must not be negative")
+        object.__setattr__(self, "interval", DataInterval(self.interval))
+        for name in (
+            "requested_start",
+            "requested_end",
+            "started_at",
+            "finished_at",
+        ):
+            object.__setattr__(self, name, _aware(getattr(self, name), field_name=name))
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.provider) and self.bars_received > 0
+
+    @property
+    def duration_ms(self) -> float:
+        return max((self.finished_at - self.started_at).total_seconds() * 1000.0, 0.0)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "instrument_id": self.instrument_id,
+            "interval": self.interval.value,
+            "requested_start": self.requested_start.isoformat(),
+            "requested_end": self.requested_end.isoformat(),
+            "started_at": self.started_at.isoformat(),
+            "finished_at": self.finished_at.isoformat(),
+            "duration_ms": round(self.duration_ms, 3),
+            "provider": self.provider,
+            "ok": self.ok,
+            "bars_received": self.bars_received,
+            "bars_inserted": self.bars_inserted,
+            "bars_duplicate": self.bars_duplicate,
+            "bars_rejected": self.bars_rejected,
+            "bars_outside_range": self.bars_outside_range,
+            "errors": list(self.errors),
+        }
+
+
 __all__ = [
     "AppendResult",
     "AppendStatus",
@@ -1071,6 +1164,7 @@ __all__ = [
     "DataQuality",
     "EXCHANGE_MICS",
     "Freshness",
+    "HistoryIngestReport",
     "IngestionReport",
     "Instrument",
     "InstrumentIngestResult",

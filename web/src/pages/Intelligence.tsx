@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   ArrowRight,
-  BrainCircuit,
   CalendarClock,
   Check,
   ChevronRight,
@@ -16,10 +15,9 @@ import {
   Search,
   Sparkles,
   Target,
-  TrendingUp,
   Trash2,
 } from "lucide-react";
-import { apiDelete, apiPost } from "../api";
+import { apiDelete, apiGet, apiPost } from "../api";
 import { useApi, useDocumentTitle, navigate } from "../hooks";
 import {
   arrayFrom,
@@ -27,7 +25,6 @@ import {
   money,
   num,
   pct,
-  pctUnsigned,
   shortId,
   timeAgo,
   title,
@@ -53,7 +50,6 @@ import {
 } from "../components/ui";
 
 const WATCHLIST_KINDS = ["custom", "discovery", "activity", "event_driven", "liquidity", "sector"];
-const FORECAST_HORIZONS = ["next_session", "few_sessions", "one_week", "one_month", "three_months"];
 const WATCHLIST_MEMBER_GAP_MS = 1_000;
 const WATCHLIST_ERROR_BACKOFF_MS = 5_000;
 const WATCHLIST_PROVIDER_CAPACITY = 40;
@@ -67,8 +63,20 @@ type WatchlistLiveRefresh = {
   error: string;
 };
 
-function scoreOf(row: any): number {
-  return num(row.last_score ?? row.score ?? row.evaluation?.score ?? row.total_score ?? row.candidate_score ?? row.quality_score, 0);
+function scoreOf(row: any): number | null {
+  // A missing score is not a zero score; null keeps it absent at every call site.
+  const value = num(row.last_score ?? row.score ?? row.evaluation?.score ?? row.total_score ?? row.candidate_score ?? row.quality_score, NaN);
+  return Number.isFinite(value) ? value : null;
+}
+
+function scoreText(row: any): string {
+  const score = scoreOf(row);
+  return score == null ? "—" : `${score.toFixed(1)}`;
+}
+
+function scoreOutOf(row: any): string {
+  const score = scoreOf(row);
+  return score == null ? "—" : `${score.toFixed(1)} / 100`;
 }
 
 function instrumentIdOf(row: any): string {
@@ -144,7 +152,7 @@ export function DiscoveryPage() {
       </div>
       <div className="metric-grid metric-grid-four">
         <div className="mini-stat"><span>Ranked</span><strong>{rows.length}</strong><small>in the current result</small></div>
-        <div className="mini-stat"><span>Above 70</span><strong>{rows.filter((row) => scoreOf(row) >= 70).length}</strong><small>high-conviction candidates</small></div>
+        <div className="mini-stat"><span>Above 70</span><strong>{rows.filter((row) => (scoreOf(row) ?? -1) >= 70).length}</strong><small>high-conviction candidates</small></div>
         <div className="mini-stat"><span>Watchlist coverage</span><strong>{rows.filter((row) => row.watchlist_id || row.on_watchlist).length}</strong><small>already tracked</small></div>
         <div className="mini-stat"><span>Engine</span><strong>{title(status.data?.lifecycle || "ready")}</strong><small>{lastCycleAt ? `Last cycle ${timeAgo(lastCycleAt)}` : "Cycle history not exposed"}</small></div>
       </div>
@@ -162,7 +170,7 @@ export function DiscoveryPage() {
             empty={<EmptyState icon={<Radar size={22} />} title={rows.length ? "No candidates match" : "No candidates discovered yet"} description={rows.length ? "Adjust the search." : "Run a discovery cycle to ask the backend for a ranked set."} action={!rows.length ? <Button variant="primary" size="sm" onClick={runCycle} loading={running}>Run first cycle</Button> : undefined} />}
             columns={[
               { key: "instrument", label: "Instrument", sortable: true, sortValue: (row) => instrumentIdOf(row), render: (row) => <div className="identity-cell"><span className="symbol-mark">{String(row.symbol || row.instrument?.symbol || "?").slice(0, 2)}</span><div><strong>{row.instrument?.symbol || row.symbol || instrumentIdOf(row)}</strong><small>{row.instrument?.name || row.name || row.sector || "Candidate"}</small></div></div> },
-              { key: "score", label: "Score", sortable: true, sortValue: scoreOf, render: (row) => <span className="score-pill">{scoreOf(row).toFixed(1)}<small>/100</small></span> },
+              { key: "score", label: "Score", sortable: true, sortValue: (row) => scoreOf(row) ?? -1, render: (row) => <span className="score-pill">{scoreText(row)}{scoreOf(row) == null ? null : <small>/100</small>}</span> },
               { key: "sector", label: "Sector", render: (row) => <Badge tone="neutral">{title(row.sector || "—")}</Badge> },
               { key: "reason", label: "Why it surfaced", render: (row) => <span className="clamp-cell">{row.discovery_reason || row.reason || row.explanation || row.summary || "—"}</span> },
               { key: "created_at", label: "Discovered", sortable: true, sortValue: (row) => row.first_discovered_at || row.created_at || row.discovered_at || "", render: (row) => timeAgo(row.first_discovered_at || row.created_at || row.discovered_at) },
@@ -176,7 +184,7 @@ export function DiscoveryPage() {
         open={!!selected && !addOpen}
         onClose={() => setSelected(null)}
         title={selected ? `${selected.instrument?.symbol || selected.symbol || instrumentIdOf(selected)} candidate` : "Candidate"}
-        description={selected ? `Discovered ${timeAgo(selected.created_at || selected.discovered_at)} · score ${scoreOf(selected).toFixed(1)}` : ""}
+        description={selected ? `Discovered ${timeAgo(selected.created_at || selected.discovered_at)} · score ${scoreText(selected)}` : ""}
         footer={<><Button variant="ghost" onClick={() => setSelected(null)}>Close</Button><Button variant="primary" icon={<Plus size={14} />} onClick={() => { setWatchlistId(lists[0]?.watchlist_id || ""); setAddOpen(true); }} disabled={!lists.length}>Add to watchlist</Button></>}
       >
         {selected && (
@@ -192,7 +200,7 @@ export function DiscoveryPage() {
                 </div>
               </div>
             </div>
-            <aside className="detail-aside"><div className="detail-fact"><span>Score</span><strong>{scoreOf(selected).toFixed(1)} / 100</strong></div><div className="detail-fact"><span>Sector</span><strong>{title(selected.sector || "—")}</strong></div><div className="detail-fact"><span>Candidate ID</span><code>{shortId(selected.candidate_id || "—", 18)}</code></div><div className="detail-fact"><span>Source</span><span>{selected.source || "Discovery engine"}</span></div></aside>
+            <aside className="detail-aside"><div className="detail-fact"><span>Score</span><strong>{scoreOutOf(selected)}</strong></div><div className="detail-fact"><span>Sector</span><strong>{title(selected.sector || "—")}</strong></div><div className="detail-fact"><span>Candidate ID</span><code>{shortId(selected.candidate_id || "—", 18)}</code></div><div className="detail-fact"><span>Source</span><span>{selected.source || "Discovery engine"}</span></div></aside>
           </div>
         )}
       </Modal>
@@ -461,7 +469,7 @@ export function WatchlistsPage() {
                   columns={[
                     { key: "instrument", label: "Instrument", render: (row) => <div className="identity-cell"><span className="symbol-mark">{(row.instrument?.symbol || row.instrument_id || "?").slice(0, 2)}</span><div><strong>{row.instrument?.symbol || row.instrument_id}</strong><small>{row.instrument?.name || "Instrument"}</small></div></div> },
                     { key: "status", label: "Status", render: (row) => <StatusBadge value={row.status || "active"} /> },
-                    { key: "score", label: "Score", render: (row) => <span className="score-pill">{scoreOf(row).toFixed(1)}</span>, sortable: true, sortValue: scoreOf },
+                    { key: "score", label: "Score", render: (row) => <span className="score-pill">{scoreText(row)}</span>, sortable: true, sortValue: (row) => scoreOf(row) ?? -1 },
                     { key: "reason", label: "Reason", render: (row) => <span className="clamp-cell">{row.reason || row.note || "—"}</span> },
                     { key: "added_at", label: "Added", render: (row) => timeAgo(row.added_at || row.created_at) },
                     { key: "action", label: "", align: "right", render: (row) => <button type="button" className="row-action row-action-danger" onClick={() => setRemoveTarget(row)}><Trash2 size={13} /> Remove</button> },
@@ -507,93 +515,4 @@ export function WatchlistsPage() {
   );
 }
 
-export function ForecastsPage() {
-  useDocumentTitle("Forecasts");
-  const toast = useToast();
-  const forecasts = useApi<any>("/market/forecasts?limit=200");
-  const instruments = useApi<any>("/market/instruments?limit=200");
-  const [search, setSearch] = useState("");
-  const [horizon, setHorizon] = useState("");
-  const [createOpen, setCreateOpen] = useState(false);
-  const [instrumentId, setInstrumentId] = useState("");
-  const [forecastHorizon, setForecastHorizon] = useState("next_session");
-  const [saving, setSaving] = useState(false);
-  const [selected, setSelected] = useState<any | null>(null);
-  const rows = arrayFrom(forecasts.data, "forecasts");
-  const filtered = useMemo(() => {
-    const text = search.toLowerCase().trim();
-    return rows.filter((row) => (!text || [row.instrument_id, row.instrument?.symbol, row.model_id].some((value) => String(value || "").toLowerCase().includes(text))) && (!horizon || row.horizon === horizon));
-  }, [rows, search, horizon]);
-
-  const create = async () => {
-    setSaving(true);
-    try {
-      await apiPost("/market/forecasts", { instrument_id: instrumentId, horizon: forecastHorizon });
-      toast.push("Forecast generated and stored by the backend.", "success");
-      setCreateOpen(false);
-      forecasts.refresh();
-    } catch (error: any) {
-      toast.push(error?.detail || "The forecast could not be generated.", "error");
-    } finally { setSaving(false); }
-  };
-
-  return (
-    <div className="page">
-      <PageHeader
-        eyebrow="Intelligence / Forecasts"
-        title={<>Probabilities, <em>with the uncertainty left in.</em></>}
-        description="Every forecast is a stored range with a model identity and data cutoff. It is a simulation input, never a guaranteed price."
-        meta={<><span className="meta-item"><TrendingUp size={13} /> {forecasts.data?.total ?? rows.length} stored</span><span className="meta-item"><BrainCircuit size={13} /> {new Set(rows.map((row) => row.model_id).filter(Boolean)).size} models in view</span></>}
-        actions={<><Button variant="ghost" icon={<RefreshCw size={14} />} onClick={forecasts.refresh}>Refresh</Button><Button variant="primary" icon={<Sparkles size={15} />} onClick={() => setCreateOpen(true)}>Generate forecast</Button></>}
-      />
-      {forecasts.error && <ErrorBlock message={forecasts.error.detail} onRetry={forecasts.refresh} />}
-      <div className="notice-strip"><BrainCircuit size={16} /><span><strong>Uncertainty is part of the answer.</strong> A point estimate without its interval and confidence is not shown as a trading instruction.</span><Badge tone="warn">Simulation input</Badge></div>
-      <Card>
-        <CardHeader title="Stored forecasts" subtitle="Newest first, with model provenance" action={<Badge tone="neutral">{filtered.length} shown</Badge>} />
-        <div className="filter-row">
-          <SearchInput value={search} onChange={setSearch} placeholder="Search instrument or model…" />
-          <SelectInput value={horizon} onChange={(event) => setHorizon(event.target.value)} aria-label="Forecast horizon">
-            <option value="">All horizons</option>
-            {FORECAST_HORIZONS.map((item) => <option key={item} value={item}>{title(item)}</option>)}
-          </SelectInput>
-        </div>
-        {forecasts.loading ? <LoadingBlock rows={5} label="Reading forecast history…" /> : (
-          <DataTable
-            rows={filtered}
-            rowKey={(row) => row.forecast_id || `${row.instrument_id}-${row.created_at}`}
-            onRowClick={setSelected}
-            empty={<EmptyState icon={<TrendingUp size={22} />} title={rows.length ? "No forecasts match" : "No forecasts yet"} description={rows.length ? "Adjust the search or horizon." : "Generate one from an instrument with enough history for the backend model."} action={!rows.length ? <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}>Generate forecast</Button> : undefined} />}
-            columns={[
-              { key: "instrument", label: "Instrument", render: (row) => <div className="identity-cell"><span className="symbol-mark">{(row.instrument?.symbol || row.instrument_id || "?").slice(0, 2)}</span><div><strong>{row.instrument?.symbol || row.instrument_id}</strong><small>{title(row.horizon || "horizon")}</small></div></div>, sortable: true, sortValue: (row) => row.instrument_id || "" },
-              { key: "predicted_price", label: "Point estimate", sortable: true, sortValue: (row) => num(row.predicted_price, 0), render: (row) => <div><strong>{money(row.predicted_price)}</strong><small className="table-sub">return {pct(num(row.predicted_return, 0) * 100)}</small></div> },
-              { key: "interval", label: "Range", render: (row) => <span className="range-cell">{money(row.lower_price)}<i>→</i>{money(row.upper_price)}</span> },
-              { key: "uncertainty", label: "Uncertainty", render: (row) => <Badge tone={String(row.uncertainty).toLowerCase() === "high" ? "bad" : String(row.uncertainty).toLowerCase() === "medium" ? "warn" : "good"}>{title(row.uncertainty || "—")}</Badge> },
-              { key: "model_id", label: "Model", render: (row) => <span className="mono-small">{row.model_id || "—"} <small>v{row.model_version || "?"}</small></span> },
-              { key: "created_at", label: "Created", render: (row) => timeAgo(row.created_at), sortable: true, sortValue: (row) => row.created_at || "" },
-              { key: "status", label: "Status", render: (row) => <StatusBadge value={row.status || "pending"} /> },
-            ]}
-          />
-        )}
-      </Card>
-      <div className="two-col-grid">
-        <Card><CardHeader title="How to read this" subtitle="A forecast is a probability, not a promise." /><div className="contract-list"><div><Check size={15} /><span>Point estimate is the model's centre, not a guaranteed close.</span></div><div><Check size={15} /><span>The interval makes the uncertainty visible; it can miss.</span></div><div><Check size={15} /><span>Model version and data cutoff are retained for evaluation.</span></div><div><Check size={15} /><span>Outcomes are evaluated later against actual observations.</span></div></div></Card>
-        <Card><CardHeader title="Coverage" subtitle="Models in the current result" /><div className="model-list">{Array.from(new Set(rows.map((row) => row.model_id).filter(Boolean))).slice(0, 8).map((model) => <div key={model}><span className="model-dot" /><strong>{model}</strong><small>{rows.filter((row) => row.model_id === model).length} forecasts</small></div>)}</div>{!rows.length && <EmptyState title="No model coverage yet" description="Generate a forecast to populate this view." />}</Card>
-      </div>
-
-      <Modal open={createOpen} onClose={() => setCreateOpen(false)} title="Generate a forecast" description="The backend will use its validated historical window and refuse if the instrument lacks enough data." footer={<><Button variant="ghost" onClick={() => setCreateOpen(false)}>Cancel</Button><Button variant="primary" loading={saving} disabled={!instrumentId} onClick={create}>Generate and store</Button></>}>
-        <div className="form-grid">
-          <Field label="Instrument"><SelectInput value={instrumentId} onChange={(event) => setInstrumentId(event.target.value)}><option value="">Choose an instrument…</option>{arrayFrom(instruments.data, "items").map((item) => <option key={item.instrument_id} value={item.instrument_id}>{item.symbol || item.instrument_id} · {item.name || item.asset_class}</option>)}</SelectInput></Field>
-          <Field label="Horizon"><SelectInput value={forecastHorizon} onChange={(event) => setForecastHorizon(event.target.value)}>{FORECAST_HORIZONS.map((item) => <option key={item} value={item}>{title(item)}</option>)}</SelectInput></Field>
-        </div>
-        <div className="inline-warning">A forecast is generated only from data the backend has already ingested. No future price is read.</div>
-      </Modal>
-
-      <Modal open={!!selected} onClose={() => setSelected(null)} title={selected ? `${selected.instrument?.symbol || selected.instrument_id} · ${title(selected.horizon)}` : "Forecast"} description={selected ? `Model ${selected.model_id || "—"} · ${dateTime(selected.created_at)}` : ""} footer={<Button variant="secondary" onClick={() => setSelected(null)}>Close</Button>}>
-        {selected && <div className="forecast-detail">
-          <div className="forecast-band"><div><span>Lower</span><strong>{money(selected.lower_price)}</strong></div><div className="forecast-band-center"><span>Point estimate</span><strong>{money(selected.predicted_price)}</strong></div><div><span>Upper</span><strong>{money(selected.upper_price)}</strong></div></div>
-          <div className="detail-grid"><div className="detail-main"><div className="fact-list"><div><span>Predicted return</span><strong>{pct(num(selected.predicted_return, 0) * 100)}</strong></div><div><span>Probability up</span><strong>{pctUnsigned(num(selected.p_up, 0) * 100)}</strong></div><div><span>Probability down</span><strong>{pctUnsigned(num(selected.p_down, 0) * 100)}</strong></div><div><span>Probability sideways</span><strong>{pctUnsigned(num(selected.p_sideways, 0) * 100)}</strong></div><div><span>Regime</span><strong>{title(selected.regime || "—")}</strong></div><div><span>Data quality</span><strong>{title(selected.data_quality || "—")}</strong></div></div></div><aside className="detail-aside"><div className="detail-fact"><span>Uncertainty</span><Badge tone={String(selected.uncertainty).toLowerCase() === "high" ? "bad" : "warn"}>{title(selected.uncertainty || "—")}</Badge></div><div className="detail-fact"><span>Interval width</span><strong>{pct(num(selected.uncertainty_width, 0) * 100)}</strong></div><div className="detail-fact"><span>Target</span><strong>{dateTime(selected.target_at)}</strong></div><div className="detail-fact"><span>Cutoff</span><strong>{dateTime(selected.data_cutoff)}</strong></div><div className="detail-fact"><span>Forecast ID</span><code>{shortId(selected.forecast_id, 18)}</code></div></aside></div>
-        </div>}
-      </Modal>
-    </div>
-  );
-}
+export { ForecastsPage } from "./ForecastModels";

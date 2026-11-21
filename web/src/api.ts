@@ -11,6 +11,12 @@ const TOKEN_KEY = "novamarket.apiToken";
 const configuredBase = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
 export const API_BASE = configuredBase;
 
+// The local Vite dev proxy supplies the loopback admin credential.  The token
+// never reaches the browser bundle, so tabs do not prompt for it.
+export const LOCAL_ADMIN_PROXY =
+  import.meta.env.DEV &&
+  ["127.0.0.1", "localhost", "[::1]"].includes(window.location.hostname);
+
 export class ApiError extends Error {
   status: number;
   detail: string;
@@ -45,6 +51,10 @@ export function setToken(token: string): void {
   } catch {
     /* session storage can be unavailable in hardened browsers */
   }
+}
+
+export function hasApiAccess(): boolean {
+  return Boolean(getToken()) || LOCAL_ADMIN_PROXY;
 }
 
 function endpoint(path: string, params?: Record<string, string | number | boolean | null | undefined>): string {

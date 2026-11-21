@@ -57,6 +57,7 @@ from novacontrol.novamarket.marketdata.models import (
     DataInterval,
     DataQuality,
     Freshness,
+    HistoryIngestReport,
     IngestionReport,
     Instrument,
     InstrumentIngestResult,
@@ -160,6 +161,8 @@ class MarketDataEngine:
         # report describes THIS run, not the process lifetime.
         self._provider_attempts = 0
         self._provider_failures = 0
+        self._provider_retries = 0
+        self._retries_by_provider: dict[str, int] = {}
 
     # -- configuration --------------------------------------------------------
 
@@ -185,6 +188,25 @@ class MarketDataEngine:
                     clock=self._monotonic,
                 ),
             )
+            setter = getattr(adapter, "set_retry_observer", None)
+            if callable(setter):
+                setter(self._record_retry)
+
+    def _record_retry(
+        self,
+        provider: str,
+        attempt: int,
+        delay: float,
+        error: ProviderError,
+    ) -> None:
+        """Count adapter retries without changing the adapter's policy."""
+        key = str(provider or "").strip().lower()
+        self._provider_retries += 1
+        self._retries_by_provider[key] = self._retries_by_provider.get(key, 0) + 1
+
+    def provider_retry_counts(self) -> dict[str, int]:
+        """Process-lifetime retry evidence, by provider."""
+        return dict(sorted(self._retries_by_provider.items()))
 
     def reconfigure(
         self,
@@ -1046,7 +1068,24 @@ class MarketDataEngine:
                 instrument_id=instrument.instrument_id,
                 provider=adapter.name,
                 quality=observation.quality.value,
+                freshness=observation.freshness.value,
+                observed_at=observation.observed_at.isoformat(),
+                retrieved_at=observation.retrieved_at.isoformat(),
+                source_timezone=observation.source_timezone,
+                age_seconds=round(
+                    max((now - observation.observed_at).total_seconds(), 0.0), 3
+                ),
                 duplicate=append.duplicate,
+            )
+            await self._publish(
+                "novamarket.data.validated",
+                instrument_id=instrument.instrument_id,
+                provider=adapter.name,
+                quality=observation.quality.value,
+                freshness=observation.freshness.value,
+                observed_at=observation.observed_at.isoformat(),
+                retrieved_at=observation.retrieved_at.isoformat(),
+                source_timezone=observation.source_timezone,
             )
             if observation.freshness is Freshness.STALE:
                 await self._publish(
@@ -1178,6 +1217,145 @@ class MarketDataEngine:
                 break
             errors.append(f"{adapter.name}: every bar failed validation")
         return inserted, duplicate, rejected, provider_name, errors
+
+    async def ingest_history(
+        self,
+        instrument_id: str,
+        interval: DataInterval | str,
+        *,
+        start: datetime,
+        end: datetime,
+        provider: str | None = None,
+        allow_partial: bool | None = None,
+        limit: int = 5_000,
+    ) -> HistoryIngestReport:
+        """Acquire one bounded historical date range through the existing pipeline.
+
+        This is PI-02's acquisition door.  It does not add a collector: the
+        adapter is called through ``_provider_call`` (retry, rate limit, circuit
+        breaker, health and retrieval log), and every row passes the SAME
+        ``_normalize_bar`` / ``_assess_bar`` / ``append_bar`` path as background
+        ingestion.  Repeated calls are idempotent because the store's unique key
+        keeps the first observation and records conflicts.
+        """
+        canonical = DataInterval(interval)
+        if canonical is DataInterval.SPOT:
+            raise MarketDataError("historical acquisition needs a bar interval, not SPOT")
+        if start.tzinfo is None or end.tzinfo is None:
+            raise MarketDataError("historical acquisition bounds must be timezone-aware")
+        if end < start:
+            raise MarketDataError("historical acquisition end precedes start")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise MarketDataError("historical acquisition limit must be a positive integer")
+        started_at = self._clock()
+        instrument = self.get_instrument(instrument_id)
+        inserted = duplicate = rejected = outside = received = 0
+        provider_name = ""
+        errors: list[str] = []
+        allow = self._ingestion.allow_partial_bars if allow_partial is None else allow_partial
+        adapters: tuple[MarketDataAdapter, ...]
+        if provider:
+            try:
+                selected = self._adapter(provider)
+            except MarketDataError as exc:
+                errors.append(str(exc))
+                adapters = ()
+            else:
+                adapters = (selected,)
+        else:
+            adapters = self._compatible(instrument)
+            if not adapters:
+                errors.append(
+                    f"no compatible OHLCV provider is enabled for "
+                    f"{instrument.instrument_id}"
+                )
+        for adapter in adapters:
+            if not adapter.capabilities.supports("ohlcv"):
+                errors.append(f"{adapter.name}: provider does not supply OHLCV")
+                continue
+            if canonical not in adapter.capabilities.intervals:
+                errors.append(
+                    f"{adapter.name}: interval {canonical.value} is unsupported"
+                )
+                continue
+            try:
+                rows = await self._provider_call(
+                    adapter,
+                    "ohlcv",
+                    instrument.instrument_id,
+                    lambda: adapter.fetch_ohlcv(
+                        instrument, canonical, start=start, end=end, limit=limit
+                    ),
+                )
+            except CircuitOpenError as exc:
+                errors.append(f"{adapter.name}: {exc}")
+                continue
+            except ProviderError as exc:
+                errors.append(f"{adapter.name}: {exc}")
+                continue
+            if not rows:
+                errors.append(f"{adapter.name}: no bars returned")
+                continue
+            received += len(rows)
+            accepted = 0
+            for row in rows:
+                try:
+                    bar = self._normalize_bar(instrument, adapter, row, started_at)
+                    if bar is None:
+                        continue
+                    if bar.partial and not allow:
+                        rejected += 1
+                        continue
+                    bar = self._assess_bar(instrument, adapter, bar, started_at)
+                except (ProviderInvalidResponseError, ValueError, TypeError) as exc:
+                    errors.append(f"{adapter.name}: malformed bar skipped: {exc}")
+                    rejected += 1
+                    continue
+                if bar.observed_at < start or bar.observed_at > end:
+                    outside += 1
+                    continue
+                try:
+                    append = self.store.append_bar(bar)
+                except MarketDataStoreError as exc:
+                    self._last_store_error = str(exc)
+                    errors.append(f"{adapter.name}: store refused a bar: {exc}")
+                    break
+                if bar.quality is DataQuality.INVALID:
+                    rejected += 1
+                    await self._publish(
+                        "novamarket.data.rejected",
+                        instrument_id=instrument.instrument_id,
+                        provider=adapter.name,
+                        reason="; ".join(bar.reasons)
+                        or "structural OHLCV validation failed",
+                    )
+                    continue
+                accepted += 1
+                if append.inserted:
+                    inserted += 1
+                else:
+                    duplicate += 1
+            if accepted:
+                provider_name = adapter.name
+                self.invalidate(instrument.instrument_id)
+                break
+            errors.append(f"{adapter.name}: every historical bar failed validation")
+        finished_at = self._clock()
+        return HistoryIngestReport(
+            instrument_id=instrument.instrument_id,
+            interval=canonical,
+            requested_start=start,
+            requested_end=end,
+            started_at=started_at,
+            finished_at=finished_at,
+            provider=provider_name,
+            bars_received=received,
+            bars_inserted=inserted,
+            bars_duplicate=duplicate,
+            bars_rejected=rejected,
+            bars_outside_range=outside,
+            errors=tuple(errors),
+        )
 
     # -- normalization --------------------------------------------------------
 
@@ -1648,6 +1826,7 @@ class MarketDataEngine:
             "last_event_error": self._last_event_error,
             "last_report": self._last_report.to_dict() if self._last_report else None,
             "cycles": self._cycles,
+            "provider_retries": dict(sorted(self._retries_by_provider.items())),
         }
 
     def contract(self) -> dict[str, Any]:

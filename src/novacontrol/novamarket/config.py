@@ -32,6 +32,7 @@ from novacontrol.novamarket.contracts import (
     MARKET_SCHEMA_VERSION,
 )
 from novacontrol.novamarket.marketdata.freshness import FreshnessSettings
+from novacontrol.novamarket.marketdata.gateway import GatewaySettings
 from novacontrol.novamarket.marketdata.quality import QualitySettings
 from novacontrol.novamarket.marketdata.settings import (
     CacheSettings,
@@ -41,6 +42,7 @@ from novacontrol.novamarket.marketdata.settings import (
 #: The operational mode this build implements. ``paper`` and ``live`` are
 #: deliberately absent from the allowed set; reserved modes are named below.
 OPERATIONAL_MODES: tuple[str, ...] = ("observe",)
+FEATURE_RESOLUTIONS: tuple[str, ...] = ("1m", "5m", "15m", "30m", "1h", "1d", "1wk", "1mo")
 
 #: Modes a later phase will introduce, and the phase (or reason) responsible.
 RESERVED_MODES: dict[str, str] = {
@@ -210,6 +212,170 @@ def _has_secret_shaped_key(key: str) -> bool:
 
 
 @dataclass(frozen=True, slots=True)
+class FeatureSettings:
+    """PI-04 generation defaults; all limits are bounded and secret-free."""
+
+    enabled: bool = True
+    default_profile: str = "swing"
+    default_timeframes: tuple[str, ...] = ("1d", "1wk")
+    max_bars: int = 500
+    cache_size: int = 256
+    include_context: bool = True
+    include_fundamentals: bool = True
+    include_news: bool = True
+    missing_policy: str = "median"
+    selection_correlation_threshold: float = 0.95
+    selection_missing_threshold: float = 0.5
+    strong_adx: float = 25.0
+    trend_adx: float = 20.0
+    high_volatility_range_expansion: float = 1.25
+    low_volatility_range_expansion: float = 0.75
+
+    FIELDS: ClassVar[tuple[str, ...]] = (
+        "enabled",
+        "default_profile",
+        "default_timeframes",
+        "max_bars",
+        "cache_size",
+        "include_context",
+        "include_fundamentals",
+        "include_news",
+        "missing_policy",
+        "selection_correlation_threshold",
+        "selection_missing_threshold",
+        "strong_adx",
+        "trend_adx",
+        "high_volatility_range_expansion",
+        "low_volatility_range_expansion",
+    )
+
+    def __post_init__(self) -> None:
+        for name in ("enabled", "include_context", "include_fundamentals", "include_news"):
+            if not isinstance(getattr(self, name), bool):
+                raise ConfigurationError(f"features.{name} must be a boolean")
+        profile = str(self.default_profile or "").strip().lower()
+        if profile not in ("intraday", "swing", "long_term"):
+            raise ConfigurationError(
+                "features.default_profile must be intraday, swing or long_term"
+            )
+        object.__setattr__(self, "default_profile", profile)
+        if isinstance(self.default_timeframes, str) or not isinstance(
+            self.default_timeframes, Sequence
+        ):
+            raise ConfigurationError("features.default_timeframes must be a list")
+        timeframes = tuple(str(item).strip().lower() for item in self.default_timeframes if str(item).strip())
+        if not timeframes:
+            raise ConfigurationError("features.default_timeframes may not be empty")
+        if len(timeframes) > 8:
+            raise ConfigurationError("features.default_timeframes supports at most 8 entries")
+        unsupported = [item for item in timeframes if item not in FEATURE_RESOLUTIONS]
+        if unsupported:
+            raise ConfigurationError(
+                f"features.default_timeframes contains unsupported resolutions {unsupported!r}"
+            )
+        object.__setattr__(self, "default_timeframes", tuple(dict.fromkeys(timeframes)))
+        for name, minimum, maximum in (
+            ("max_bars", 30, 20_000),
+            ("cache_size", 0, 2048),
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ConfigurationError(f"features.{name} must be an integer")
+            if not minimum <= value <= maximum:
+                raise ConfigurationError(
+                    f"features.{name} must be between {minimum} and {maximum}"
+                )
+        policy = str(self.missing_policy or "").strip().lower()
+        if policy not in ("error", "drop", "mean", "median", "zero"):
+            raise ConfigurationError(
+                "features.missing_policy must be error, drop, mean, median or zero"
+            )
+        object.__setattr__(self, "missing_policy", policy)
+        for name in (
+            "selection_correlation_threshold",
+            "selection_missing_threshold",
+            "strong_adx",
+            "trend_adx",
+            "high_volatility_range_expansion",
+            "low_volatility_range_expansion",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ConfigurationError(f"features.{name} must be a number")
+            if value < 0:
+                raise ConfigurationError(f"features.{name} may not be negative")
+            object.__setattr__(self, name, float(value))
+        if self.trend_adx > self.strong_adx:
+            raise ConfigurationError("features.trend_adx may not exceed features.strong_adx")
+        if self.low_volatility_range_expansion > self.high_volatility_range_expansion:
+            raise ConfigurationError(
+                "features.low_volatility_range_expansion may not exceed the high threshold"
+            )
+        for name in ("selection_correlation_threshold", "selection_missing_threshold"):
+            if getattr(self, name) > 1.0:
+                raise ConfigurationError(f"features.{name} must be within [0, 1]")
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any] | None) -> "FeatureSettings":
+        if data is None:
+            return cls()
+        if isinstance(data, cls):
+            return data
+        if not isinstance(data, Mapping):
+            raise ConfigurationError("features must be an object")
+        unknown = sorted(set(data) - set(cls.FIELDS))
+        if unknown:
+            raise ConfigurationError(
+                f"unknown features field(s): {', '.join(unknown)}; allowed: {', '.join(cls.FIELDS)}"
+            )
+        defaults = cls()
+        return cls(
+            enabled=data.get("enabled", defaults.enabled),
+            default_profile=data.get("default_profile", defaults.default_profile),
+            default_timeframes=data.get("default_timeframes", defaults.default_timeframes),
+            max_bars=data.get("max_bars", defaults.max_bars),
+            cache_size=data.get("cache_size", defaults.cache_size),
+            include_context=data.get("include_context", defaults.include_context),
+            include_fundamentals=data.get("include_fundamentals", defaults.include_fundamentals),
+            include_news=data.get("include_news", defaults.include_news),
+            missing_policy=data.get("missing_policy", defaults.missing_policy),
+            selection_correlation_threshold=data.get(
+                "selection_correlation_threshold", defaults.selection_correlation_threshold
+            ),
+            selection_missing_threshold=data.get(
+                "selection_missing_threshold", defaults.selection_missing_threshold
+            ),
+            strong_adx=data.get("strong_adx", defaults.strong_adx),
+            trend_adx=data.get("trend_adx", defaults.trend_adx),
+            high_volatility_range_expansion=data.get(
+                "high_volatility_range_expansion", defaults.high_volatility_range_expansion
+            ),
+            low_volatility_range_expansion=data.get(
+                "low_volatility_range_expansion", defaults.low_volatility_range_expansion
+            ),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "default_profile": self.default_profile,
+            "default_timeframes": list(self.default_timeframes),
+            "max_bars": self.max_bars,
+            "cache_size": self.cache_size,
+            "include_context": self.include_context,
+            "include_fundamentals": self.include_fundamentals,
+            "include_news": self.include_news,
+            "missing_policy": self.missing_policy,
+            "selection_correlation_threshold": self.selection_correlation_threshold,
+            "selection_missing_threshold": self.selection_missing_threshold,
+            "strong_adx": self.strong_adx,
+            "trend_adx": self.trend_adx,
+            "high_volatility_range_expansion": self.high_volatility_range_expansion,
+            "low_volatility_range_expansion": self.low_volatility_range_expansion,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class NovaMarketConfig:
     """The resolved NovaMarket configuration.
 
@@ -230,6 +396,8 @@ class NovaMarketConfig:
     freshness: FreshnessSettings = field(default_factory=FreshnessSettings)
     quality: QualitySettings = field(default_factory=QualitySettings)
     cache: CacheSettings = field(default_factory=CacheSettings)
+    gateway: GatewaySettings = field(default_factory=GatewaySettings)
+    features: FeatureSettings = field(default_factory=FeatureSettings)
     history_page_limit: int = 200
     log_level: str = "INFO"
     emit_events: bool = True
@@ -260,6 +428,8 @@ class NovaMarketConfig:
         "freshness",
         "quality",
         "cache",
+        "gateway",
+        "features",
         "history_page_limit",
         "log_level",
         "emit_events",
@@ -402,6 +572,8 @@ class NovaMarketConfig:
             ("freshness", FreshnessSettings),
             ("quality", QualitySettings),
             ("cache", CacheSettings),
+            ("gateway", GatewaySettings),
+            ("features", FeatureSettings),
         ):
             if not isinstance(getattr(self, name), expected):
                 raise ConfigurationError(f"{name} must be a {expected.__name__} value")
@@ -409,6 +581,11 @@ class NovaMarketConfig:
             raise ConfigurationError(
                 "ingestion.max_concurrency may not exceed "
                 "resources.max_concurrent_fetches"
+            )
+        if self.gateway.interval_seconds >= self.gateway.general_refresh_floor_seconds:
+            raise ConfigurationError(
+                "gateway.interval_seconds must be shorter than the preserved "
+                "general refresh floor"
             )
         if isinstance(self.history_page_limit, bool) or not isinstance(
             self.history_page_limit, int
@@ -472,6 +649,8 @@ class NovaMarketConfig:
             "freshness": self.freshness.to_dict(),
             "quality": self.quality.to_dict(),
             "cache": self.cache.to_dict(),
+            "gateway": self.gateway.to_dict(),
+            "features": self.features.to_dict(),
             "history_page_limit": self.history_page_limit,
             "log_level": self.log_level,
             "emit_events": self.emit_events,
@@ -559,6 +738,8 @@ class NovaMarketConfig:
         freshness_value = data.get("freshness")
         quality_value = data.get("quality")
         cache_value = data.get("cache")
+        gateway_value = data.get("gateway")
+        feature_value = data.get("features")
         return cls(
             enabled=data.get("enabled", defaults.enabled),
             mode=data.get("mode", defaults.mode),
@@ -589,6 +770,16 @@ class NovaMarketConfig:
                 cache_value
                 if isinstance(cache_value, CacheSettings)
                 else CacheSettings.from_mapping(cache_value)
+            ),
+            gateway=(
+                gateway_value
+                if isinstance(gateway_value, GatewaySettings)
+                else GatewaySettings.from_mapping(gateway_value)
+            ),
+            features=(
+                feature_value
+                if isinstance(feature_value, FeatureSettings)
+                else FeatureSettings.from_mapping(feature_value)
             ),
             history_page_limit=data.get(
                 "history_page_limit", defaults.history_page_limit
@@ -740,6 +931,18 @@ class NovaMarketConfig:
                 "type": "object",
                 "default": CacheSettings().to_dict(),
                 "notes": "quote/instrument/provider cache lifetimes",
+            },
+            {
+                "field": "gateway",
+                "type": "object",
+                "default": GatewaySettings().to_dict(),
+                "notes": "opt-in intraday path; preserves the 900-second general floor",
+            },
+            {
+                "field": "features",
+                "type": "object",
+                "default": FeatureSettings().to_dict(),
+                "notes": "PI-04 feature generation, regime thresholds and preprocessing defaults",
             },
             {
                 "field": "history_page_limit",

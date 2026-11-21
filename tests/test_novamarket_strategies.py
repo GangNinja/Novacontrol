@@ -506,6 +506,21 @@ class CategoryTests(Harness):
         signal = body["signals"][0]
         self.assertEqual(signal["signal_type"], "buy")
         self.assertTrue(signal["forecast_references"])
+        self.assertEqual(signal["horizon_days"], 3)
+
+    async def test_forecast_strategy_holding_period_follows_forecast_horizon(self) -> None:
+        self.set_market([100.0] * 70 + [110.0])
+        sid = await self.make(
+            "forecast_assisted",
+            forecast_horizon="one_month",
+            horizon_days=5,
+        )
+        body = await self.strategies.evaluate(
+            sid, self.portfolio_id, instrument_ids=["XNSE:GAMMA"]
+        )
+        signal = body["signals"][0]
+        self.assertEqual(signal["signal_type"], "buy")
+        self.assertEqual(signal["horizon_days"], 30)
 
     async def test_forecast_strategy_refuses_stale_forecasts(self) -> None:
         self.set_market([100.0] * 70 + [110.0])

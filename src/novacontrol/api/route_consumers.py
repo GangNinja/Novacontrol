@@ -43,7 +43,10 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("POST", "/ask"): "renderChatResult",  # envelope branches by route/intent
     ("POST", "/brain/decide"): "no-render",  # routing-explorer.js renders the trace itself
     ("POST", "/explore"): "renderExplore",
-    ("GET", "/explore/trending"): "no-render",  # example chips fetched by js/routing-explorer.js sibling app.js loader, not run()
+    (
+        "GET",
+        "/explore/trending",
+    ): "no-render",  # example chips fetched by js/routing-explorer.js sibling app.js loader, not run()
     ("POST", "/command/plan"): "renderCommand",
     ("POST", "/command/execute"): "renderCommand",
     ("POST", "/desktop/plan"): "renderCommand",
@@ -103,7 +106,10 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("GET", "/health"): "no-render",  # infrastructure probe
     ("POST", "/improve"): "no-render",  # raw plan API (CLI/demos only)
     ("GET", "/phone/status"): "no-render",  # bridge status (CLI/demos only)
-    ("POST", "/phone/connect"): "renderPhoneStatus",  # Connect Phone button - pairing flow, bridge-shaped result
+    (
+        "POST",
+        "/phone/connect",
+    ): "renderPhoneStatus",  # Connect Phone button - pairing flow, bridge-shaped result
     ("GET", "/vision/status"): "no-render",  # Vision panel toast-only status check
     ("POST", "/vision/model"): "no-render",  # vision model card connect button; refreshes card
     ("POST", "/vision/model/clear"): "no-render",  # vision model card remove button; refreshes card
@@ -148,6 +154,12 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("GET", "/market/autonomy/decisions/signals"): "no-render",
     ("GET", "/market/autonomy/decisions/proposals"): "no-render",
     ("GET", "/market/autonomy/decisions/proposals/{proposal_id}"): "no-render",
+    ("GET", "/market/autonomy/decisions/predictions"): "no-render",
+    ("GET", "/market/autonomy/decisions/predictions/{decision_id}"): "no-render",
+    ("GET", "/market/autonomy/decisions/outcomes"): "no-render",
+    ("GET", "/market/autonomy/decisions/forecast-policy"): "no-render",
+    ("PUT", "/market/autonomy/decisions/forecast-policy"): "no-render",
+    ("POST", "/market/autonomy/decisions/outcomes/run"): "no-render",
     ("POST", "/market/autonomy/decisions/run"): "no-render",
     ("GET", "/market/autonomy/executions/contracts"): "no-render",
     ("GET", "/market/autonomy/executions/status"): "no-render",
@@ -248,14 +260,26 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     # API is the caller here (no panel renders these responses yet), so they are
     # declared no-render with the rest of the panel-internal surface.
     ("GET", "/novaforge/sessions/{session_id}/outcomes"): "no-render",  # outcome state read
-    ("POST", "/novaforge/sessions/{session_id}/outcomes/verify"): "no-render",  # verify a plan's steps
-    ("POST", "/novaforge/sessions/{session_id}/outcomes/recover"): "no-render",  # apply one recovery
-    ("POST", "/novaforge/sessions/{session_id}/outcomes/cancel"): "no-render",  # cancel verification
+    (
+        "POST",
+        "/novaforge/sessions/{session_id}/outcomes/verify",
+    ): "no-render",  # verify a plan's steps
+    (
+        "POST",
+        "/novaforge/sessions/{session_id}/outcomes/recover",
+    ): "no-render",  # apply one recovery
+    (
+        "POST",
+        "/novaforge/sessions/{session_id}/outcomes/cancel",
+    ): "no-render",  # cancel verification
     # NF-22: the autonomous-run card (JARVIS panel) polls its own state and its
     # buttons repaint in place, so the panel renders these responses itself rather
     # than through the generic result renderer.
     ("GET", "/novaforge/sessions/{session_id}/autonomy"): "no-render",  # autonomy card poll
-    ("POST", "/novaforge/sessions/{session_id}/autonomy/start"): "no-render",  # Start Autonomous Run
+    (
+        "POST",
+        "/novaforge/sessions/{session_id}/autonomy/start",
+    ): "no-render",  # Start Autonomous Run
     ("POST", "/novaforge/sessions/{session_id}/autonomy/pause"): "no-render",  # Pause Run button
     ("POST", "/novaforge/sessions/{session_id}/autonomy/resume"): "no-render",  # Resume Run button
     ("POST", "/novaforge/sessions/{session_id}/autonomy/cancel"): "no-render",  # Cancel Run button
@@ -264,7 +288,10 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("POST", "/novaforge/sessions/{session_id}/verify"): "no-render",  # Verify button
     ("POST", "/novaforge/sessions/{session_id}/loop"): "no-render",  # Run Closed Loop button
     ("POST", "/novaforge/sessions/{session_id}/loop/cancel"): "no-render",  # Stop Loop button
-    ("POST", "/novaforge/sessions/{session_id}/vision/interpret"): "no-render",  # Describe Frame button
+    (
+        "POST",
+        "/novaforge/sessions/{session_id}/vision/interpret",
+    ): "no-render",  # Describe Frame button
     ("GET", "/novaforge/sessions/{session_id}/verification"): "no-render",  # verdict card
     ("GET", "/novaforge/sessions"): "no-render",  # session history list
     ("POST", "/novaforge/sessions"): "no-render",  # Start button
@@ -306,7 +333,10 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("GET", "/novaforge/coach"): "no-render",  # capability card
     ("POST", "/novaforge/coach/analyse"): "no-render",  # Analyse button + findings
     ("GET", "/novaforge/coach/recommendations"): "no-render",  # persisted decisions
-    ("POST", "/novaforge/coach/recommendations/{recommendation_id}"): "no-render",  # approve/reject a recommendation
+    (
+        "POST",
+        "/novaforge/coach/recommendations/{recommendation_id}",
+    ): "no-render",  # approve/reject a recommendation
     ("GET", "/novaforge/experiments"): "no-render",  # experiment history list
     ("POST", "/novaforge/experiments"): "no-render",  # Propose button
     ("GET", "/novaforge/experiments/{experiment_id}"): "no-render",  # live poll + spec review
@@ -398,7 +428,10 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("GET", "/bugs"): "no-render",  # Bug log rows rendered by app.js renderBugs, not run()
     ("POST", "/bugs/{bug_id}/fix"): "no-render",  # Mark-fixed row button re-fetches /bugs
     ("POST", "/bugs/clear-fixed"): "no-render",  # Clear Fixed button re-fetches /bugs
-    ("POST", "/agent/run"): "no-render",  # agentic loop (API/CLI surface; UI lands with the JARVIS panel)
+    (
+        "POST",
+        "/agent/run",
+    ): "no-render",  # agentic loop (API/CLI surface; UI lands with the JARVIS panel)
     ("GET", "/agent/metrics"): "no-render",  # evaluation ledger metrics
     ("GET", "/agent/knowledge"): "no-render",  # application knowledge graph dump
     ("GET", "/plugins"): "no-render",  # plugin marketplace API (CLI only)
@@ -588,6 +621,143 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("GET", "/market/watchlists/{watchlist_id}"): "no-render",
     ("POST", "/market/watchlists/{watchlist_id}/members"): "no-render",
     ("DELETE", "/market/watchlists/{watchlist_id}/members/{instrument_id}"): "no-render",
+    # PI-20 is consumed by the React Prediction Intelligence workspace, not by
+    # the static render-panels dispatcher; every row stays non-render there.
+    ("GET", "/market/intelligence/status"): "no-render",
+    ("GET", "/market/portfolio-management/status"): "no-render",
+    ("GET", "/market/portfolio-management/contracts"): "no-render",
+    ("GET", "/market/portfolio-management/navigation"): "no-render",
+    ("GET", "/market/portfolio-management/config"): "no-render",
+    ("PUT", "/market/portfolio-management/config"): "no-render",
+    ("POST", "/market/portfolio-management/review"): "no-render",
+    ("GET", "/market/portfolio-management/cycles"): "no-render",
+    ("GET", "/market/portfolio-management/cycles/{cycle_id}"): "no-render",
+    ("GET", "/market/portfolio-management/cycles/{cycle_id}/events"): "no-render",
+    ("POST", "/market/portfolio-management/cycles/{cycle_id}/handoff"): "no-render",
+    ("POST", "/market/portfolio-management/cycles/{cycle_id}/reconcile"): "no-render",
+    ("POST", "/market/portfolio-management/recover"): "no-render",
+    ("GET", "/market/portfolio-management/portfolios/{portfolio_id}/snapshot"): "no-render",
+    ("GET", "/market/portfolio-management/portfolios/{portfolio_id}/positions"): "no-render",
+    ("GET", "/market/portfolio-management/portfolios/{portfolio_id}/opportunities"): "no-render",
+    ("GET", "/market/portfolio-management/portfolios/{portfolio_id}/decisions"): "no-render",
+    ("GET", "/market/portfolio-management/portfolios/{portfolio_id}/capital"): "no-render",
+    ("GET", "/market/portfolio-management/portfolios/{portfolio_id}/cash"): "no-render",
+    ("GET", "/market/portfolio-management/portfolios/{portfolio_id}/exposure"): "no-render",
+    ("GET", "/market/portfolio-management/portfolios/{portfolio_id}/rebalancing"): "no-render",
+    ("GET", "/market/portfolio-management/portfolios/{portfolio_id}/analytics"): "no-render",
+    # PI-22 is consumed by the React Risk Intelligence workspace.
+    ("GET", "/market/risk-intelligence/status"): "no-render",
+    ("GET", "/market/risk-intelligence/contracts"): "no-render",
+    ("GET", "/market/risk-intelligence/navigation"): "no-render",
+    ("GET", "/market/risk-intelligence/config"): "no-render",
+    ("PUT", "/market/risk-intelligence/config"): "no-render",
+    ("POST", "/market/risk-intelligence/analyze"): "no-render",
+    ("GET", "/market/risk-intelligence/portfolios/{portfolio_id}/overview"): "no-render",
+    ("GET", "/market/risk-intelligence/portfolios/{portfolio_id}/positions"): "no-render",
+    ("GET", "/market/risk-intelligence/portfolios/{portfolio_id}/concentration"): "no-render",
+    ("GET", "/market/risk-intelligence/portfolios/{portfolio_id}/correlation"): "no-render",
+    ("GET", "/market/risk-intelligence/portfolios/{portfolio_id}/volatility"): "no-render",
+    ("GET", "/market/risk-intelligence/portfolios/{portfolio_id}/drawdown"): "no-render",
+    ("GET", "/market/risk-intelligence/portfolios/{portfolio_id}/liquidity"): "no-render",
+    ("GET", "/market/risk-intelligence/portfolios/{portfolio_id}/regime"): "no-render",
+    ("GET", "/market/risk-intelligence/portfolios/{portfolio_id}/history"): "no-render",
+    ("GET", "/market/risk-intelligence/portfolios/{portfolio_id}/trend"): "no-render",
+    (
+        "GET",
+        "/market/risk-intelligence/portfolios/{portfolio_id}/recommendations",
+    ): "no-render",
+    ("GET", "/market/risk-intelligence/alerts"): "no-render",
+    ("POST", "/market/risk-intelligence/alerts/{alert_id}/action"): "no-render",
+    ("GET", "/market/risk-intelligence/scenarios"): "no-render",
+    ("POST", "/market/risk-intelligence/scenarios"): "no-render",
+    (
+        "POST",
+        "/market/risk-intelligence/portfolios/{portfolio_id}/scenarios/run",
+    ): "no-render",
+    (
+        "GET",
+        "/market/risk-intelligence/portfolios/{portfolio_id}/scenario-runs",
+    ): "no-render",
+    (
+        "GET",
+        "/market/risk-intelligence/portfolios/{portfolio_id}/stress-tests",
+    ): "no-render",
+    (
+        "POST",
+        "/market/risk-intelligence/portfolios/{portfolio_id}/stress-tests",
+    ): "no-render",
+    ("POST", "/market/risk-intelligence/recover"): "no-render",
+    # PI-23 is consumed by the React Forecast Optimization workspace.
+    ("GET", "/market/forecast-intelligence/status"): "no-render",
+    ("GET", "/market/forecast-intelligence/contracts"): "no-render",
+    ("GET", "/market/forecast-intelligence/navigation"): "no-render",
+    ("GET", "/market/forecast-intelligence/config"): "no-render",
+    ("PUT", "/market/forecast-intelligence/config"): "no-render",
+    ("GET", "/market/forecast-intelligence/registry"): "no-render",
+    ("GET", "/market/forecast-intelligence/history"): "no-render",
+    ("GET", "/market/forecast-intelligence/overview"): "no-render",
+    ("GET", "/market/forecast-intelligence/comparison/{instrument_id}"): "no-render",
+    ("GET", "/market/forecast-intelligence/horizons/{instrument_id}"): "no-render",
+    ("GET", "/market/forecast-intelligence/regimes/{instrument_id}"): "no-render",
+    ("POST", "/market/forecast-intelligence/instruments"): "no-render",
+    ("POST", "/market/forecast-intelligence/evaluate"): "no-render",
+    ("POST", "/market/forecast-intelligence/select"): "no-render",
+    ("POST", "/market/forecast-intelligence/calibration"): "no-render",
+    ("POST", "/market/forecast-intelligence/uncertainty"): "no-render",
+    ("POST", "/market/forecast-intelligence/disagreement"): "no-render",
+    ("POST", "/market/forecast-intelligence/consistency"): "no-render",
+    ("POST", "/market/forecast-intelligence/drift"): "no-render",
+    ("POST", "/market/forecast-intelligence/degradation"): "no-render",
+    ("POST", "/market/forecast-intelligence/weights"): "no-render",
+    ("POST", "/market/forecast-intelligence/reliability"): "no-render",
+    ("POST", "/market/forecast-intelligence/fallback"): "no-render",
+    ("POST", "/market/forecast-intelligence/analyze"): "no-render",
+    ("GET", "/market/forecast-intelligence/health"): "no-render",
+    ("GET", "/market/event-intelligence/status"): "no-render",
+    ("GET", "/market/event-intelligence/contracts"): "no-render",
+    ("GET", "/market/event-intelligence/navigation"): "no-render",
+    ("GET", "/market/event-intelligence/config"): "no-render",
+    ("PUT", "/market/event-intelligence/config"): "no-render",
+    ("GET", "/market/event-intelligence/events"): "no-render",
+    ("GET", "/market/event-intelligence/events/{event_id}"): "no-render",
+    ("GET", "/market/event-intelligence/timeline"): "no-render",
+    ("POST", "/market/event-intelligence/relevance"): "no-render",
+    ("POST", "/market/event-intelligence/impact"): "no-render",
+    ("POST", "/market/event-intelligence/warnings"): "no-render",
+    ("POST", "/market/event-intelligence/features"): "no-render",
+    ("POST", "/market/event-intelligence/forecast-context"): "no-render",
+    ("POST", "/market/event-intelligence/outcomes"): "no-render",
+    ("POST", "/market/event-intelligence/outcomes/study"): "no-render",
+    ("POST", "/market/event-intelligence/forecast-evaluation"): "no-render",
+    ("POST", "/market/event-intelligence/agents"): "no-render",
+    ("GET", "/market/event-intelligence/portfolio/{portfolio_id}/context"): "no-render",
+    ("POST", "/market/event-intelligence/sync"): "no-render",
+    ("POST", "/market/event-intelligence/ingest"): "no-render",
+    ("POST", "/market/event-intelligence/analyze"): "no-render",
+    ("GET", "/market/event-intelligence/overview"): "no-render",
+    ("GET", "/market/event-intelligence/history"): "no-render",
+    ("GET", "/market/event-intelligence/health"): "no-render",
+    ("GET", "/market/intelligence/contracts"): "no-render",
+    ("GET", "/market/intelligence/navigation"): "no-render",
+    ("GET", "/market/intelligence/overview"): "no-render",
+    ("GET", "/market/intelligence/instruments/{instrument_id}"): "no-render",
+    ("GET", "/market/intelligence/forecasts"): "no-render",
+    ("GET", "/market/intelligence/compare"): "no-render",
+    ("GET", "/market/intelligence/horizons/{instrument_id}"): "no-render",
+    ("GET", "/market/intelligence/lifecycle"): "no-render",
+    ("GET", "/market/intelligence/performance"): "no-render",
+    ("GET", "/market/intelligence/regimes"): "no-render",
+    ("GET", "/market/intelligence/decisions"): "no-render",
+    ("GET", "/market/intelligence/decisions/{cycle_id}"): "no-render",
+    ("GET", "/market/intelligence/explain/{subject_id}"): "no-render",
+    ("GET", "/market/intelligence/attribution/{forecast_id}"): "no-render",
+    ("GET", "/market/intelligence/evidence/{subject_id}"): "no-render",
+    ("GET", "/market/intelligence/research"): "no-render",
+    ("GET", "/market/intelligence/portfolio"): "no-render",
+    ("GET", "/market/intelligence/policies"): "no-render",
+    ("GET", "/market/intelligence/replay/{cycle_id}"): "no-render",
+    ("GET", "/market/intelligence/filters"): "no-render",
+    ("PUT", "/market/intelligence/filters"): "no-render",
     ("POST", "/market/forecasts"): "no-render",
     ("GET", "/market/forecasts"): "no-render",
     ("GET", "/market/forecasts/status"): "no-render",
@@ -597,8 +767,22 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("POST", "/market/forecasts/train"): "no-render",
     ("POST", "/market/forecasts/evaluate"): "no-render",
     ("POST", "/market/forecasts/models/{model_id}/promote"): "no-render",
+    ("GET", "/market/forecasts/{forecast_id}/explain"): "no-render",
     ("GET", "/market/forecasts/{forecast_id}"): "no-render",
     ("GET", "/market/forecasts/{forecast_id}/outcome"): "no-render",
+    ("POST", "/market/forecasts/cycles"): "no-render",
+    ("GET", "/market/forecasts/cycles"): "no-render",
+    ("GET", "/market/forecasts/cycles/{cycle_id}"): "no-render",
+    ("GET", "/market/forecasts/scheduler"): "no-render",
+    ("POST", "/market/forecasts/scheduler/tick"): "no-render",
+    ("GET", "/market/forecasts/missed"): "no-render",
+    ("GET", "/market/forecasts/evaluations/pending"): "no-render",
+    ("GET", "/market/forecasts/accuracy"): "no-render",
+    ("POST", "/market/forecasts/horizons"): "no-render",
+    ("GET", "/market/forecasts/horizons/status"): "no-render",
+    ("GET", "/market/forecasts/horizons/performance"): "no-render",
+    ("GET", "/market/forecasts/horizons/{instrument_id}/context"): "no-render",
+    ("GET", "/market/forecasts/horizons/{instrument_id}"): "no-render",
     ("POST", "/market/portfolios"): "no-render",
     ("GET", "/market/portfolios"): "no-render",
     ("GET", "/market/portfolios/status"): "no-render",
@@ -693,6 +877,180 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("GET", "/market/backtests/{backtest_id}/data-quality"): "no-render",
     ("GET", "/market/backtests/{backtest_id}/verify"): "no-render",
     ("POST", "/market/backtests/{backtest_id}/sensitivity"): "no-render",
+    # PI-13: the RL research workspace is a NovaMarket web page; these are
+    # research APIs and controls, not legacy static-panel bodies.
+    ("GET", "/market/rl/status"): "no-render",
+    ("GET", "/market/rl/contracts"): "no-render",
+    ("GET", "/market/rl/health"): "no-render",
+    ("POST", "/market/rl/environments"): "no-render",
+    ("GET", "/market/rl/environments"): "no-render",
+    ("GET", "/market/rl/environments/{environment_id}"): "no-render",
+    ("POST", "/market/rl/environments/{environment_id}/episodes"): "no-render",
+    ("GET", "/market/rl/episodes"): "no-render",
+    ("GET", "/market/rl/episodes/{episode_id}"): "no-render",
+    ("POST", "/market/rl/episodes/{episode_id}/step"): "no-render",
+    ("POST", "/market/rl/episodes/{episode_id}/reset"): "no-render",
+    ("POST", "/market/rl/episodes/{episode_id}/cancel"): "no-render",
+    ("GET", "/market/rl/episodes/{episode_id}/transitions"): "no-render",
+    ("GET", "/market/rl/episodes/{episode_id}/experiences"): "no-render",
+    # PI-14: the Reward & Policy Evaluation page is a NovaMarket web page;
+    # these research APIs are not legacy static-panel bodies.
+    ("GET", "/market/rewards/status"): "no-render",
+    ("GET", "/market/rewards/contracts"): "no-render",
+    ("GET", "/market/rewards/health"): "no-render",
+    ("GET", "/market/rewards/baselines"): "no-render",
+    ("POST", "/market/rewards/configurations"): "no-render",
+    ("GET", "/market/rewards/configurations"): "no-render",
+    ("GET", "/market/rewards/configurations/{config_id}"): "no-render",
+    ("POST", "/market/rewards/episodes/{episode_id}/calculate"): "no-render",
+    ("GET", "/market/rewards/episodes/{episode_id}"): "no-render",
+    ("GET", "/market/rewards/results/{reward_id}"): "no-render",
+    ("POST", "/market/rewards/evaluations"): "no-render",
+    ("POST", "/market/rewards/evaluations/cancel"): "no-render",
+    ("GET", "/market/rewards/evaluations"): "no-render",
+    ("GET", "/market/rewards/evaluations/{evaluation_id}"): "no-render",
+    ("GET", "/market/rewards/comparisons"): "no-render",
+    ("POST", "/market/rewards/stability"): "no-render",
+    ("POST", "/market/rewards/walk-forward"): "no-render",
+    # PI-15: the RL Training & Optimisation workspace is a NovaMarket web page.
+    ("GET", "/market/training/status"): "no-render",
+    ("GET", "/market/training/contracts"): "no-render",
+    ("GET", "/market/training/health"): "no-render",
+    ("GET", "/market/training/datasets"): "no-render",
+    ("POST", "/market/training/configurations"): "no-render",
+    ("GET", "/market/training/configurations"): "no-render",
+    ("GET", "/market/training/configurations/{config_id}"): "no-render",
+    ("POST", "/market/training/validate"): "no-render",
+    ("POST", "/market/training/runs"): "no-render",
+    ("GET", "/market/training/runs"): "no-render",
+    ("GET", "/market/training/runs/{run_id}"): "no-render",
+    ("POST", "/market/training/runs/{run_id}/pause"): "no-render",
+    ("POST", "/market/training/runs/{run_id}/resume"): "no-render",
+    ("POST", "/market/training/runs/{run_id}/cancel"): "no-render",
+    ("POST", "/market/training/runs/{run_id}/retry"): "no-render",
+    ("GET", "/market/training/runs/{run_id}/metrics"): "no-render",
+    ("GET", "/market/training/runs/{run_id}/checkpoints"): "no-render",
+    ("POST", "/market/training/runs/{run_id}/checkpoints"): "no-render",
+    ("GET", "/market/training/checkpoints/{checkpoint_id}"): "no-render",
+    ("POST", "/market/training/checkpoints/{checkpoint_id}/resume"): "no-render",
+    ("GET", "/market/training/policies"): "no-render",
+    ("GET", "/market/training/policies/{policy_id}"): "no-render",
+    ("POST", "/market/training/policies/{policy_id}/archive"): "no-render",
+    ("POST", "/market/training/policies/{policy_id}/validate"): "no-render",
+    ("POST", "/market/training/policies/{policy_id}/test"): "no-render",
+    ("POST", "/market/training/compare"): "no-render",
+    ("POST", "/market/training/optimize"): "no-render",
+    ("GET", "/market/training/searches/{search_id}"): "no-render",
+    ("GET", "/market/training/evaluations"): "no-render",
+    # PI-16: the Adaptive Intelligence workspace is a new React page; the API
+    # contract still declares every response as not rendered by the legacy UI.
+    ("GET", "/market/adaptive/status"): "no-render",
+    ("GET", "/market/adaptive/contracts"): "no-render",
+    ("GET", "/market/adaptive/health"): "no-render",
+    ("GET", "/market/adaptive/dashboard"): "no-render",
+    ("POST", "/market/adaptive/configurations"): "no-render",
+    ("GET", "/market/adaptive/configurations"): "no-render",
+    ("GET", "/market/adaptive/configurations/{config_id}"): "no-render",
+    ("POST", "/market/adaptive/regime/analyze"): "no-render",
+    ("GET", "/market/adaptive/regime/latest"): "no-render",
+    ("POST", "/market/adaptive/regime/annotations"): "no-render",
+    ("GET", "/market/adaptive/regime/annotations"): "no-render",
+    ("POST", "/market/adaptive/regime/evaluations"): "no-render",
+    ("GET", "/market/adaptive/regime/evaluations"): "no-render",
+    ("POST", "/market/adaptive/experiences/query"): "no-render",
+    ("POST", "/market/adaptive/changes/detect"): "no-render",
+    ("GET", "/market/adaptive/changes"): "no-render",
+    ("POST", "/market/adaptive/drift/detect"): "no-render",
+    ("GET", "/market/adaptive/drift"): "no-render",
+    ("POST", "/market/adaptive/degradation/monitor"): "no-render",
+    ("GET", "/market/adaptive/degradation"): "no-render",
+    ("POST", "/market/adaptive/suitability/assess"): "no-render",
+    ("GET", "/market/adaptive/suitability"): "no-render",
+    ("POST", "/market/adaptive/recommendations"): "no-render",
+    ("GET", "/market/adaptive/recommendations"): "no-render",
+    ("POST", "/market/adaptive/recommendations/{recommendation_id}/acknowledge"): "no-render",
+    ("POST", "/market/adaptive/retraining"): "no-render",
+    ("GET", "/market/adaptive/retraining"): "no-render",
+    ("POST", "/market/adaptive/reassessments"): "no-render",
+    ("GET", "/market/adaptive/reassessments"): "no-render",
+    ("POST", "/market/adaptive/reassessments/{reassessment_id}/run"): "no-render",
+    ("GET", "/market/adaptive/reassessments/{reassessment_id}"): "no-render",
+    # PI-17 is consumed by the dedicated React Multi-Agent Intelligence page,
+    # not the legacy static renderer bundle.
+    ("GET", "/market/multiagent/status"): "no-render",
+    ("GET", "/market/multiagent/contracts"): "no-render",
+    ("GET", "/market/multiagent/health"): "no-render",
+    ("GET", "/market/multiagent/agents"): "no-render",
+    ("GET", "/market/multiagent/agents/{agent_id}"): "no-render",
+    ("PUT", "/market/multiagent/agents/{agent_id}/config"): "no-render",
+    ("POST", "/market/multiagent/cycles"): "no-render",
+    ("GET", "/market/multiagent/cycles"): "no-render",
+    ("GET", "/market/multiagent/cycles/{cycle_id}"): "no-render",
+    ("POST", "/market/multiagent/cycles/{cycle_id}/run"): "no-render",
+    ("POST", "/market/multiagent/cycles/{cycle_id}/cancel"): "no-render",
+    ("GET", "/market/multiagent/cycles/{cycle_id}/agents"): "no-render",
+    ("GET", "/market/multiagent/cycles/{cycle_id}/evidence"): "no-render",
+    ("GET", "/market/multiagent/cycles/{cycle_id}/conflicts"): "no-render",
+    ("GET", "/market/multiagent/cycles/{cycle_id}/decision"): "no-render",
+    ("GET", "/market/multiagent/cycles/{cycle_id}/handoff"): "no-render",
+    ("GET", "/market/multiagent/history"): "no-render",
+    ("GET", "/market/multiagent/performance"): "no-render",
+    ("GET", "/market/multiagent/performance/{agent_id}"): "no-render",
+    ("GET", "/market/optimization/status"): "no-render",
+    ("GET", "/market/optimization/contracts"): "no-render",
+    ("GET", "/market/optimization/health"): "no-render",
+    ("POST", "/market/optimization/configs"): "no-render",
+    ("GET", "/market/optimization/configs"): "no-render",
+    ("GET", "/market/optimization/configs/{config_id}"): "no-render",
+    ("POST", "/market/optimization/validate"): "no-render",
+    ("POST", "/market/optimization/runs"): "no-render",
+    ("GET", "/market/optimization/runs"): "no-render",
+    ("GET", "/market/optimization/history"): "no-render",
+    ("GET", "/market/optimization/latest"): "no-render",
+    ("GET", "/market/optimization/runs/{run_id}"): "no-render",
+    ("GET", "/market/optimization/runs/{run_id}/allocations"): "no-render",
+    ("GET", "/market/optimization/runs/{run_id}/diversification"): "no-render",
+    ("GET", "/market/optimization/runs/{run_id}/risk"): "no-render",
+    ("GET", "/market/optimization/runs/{run_id}/liquidity"): "no-render",
+    ("GET", "/market/optimization/runs/{run_id}/rebalancing"): "no-render",
+    ("GET", "/market/optimization/runs/{run_id}/scenarios"): "no-render",
+    ("POST", "/market/optimization/runs/{run_id}/scenarios"): "no-render",
+    ("POST", "/market/optimization/runs/{run_id}/backtests"): "no-render",
+    ("GET", "/market/optimization/runs/{run_id}/handoff"): "no-render",
+    ("POST", "/market/optimization/runs/{run_id}/cancel"): "no-render",
+    ("GET", "/market/optimization/backtests"): "no-render",
+    ("GET", "/market/optimization/backtests/{backtest_id}"): "no-render",
+    ("GET", "/market/research/status"): "no-render",
+    ("GET", "/market/research/contracts"): "no-render",
+    ("GET", "/market/research/health"): "no-render",
+    ("POST", "/market/research/runs"): "no-render",
+    ("POST", "/market/research/runs/{run_id}/run"): "no-render",
+    ("POST", "/market/research/runs/{run_id}/cancel"): "no-render",
+    ("POST", "/market/research/runs/{run_id}/refresh"): "no-render",
+    ("GET", "/market/research/runs"): "no-render",
+    ("GET", "/market/research/history"): "no-render",
+    ("GET", "/market/research/latest"): "no-render",
+    ("GET", "/market/research/runs/{run_id}"): "no-render",
+    ("GET", "/market/research/runs/{run_id}/company"): "no-render",
+    ("GET", "/market/research/runs/{run_id}/financials"): "no-render",
+    ("GET", "/market/research/runs/{run_id}/events"): "no-render",
+    ("GET", "/market/research/runs/{run_id}/news"): "no-render",
+    ("GET", "/market/research/runs/{run_id}/sector"): "no-render",
+    ("GET", "/market/research/runs/{run_id}/peers"): "no-render",
+    ("GET", "/market/research/runs/{run_id}/valuation"): "no-render",
+    ("GET", "/market/research/runs/{run_id}/thesis"): "no-render",
+    ("GET", "/market/research/runs/{run_id}/evidence"): "no-render",
+    ("GET", "/market/research/runs/{run_id}/claims"): "no-render",
+    ("GET", "/market/research/runs/{run_id}/features"): "no-render",
+    ("GET", "/market/research/runs/{run_id}/handoff"): "no-render",
+    ("POST", "/market/research/monitor"): "no-render",
+    ("GET", "/market/evaluations/status"): "no-render",
+    ("GET", "/market/evaluations/contracts"): "no-render",
+    ("GET", "/market/evaluations"): "no-render",
+    ("POST", "/market/evaluations"): "no-render",
+    ("GET", "/market/evaluations/{evaluation_id}"): "no-render",
+    ("GET", "/market/evaluations/{evaluation_id}/verify"): "no-render",
+    ("POST", "/market/evaluations/{evaluation_id}/reproduce"): "no-render",
     ("GET", "/market/shadow/status"): "no-render",
     ("GET", "/market/shadow/contracts"): "no-render",
     ("POST", "/market/shadow/sessions"): "no-render",

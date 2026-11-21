@@ -374,12 +374,16 @@ class MarketWorkbench:
                 if data_interval is DataInterval.WEEK_1
                 else chart_limit
             )
+            # Newest window first: the store caps one page at ~200 rows, so an
+            # ascending read returns the OLDEST page of the whole series, not the
+            # bars immediately before the cutoff.  ``_normalize`` restores
+            # chronological order for the prefix calculations.
             page = self._engine.bars(
                 instrument_id,
                 interval=source_interval,
                 end=cutoff,
                 limit=source_limit,
-                ascending=True,
+                ascending=False,
             )
             bars = self._normalize(page.items)
         except Exception as exc:  # noqa: BLE001 - the API should explain, not traceback
@@ -695,11 +699,14 @@ class MarketWorkbench:
     ) -> dict[str, Any]:
         instrument = instrument if instrument is not None else self._instrument(instrument_id)
         try:
+            # The store caps a page below 320 rows, so an ascending read would
+            # return the OLDEST page and the "latest" bar would be months old.
+            # Read newest-first; _normalize restores chronological order.
             page = self._engine.bars(
                 instrument_id,
                 interval=interval,
                 limit=320,
-                ascending=True,
+                ascending=False,
             )
             bars = self._normalize(page.items)
         except Exception as exc:  # noqa: BLE001 - a missing series is a stated outcome

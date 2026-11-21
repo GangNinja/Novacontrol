@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from starlette.requests import Request
+
 from novacontrol.api.auth import ApiTokenAuthenticator
 from novacontrol.api.middleware import (
     OriginGuardMiddleware,
@@ -21,7 +23,13 @@ from novacontrol.api.middleware import (
     RequestLoggingMiddleware,
     SecurityHeadersMiddleware,
 )
-from novacontrol.api.models import ApiSurface, AskRequest, BrainDecideRequest, CommandPlanRequest, ExploreRequest_
+from novacontrol.api.models import (
+    ApiSurface,
+    AskRequest,
+    BrainDecideRequest,
+    CommandPlanRequest,
+    ExploreRequest_,
+)
 from novacontrol.application import NovaControlApplication
 from novacontrol.core.events import Event
 from novacontrol.explore import ExploreRequest
@@ -130,9 +138,7 @@ def _parse_market_datetime(value: str | None, field: str) -> datetime | None:
             status_code=422, detail=f"{field} must be an ISO-8601 timestamp"
         ) from exc
     if parsed.tzinfo is None:
-        raise HTTPException(
-            status_code=422, detail=f"{field} must include a timezone offset"
-        )
+        raise HTTPException(status_code=422, detail=f"{field} must include a timezone offset")
     return parsed.astimezone(UTC)
 
 
@@ -257,7 +263,10 @@ def _routing_preview(nova: NovaControlApplication, text: str, intent: str) -> di
             device_plan = nova.plan_command(text)
             return {
                 "kind": "plan",
-                "outline": [str(a.get("type") or a.get("action") or "") for a in device_plan.get("workflow", {}).get("actions", [])][:8],
+                "outline": [
+                    str(a.get("type") or a.get("action") or "")
+                    for a in device_plan.get("workflow", {}).get("actions", [])
+                ][:8],
                 "target": device_plan.get("target"),
                 "summary": str(device_plan.get("summary", ""))[:200],
             }
@@ -284,7 +293,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         external_allowed=lambda: nova.privacy.allows(PrivacyAction.EXTERNAL_SEARCH)
     )
     try:
-        from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+        from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.middleware.gzip import GZipMiddleware
         from fastapi.responses import FileResponse, HTMLResponse
@@ -357,10 +366,20 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
     if operator_token and operator_token == api_token:
         operator_token = ""
     operator_authenticator = ApiTokenAuthenticator(operator_token)
+    # The local admin token is accepted only from loopback clients.  It lets the
+    # local Vite proxy open the desk without a per-tab prompt and acts as both
+    # the ordinary API credential and the autonomy-operator credential.  Never
+    # accept it from a remote address: a remote deployment still needs the
+    # configured bearer/operator tokens.
+    # The predictable local key is opt-in, never a built-in default: a
+    # deployed backend reached through a loopback reverse proxy would
+    # otherwise inherit a guessable admin credential.  The local launchers
+    # (start.ps1) export NOVACONTROL_ADMIN_TOKEN so the Vite proxy keeps
+    # auto-connecting; an unset value disables this credential entirely.
+    admin_token = (os.getenv("NOVACONTROL_ADMIN_TOKEN") or "").strip()
+    admin_authenticator = ApiTokenAuthenticator(admin_token)
     api_surface = ApiSurface.default()
-    nova = NovaControlApplication(
-        data_dir=Path(data_dir) if data_dir is not None else Path("data")
-    )
+    nova = NovaControlApplication(data_dir=Path(data_dir) if data_dir is not None else Path("data"))
     app = FastAPI(title="NovaControl", version="0.1.0")
 
     # Middleware (order matters: last added = first executed)
@@ -372,9 +391,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
     # The default is no cross-origin access; the standalone dev server uses a
     # same-origin Vite proxy, and production must name its exact origin here.
     cors_origins = [
-        item.strip()
-        for item in os.getenv("NOVAMARKET_CORS_ORIGINS", "").split(",")
-        if item.strip()
+        item.strip() for item in os.getenv("NOVAMARKET_CORS_ORIGINS", "").split(",") if item.strip()
     ]
 
     # Reject foreign Host headers.  Without this, a hostile DNS name can be
@@ -442,31 +459,80 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         await nova.novamarket.stop_runtime()
         await nova.stop()
 
-    async def require_auth(authorization: str | None = Header(default=None)) -> str:
+    def _is_loopback_request(request: Request) -> bool:
+        host = (request.client.host if request.client else "").strip().lower()
+        return host in {"127.0.0.1", "::1", "localhost"} or host.startswith("127.")
+
+    def _admin_token_authorized(value: str | None) -> bool:
+        if not admin_authenticator.enabled or not value:
+            return False
+        return admin_authenticator.authenticate(f"Bearer {value.strip()}").authenticated
+
+    def _bearer_credential(authorization: str | None) -> str | None:
+        if not authorization:
+            return None
+        scheme, separator, value = authorization.partition(" ")
+        if not separator or scheme.lower() != "bearer":
+            return None
+        return value.strip() or None
+
+    def _local_admin_authorized(
+        request: Request,
+        operator_value: str | None = None,
+        authorization: str | None = None,
+    ) -> bool:
+        """The admin key opens every local door from either credential header."""
+
+        if not _is_loopback_request(request):
+            return False
+        return _admin_token_authorized(operator_value) or _admin_token_authorized(
+            _bearer_credential(authorization)
+        )
+
+    async def require_auth(
+        request: Request, authorization: str | None = Header(default=None)
+    ) -> str:
         result = authenticator.authenticate(authorization)
+        if not result.authenticated and _is_loopback_request(request):
+            if _admin_token_authorized(_bearer_credential(authorization)):
+                return "local-admin"
         if not result.authenticated:
             raise HTTPException(status_code=401, detail=result.reason)
         return result.principal
 
-    def _autonomy_operator_authorized(value: str | None) -> bool:
-        if not operator_authenticator.enabled or not value:
+    def _autonomy_operator_authorized(
+        value: str | None,
+        request: Request,
+        authorization: str | None = None,
+    ) -> bool:
+        if _local_admin_authorized(request, value, authorization):
+            return True
+        if not value:
+            return False
+        if not operator_authenticator.enabled:
             return False
         result = operator_authenticator.authenticate(f"Bearer {value.strip()}")
         return result.authenticated
 
     async def autonomy_operator_state(
+        request: Request,
         x_autonomy_operator_token: str | None = Header(
             default=None, alias="X-Autonomy-Operator-Token"
         ),
+        authorization: str | None = Header(default=None),
     ) -> bool:
         """Read-only permission marker for status/health responses."""
 
-        return _autonomy_operator_authorized(x_autonomy_operator_token)
+        return _autonomy_operator_authorized(
+            x_autonomy_operator_token, request, authorization
+        )
 
     async def require_autonomy_operator(
+        request: Request,
         x_autonomy_operator_token: str | None = Header(
             default=None, alias="X-Autonomy-Operator-Token"
         ),
+        authorization: str | None = Header(default=None),
     ) -> str:
         """Fail closed unless the dedicated autonomy-operator token is proven.
 
@@ -475,6 +541,10 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         implicit local permission.
         """
 
+        if _local_admin_authorized(
+            request, x_autonomy_operator_token, authorization
+        ):
+            return "local-admin"
         if not operator_authenticator.enabled:
             raise HTTPException(
                 status_code=403,
@@ -561,10 +631,16 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         return nova.settings.to_dict()
 
     @app.post("/settings")
-    async def update_settings(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def update_settings(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         try:
-            retention_days = int(payload["audit_retention_days"]) if "audit_retention_days" in payload else None
-            max_records = int(payload["audit_max_records"]) if "audit_max_records" in payload else None
+            retention_days = (
+                int(payload["audit_retention_days"]) if "audit_retention_days" in payload else None
+            )
+            max_records = (
+                int(payload["audit_max_records"]) if "audit_max_records" in payload else None
+            )
             evaluation_retention_days = (
                 int(payload["evaluation_retention_days"])
                 if "evaluation_retention_days" in payload
@@ -586,9 +662,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
                 else None
             )
             training_max_records = (
-                int(payload["training_max_records"])
-                if "training_max_records" in payload
-                else None
+                int(payload["training_max_records"]) if "training_max_records" in payload else None
             )
             preference_max_checkpoints = (
                 int(payload["preference_max_checkpoints"])
@@ -606,26 +680,22 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
                 else None
             )
             rlhf_max_checkpoints = (
-                int(payload["rlhf_max_checkpoints"])
-                if "rlhf_max_checkpoints" in payload
-                else None
+                int(payload["rlhf_max_checkpoints"]) if "rlhf_max_checkpoints" in payload else None
             )
             rlhf_retention_days = (
-                int(payload["rlhf_retention_days"])
-                if "rlhf_retention_days" in payload
-                else None
+                int(payload["rlhf_retention_days"]) if "rlhf_retention_days" in payload else None
             )
             rlhf_max_records = (
-                int(payload["rlhf_max_records"])
-                if "rlhf_max_records" in payload
-                else None
+                int(payload["rlhf_max_records"]) if "rlhf_max_records" in payload else None
             )
         except (TypeError, ValueError) as exc:
             raise HTTPException(
                 status_code=422, detail="Retention must be a whole number."
             ) from exc
         settings = nova.settings.update(
-            approval_mode=ApprovalMode(str(payload["approval_mode"])) if "approval_mode" in payload else None,
+            approval_mode=ApprovalMode(str(payload["approval_mode"]))
+            if "approval_mode" in payload
+            else None,
             detailed_explanations=bool(payload["detailed_explanations"])
             if "detailed_explanations" in payload
             else None,
@@ -682,12 +752,8 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             preference_max_checkpoints=preference_max_checkpoints,
             preference_retention_days=preference_retention_days,
             preference_max_records=preference_max_records,
-            rlhf_enabled=bool(payload["rlhf_enabled"])
-            if "rlhf_enabled" in payload
-            else None,
-            rlhf_dry_run=bool(payload["rlhf_dry_run"])
-            if "rlhf_dry_run" in payload
-            else None,
+            rlhf_enabled=bool(payload["rlhf_enabled"]) if "rlhf_enabled" in payload else None,
+            rlhf_dry_run=bool(payload["rlhf_dry_run"]) if "rlhf_dry_run" in payload else None,
             rlhf_max_checkpoints=rlhf_max_checkpoints,
             rlhf_retention_days=rlhf_retention_days,
             rlhf_max_records=rlhf_max_records,
@@ -720,7 +786,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         return response.to_dict()
 
     @app.post("/brain/mode")
-    async def brain_mode(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def brain_mode(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """Switch the chat brain: auto | llm | scratch (hot-swap, no restart).
 
         The setting persists server-side, so the choice survives reloads and
@@ -741,7 +809,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         return {"presets": nova.cloud_llm_presets()}
 
     @app.post("/brain/cloud")
-    async def brain_cloud_set(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def brain_cloud_set(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """Install a cloud LLM (ChatGPT/Gemini/Groq/…) as the active brain.
 
         The API key is stored only on this machine (data/cloud_llm.json,
@@ -763,7 +833,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         return nova.clear_cloud_llm()
 
     @app.post("/brain/cloud/test")
-    async def brain_cloud_test(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def brain_cloud_test(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """Ping a cloud provider with the pasted key BEFORE saving anything.
 
         One tiny completion through the exact provider construction the real
@@ -790,7 +862,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         return await nova.local_models()
 
     @app.post("/brain/local/model")
-    async def brain_local_model(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def brain_local_model(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """Pin the LOCAL brain to a specific Ollama model (hot swap, no restart).
 
         Empty model clears the pick (auto-pick returns). The choice persists
@@ -835,7 +909,11 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         nova.brain.conversation.clear()
         transcript_dropped = nova.chat_transcript.clear()
         nova.persist()
-        return {"status": "cleared", "conversation_turns": 0, "transcript_dropped": transcript_dropped}
+        return {
+            "status": "cleared",
+            "conversation_turns": 0,
+            "transcript_dropped": transcript_dropped,
+        }
 
     @app.get("/chat/history")
     async def chat_history_get(_principal: str = Depends(require_auth)) -> dict[str, Any]:
@@ -843,13 +921,17 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         return nova.chat_history()
 
     @app.post("/chat/history")
-    async def chat_history_post(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def chat_history_post(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """Append one client turn to the shared thread, or (action=migrate)
         one-time import a browser's old localStorage thread. The import is
         idempotent per (role, text, at) so re-running it never duplicates."""
         if str(payload.get("action", "")) == "migrate":
             raw_turns = payload.get("turns")
-            turns = [t for t in raw_turns if isinstance(t, dict)] if isinstance(raw_turns, list) else []
+            turns = (
+                [t for t in raw_turns if isinstance(t, dict)] if isinstance(raw_turns, list) else []
+            )
             return nova.import_chat_history(turns)
         return nova.record_chat_turn(
             str(payload.get("role", "")),
@@ -879,7 +961,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         }
 
     @app.post("/tasks/delete")
-    async def tasks_delete(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def tasks_delete(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """Delete one tracked task by id (404 when the id is unknown)."""
         task_id = str(payload.get("id", ""))
         try:
@@ -914,7 +998,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         }
 
     @app.post("/tasks/clear/undo")
-    async def tasks_clear_undo(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def tasks_clear_undo(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """Undo a recent /tasks/clear by token (one-shot; unknown/expired → 409)."""
         token = str(payload.get("token", ""))
         snapshot = _task_clear_snapshots.pop(token, None)
@@ -926,33 +1012,45 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         return {"status": "restored", "restored": restored}
 
     @app.post("/improve")
-    async def improve(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def improve(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         return nova.self_improvement.plan(_required_field(payload, "goal")).to_dict()
 
     @app.post("/improve/workflow")
-    async def improve_workflow(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def improve_workflow(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         return nova.improvement_workflow(_required_field(payload, "goal"))
 
     @app.post("/improve/preview")
-    async def improve_preview(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def improve_preview(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         return nova.preview_improvement_workflow(_required_field(payload, "goal"))
 
     @app.post("/improve/approve")
-    async def improve_approve(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def improve_approve(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         return await nova.approve_improvement_workflow(
             _required_field(payload, "goal"),
             preview_id=str(payload.get("preview_id") or "") or None,
         )
 
     @app.post("/learn")
-    async def learn(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def learn(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         return await nova.learning_cycle(
             _required_field(payload, "goal"),
             feedback=str(payload.get("feedback", "")),
         )
 
     @app.post("/knowledge/teach")
-    async def knowledge_teach(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def knowledge_teach(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """Teach: persist a typed fact as durable, recallable knowledge."""
         try:
             return await nova.teach_knowledge(_required_field(payload, "fact"))
@@ -960,15 +1058,23 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/knowledge")
-    async def knowledge_list(query: str = "", _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def knowledge_list(
+        query: str = "", _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         return await nova.list_knowledge(query)
 
     @app.post("/knowledge/recall")
-    async def knowledge_recall(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
-        return await nova.list_knowledge(str(payload.get("query", "")), limit=int(payload.get("limit", 20)))
+    async def knowledge_recall(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        return await nova.list_knowledge(
+            str(payload.get("query", "")), limit=int(payload.get("limit", 20))
+        )
 
     @app.post("/train")
-    async def train(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def train(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         return await nova.autonomous_learning_loop(
             _required_field(payload, "goal"),
             iterations=int(payload.get("iterations", 3)),
@@ -976,7 +1082,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         )
 
     @app.post("/plan")
-    async def plan(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def plan(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """Plan a goal: steps, tools, effects, dependencies and how each is checked.
 
         The planner is the application's own compiler (Phase 4), so a plan here
@@ -1012,7 +1120,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         return await nova.run_plan(goal, approved=[str(step_id) for step_id in approved])
 
     @app.post("/plan/code")
-    async def plan_code(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def plan_code(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """Code-aware planning: language-aware steps + a drafted code artifact.
 
         Uses the configured LLM when one is wired; otherwise returns the
@@ -1027,7 +1137,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post("/build/project")
-    async def build_project(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def build_project(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """Draft a small multi-file project with the coding agent.
 
         Uses the configured model when available; without one it falls back
@@ -1048,7 +1160,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         return nova.list_workspace_artifacts()
 
     @app.post("/build/run")
-    async def build_run(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def build_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """Re-execute a saved workspace artifact in the sandbox."""
         try:
             return await nova.run_saved_artifact(str(payload.get("filename", "")))
@@ -1056,7 +1170,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post("/build/save")
-    async def build_save(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def build_save(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """Save a drafted Build artifact to the workspace on disk.
 
         Closes the Build loop: draft (LLM or plan) → edit in the panel → save
@@ -1073,7 +1189,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post("/command/plan")
-    async def command_plan(payload: CommandPlanRequest, _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def command_plan(
+        payload: CommandPlanRequest, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """Plan a device command — or a catalog game launch, which is verified.
 
         A game phrase returns the library's plan (resolution, resource gate,
@@ -1083,31 +1201,43 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         return await nova.plan_command_or_game(payload.command)
 
     @app.post("/command/execute")
-    async def command_execute(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def command_execute(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         token = str(payload.get("approval_token", "") or "") or None
         try:
             return await nova.execute_command(
-                _required_field(payload, "command"), approval_token=token, correlation_id=str(payload.get("correlation_id", "") or "")
+                _required_field(payload, "command"),
+                approval_token=token,
+                correlation_id=str(payload.get("correlation_id", "") or ""),
             )
         except ValueError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     @app.post("/desktop/plan")
-    async def desktop_plan(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def desktop_plan(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         return nova.plan_desktop_command(_required_field(payload, "command"))
 
     @app.post("/desktop/execute")
-    async def desktop_execute(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def desktop_execute(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         token = str(payload.get("approval_token", "") or "") or None
         try:
             return await nova.execute_desktop_command(
-                _required_field(payload, "command"), approval_token=token, correlation_id=str(payload.get("correlation_id", "") or "")
+                _required_field(payload, "command"),
+                approval_token=token,
+                correlation_id=str(payload.get("correlation_id", "") or ""),
             )
         except ValueError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     @app.post("/browser/plan")
-    async def browser_plan(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def browser_plan(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """Plan an approval-gated browser action (navigate / search + extract).
 
         Dedicated device endpoint — same contract as /desktop/plan: a plan with
@@ -1117,11 +1247,15 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         return nova.plan_browser_command(_required_field(payload, "command"))
 
     @app.post("/browser/execute")
-    async def browser_execute(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def browser_execute(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         token = str(payload.get("approval_token", "") or "") or None
         try:
             return await nova.execute_browser_command(
-                _required_field(payload, "command"), approval_token=token, correlation_id=str(payload.get("correlation_id", "") or "")
+                _required_field(payload, "command"),
+                approval_token=token,
+                correlation_id=str(payload.get("correlation_id", "") or ""),
             )
         except ValueError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -1142,7 +1276,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         }
 
     @app.post("/vision/model")
-    async def vision_model_set(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def vision_model_set(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """Install a multimodal vision model (hot swap, no restart).
 
         provider=ollama probes the local Ollama for a vision model (llava,
@@ -1171,7 +1307,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         return await nova.vision.describe_screen()
 
     @app.post("/vision/click")
-    async def vision_click(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def vision_click(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """Vision-locate a labeled element on screen, click it, verify."""
         label = str(payload.get("label", "")).strip()
         if not label:
@@ -1243,7 +1381,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         """Send one real test message through the configured SMTP transport."""
         result = await nova.novamarket.send_test_notification()
         if not result.get("ok"):
-            raise HTTPException(status_code=422, detail=str(result.get("detail") or "email delivery failed"))
+            raise HTTPException(
+                status_code=422, detail=str(result.get("detail") or "email delivery failed")
+            )
         return result
 
     @app.post("/market/config")
@@ -1330,7 +1470,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         """A control call that passed the dependency is authorized by that token."""
 
         result["operator_authorized"] = True
-        result["operator_authorization_configured"] = operator_authenticator.enabled
+        result["operator_authorization_configured"] = (
+            operator_authenticator.enabled or admin_authenticator.enabled
+        )
         return result
 
     @app.get("/market/autonomy/contracts")
@@ -1343,6 +1485,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
 
     @app.get("/market/autonomy/status")
     def market_autonomy_status(
+        request: Request,
         _principal: str = Depends(require_auth),
         operator_ok: bool = Depends(autonomy_operator_state),
     ) -> dict[str, Any]:
@@ -1351,13 +1494,16 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         try:
             return nova.novamarket.autonomy_status(
                 operator_authorized=operator_ok,
-                operator_configured=operator_authenticator.enabled,
+                operator_configured=(
+                    operator_authenticator.enabled or _is_loopback_request(request)
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - refused with a truthful HTTP status
             raise _autonomy_http_error(exc) from exc
 
     @app.get("/market/autonomy/health")
     def market_autonomy_health(
+        request: Request,
         _principal: str = Depends(require_auth),
         operator_ok: bool = Depends(autonomy_operator_state),
     ) -> dict[str, Any]:
@@ -1366,7 +1512,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         try:
             status = nova.novamarket.autonomy_status(
                 operator_authorized=operator_ok,
-                operator_configured=operator_authenticator.enabled,
+                operator_configured=(
+                    operator_authenticator.enabled or _is_loopback_request(request)
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             raise _autonomy_http_error(exc) from exc
@@ -1420,9 +1568,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
                 nova.novamarket.autonomy_start(
                     str(body.get("mode") or "monitoring"),
                     reason=str(body.get("reason") or "operator start"),
-                    acknowledge_paper_only=bool(
-                        body.get("acknowledge_paper_only", False)
-                    ),
+                    acknowledge_paper_only=bool(body.get("acknowledge_paper_only", False)),
                 )
             )
         except Exception as exc:  # noqa: BLE001
@@ -1459,9 +1605,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
                 nova.novamarket.autonomy_resume(
                     str(body.get("mode") or "monitoring"),
                     reason=str(body.get("reason") or "operator resume"),
-                    acknowledge_paper_only=bool(
-                        body.get("acknowledge_paper_only", False)
-                    ),
+                    acknowledge_paper_only=bool(body.get("acknowledge_paper_only", False)),
                 )
             )
         except Exception as exc:  # noqa: BLE001
@@ -1599,8 +1743,14 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             DecisionNotFound,
             DecisionStateError,
             DecisionValidationError,
+            ForecastDecisionConfigError,
         )
 
+        if isinstance(exc, ForecastDecisionConfigError):
+            return HTTPException(
+                status_code=422,
+                detail={"error": "invalid_forecast_policy", "message": str(exc)},
+            )
         if isinstance(exc, DecisionNotFound):
             return HTTPException(
                 status_code=404,
@@ -1793,6 +1943,146 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         except Exception as exc:  # noqa: BLE001
             raise _decision_http_error(exc) from exc
 
+    @app.get("/market/autonomy/decisions/predictions")
+    def market_autonomy_prediction_decisions(
+        run_id: str = "",
+        portfolio_id: str = "",
+        instrument_id: str = "",
+        decision_type: str = "",
+        limit: int = 50,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """PI-12 forecast decisions with their immutable evidence and status."""
+
+        if limit < 1 or limit > 500 or offset < 0:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "invalid_pagination",
+                    "message": "limit must be 1-500 and offset must not be negative",
+                },
+            )
+        normalized = decision_type.strip().upper()
+        if normalized and normalized not in {
+            "BUY",
+            "SELL",
+            "HOLD",
+            "WAIT",
+            "NO_ACTION",
+        }:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "invalid_decision_type",
+                    "message": "decision_type must be BUY, SELL, HOLD, WAIT or NO_ACTION",
+                },
+            )
+        try:
+            return nova.novamarket.autonomy_prediction_decisions(
+                run_id=run_id,
+                portfolio_id=portfolio_id,
+                instrument_id=instrument_id,
+                decision_type=normalized,
+                limit=limit,
+                offset=offset,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _decision_http_error(exc) from exc
+
+    @app.get("/market/autonomy/decisions/predictions/{decision_id}")
+    def market_autonomy_prediction_decision(
+        decision_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """One forecast decision with audit history, risk, proposal and outcome."""
+
+        try:
+            return nova.novamarket.autonomy_prediction_decision(decision_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _decision_http_error(exc) from exc
+
+    @app.get("/market/autonomy/decisions/outcomes")
+    def market_autonomy_prediction_outcomes(
+        limit: int = 100,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Measured outcomes, kept separate from the original decisions."""
+
+        if limit < 1 or limit > 500 or offset < 0:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "invalid_pagination",
+                    "message": "limit must be 1-500 and offset must not be negative",
+                },
+            )
+        try:
+            return nova.novamarket.autonomy_prediction_outcomes(limit=limit, offset=offset)
+        except Exception as exc:  # noqa: BLE001
+            raise _decision_http_error(exc) from exc
+
+    @app.get("/market/autonomy/decisions/forecast-policy")
+    def market_autonomy_forecast_policy(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """The effective multi-horizon forecast decision policy."""
+
+        try:
+            return nova.novamarket.autonomy_forecast_policy()
+        except Exception as exc:  # noqa: BLE001
+            raise _decision_http_error(exc) from exc
+
+    @app.put("/market/autonomy/decisions/forecast-policy")
+    def market_autonomy_forecast_policy_update(
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        """Persist a validated policy; this can never promote a model."""
+
+        body: dict[str, Any] = dict(payload or {})
+        nested = body.get("policy")
+        policy: dict[str, Any] = nested if isinstance(nested, dict) else body
+        try:
+            result = nova.novamarket.autonomy_forecast_policy_update(policy)
+        except Exception as exc:  # noqa: BLE001
+            raise _decision_http_error(exc) from exc
+        return _autonomy_control_response(result)
+
+    @app.post("/market/autonomy/decisions/outcomes/run")
+    def market_autonomy_prediction_outcomes_run(
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        """Measure due outcomes; no portfolio or ledger mutation is permitted."""
+
+        try:
+            limit = int((payload or {}).get("limit", 50))
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "invalid_limit",
+                    "message": "limit must be an integer between 1 and 500",
+                },
+            ) from None
+        if limit < 1 or limit > 500:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "invalid_limit",
+                    "message": "limit must be between 1 and 500",
+                },
+            )
+        try:
+            result = nova.novamarket.track_prediction_outcomes(limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            raise _decision_http_error(exc) from exc
+        return _autonomy_control_response(result)
+
     @app.post("/market/autonomy/decisions/run")
     async def market_autonomy_decision_run_trigger(
         payload: dict[str, Any] | None = None,
@@ -1984,10 +2274,13 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         """Durable supervision state for positions seen by AT-05."""
 
         if limit < 1 or limit > 500:
-            raise HTTPException(status_code=422, detail={
-                "error": "invalid_limit",
-                "message": "limit must be between 1 and 500",
-            })
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "invalid_limit",
+                    "message": "limit must be between 1 and 500",
+                },
+            )
         try:
             return nova.novamarket.autonomy_exit_positions(limit=limit)
         except Exception as exc:  # noqa: BLE001
@@ -2001,10 +2294,13 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         """Persisted target/trailing definitions for long paper positions."""
 
         if limit < 1 or limit > 500:
-            raise HTTPException(status_code=422, detail={
-                "error": "invalid_limit",
-                "message": "limit must be between 1 and 500",
-            })
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "invalid_limit",
+                    "message": "limit must be between 1 and 500",
+                },
+            )
         try:
             return nova.novamarket.autonomy_exit_configurations(limit=limit)
         except Exception as exc:  # noqa: BLE001
@@ -2037,9 +2333,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         """Remove a target/trailing configuration without touching the position."""
 
         try:
-            return nova.novamarket.delete_autonomy_exit_configuration(
-                portfolio_id, instrument_id
-            )
+            return nova.novamarket.delete_autonomy_exit_configuration(portfolio_id, instrument_id)
         except Exception as exc:  # noqa: BLE001
             raise _execution_http_error(exc) from exc
 
@@ -2052,14 +2346,15 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         """Exit decisions, newest first; reads never submit an order."""
 
         if limit < 1 or limit > 500:
-            raise HTTPException(status_code=422, detail={
-                "error": "invalid_limit",
-                "message": "limit must be between 1 and 500",
-            })
-        try:
-            return nova.novamarket.autonomy_exit_decisions(
-                portfolio_id=portfolio_id, limit=limit
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "invalid_limit",
+                    "message": "limit must be between 1 and 500",
+                },
             )
+        try:
+            return nova.novamarket.autonomy_exit_decisions(portfolio_id=portfolio_id, limit=limit)
         except Exception as exc:  # noqa: BLE001
             raise _execution_http_error(exc) from exc
 
@@ -2072,10 +2367,13 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         """Append-only AT-05 journal events for one exit decision."""
 
         if limit < 1 or limit > 1000:
-            raise HTTPException(status_code=422, detail={
-                "error": "invalid_limit",
-                "message": "limit must be between 1 and 1000",
-            })
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "invalid_limit",
+                    "message": "limit must be between 1 and 1000",
+                },
+            )
         try:
             return nova.novamarket.autonomy_exit_events(decision_id, limit=limit)
         except Exception as exc:  # noqa: BLE001
@@ -2102,14 +2400,15 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         """Advisory entry-to-exit learning evidence with completeness state."""
 
         if limit < 1 or limit > 500:
-            raise HTTPException(status_code=422, detail={
-                "error": "invalid_limit",
-                "message": "limit must be between 1 and 500",
-            })
-        try:
-            return nova.novamarket.autonomy_learning_evidence(
-                decision_id=decision_id, limit=limit
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "invalid_limit",
+                    "message": "limit must be between 1 and 500",
+                },
             )
+        try:
+            return nova.novamarket.autonomy_learning_evidence(decision_id=decision_id, limit=limit)
         except Exception as exc:  # noqa: BLE001
             raise _execution_http_error(exc) from exc
 
@@ -2197,9 +2496,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
     ) -> dict[str, Any]:
         """List NovaCoin wallets with their available and total balances."""
         try:
-            return nova.novamarket.wallets_list(
-                owner=owner, limit=limit, offset=offset
-            )
+            return nova.novamarket.wallets_list(owner=owner, limit=limit, offset=offset)
         except Exception as exc:  # noqa: BLE001 - the mapper names the status
             raise _wallet_http_error(exc) from exc
 
@@ -2270,9 +2567,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
     ) -> dict[str, Any]:
         """The immutable ledger entries that produced the wallet's balance."""
         try:
-            return nova.novamarket.wallet_entries(
-                wallet_id=wallet_id, limit=limit, offset=offset
-            )
+            return nova.novamarket.wallet_entries(wallet_id=wallet_id, limit=limit, offset=offset)
         except Exception as exc:  # noqa: BLE001 - the mapper names the status
             raise _wallet_http_error(exc) from exc
 
@@ -2364,6 +2659,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             )
         except Exception as exc:  # noqa: BLE001 - the mapper names the status
             raise _wallet_http_error(exc) from exc
+
     # -- NM-04: evidence-backed market events --------------------------------
 
     def _event_http_error(exc: Exception) -> HTTPException:
@@ -2552,9 +2848,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
     ) -> dict[str, Any]:
         """Scored candidates, highest first."""
         try:
-            return nova.novamarket.discovery_candidates(
-                limit=limit, min_score=min_score
-            )
+            return nova.novamarket.discovery_candidates(limit=limit, min_score=min_score)
         except Exception as exc:  # noqa: BLE001
             raise _discovery_http_error(exc) from exc
 
@@ -2588,9 +2882,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         """Reevaluate watchlist members."""
         watchlist_id = str((payload or {}).get("watchlist_id") or "") or None
         try:
-            return await nova.novamarket.discovery_reevaluate(
-                watchlist_id=watchlist_id
-            )
+            return await nova.novamarket.discovery_reevaluate(watchlist_id=watchlist_id)
         except Exception as exc:  # noqa: BLE001
             raise _discovery_http_error(exc) from exc
 
@@ -2725,24 +3017,87 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             ForecastStateError,
             ForecastValidationError,
         )
+        from novacontrol.novamarket.statistical.models import (
+            StatisticalModelError,
+            StatisticalValidationError,
+            UnsupportedHorizonError,
+        )
+        from novacontrol.novamarket.gradient.models import GradientError
+        from novacontrol.novamarket.ensemble.models import (
+            EnsembleError,
+            EnsembleUnavailableError,
+        )
+        from novacontrol.novamarket.prediction.models import (
+            PredictionNotFoundError,
+            PredictionValidationError,
+        )
 
-        if isinstance(exc, ForecastNotFoundError):
+        if isinstance(exc, (ForecastNotFoundError, PredictionNotFoundError)):
             return HTTPException(status_code=404, detail=str(exc))
-        if isinstance(exc, (ForecastValidationError, ForecastDataError)):
+        if isinstance(
+            exc,
+            (
+                ForecastValidationError,
+                ForecastDataError,
+                StatisticalValidationError,
+                UnsupportedHorizonError,
+                PredictionValidationError,
+            ),
+        ):
+            return HTTPException(status_code=422, detail=str(exc))
+        if isinstance(
+            exc, (StatisticalModelError, GradientError, EnsembleError, EnsembleUnavailableError)
+        ):
             return HTTPException(status_code=422, detail=str(exc))
         if isinstance(exc, ForecastStateError):
             return HTTPException(status_code=409, detail=str(exc))
         return HTTPException(status_code=500, detail=str(exc))
 
+    def _forecast_as_of(value: Any) -> datetime | None:
+        """Parse an optional cutoff without turning bad input into a 500."""
+        if not value:
+            return None
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError as exc:
+                from novacontrol.novamarket.contracts import (
+                    ForecastValidationError,
+                )
+
+                raise ForecastValidationError("as_of must be an ISO-8601 timestamp") from exc
+        from novacontrol.novamarket.contracts import ForecastValidationError
+
+        raise ForecastValidationError("as_of must be an ISO-8601 timestamp")
+
     @app.post("/market/forecasts")
     async def market_forecast_create(
         payload: dict[str, Any], _principal: str = Depends(require_auth)
     ) -> dict[str, Any]:
-        """Generate and store one probabilistic forecast."""
+        """Generate one NM-06, PI-05, PI-06, PI-07 or PI-08 forecast."""
         try:
+            as_of = _forecast_as_of(payload.get("as_of"))
             return await nova.novamarket.forecast_generate(
                 str(payload.get("instrument_id") or ""),
                 str(payload.get("horizon") or ""),
+                statistical=str(payload.get("engine") or "").lower() == "statistical",
+                engine=str(payload.get("engine") or "").lower(),
+                model_id=str(payload.get("model_id") or ""),
+                as_of=as_of,
+                resolution=payload.get("resolution"),
+                dataset_id=str(payload.get("dataset_id") or ""),
+                dataset_version=str(payload.get("dataset_version") or ""),
+                feature_set_version=str(payload.get("feature_set_version") or "unspecified"),
+                feature_set_id=str(payload.get("feature_set_id") or ""),
+                exchange=str(payload.get("exchange") or ""),
+                currency=str(payload.get("currency") or ""),
+                bars=payload.get("bars"),
+                config=payload.get("config"),
+                fundamentals=payload.get("fundamentals") or (),
+                news_events=payload.get("news_events") or (),
+                regime=str(payload.get("regime") or ""),
             )
         except Exception as exc:  # noqa: BLE001
             raise _forecast_http_error(exc) from exc
@@ -2753,6 +3108,8 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         horizon: str = "",
         status: str = "",
         limit: int = 50,
+        engine: str = "",
+        model_id: str = "",
         _principal: str = Depends(require_auth),
     ) -> dict[str, Any]:
         """Stored forecasts, newest first."""
@@ -2762,6 +3119,8 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
                 horizon=horizon or None,
                 status=status or None,
                 limit=limit,
+                engine=engine,
+                model_id=model_id or None,
             )
         except Exception as exc:  # noqa: BLE001
             raise _forecast_http_error(exc) from exc
@@ -2777,6 +3136,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
     async def market_forecast_models(
         instrument_id: str = "",
         horizon: str = "",
+        engine: str = "",
         _principal: str = Depends(require_auth),
     ) -> dict[str, Any]:
         """Model versions, states and measured metrics."""
@@ -2784,6 +3144,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             return nova.novamarket.forecast_models(
                 instrument_id=instrument_id or None,
                 horizon=horizon or None,
+                engine=engine,
             )
         except Exception as exc:  # noqa: BLE001
             raise _forecast_http_error(exc) from exc
@@ -2794,6 +3155,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         instrument_id: str = "",
         horizon: str = "",
         limit: int = 50,
+        engine: str = "",
         _principal: str = Depends(require_auth),
     ) -> dict[str, Any]:
         """Measured performance: snapshots and the live aggregate."""
@@ -2803,6 +3165,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
                 instrument_id=instrument_id or None,
                 horizon=horizon or None,
                 limit=limit,
+                engine=engine,
             )
         except Exception as exc:  # noqa: BLE001
             raise _forecast_http_error(exc) from exc
@@ -2811,11 +3174,15 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
     async def market_forecast_calibration(
         model_id: str = "",
         horizon: str = "",
+        engine: str = "",
+        instrument_id: str = "",
         _principal: str = Depends(require_auth),
     ) -> dict[str, Any]:
         """The calibration report for one model and horizon."""
         try:
-            return nova.novamarket.forecast_calibration(model_id, horizon)
+            return nova.novamarket.forecast_calibration(
+                model_id, horizon, engine=engine, instrument_id=instrument_id
+            )
         except Exception as exc:  # noqa: BLE001
             raise _forecast_http_error(exc) from exc
 
@@ -2825,20 +3192,58 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
     ) -> dict[str, Any]:
         """Run chronological walk-forward comparison and calibration."""
         try:
+            as_of = _forecast_as_of(payload.get("as_of"))
+            requested_engine = str(payload.get("engine") or "").lower()
             return await nova.novamarket.forecast_train(
                 str(payload.get("instrument_id") or ""),
                 str(payload.get("horizon") or ""),
+                engine=requested_engine,
+                as_of=as_of,
+                resolution=payload.get("resolution"),
+                dataset_id=str(payload.get("dataset_id") or ""),
+                dataset_version=str(payload.get("dataset_version") or ""),
+                bars=payload.get("bars"),
+                config=payload.get("config"),
+                models=payload.get("models"),
+                fundamentals=payload.get("fundamentals") or (),
+                news_events=payload.get("news_events") or (),
+                benchmark_bars=payload.get("benchmark_bars"),
+                sector_bars=payload.get("sector_bars"),
+                context_bars=payload.get("context_bars"),
+                train_ratio=payload.get("train_ratio", 0.6),
+                validation_ratio=payload.get("validation_ratio", 0.2),
             )
         except Exception as exc:  # noqa: BLE001
             raise _forecast_http_error(exc) from exc
 
     @app.post("/market/forecasts/evaluate")
     async def market_forecast_evaluate(
+        payload: dict[str, Any] | None = None,
         _principal: str = Depends(require_auth),
     ) -> dict[str, Any]:
-        """Resolve every forecast whose target data now exists."""
+        """Resolve due NM-06 forecasts, or run a PI-05 chronological evaluation."""
         try:
-            return await nova.novamarket.forecast_evaluate()
+            body = payload or {}
+            as_of = _forecast_as_of(body.get("as_of"))
+            return await nova.novamarket.forecast_evaluate(
+                engine=str(body.get("engine") or ""),
+                instrument_id=str(body.get("instrument_id") or ""),
+                horizon=str(body.get("horizon") or ""),
+                as_of=as_of,
+                resolution=body.get("resolution"),
+                dataset_id=str(body.get("dataset_id") or ""),
+                dataset_version=str(body.get("dataset_version") or ""),
+                bars=body.get("bars"),
+                config=body.get("config"),
+                models=body.get("models"),
+                fundamentals=body.get("fundamentals") or (),
+                news_events=body.get("news_events") or (),
+                benchmark_bars=body.get("benchmark_bars"),
+                sector_bars=body.get("sector_bars"),
+                context_bars=body.get("context_bars"),
+                train_ratio=body.get("train_ratio", 0.6),
+                validation_ratio=body.get("validation_ratio", 0.2),
+            )
         except Exception as exc:  # noqa: BLE001
             raise _forecast_http_error(exc) from exc
 
@@ -2855,6 +3260,236 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
                 str(payload.get("instrument_id") or ""),
                 str(payload.get("horizon") or ""),
             )
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_http_error(exc) from exc
+
+    @app.post("/market/forecasts/cycles")
+    async def market_forecast_cycle_create(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Schedule one durable PI-09 forecast lifecycle; never creates an order."""
+        try:
+            target = _forecast_as_of(payload.get("target_at"))
+            return nova.novamarket.schedule_forecast_cycle(
+                instrument_id=str(payload.get("instrument_id") or ""),
+                horizon=str(payload.get("horizon") or ""),
+                exchange=str(payload.get("exchange") or ""),
+                target_at=target,
+                resolution=payload.get("resolution"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_http_error(exc) from exc
+
+    @app.get("/market/forecasts/cycles")
+    async def market_forecast_cycles(
+        instrument_id: str = "",
+        exchange: str = "",
+        horizon: str = "",
+        state: str = "",
+        target_date: str = "",
+        limit: int = 50,
+        _principal: str = Depends(require_auth),
+    ) -> list[dict[str, Any]]:
+        """Scheduled and historical PI-09 cycles, most recently scheduled first.
+
+        The operator-facing list is ordered by creation so a lifecycle scheduled
+        a moment ago is always on the first page instead of being cut off by the
+        limit behind older, earlier-dated cycles.
+        """
+        try:
+            return nova.novamarket.forecast_cycles(
+                instrument_id=instrument_id or None,
+                exchange=exchange or None,
+                horizon=horizon or None,
+                state=state or None,
+                target_date=target_date or None,
+                limit=limit,
+                newest_first=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_http_error(exc) from exc
+
+    @app.get("/market/forecasts/cycles/{cycle_id}")
+    async def market_forecast_cycle(
+        cycle_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """One cycle with its checkpoint timeline, immutable versions and outcomes."""
+        try:
+            return nova.novamarket.forecast_cycle(cycle_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_http_error(exc) from exc
+
+    @app.get("/market/forecasts/scheduler")
+    async def market_forecast_scheduler(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """PI-09 scheduler health, durable queue state and forecast-only authority."""
+        return nova.novamarket.forecast_scheduler_status()
+
+    @app.post("/market/forecasts/scheduler/tick")
+    async def market_forecast_scheduler_tick(
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Run a bounded, authenticated due-checkpoint batch; never trades."""
+        try:
+            body = payload or {}
+            limit = int(body.get("limit") or 5)
+            if not 1 <= limit <= 20:
+                raise ValueError("limit must be between 1 and 20")
+            return await nova.novamarket.forecast_scheduler_tick(limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_http_error(exc) from exc
+
+    @app.get("/market/forecasts/missed")
+    async def market_forecast_missed(
+        limit: int = 100, _principal: str = Depends(require_auth)
+    ) -> list[dict[str, Any]]:
+        """Checkpoints whose planned or retry time passed without completion."""
+        try:
+            return nova.novamarket.forecast_missed_checkpoints(limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_http_error(exc) from exc
+
+    @app.get("/market/forecasts/evaluations/pending")
+    async def market_forecast_pending_evaluations(
+        _principal: str = Depends(require_auth),
+    ) -> list[dict[str, Any]]:
+        """Target-time evaluations waiting on validated observations."""
+        try:
+            return nova.novamarket.forecast_pending_evaluations()
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_http_error(exc) from exc
+
+    @app.get("/market/forecasts/accuracy")
+    async def market_forecast_accuracy(
+        instrument_id: str = "",
+        horizon: str = "",
+        stage: str = "",
+        cycle_id: str = "",
+        model_id: str = "",
+        model_version: str = "",
+        ensemble_id: str = "",
+        target_date: str = "",
+        regime: str = "",
+        limit: int = 1000,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Forecast accuracy history with sample counts and reliability caveats."""
+        try:
+            return nova.novamarket.forecast_accuracy(
+                instrument_id=instrument_id or None,
+                horizon=horizon or None,
+                stage=stage or None,
+                cycle_id=cycle_id or None,
+                model_id=model_id or None,
+                model_version=model_version or None,
+                ensemble_id=ensemble_id or None,
+                target_date=target_date or None,
+                regime=regime or None,
+                limit=limit,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_http_error(exc) from exc
+
+    # -- PI-10: swing and long-term outlook ----------------------------------
+
+    @app.post("/market/forecasts/horizons")
+    async def market_forecast_horizons_create(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Generate 1d/3d/5d/30d/90d forecasts through the existing PI-08 stack."""
+        try:
+            requested = payload.get("horizons") or payload.get("horizon") or None
+            if isinstance(requested, str):
+                requested = [item.strip() for item in requested.split(",") if item.strip()]
+            return await nova.novamarket.outlook_forecast(
+                str(payload.get("instrument_id") or ""),
+                horizons=requested,
+                as_of=_forecast_as_of(payload.get("as_of")),
+                resolution=payload.get("resolution"),
+                dataset_id=str(payload.get("dataset_id") or ""),
+                dataset_version=str(payload.get("dataset_version") or ""),
+                feature_set_version=str(payload.get("feature_set_version") or ""),
+                feature_set_id=str(payload.get("feature_set_id") or ""),
+                exchange=str(payload.get("exchange") or ""),
+                currency=str(payload.get("currency") or ""),
+                bars=payload.get("bars"),
+                config=payload.get("config"),
+                fundamentals=payload.get("fundamentals") or (),
+                news_events=payload.get("news_events") or (),
+                regime=str(payload.get("regime") or ""),
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_http_error(exc) from exc
+
+    @app.get("/market/forecasts/horizons/status")
+    async def market_forecast_horizons_status(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """PI-10 horizon profiles, evidence rules and unchanged authorities."""
+        return nova.novamarket.outlook_status()
+
+    @app.get("/market/forecasts/horizons/performance")
+    async def market_forecast_horizons_performance(
+        instrument_id: str = "",
+        horizon: str = "",
+        family: str = "",
+        limit: int = 1000,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Horizon-separated forecast outcomes; never one blended accuracy."""
+        try:
+            if not 1 <= int(limit) <= 10_000:
+                from novacontrol.novamarket.outlook import OutlookValidationError
+
+                raise OutlookValidationError("limit must be between 1 and 10000")
+            return nova.novamarket.outlook_accuracy(
+                instrument_id=instrument_id or None,
+                horizon=horizon or None,
+                family=family or None,
+                limit=limit,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_http_error(exc) from exc
+
+    @app.get("/market/forecasts/horizons/{instrument_id}/context")
+    async def market_forecast_horizons_context(
+        instrument_id: str,
+        as_of: str = "",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Validated point-in-time sector, benchmark, peer and event context."""
+        try:
+            return await nova.novamarket.outlook_context(
+                instrument_id, as_of=_forecast_as_of(as_of)
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_http_error(exc) from exc
+
+    @app.get("/market/forecasts/horizons/{instrument_id}")
+    async def market_forecast_horizons_latest(
+        instrument_id: str,
+        as_of: str = "",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Latest stored forecast for each horizon plus cross-horizon analysis."""
+        try:
+            return nova.novamarket.outlook_latest(instrument_id, as_of=_forecast_as_of(as_of))
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_http_error(exc) from exc
+
+    @app.get("/market/forecasts/{forecast_id}/explain")
+    async def market_forecast_explain(
+        forecast_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """On-demand constituent/importance detail for one PI-06/07/08 forecast."""
+        try:
+            if forecast_id.startswith(("ens_", "ensfb_")):
+                return nova.novamarket.ensemble_explain(forecast_id)
+            if forecast_id.startswith("lstm_"):
+                return nova.novamarket.lstm_explain(forecast_id)
+            return nova.novamarket.gradient_explain(forecast_id)
         except Exception as exc:  # noqa: BLE001
             raise _forecast_http_error(exc) from exc
 
@@ -3095,9 +3730,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
     ) -> dict[str, Any]:
         """Apply a validated proposal to the simulated book."""
         try:
-            return await nova.novamarket.portfolio_apply(
-                str(payload.get("proposal_id") or "")
-            )
+            return await nova.novamarket.portfolio_apply(str(payload.get("proposal_id") or ""))
         except Exception as exc:  # noqa: BLE001
             raise _portfolio_http_error(exc) from exc
 
@@ -3130,7 +3763,6 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             )
         except Exception as exc:  # noqa: BLE001
             raise _portfolio_http_error(exc) from exc
-
 
     @app.post("/market/risk/assess")
     async def market_risk_assess(
@@ -3259,11 +3891,10 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             raw_changes = payload.get("changes") or {}
             if not isinstance(raw_changes, dict):
                 from novacontrol.novamarket.contracts import RiskValidationError
+
                 raise RiskValidationError("changes must be an object")
             changes = dict(raw_changes)
-            return await nova.novamarket.risk_update_policy(
-                policy_id, changes, actor=_principal
-            )
+            return await nova.novamarket.risk_update_policy(policy_id, changes, actor=_principal)
         except Exception as exc:  # noqa: BLE001
             raise _risk_http_error(exc) from exc
 
@@ -3282,9 +3913,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
     ) -> dict[str, Any]:
         """Acknowledge an alert."""
         try:
-            return await nova.novamarket.risk_acknowledge_alert(
-                alert_id, actor=_principal
-            )
+            return await nova.novamarket.risk_acknowledge_alert(alert_id, actor=_principal)
         except Exception as exc:  # noqa: BLE001
             raise _risk_http_error(exc) from exc
 
@@ -3294,9 +3923,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
     ) -> dict[str, Any]:
         """Resolve an alert."""
         try:
-            return await nova.novamarket.risk_resolve_alert(
-                alert_id, actor=_principal
-            )
+            return await nova.novamarket.risk_resolve_alert(alert_id, actor=_principal)
         except Exception as exc:  # noqa: BLE001
             raise _risk_http_error(exc) from exc
 
@@ -3364,7 +3991,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
 
     @app.get("/market/strategies")
     async def market_strategies(
-        status: str = "", category: str = "", limit: int = 100,
+        status: str = "",
+        category: str = "",
+        limit: int = 100,
         _principal: str = Depends(require_auth),
     ) -> dict[str, Any]:
         return nova.novamarket.strategies(status=status, category=category, limit=limit)
@@ -3388,7 +4017,10 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
 
     @app.get("/market/strategies/proposals")
     async def market_strategy_proposals(
-        strategy_id: str = "", portfolio_id: str = "", status: str = "", limit: int = 100,
+        strategy_id: str = "",
+        portfolio_id: str = "",
+        status: str = "",
+        limit: int = 100,
         _principal: str = Depends(require_auth),
     ) -> dict[str, Any]:
         return nova.novamarket.strategy_proposals(
@@ -3421,12 +4053,17 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
 
     @app.get("/market/strategies/signals")
     async def market_strategy_signals(
-        strategy_id: str = "", portfolio_id: str = "", signal_type: str = "", limit: int = 200,
+        strategy_id: str = "",
+        portfolio_id: str = "",
+        signal_type: str = "",
+        limit: int = 200,
         _principal: str = Depends(require_auth),
     ) -> dict[str, Any]:
         return nova.novamarket.strategy_signals(
-            strategy_id=strategy_id, portfolio_id=portfolio_id,
-            signal_type=signal_type, limit=limit,
+            strategy_id=strategy_id,
+            portfolio_id=portfolio_id,
+            signal_type=signal_type,
+            limit=limit,
         )
 
     @app.get("/market/strategies/signals/{signal_id}")
@@ -3468,7 +4105,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
     ) -> dict[str, Any]:
         try:
             return await nova.novamarket.update_strategy_config(
-                strategy_id, payload.get("changes") or {}, actor=_principal,
+                strategy_id,
+                payload.get("changes") or {},
+                actor=_principal,
                 reason=str(payload.get("reason") or ""),
             )
         except Exception as exc:  # noqa: BLE001
@@ -3485,12 +4124,15 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
 
     @app.post("/market/strategies/{strategy_id}/activate")
     async def market_strategy_activate(
-        strategy_id: str, payload: dict[str, Any] | None = None,
+        strategy_id: str,
+        payload: dict[str, Any] | None = None,
         _principal: str = Depends(require_auth),
     ) -> dict[str, Any]:
         try:
             return await nova.novamarket.strategy_transition(
-                strategy_id, "activate", actor=_principal,
+                strategy_id,
+                "activate",
+                actor=_principal,
                 reason=str((payload or {}).get("reason") or ""),
             )
         except Exception as exc:  # noqa: BLE001
@@ -3498,12 +4140,15 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
 
     @app.post("/market/strategies/{strategy_id}/pause")
     async def market_strategy_pause(
-        strategy_id: str, payload: dict[str, Any] | None = None,
+        strategy_id: str,
+        payload: dict[str, Any] | None = None,
         _principal: str = Depends(require_auth),
     ) -> dict[str, Any]:
         try:
             return await nova.novamarket.strategy_transition(
-                strategy_id, "pause", actor=_principal,
+                strategy_id,
+                "pause",
+                actor=_principal,
                 reason=str((payload or {}).get("reason") or ""),
             )
         except Exception as exc:  # noqa: BLE001
@@ -3511,12 +4156,15 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
 
     @app.post("/market/strategies/{strategy_id}/suspend")
     async def market_strategy_suspend(
-        strategy_id: str, payload: dict[str, Any] | None = None,
+        strategy_id: str,
+        payload: dict[str, Any] | None = None,
         _principal: str = Depends(require_auth),
     ) -> dict[str, Any]:
         try:
             return await nova.novamarket.strategy_transition(
-                strategy_id, "suspend", actor=_principal,
+                strategy_id,
+                "suspend",
+                actor=_principal,
                 reason=str((payload or {}).get("reason") or ""),
             )
         except Exception as exc:  # noqa: BLE001
@@ -3524,12 +4172,15 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
 
     @app.post("/market/strategies/{strategy_id}/retire")
     async def market_strategy_retire(
-        strategy_id: str, payload: dict[str, Any] | None = None,
+        strategy_id: str,
+        payload: dict[str, Any] | None = None,
         _principal: str = Depends(require_auth),
     ) -> dict[str, Any]:
         try:
             return await nova.novamarket.strategy_transition(
-                strategy_id, "retire", actor=_principal,
+                strategy_id,
+                "retire",
+                actor=_principal,
                 reason=str((payload or {}).get("reason") or ""),
             )
         except Exception as exc:  # noqa: BLE001
@@ -3537,12 +4188,15 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
 
     @app.post("/market/strategies/{strategy_id}/degrade")
     async def market_strategy_degrade(
-        strategy_id: str, payload: dict[str, Any] | None = None,
+        strategy_id: str,
+        payload: dict[str, Any] | None = None,
         _principal: str = Depends(require_auth),
     ) -> dict[str, Any]:
         try:
             return await nova.novamarket.strategy_transition(
-                strategy_id, "degrade", actor=_principal,
+                strategy_id,
+                "degrade",
+                actor=_principal,
                 reason=str((payload or {}).get("reason") or ""),
             )
         except Exception as exc:  # noqa: BLE001
@@ -3554,8 +4208,10 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
     ) -> dict[str, Any]:
         try:
             return await nova.novamarket.evaluate_strategy(
-                strategy_id, str(payload.get("portfolio_id") or ""),
-                instrument_ids=payload.get("instrument_ids") or None, actor=_principal,
+                strategy_id,
+                str(payload.get("portfolio_id") or ""),
+                instrument_ids=payload.get("instrument_ids") or None,
+                actor=_principal,
             )
         except Exception as exc:  # noqa: BLE001
             raise _risk_http_error(exc) from exc
@@ -3672,15 +4328,11 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
                     else None
                 ),
                 intervals=(
-                    [str(item) for item in intervals]
-                    if isinstance(intervals, list)
-                    else None
+                    [str(item) for item in intervals] if isinstance(intervals, list) else None
                 ),
                 trigger=str(body.get("trigger") or "api"),
                 force_quotes=bool(body.get("force_quotes", False)),
-                include_quotes=(
-                    include_quotes if isinstance(include_quotes, bool) else None
-                ),
+                include_quotes=(include_quotes if isinstance(include_quotes, bool) else None),
             )
         except Exception as exc:  # noqa: BLE001 - the mapper names the status
             raise _market_http_error(exc) from exc
@@ -3809,9 +4461,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
     ) -> dict[str, Any]:
         """One instrument's closed-candle structure, blocks, levels and chart."""
         try:
-            return nova.novamarket.market_orderblock_instrument(
-                instrument_id, interval=interval
-            )
+            return nova.novamarket.market_orderblock_instrument(instrument_id, interval=interval)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
@@ -4481,7 +5131,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
 
     @app.post("/novaforge/sessions/{session_id}/plan/cancel")
     async def novaforge_plan_cancel(
-        session_id: str, payload: dict[str, Any] | None = None, _principal: str = Depends(require_auth)
+        session_id: str,
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
     ) -> dict[str, Any]:
         """Cancel the session's pending or running plan (idempotent)."""
         try:
@@ -4503,9 +5155,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         fresh plan is served with the approval token it needs.
         """
         try:
-            return nova.forge_plan_receipt(
-                await nova.novaforge.replan_actions(session_id, payload)
-            )
+            return nova.forge_plan_receipt(await nova.novaforge.replan_actions(session_id, payload))
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}") from exc
         except MissionValidationError as exc:
@@ -4529,7 +5179,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
 
     @app.post("/novaforge/sessions/{session_id}/outcomes/verify")
     async def novaforge_outcomes_verify(
-        session_id: str, payload: dict[str, Any] | None = None, _principal: str = Depends(require_auth)
+        session_id: str,
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
     ) -> dict[str, Any]:
         """Verify a plan's dispatched steps against fresh readings.
 
@@ -4627,7 +5279,11 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         _principal: str = Depends(require_auth),
     ) -> dict[str, Any]:
         """Pause the run: the session pauses and the next cycle re-observes."""
-        reason = str((payload or {}).get("reason") or "operator") if isinstance(payload, dict) else "operator"
+        reason = (
+            str((payload or {}).get("reason") or "operator")
+            if isinstance(payload, dict)
+            else "operator"
+        )
         return await nova.novaforge.pause_autonomy(session_id, reason=reason)
 
     @app.post("/novaforge/sessions/{session_id}/autonomy/resume")
@@ -4644,7 +5300,11 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         _principal: str = Depends(require_auth),
     ) -> dict[str, Any]:
         """Cancel the run before its next stage, then let it end cleanly."""
-        reason = str((payload or {}).get("reason") or "operator") if isinstance(payload, dict) else "operator"
+        reason = (
+            str((payload or {}).get("reason") or "operator")
+            if isinstance(payload, dict)
+            else "operator"
+        )
         return await nova.novaforge.cancel_autonomy(session_id, reason=reason)
 
     @app.post("/novaforge/sessions/{session_id}/autonomy/approve")
@@ -4917,9 +5577,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
     ) -> dict[str, Any]:
         """Compare compatible runs; query params accept comma-separated run ids."""
         try:
-            return nova.novaforge_benchmarks.compare(
-                _benchmark_ids(left), _benchmark_ids(right)
-            )
+            return nova.novaforge_benchmarks.compare(_benchmark_ids(left), _benchmark_ids(right))
         except BenchmarkValidationError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except BenchmarkNotFoundError as exc:
@@ -5111,9 +5769,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         reasons, which is a decision record rather than an error page.
         """
         try:
-            return nova.novaforge_experiments.propose(
-                payload, coach=nova.novaforge_coach
-            )
+            return nova.novaforge_experiments.propose(payload, coach=nova.novaforge_coach)
         except ExperimentNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ExperimentError as exc:
@@ -6201,21 +6857,29 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         return nova.phone.connect().to_dict()
 
     @app.post("/phone/plan")
-    async def phone_plan(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def phone_plan(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         return nova.plan_phone_command(_required_field(payload, "command"))
 
     @app.post("/phone/execute")
-    async def phone_execute(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def phone_execute(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         token = str(payload.get("approval_token", "") or "") or None
         try:
             return await nova.execute_phone_command(
-                _required_field(payload, "command"), approval_token=token, correlation_id=str(payload.get("correlation_id", "") or "")
+                _required_field(payload, "command"),
+                approval_token=token,
+                correlation_id=str(payload.get("correlation_id", "") or ""),
             )
         except ValueError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     @app.post("/agent/run")
-    async def agent_run(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def agent_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """Run the full agentic loop (interpret → plan → perceive → act → verify → recover)."""
         return await nova.run_agentic_task(_required_field(payload, "request"))
 
@@ -6255,7 +6919,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         return nova.automation_status()
 
     @app.post("/automation/schedule")
-    async def automation_schedule(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def automation_schedule(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """Store a request plus the schedule its wording states.
 
         ``authorize`` is the caller saying it has approved the task; without it
@@ -6272,7 +6938,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post("/automation/approve")
-    async def automation_approve(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def automation_approve(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         try:
             return nova.approve_automation(
                 _automation_id(payload), by=str(payload.get("by", "operator"))
@@ -6281,14 +6949,18 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/automation/cancel")
-    async def automation_cancel(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def automation_cancel(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         try:
             return nova.cancel_automation(_automation_id(payload))
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/automation/enable")
-    async def automation_enable(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def automation_enable(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         try:
             return nova.enable_automation(_automation_id(payload))
         except KeyError as exc:
@@ -6299,14 +6971,18 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/automation/disable")
-    async def automation_disable(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def automation_disable(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         try:
             return nova.disable_automation(_automation_id(payload))
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/automation/run")
-    async def automation_run(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def automation_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """Run one stored automation now — the same gate a due run passes."""
         try:
             return await nova.run_automation(_automation_id(payload))
@@ -6323,7 +6999,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         return nova.audit_status()
 
     @app.get("/audit/entries")
-    async def audit_entries(limit: int = 20, _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def audit_entries(
+        limit: int = 20, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         return {"entries": nova.audit_entries(limit)}
 
     @app.post("/audit/prune")
@@ -6331,7 +7009,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         return nova.audit_prune()
 
     @app.post("/audit/delete")
-    async def audit_delete(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def audit_delete(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         record_id = str(payload.get("record_id", "")).strip()
         if not record_id:
             raise HTTPException(status_code=422, detail="record_id is required.")
@@ -6347,12 +7027,12 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         return nova.privacy_status()
 
     @app.post("/privacy")
-    async def privacy_update(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def privacy_update(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """Change the execution mode and/or a control, and apply it live."""
         return await nova.apply_privacy_settings(
-            execution_mode=str(payload["execution_mode"])
-            if "execution_mode" in payload
-            else None,
+            execution_mode=str(payload["execution_mode"]) if "execution_mode" in payload else None,
             allow_cloud=bool(payload["allow_cloud"]) if "allow_cloud" in payload else None,
             allow_external_search=bool(payload["allow_external_search"])
             if "allow_external_search" in payload
@@ -6374,7 +7054,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         return nova.resource_status()
 
     @app.post("/cost/estimate")
-    async def cost_estimate(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def cost_estimate(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """Estimate a request's cost — a hint for routing, never a gate."""
         request = str(payload.get("request", "")).strip()
         if not request:
@@ -6398,7 +7080,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         return nova.benchmark_status()
 
     @app.post("/benchmark")
-    async def benchmark_run(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def benchmark_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """Measure a model on the given tasks through the live provider."""
         model = str(payload.get("model", "")).strip()
         tasks = payload.get("tasks")
@@ -6603,9 +7287,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         payload: dict[str, Any], _principal: str = Depends(require_auth)
     ) -> dict[str, Any]:
         """End a run: a live one at its next step, a stored one immediately."""
-        return _training_refused(
-            nova.cancel_training_run(_required_field(payload)), "cancellation"
-        )
+        return _training_refused(nova.cancel_training_run(_required_field(payload)), "cancellation")
 
     @app.post("/training/runs/resume")
     async def resume_training_run(
@@ -6657,7 +7339,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         # recorded as unevaluated and the caller gets a non-2xx, exactly as the
         # CLI exits non-zero. A comparison that ran (pass, regress, even
         # inconclusive) is a 200 with its verdict in the body.
-        return _training_refused(result, "evaluation", status_code=404 if _is_missing(result) else 409)
+        return _training_refused(
+            result, "evaluation", status_code=404 if _is_missing(result) else 409
+        )
 
     @app.get("/training/runs/{run_id}/checkpoints")
     async def training_checkpoints(
@@ -6667,9 +7351,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         return nova.training_checkpoints(run_id)
 
     @app.get("/training/runs/{run_id}")
-    async def training_run(
-        run_id: str, _principal: str = Depends(require_auth)
-    ) -> dict[str, Any]:
+    async def training_run(run_id: str, _principal: str = Depends(require_auth)) -> dict[str, Any]:
         """One run: its configuration, status, losses, checkpoints and estimate."""
         try:
             return nova.training_run(run_id)
@@ -6911,13 +7593,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         chosen = payload.get("chosen")
         rejected = payload.get("rejected")
         if not dataset_type or not isinstance(prompt, dict):
-            raise HTTPException(
-                status_code=422, detail="dataset_type and prompt are required."
-            )
+            raise HTTPException(status_code=422, detail="dataset_type and prompt are required.")
         if not isinstance(chosen, dict) or not isinstance(rejected, dict):
-            raise HTTPException(
-                status_code=422, detail="chosen and rejected must both be objects."
-            )
+            raise HTTPException(status_code=422, detail="chosen and rejected must both be objects.")
         context = payload.get("context")
         chosen_outcome = payload.get("chosen_outcome")
         rejected_outcome = payload.get("rejected_outcome")
@@ -6929,9 +7607,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             rejected=rejected,
             context=context if isinstance(context, dict) else None,
             chosen_outcome=chosen_outcome if isinstance(chosen_outcome, dict) else None,
-            rejected_outcome=(
-                rejected_outcome if isinstance(rejected_outcome, dict) else None
-            ),
+            rejected_outcome=(rejected_outcome if isinstance(rejected_outcome, dict) else None),
             reviewer=str(payload.get("reviewer", "")),
             reason=str(payload.get("reason", "")),
             confidence=float(payload.get("confidence", 1.0) or 1.0),
@@ -7253,9 +7929,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             payload.get("subject") or {},
             evaluator=str(payload.get("evaluator") or "auto"),
             criteria=(
-                [str(item) for item in criteria]
-                if isinstance(criteria, (list, tuple))
-                else ()
+                [str(item) for item in criteria] if isinstance(criteria, (list, tuple)) else ()
             ),
             save=bool(payload.get("save", True)),
         )
@@ -7300,9 +7974,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         name = str(payload.get("name") or "").strip()
         mode = str(payload.get("mode") or "").strip()
         if not name or not mode:
-            raise HTTPException(
-                status_code=422, detail="name and mode are required."
-            )
+            raise HTTPException(status_code=422, detail="name and mode are required.")
         rules = payload.get("rules")
         split = payload.get("split")
         tags = payload.get("tags")
@@ -7313,28 +7985,28 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             split=split if isinstance(split, dict) else None,
             version=str(payload.get("version") or ""),
             description=str(payload.get("description") or ""),
-            tags=[str(tag) for tag in tags]
-            if isinstance(tags, (list, tuple))
-            else (),
+            tags=[str(tag) for tag in tags] if isinstance(tags, (list, tuple)) else (),
         )
         if not result.get("ok"):
             raise HTTPException(
                 status_code=422,
-                detail=str(
-                    result.get("reason", "the reward dataset could not be built")
-                ),
+                detail=str(result.get("reason", "the reward dataset could not be built")),
             )
         return result
 
     @app.get("/rlhf/datasets/{dataset_version_id}/validate")
-    async def validate_rlhf_dataset(dataset_version_id: str, _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def validate_rlhf_dataset(
+        dataset_version_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         try:
             return nova.validate_rlhf_dataset(dataset_version_id)
         except KeyError as exc:
             raise HTTPException(404, str(exc)) from exc
 
     @app.get("/rlhf/datasets/{dataset_version_id}/held")
-    async def rlhf_held(dataset_version_id: str, _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def rlhf_held(
+        dataset_version_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         result = nova.rlhf_held(dataset_version_id)
         if not result.get("ok", True):
             detail = str(result.get("reason") or "no such dataset")
@@ -7342,7 +8014,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         return result
 
     @app.get("/rlhf/datasets/{dataset_version_id}")
-    async def rlhf_dataset(dataset_version_id: str, _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def rlhf_dataset(
+        dataset_version_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         try:
             return nova.rlhf_dataset(dataset_version_id)
         except KeyError as exc:
@@ -7415,9 +8089,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         payload: dict[str, Any], _principal: str = Depends(require_auth)
     ) -> dict[str, Any]:
         """End an RL run: a live one at its next step, a stored one now."""
-        return _training_refused(
-            nova.cancel_rlhf_run(_required_field(payload)), "cancellation"
-        )
+        return _training_refused(nova.cancel_rlhf_run(_required_field(payload)), "cancellation")
 
     @app.post("/rlhf/runs/resume")
     async def resume_rlhf_run(
@@ -7500,9 +8172,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         return result
 
     @app.get("/rlhf/runs/{run_id}")
-    async def rlhf_run(
-        run_id: str, _principal: str = Depends(require_auth)
-    ) -> dict[str, Any]:
+    async def rlhf_run(run_id: str, _principal: str = Depends(require_auth)) -> dict[str, Any]:
         """One RL run: mode, algorithm, config, progress and checkpoints."""
         try:
             return nova.rlhf_run(run_id)
@@ -7527,9 +8197,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         return nova.rlhf_models(status=status, mode=mode, limit=limit)
 
     @app.get("/rlhf/models/{model_id}")
-    async def rlhf_model(
-        model_id: str, _principal: str = Depends(require_auth)
-    ) -> dict[str, Any]:
+    async def rlhf_model(model_id: str, _principal: str = Depends(require_auth)) -> dict[str, Any]:
         """One registered model, with the RL mode that produced it."""
         try:
             return nova.rlhf_model(model_id)
@@ -7675,9 +8343,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
     ) -> dict[str, Any]:
         """The Phase 17 preference pairs a critique dataset yields."""
         try:
-            return nova.rlvr_preference_pairs(
-                dataset_version_id, verified_only=verified_only
-            )
+            return nova.rlvr_preference_pairs(dataset_version_id, verified_only=verified_only)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -7729,9 +8395,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             if isinstance(tasks, (list, tuple))
             else (),
             dataset_version=str(payload.get("dataset_version", "")),
-            labels={
-                str(key): str(value) for key, value in labels.items()
-            }
+            labels={str(key): str(value) for key, value in labels.items()}
             if isinstance(labels, dict)
             else None,
         )
@@ -7823,6 +8487,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         payload: dict[str, Any], _principal: str = Depends(require_auth)
     ) -> dict[str, Any]:
         """Verifier-side metrics against labels recorded before the call."""
+
         def rows(key: str) -> list[dict[str, Any]]:
             value = payload.get(key)
             if not isinstance(value, (list, tuple)):
@@ -7837,9 +8502,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             if isinstance(labels, dict)
             else None,
             critiques=rows("critiques"),
-            expected_categories={
-                str(key): str(value) for key, value in categories.items()
-            }
+            expected_categories={str(key): str(value) for key, value in categories.items()}
             if isinstance(categories, dict)
             else None,
             integrity=rows("integrity"),
@@ -7855,9 +8518,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         return nova.rlvr_checkpoints(run_id)
 
     @app.get("/rlvr/runs/{run_id}")
-    async def rlvr_run(
-        run_id: str, _principal: str = Depends(require_auth)
-    ) -> dict[str, Any]:
+    async def rlvr_run(run_id: str, _principal: str = Depends(require_auth)) -> dict[str, Any]:
         """One RLVR run: configuration, metrics, verifier snapshot."""
         try:
             return nova.rlvr_run(run_id)
@@ -7865,7 +8526,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/brain/decide")
-    async def brain_decide(payload: BrainDecideRequest, _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def brain_decide(
+        payload: BrainDecideRequest, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """Trace an utterance through the routing gates with a rung preview.
 
         The routing explorer in the web UI posts here while the server is up:
@@ -7879,11 +8542,16 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         try:
             routed["preview"] = _routing_preview(nova, payload.text, routed["intent"])
         except Exception as exc:
-            routed["preview"] = {"kind": "info", "text": f"Preview unavailable: {type(exc).__name__}"}
+            routed["preview"] = {
+                "kind": "info",
+                "text": f"Preview unavailable: {type(exc).__name__}",
+            }
         return routed
 
     @app.get("/explore/trending")
-    async def explore_trending(count: int = 6, _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def explore_trending(
+        count: int = 6, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         """Current daily research topics from live top-story news.
 
         The pool refetches at most every 30 minutes and is invalidated by day;
@@ -7896,7 +8564,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         return trending.topics(count=bounded)
 
     @app.post("/explore")
-    async def explore(payload: ExploreRequest_, _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def explore(
+        payload: ExploreRequest_, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
         last_topic = payload.last_topic or None
         prior_topics = tuple(payload.prior_topics)
         if last_topic and not prior_topics:
@@ -7927,6 +8597,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
 
     @app.get("/events/stream")
     async def events_stream(
+        request: Request,
         token: str | None = None,
         authorization: str | None = Header(default=None),
     ) -> Any:
@@ -7946,7 +8617,9 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         result = authenticator.authenticate(authorization)
         if not result.authenticated and token:
             result = authenticator.authenticate(f"Bearer {token}")
-        if not result.authenticated:
+        if not result.authenticated and not _local_admin_authorized(
+            request, token, authorization
+        ):
             raise HTTPException(status_code=401, detail=result.reason)
 
         queue: asyncio.Queue[Event] = asyncio.Queue(maxsize=256)
@@ -7970,11 +8643,15 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             finally:
                 await nova.event_bus.unsubscribe("*", forward)
 
-        return StreamingResponse(stream(), media_type="text/event-stream", headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        })
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @app.get("/plugins")
     async def plugins(_principal: str = Depends(require_auth)) -> dict[str, Any]:
@@ -8022,7 +8699,10 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         if not result.get("ok") and result.get("order", {}).get("status") == "rejected":
             from fastapi import HTTPException
 
-            raise HTTPException(status_code=422, detail={"error": result.get("error", "rejected"), "order": result.get("order")})
+            raise HTTPException(
+                status_code=422,
+                detail={"error": result.get("error", "rejected"), "order": result.get("order")},
+            )
         return result
 
     @app.get("/market/execution/orders")
@@ -8257,9 +8937,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         _principal: str = Depends(require_auth),
     ) -> dict[str, Any]:
         try:
-            return nova.novamarket.backtest(
-                backtest_id, include_bars=include_bars
-            )
+            return nova.novamarket.backtest(backtest_id, include_bars=include_bars)
         except Exception as exc:  # noqa: BLE001
             raise _backtest_http_error(exc) from exc
 
@@ -8362,6 +9040,3409 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             )
         except Exception as exc:  # noqa: BLE001
             raise _backtest_http_error(exc) from exc
+
+    # -- PI-13: isolated reinforcement-learning research --------------------
+    def _rl_http_error(exc: Exception) -> HTTPException:
+        from novacontrol.novamarket.rl import (
+            RLDataError,
+            RLEpisodeError,
+            RLInvalidActionError,
+            RLStoreError,
+            RLValidationError,
+        )
+
+        if isinstance(exc, HTTPException):
+            return exc
+        text = str(exc)
+        if isinstance(exc, RLInvalidActionError):
+            return HTTPException(status_code=422, detail=text)
+        if isinstance(exc, RLValidationError):
+            return HTTPException(status_code=404 if "unknown" in text.lower() else 422, detail=text)
+        if isinstance(exc, RLEpisodeError):
+            return HTTPException(status_code=409, detail=text)
+        if isinstance(exc, (RLDataError, RLStoreError)):
+            return HTTPException(status_code=422, detail=text)
+        return HTTPException(status_code=500, detail=text)
+
+    @app.get("/market/rl/status")
+    async def market_rl_status(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.novamarket.rl_status()
+
+    @app.get("/market/rl/contracts")
+    async def market_rl_contracts(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.rl_contract()
+        except Exception as exc:  # noqa: BLE001
+            raise _rl_http_error(exc) from exc
+
+    @app.get("/market/rl/health")
+    async def market_rl_health(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.rl_health()
+        except Exception as exc:  # noqa: BLE001
+            raise _rl_http_error(exc) from exc
+
+    @app.post("/market/rl/environments")
+    async def market_rl_create_environment(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.rl_create_environment(payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _rl_http_error(exc) from exc
+
+    @app.get("/market/rl/environments")
+    async def market_rl_environments(
+        limit: int = 50, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.rl_environments(limit)
+        except Exception as exc:  # noqa: BLE001
+            raise _rl_http_error(exc) from exc
+
+    @app.get("/market/rl/environments/{environment_id}")
+    async def market_rl_environment(
+        environment_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.rl_environment(environment_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _rl_http_error(exc) from exc
+
+    @app.post("/market/rl/environments/{environment_id}/episodes")
+    async def market_rl_start_episode(
+        environment_id: str,
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.rl_start_episode(environment_id, payload or {})
+        except Exception as exc:  # noqa: BLE001
+            raise _rl_http_error(exc) from exc
+
+    @app.get("/market/rl/episodes")
+    async def market_rl_episodes(
+        environment_id: str = "",
+        limit: int = 50,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.rl_episodes(
+                environment_id=environment_id or None, limit=limit, offset=offset
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _rl_http_error(exc) from exc
+
+    @app.get("/market/rl/episodes/{episode_id}")
+    async def market_rl_episode(
+        episode_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.rl_episode(episode_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _rl_http_error(exc) from exc
+
+    @app.post("/market/rl/episodes/{episode_id}/step")
+    async def market_rl_step(
+        episode_id: str,
+        payload: dict[str, Any],
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.rl_step(episode_id, payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _rl_http_error(exc) from exc
+
+    @app.post("/market/rl/episodes/{episode_id}/reset")
+    async def market_rl_reset(
+        episode_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.rl_reset_episode(episode_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _rl_http_error(exc) from exc
+
+    @app.post("/market/rl/episodes/{episode_id}/cancel")
+    async def market_rl_cancel(
+        episode_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.rl_cancel(episode_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _rl_http_error(exc) from exc
+
+    @app.get("/market/rl/episodes/{episode_id}/transitions")
+    async def market_rl_transitions(
+        episode_id: str,
+        limit: int = 100,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.rl_transitions(episode_id, limit=limit, offset=offset)
+        except Exception as exc:  # noqa: BLE001
+            raise _rl_http_error(exc) from exc
+
+    @app.get("/market/rl/episodes/{episode_id}/experiences")
+    async def market_rl_experiences(
+        episode_id: str,
+        limit: int = 100,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.rl_experiences(episode_id, limit=limit, offset=offset)
+        except Exception as exc:  # noqa: BLE001
+            raise _rl_http_error(exc) from exc
+
+    # -- PI-14: reward calculation and policy evaluation --------------------
+    def _reward_http_error(exc: Exception) -> HTTPException:
+        from novacontrol.novamarket.rewards import (
+            PolicyEvaluationError,
+            RewardStoreError,
+            RewardValidationError,
+        )
+
+        if isinstance(exc, HTTPException):
+            return exc
+        text = str(exc)
+        if isinstance(exc, RewardValidationError):
+            return HTTPException(status_code=404 if "unknown" in text.lower() else 422, detail=text)
+        if isinstance(exc, PolicyEvaluationError):
+            return HTTPException(status_code=422, detail=text)
+        if isinstance(exc, RewardStoreError):
+            return HTTPException(status_code=409, detail=text)
+        return HTTPException(status_code=500, detail=text)
+
+    @app.get("/market/rewards/status")
+    async def market_rewards_status(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.novamarket.reward_status()
+
+    @app.get("/market/rewards/contracts")
+    async def market_rewards_contracts(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.reward_contract()
+        except Exception as exc:  # noqa: BLE001
+            raise _reward_http_error(exc) from exc
+
+    @app.get("/market/rewards/health")
+    async def market_rewards_health(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.reward_health()
+        except Exception as exc:  # noqa: BLE001
+            raise _reward_http_error(exc) from exc
+
+    @app.get("/market/rewards/baselines")
+    async def market_rewards_baselines(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.reward_baselines()
+        except Exception as exc:  # noqa: BLE001
+            raise _reward_http_error(exc) from exc
+
+    @app.post("/market/rewards/configurations")
+    async def market_rewards_create_configuration(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.reward_create_config(payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _reward_http_error(exc) from exc
+
+    @app.get("/market/rewards/configurations")
+    async def market_rewards_configurations(
+        limit: int = 50, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.reward_configs(limit)
+        except Exception as exc:  # noqa: BLE001
+            raise _reward_http_error(exc) from exc
+
+    @app.get("/market/rewards/configurations/{config_id}")
+    async def market_rewards_configuration(
+        config_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.reward_config(config_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _reward_http_error(exc) from exc
+
+    @app.post("/market/rewards/episodes/{episode_id}/calculate")
+    async def market_rewards_calculate_episode(
+        episode_id: str,
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(
+                nova.novamarket.reward_calculate_episode,
+                episode_id,
+                config_id=str((payload or {}).get("config_id") or ""),
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _reward_http_error(exc) from exc
+
+    @app.get("/market/rewards/episodes/{episode_id}")
+    async def market_rewards_episode(
+        episode_id: str,
+        limit: int = 200,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.reward_episode_rewards(episode_id, limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            raise _reward_http_error(exc) from exc
+
+    @app.get("/market/rewards/results/{reward_id}")
+    async def market_rewards_result(
+        reward_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.reward_result(reward_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _reward_http_error(exc) from exc
+
+    @app.post("/market/rewards/evaluations")
+    async def market_rewards_evaluate(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(
+                nova.novamarket.reward_evaluate,
+                payload,
+                request_id=str(payload.get("request_id") or ""),
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _reward_http_error(exc) from exc
+
+    @app.post("/market/rewards/evaluations/cancel")
+    async def market_rewards_cancel_evaluation(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.reward_cancel_evaluation(str(payload.get("request_id") or ""))
+        except Exception as exc:  # noqa: BLE001
+            raise _reward_http_error(exc) from exc
+
+    @app.get("/market/rewards/evaluations")
+    async def market_rewards_evaluations(
+        limit: int = 50, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.reward_evaluations(limit)
+        except Exception as exc:  # noqa: BLE001
+            raise _reward_http_error(exc) from exc
+
+    @app.get("/market/rewards/evaluations/{evaluation_id}")
+    async def market_rewards_evaluation(
+        evaluation_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.reward_evaluation(evaluation_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _reward_http_error(exc) from exc
+
+    @app.get("/market/rewards/comparisons")
+    async def market_rewards_comparisons(
+        limit: int = 50, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.reward_comparisons(limit)
+        except Exception as exc:  # noqa: BLE001
+            raise _reward_http_error(exc) from exc
+
+    @app.post("/market/rewards/stability")
+    async def market_rewards_stability(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(nova.novamarket.reward_stability, payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _reward_http_error(exc) from exc
+
+    @app.post("/market/rewards/walk-forward")
+    async def market_rewards_walk_forward(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(nova.novamarket.reward_walk_forward, payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _reward_http_error(exc) from exc
+
+    # -- PI-15: experimental RL training and optimisation -------------------
+    def _training_http_error(exc: Exception) -> HTTPException:
+        from novacontrol.novamarket.agent_training.models import (
+            TrainingError,
+            TrainingResourceError,
+            TrainingStateError,
+            TrainingStoreError,
+            TrainingValidationError,
+        )
+        from novacontrol.novamarket.rl.models import RLValidationError
+
+        if isinstance(exc, HTTPException):
+            return exc
+        text = str(exc)
+        # A malformed configuration is the caller's error, not a server fault:
+        # the RL environment contract rejects missing dataset fields with its own
+        # exception type, which used to answer 500 for an empty form.  Bare
+        # ValueError is deliberately NOT mapped: a genuine internal failure must
+        # report as a server fault instead of being blamed on the request.
+        if isinstance(exc, (TrainingValidationError, RLValidationError)):
+            return HTTPException(
+                status_code=404 if "unknown" in text.lower() else 422, detail=text
+            )
+        if isinstance(exc, TrainingError):
+            return HTTPException(status_code=422, detail=text)
+        if isinstance(exc, (TrainingStateError, TrainingResourceError)):
+            return HTTPException(status_code=409, detail=text)
+        if isinstance(exc, TrainingStoreError):
+            return HTTPException(status_code=409, detail=text)
+        return HTTPException(status_code=500, detail=text)
+
+    @app.get("/market/training/status")
+    async def market_training_status(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.novamarket.training_status()
+
+    @app.get("/market/training/contracts")
+    async def market_training_contracts(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.training_contract()
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.get("/market/training/health")
+    async def market_training_health(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.training_health()
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.post("/market/training/configurations")
+    async def market_training_create_configuration(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(nova.novamarket.training_create_config, payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.get("/market/training/configurations")
+    async def market_training_configurations(
+        limit: int = 50, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.training_configs(limit)
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.get("/market/training/configurations/{config_id}")
+    async def market_training_configuration(
+        config_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.training_config(config_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.get("/market/training/datasets")
+    async def market_training_datasets(
+        dataset_id: str = "",
+        limit: int = 50,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Stored PI-02 dataset versions a training run can actually reference.
+
+        Each row also names the instruments it holds, because a run over an
+        instrument the dataset does not contain cannot prepare any split.
+        """
+        try:
+            versions = nova.novamarket.dataset_versions(
+                dataset_id.strip() or None, limit=limit
+            )
+            items = []
+            for item in versions.get("items", ()):
+                row = dict(item)
+                try:
+                    coverage = nova.novamarket.dataset_coverage(
+                        str(row.get("dataset_id") or ""), str(row.get("version") or "")
+                    )
+                except Exception:  # noqa: BLE001 - a listing still answers
+                    coverage = {}
+                row["instruments"] = [
+                    str(segment.get("instrument_id") or "")
+                    for segment in coverage.get("segments", ())
+                    if segment.get("instrument_id")
+                ]
+                items.append(row)
+            return {**versions, "items": items}
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.post("/market/training/validate")
+    async def market_training_validate(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(nova.novamarket.training_validate, payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.post("/market/training/runs")
+    async def market_training_start(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(nova.novamarket.training_start, payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.get("/market/training/runs")
+    async def market_training_runs(
+        limit: int = 50,
+        status: str = "",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.training_runs(limit, status=status)
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.get("/market/training/runs/{run_id}")
+    async def market_training_run(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.training_run(run_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.post("/market/training/runs/{run_id}/pause")
+    async def market_training_pause(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.training_pause(run_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.post("/market/training/runs/{run_id}/resume")
+    async def market_training_resume(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.training_resume(run_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.post("/market/training/runs/{run_id}/cancel")
+    async def market_training_cancel(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.training_cancel(run_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.post("/market/training/runs/{run_id}/retry")
+    async def market_training_retry(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(nova.novamarket.training_retry, run_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.get("/market/training/runs/{run_id}/metrics")
+    async def market_training_metrics(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.training_metrics(run_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.get("/market/training/runs/{run_id}/checkpoints")
+    async def market_training_run_checkpoints(
+        run_id: str,
+        limit: int = 100,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.training_checkpoints(run_id, limit)
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.post("/market/training/runs/{run_id}/checkpoints")
+    async def market_training_request_checkpoint(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.training_request_checkpoint(run_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.get("/market/training/checkpoints/{checkpoint_id}")
+    async def market_training_checkpoint(
+        checkpoint_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.training_checkpoint(checkpoint_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.post("/market/training/checkpoints/{checkpoint_id}/resume")
+    async def market_training_resume_checkpoint(
+        checkpoint_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(
+                nova.novamarket.training_resume_checkpoint, checkpoint_id
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.get("/market/training/policies")
+    async def market_training_policies(
+        limit: int = 50,
+        status: str = "",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.training_policies(limit, status=status)
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.get("/market/training/policies/{policy_id}")
+    async def market_training_policy(
+        policy_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.training_policy(policy_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.post("/market/training/policies/{policy_id}/archive")
+    async def market_training_archive_policy(
+        policy_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.training_archive_policy(policy_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.post("/market/training/policies/{policy_id}/validate")
+    async def market_training_validate_policy(
+        policy_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(nova.novamarket.training_validate_policy, policy_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.post("/market/training/policies/{policy_id}/test")
+    async def market_training_test_policy(
+        policy_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(nova.novamarket.training_test_policy, policy_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.post("/market/training/compare")
+    async def market_training_compare(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.training_compare(payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.post("/market/training/optimize")
+    async def market_training_optimize(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(nova.novamarket.training_optimize, payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.get("/market/training/searches/{search_id}")
+    async def market_training_search(
+        search_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.training_search(search_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    @app.get("/market/training/evaluations")
+    async def market_training_evaluations(
+        policy_id: str = "",
+        limit: int = 50,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.training_evaluations(policy_id, limit)
+        except Exception as exc:  # noqa: BLE001
+            raise _training_http_error(exc) from exc
+
+    # -- PI-16: adaptive learning and market-regime intelligence ------------
+    def _adaptive_http_error(exc: Exception) -> HTTPException:
+        from novacontrol.novamarket.adaptive import (
+            AdaptiveError,
+            AdaptiveNotFoundError,
+            AdaptiveResourceError,
+            AdaptiveStateError,
+            AdaptiveStoreError,
+            AdaptiveValidationError,
+        )
+
+        if isinstance(exc, HTTPException):
+            return exc
+        detail = str(exc)
+        if isinstance(exc, AdaptiveNotFoundError):
+            return HTTPException(status_code=404, detail=detail)
+        if isinstance(exc, AdaptiveValidationError):
+            return HTTPException(status_code=422, detail=detail)
+        if isinstance(exc, (AdaptiveStateError, AdaptiveStoreError, AdaptiveResourceError)):
+            return HTTPException(status_code=409, detail=detail)
+        if isinstance(exc, AdaptiveError):
+            return HTTPException(status_code=422, detail=detail)
+        return HTTPException(status_code=500, detail=detail)
+
+    @app.get("/market/adaptive/status")
+    async def market_adaptive_status(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.novamarket.adaptive_status()
+
+    @app.get("/market/adaptive/contracts")
+    async def market_adaptive_contracts(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.novamarket.adaptive_contract()
+
+    @app.get("/market/adaptive/health")
+    async def market_adaptive_health(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.novamarket.adaptive_health()
+
+    @app.get("/market/adaptive/dashboard")
+    async def market_adaptive_dashboard(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.novamarket.adaptive_dashboard()
+
+    @app.post("/market/adaptive/configurations")
+    async def market_adaptive_create_config(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.adaptive_create_config(payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _adaptive_http_error(exc) from exc
+
+    @app.get("/market/adaptive/configurations")
+    async def market_adaptive_configs(
+        limit: int = 50, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        return nova.novamarket.adaptive_configs(limit)
+
+    @app.get("/market/adaptive/configurations/{config_id}")
+    async def market_adaptive_config(
+        config_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.adaptive_config(config_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _adaptive_http_error(exc) from exc
+
+    @app.post("/market/adaptive/regime/analyze")
+    async def market_adaptive_regime_analyze(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.adaptive_regime_analysis(payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _adaptive_http_error(exc) from exc
+
+    @app.get("/market/adaptive/regime/latest")
+    async def market_adaptive_latest_regime(
+        instrument_id: str = "", _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.adaptive_latest_regime(instrument_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _adaptive_http_error(exc) from exc
+
+    @app.post("/market/adaptive/regime/annotations")
+    async def market_adaptive_annotate_regimes(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.adaptive_annotate_regimes(payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _adaptive_http_error(exc) from exc
+
+    @app.get("/market/adaptive/regime/annotations")
+    async def market_adaptive_annotations(
+        instrument_id: str = "",
+        limit: int = 100,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.novamarket.adaptive_annotations(instrument_id, limit, offset)
+
+    @app.post("/market/adaptive/regime/evaluations")
+    async def market_adaptive_record_regime_evaluation(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.adaptive_record_regime_evaluation(payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _adaptive_http_error(exc) from exc
+
+    @app.get("/market/adaptive/regime/evaluations")
+    async def market_adaptive_regime_evaluations(
+        policy_id: str = "",
+        regime: str = "",
+        limit: int = 100,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.novamarket.adaptive_regime_performance(
+            policy_id, regime=regime, limit=limit, offset=offset
+        )
+
+    @app.post("/market/adaptive/experiences/query")
+    async def market_adaptive_regime_experiences(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.adaptive_regime_experiences(payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _adaptive_http_error(exc) from exc
+
+    @app.post("/market/adaptive/changes/detect")
+    async def market_adaptive_detect_change(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.adaptive_detect_change(payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _adaptive_http_error(exc) from exc
+
+    @app.get("/market/adaptive/changes")
+    async def market_adaptive_changes(
+        instrument_id: str = "",
+        limit: int = 100,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.novamarket.adaptive_changes(instrument_id, limit, offset)
+
+    @app.post("/market/adaptive/drift/detect")
+    async def market_adaptive_detect_drift(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.adaptive_detect_drift(payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _adaptive_http_error(exc) from exc
+
+    @app.get("/market/adaptive/drift")
+    async def market_adaptive_drift(
+        subject: str = "",
+        limit: int = 100,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.novamarket.adaptive_drift(subject, limit, offset)
+
+    @app.post("/market/adaptive/degradation/monitor")
+    async def market_adaptive_monitor_degradation(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            result = nova.novamarket.adaptive_monitor_degradation(payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _adaptive_http_error(exc) from exc
+        await nova.novamarket.announce_policy_degradation(result)
+        return result
+
+    @app.get("/market/adaptive/degradation")
+    async def market_adaptive_degradation(
+        policy_id: str = "",
+        limit: int = 100,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.novamarket.adaptive_degradation(policy_id, limit, offset)
+
+    @app.post("/market/adaptive/suitability/assess")
+    async def market_adaptive_assess_suitability(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.adaptive_assess_suitability(payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _adaptive_http_error(exc) from exc
+
+    @app.get("/market/adaptive/suitability")
+    async def market_adaptive_suitability(
+        policy_id: str = "",
+        limit: int = 100,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.novamarket.adaptive_suitability(policy_id, limit, offset)
+
+    @app.post("/market/adaptive/recommendations")
+    async def market_adaptive_recommend(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.adaptive_recommend(payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _adaptive_http_error(exc) from exc
+
+    @app.get("/market/adaptive/recommendations")
+    async def market_adaptive_recommendations(
+        policy_id: str = "",
+        status: str = "",
+        limit: int = 100,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.novamarket.adaptive_recommendations(
+            policy_id, status=status, limit=limit, offset=offset
+        )
+
+    @app.post("/market/adaptive/recommendations/{recommendation_id}/acknowledge")
+    async def market_adaptive_acknowledge_recommendation(
+        recommendation_id: str,
+        payload: dict[str, Any],
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.adaptive_acknowledge_recommendation(recommendation_id, payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _adaptive_http_error(exc) from exc
+
+    @app.post("/market/adaptive/retraining")
+    async def market_adaptive_retraining_recommendation(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.adaptive_retraining_recommendation(payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _adaptive_http_error(exc) from exc
+
+    @app.get("/market/adaptive/retraining")
+    async def market_adaptive_retraining(
+        policy_id: str = "",
+        limit: int = 100,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.novamarket.adaptive_retraining(policy_id, limit, offset)
+
+    @app.post("/market/adaptive/reassessments")
+    async def market_adaptive_create_reassessment(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.adaptive_create_reassessment(payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _adaptive_http_error(exc) from exc
+
+    @app.get("/market/adaptive/reassessments")
+    async def market_adaptive_reassessments(
+        policy_id: str = "",
+        limit: int = 100,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.novamarket.adaptive_reassessments(policy_id, limit, offset)
+
+    @app.post("/market/adaptive/reassessments/{reassessment_id}/run")
+    async def market_adaptive_run_reassessment(
+        reassessment_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(
+                nova.novamarket.adaptive_run_reassessment, reassessment_id
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _adaptive_http_error(exc) from exc
+
+    @app.get("/market/adaptive/reassessments/{reassessment_id}")
+    async def market_adaptive_reassessment(
+        reassessment_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.adaptive_reassessment(reassessment_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _adaptive_http_error(exc) from exc
+
+    # -- PI-17: advisory multi-agent financial intelligence ------------------
+    def _multiagent_http_error(exc: Exception) -> HTTPException:
+        from novacontrol.novamarket.multiagent import (
+            MultiAgentError,
+            MultiAgentNotFoundError,
+            MultiAgentResourceError,
+            MultiAgentStateError,
+            MultiAgentStoreError,
+            MultiAgentValidationError,
+        )
+
+        if isinstance(exc, HTTPException):
+            return exc
+        detail = str(exc)
+        if isinstance(exc, MultiAgentNotFoundError):
+            return HTTPException(status_code=404, detail=detail)
+        if isinstance(exc, MultiAgentValidationError):
+            return HTTPException(status_code=422, detail=detail)
+        if isinstance(exc, MultiAgentStateError):
+            return HTTPException(status_code=409, detail=detail)
+        if isinstance(exc, MultiAgentResourceError):
+            return HTTPException(status_code=429, detail=detail)
+        if isinstance(exc, MultiAgentStoreError):
+            return HTTPException(status_code=503, detail=detail)
+        if isinstance(exc, MultiAgentError):
+            return HTTPException(status_code=422, detail=detail)
+        if isinstance(exc, PermissionError):
+            return HTTPException(status_code=403, detail=detail)
+        return HTTPException(status_code=500, detail=detail)
+
+    @app.get("/market/multiagent/status")
+    async def market_multiagent_status(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.multiagent_status()
+        except Exception as exc:  # noqa: BLE001
+            raise _multiagent_http_error(exc) from exc
+
+    @app.get("/market/multiagent/contracts")
+    async def market_multiagent_contracts(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.multiagent_contract()
+        except Exception as exc:  # noqa: BLE001
+            raise _multiagent_http_error(exc) from exc
+
+    @app.get("/market/multiagent/health")
+    async def market_multiagent_health(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.multiagent_health()
+        except Exception as exc:  # noqa: BLE001
+            raise _multiagent_http_error(exc) from exc
+
+    @app.get("/market/multiagent/agents")
+    async def market_multiagent_agents(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.multiagent_agents()
+        except Exception as exc:  # noqa: BLE001
+            raise _multiagent_http_error(exc) from exc
+
+    @app.get("/market/multiagent/agents/{agent_id}")
+    async def market_multiagent_agent(
+        agent_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.multiagent_agent(agent_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _multiagent_http_error(exc) from exc
+
+    @app.put("/market/multiagent/agents/{agent_id}/config")
+    async def market_multiagent_update_config(
+        agent_id: str,
+        payload: dict[str, Any],
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.multiagent_update_config(agent_id, payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _multiagent_http_error(exc) from exc
+
+    @app.post("/market/multiagent/cycles")
+    async def market_multiagent_create_cycle(
+        payload: dict[str, Any],
+        idempotency_key: str = Header(default="", alias="Idempotency-Key"),
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.multiagent_create_cycle(payload, idempotency_key=idempotency_key)
+        except Exception as exc:  # noqa: BLE001
+            raise _multiagent_http_error(exc) from exc
+
+    @app.get("/market/multiagent/cycles")
+    async def market_multiagent_cycles(
+        instrument_id: str = "",
+        cycle_status: str = "",
+        limit: int = 50,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.multiagent_cycles(
+                instrument_id=instrument_id,
+                status=cycle_status,
+                limit=limit,
+                offset=offset,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _multiagent_http_error(exc) from exc
+
+    @app.get("/market/multiagent/cycles/{cycle_id}")
+    async def market_multiagent_cycle(
+        cycle_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.multiagent_cycle(cycle_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _multiagent_http_error(exc) from exc
+
+    @app.post("/market/multiagent/cycles/{cycle_id}/run")
+    async def market_multiagent_run_cycle(
+        cycle_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            result = await asyncio.to_thread(nova.novamarket.multiagent_run_cycle, cycle_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _multiagent_http_error(exc) from exc
+        # A completed cycle must refresh the open dashboard view without polling.
+        await nova.novamarket.announce_agent_cycle(result)
+        return result
+
+    @app.post("/market/multiagent/cycles/{cycle_id}/cancel")
+    async def market_multiagent_cancel_cycle(
+        cycle_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.multiagent_cancel_cycle(cycle_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _multiagent_http_error(exc) from exc
+
+    @app.get("/market/multiagent/cycles/{cycle_id}/agents")
+    async def market_multiagent_cycle_agents(
+        cycle_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.multiagent_runs(cycle_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _multiagent_http_error(exc) from exc
+
+    @app.get("/market/multiagent/cycles/{cycle_id}/evidence")
+    async def market_multiagent_cycle_evidence(
+        cycle_id: str,
+        agent_id: str = "",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.multiagent_evidence(cycle_id, agent_id=agent_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _multiagent_http_error(exc) from exc
+
+    @app.get("/market/multiagent/cycles/{cycle_id}/conflicts")
+    async def market_multiagent_cycle_conflicts(
+        cycle_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.multiagent_conflicts(cycle_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _multiagent_http_error(exc) from exc
+
+    @app.get("/market/multiagent/cycles/{cycle_id}/decision")
+    async def market_multiagent_cycle_decision(
+        cycle_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.multiagent_decision(cycle_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _multiagent_http_error(exc) from exc
+
+    @app.get("/market/multiagent/cycles/{cycle_id}/handoff")
+    async def market_multiagent_cycle_handoff(
+        cycle_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.multiagent_handoff(cycle_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _multiagent_http_error(exc) from exc
+
+    @app.get("/market/multiagent/history")
+    async def market_multiagent_history(
+        instrument_id: str = "",
+        limit: int = 50,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.multiagent_history(
+                instrument_id=instrument_id, limit=limit, offset=offset
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _multiagent_http_error(exc) from exc
+
+    @app.get("/market/multiagent/performance")
+    async def market_multiagent_performance(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.multiagent_performance()
+        except Exception as exc:  # noqa: BLE001
+            raise _multiagent_http_error(exc) from exc
+
+    @app.get("/market/multiagent/performance/{agent_id}")
+    async def market_multiagent_agent_performance(
+        agent_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.multiagent_performance(agent_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _multiagent_http_error(exc) from exc
+
+    # -- PI-19: advanced market intelligence and financial research ----------
+    def _research_http_error(exc: Exception) -> HTTPException:
+        from novacontrol.novamarket.research import (
+            ResearchError,
+            ResearchNotFoundError,
+            ResearchResourceError,
+            ResearchStateError,
+            ResearchStoreError,
+            ResearchValidationError,
+        )
+
+        if isinstance(exc, HTTPException):
+            return exc
+        detail = str(exc)
+        if isinstance(exc, ResearchNotFoundError):
+            return HTTPException(status_code=404, detail=detail)
+        if isinstance(exc, ResearchValidationError):
+            return HTTPException(status_code=422, detail=detail)
+        if isinstance(exc, ResearchStateError):
+            return HTTPException(status_code=409, detail=detail)
+        if isinstance(exc, ResearchResourceError):
+            return HTTPException(status_code=429, detail=detail)
+        if isinstance(exc, ResearchStoreError):
+            return HTTPException(status_code=503, detail=detail)
+        if isinstance(exc, ResearchError):
+            return HTTPException(status_code=422, detail=detail)
+        if isinstance(exc, PermissionError):
+            return HTTPException(status_code=403, detail=detail)
+        return HTTPException(status_code=500, detail=detail)
+
+    @app.get("/market/research/status")
+    async def market_research_status(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.research_status()
+        except Exception as exc:  # noqa: BLE001
+            raise _research_http_error(exc) from exc
+
+    @app.get("/market/research/contracts")
+    async def market_research_contracts(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.research_contract()
+        except Exception as exc:  # noqa: BLE001
+            raise _research_http_error(exc) from exc
+
+    @app.get("/market/research/health")
+    async def market_research_health(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.research_health()
+        except Exception as exc:  # noqa: BLE001
+            raise _research_http_error(exc) from exc
+
+    @app.post("/market/research/runs")
+    async def market_research_create(
+        payload: dict[str, Any],
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.research_create(payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _research_http_error(exc) from exc
+
+    @app.post("/market/research/runs/{run_id}/run")
+    async def market_research_run(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            result = await asyncio.to_thread(nova.novamarket.research_run, run_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _research_http_error(exc) from exc
+        await nova.novamarket.announce_research_run(result)
+        return result
+
+    @app.post("/market/research/runs/{run_id}/cancel")
+    async def market_research_cancel(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.research_cancel(run_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _research_http_error(exc) from exc
+
+    @app.post("/market/research/runs/{run_id}/refresh")
+    async def market_research_refresh(
+        run_id: str,
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(nova.novamarket.research_refresh, run_id, payload or {})
+        except Exception as exc:  # noqa: BLE001
+            raise _research_http_error(exc) from exc
+
+    @app.get("/market/research/runs")
+    async def market_research_runs(
+        instrument_id: str = "",
+        status: str = "",
+        limit: int = 50,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.research_history(
+                instrument_id=instrument_id,
+                status=status,
+                limit=limit,
+                offset=offset,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _research_http_error(exc) from exc
+
+    @app.get("/market/research/history")
+    async def market_research_history(
+        instrument_id: str = "",
+        status: str = "",
+        limit: int = 50,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.research_history(
+                instrument_id=instrument_id,
+                status=status,
+                limit=limit,
+                offset=offset,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _research_http_error(exc) from exc
+
+    @app.get("/market/research/latest")
+    async def market_research_latest(
+        instrument_id: str,
+        horizon: str = "",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return {
+                "ok": True,
+                "run": nova.novamarket.research_latest(instrument_id, horizon=horizon),
+            }
+        except Exception as exc:  # noqa: BLE001
+            raise _research_http_error(exc) from exc
+
+    @app.get("/market/research/runs/{run_id}")
+    async def market_research_detail(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.research_detail(run_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _research_http_error(exc) from exc
+
+    @app.get("/market/research/runs/{run_id}/company")
+    async def market_research_company(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.research_section(run_id, "company")
+        except Exception as exc:  # noqa: BLE001
+            raise _research_http_error(exc) from exc
+
+    @app.get("/market/research/runs/{run_id}/financials")
+    async def market_research_financials(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.research_section(run_id, "financials")
+        except Exception as exc:  # noqa: BLE001
+            raise _research_http_error(exc) from exc
+
+    @app.get("/market/research/runs/{run_id}/events")
+    async def market_research_events(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.research_section(run_id, "events")
+        except Exception as exc:  # noqa: BLE001
+            raise _research_http_error(exc) from exc
+
+    @app.get("/market/research/runs/{run_id}/news")
+    async def market_research_news(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.research_section(run_id, "news")
+        except Exception as exc:  # noqa: BLE001
+            raise _research_http_error(exc) from exc
+
+    @app.get("/market/research/runs/{run_id}/sector")
+    async def market_research_sector(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.research_section(run_id, "sector")
+        except Exception as exc:  # noqa: BLE001
+            raise _research_http_error(exc) from exc
+
+    @app.get("/market/research/runs/{run_id}/peers")
+    async def market_research_peers(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.research_section(run_id, "peers")
+        except Exception as exc:  # noqa: BLE001
+            raise _research_http_error(exc) from exc
+
+    @app.get("/market/research/runs/{run_id}/valuation")
+    async def market_research_valuation(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.research_section(run_id, "valuation")
+        except Exception as exc:  # noqa: BLE001
+            raise _research_http_error(exc) from exc
+
+    @app.get("/market/research/runs/{run_id}/thesis")
+    async def market_research_thesis(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            run = nova.novamarket.research_detail(run_id)
+            return {"run_id": run_id, "thesis": run.get("thesis")}
+        except Exception as exc:  # noqa: BLE001
+            raise _research_http_error(exc) from exc
+
+    @app.get("/market/research/runs/{run_id}/evidence")
+    async def market_research_evidence(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.research_evidence(run_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _research_http_error(exc) from exc
+
+    @app.get("/market/research/runs/{run_id}/claims")
+    async def market_research_claims(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.research_claims(run_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _research_http_error(exc) from exc
+
+    @app.get("/market/research/runs/{run_id}/features")
+    async def market_research_features(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.research_features(run_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _research_http_error(exc) from exc
+
+    @app.get("/market/research/runs/{run_id}/handoff")
+    async def market_research_handoff(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.research_handoff(run_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _research_http_error(exc) from exc
+
+    @app.post("/market/research/monitor")
+    async def market_research_monitor(
+        payload: dict[str, Any],
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            instrument_id = str(payload.get("instrument_id") or "")
+            return await asyncio.to_thread(
+                nova.novamarket.research_monitor,
+                instrument_id,
+                horizon=str(payload.get("horizon") or ""),
+                min_interval_hours=float(payload.get("min_interval_hours", 6.0)),
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _research_http_error(exc) from exc
+
+    # -- PI-18: read-only portfolio optimization and capital allocation ------
+    def _optimization_http_error(exc: Exception) -> HTTPException:
+        from novacontrol.novamarket.optimization import (
+            OptimizationError,
+            OptimizationNotFoundError,
+            OptimizationResourceError,
+            OptimizationStateError,
+            OptimizationStoreError,
+            OptimizationValidationError,
+        )
+
+        if isinstance(exc, HTTPException):
+            return exc
+        detail = str(exc)
+        if isinstance(exc, OptimizationNotFoundError):
+            return HTTPException(status_code=404, detail=detail)
+        if isinstance(exc, OptimizationValidationError):
+            return HTTPException(status_code=422, detail=detail)
+        if isinstance(exc, OptimizationStateError):
+            return HTTPException(status_code=409, detail=detail)
+        if isinstance(exc, OptimizationResourceError):
+            return HTTPException(status_code=429, detail=detail)
+        if isinstance(exc, OptimizationStoreError):
+            return HTTPException(status_code=503, detail=detail)
+        if isinstance(exc, OptimizationError):
+            return HTTPException(status_code=422, detail=detail)
+        if isinstance(exc, PermissionError):
+            return HTTPException(status_code=403, detail=detail)
+        return HTTPException(status_code=500, detail=detail)
+
+    @app.get("/market/optimization/status")
+    async def market_optimization_status(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.optimization_status()
+        except Exception as exc:  # noqa: BLE001
+            raise _optimization_http_error(exc) from exc
+
+    @app.get("/market/optimization/contracts")
+    async def market_optimization_contracts(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.optimization_contract()
+        except Exception as exc:  # noqa: BLE001
+            raise _optimization_http_error(exc) from exc
+
+    @app.get("/market/optimization/health")
+    async def market_optimization_health(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.optimization_health()
+        except Exception as exc:  # noqa: BLE001
+            raise _optimization_http_error(exc) from exc
+
+    @app.post("/market/optimization/configs")
+    async def market_optimization_create_config(
+        payload: dict[str, Any],
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.optimization_create_config(payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _optimization_http_error(exc) from exc
+
+    @app.get("/market/optimization/configs")
+    async def market_optimization_configs(
+        portfolio_id: str = "",
+        limit: int = 50,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.optimization_configs(
+                portfolio_id=portfolio_id, limit=limit, offset=offset
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _optimization_http_error(exc) from exc
+
+    @app.get("/market/optimization/configs/{config_id}")
+    async def market_optimization_config(
+        config_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.optimization_config(config_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _optimization_http_error(exc) from exc
+
+    @app.post("/market/optimization/validate")
+    async def market_optimization_validate(
+        payload: dict[str, Any],
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(nova.novamarket.optimization_validate, payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _optimization_http_error(exc) from exc
+
+    @app.post("/market/optimization/runs")
+    async def market_optimization_run(
+        payload: dict[str, Any],
+        idempotency_key: str = "",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            result = await asyncio.to_thread(
+                nova.novamarket.optimization_run,
+                payload,
+                idempotency_key=idempotency_key,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _optimization_http_error(exc) from exc
+        await nova.novamarket.announce_optimization_run(result)
+        return result
+
+    @app.get("/market/optimization/runs")
+    async def market_optimization_runs(
+        portfolio_id: str = "",
+        status: str = "",
+        limit: int = 50,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.optimization_runs(
+                portfolio_id=portfolio_id,
+                status=status,
+                limit=limit,
+                offset=offset,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _optimization_http_error(exc) from exc
+
+    @app.get("/market/optimization/history")
+    async def market_optimization_history(
+        portfolio_id: str = "",
+        limit: int = 50,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.optimization_runs(
+                portfolio_id=portfolio_id, limit=limit, offset=offset
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _optimization_http_error(exc) from exc
+
+    @app.get("/market/optimization/latest")
+    async def market_optimization_latest(
+        portfolio_id: str,
+        horizon: str = "",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            row = nova.novamarket.optimization_latest(portfolio_id, horizon=horizon)
+            return {"ok": True, "run": row}
+        except Exception as exc:  # noqa: BLE001
+            raise _optimization_http_error(exc) from exc
+
+    @app.get("/market/optimization/runs/{run_id}")
+    async def market_optimization_run_record(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.optimization_run_record(run_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _optimization_http_error(exc) from exc
+
+    @app.get("/market/optimization/runs/{run_id}/allocations")
+    async def market_optimization_allocations(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.optimization_allocations(run_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _optimization_http_error(exc) from exc
+
+    @app.get("/market/optimization/runs/{run_id}/diversification")
+    async def market_optimization_diversification(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.optimization_diversification(run_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _optimization_http_error(exc) from exc
+
+    @app.get("/market/optimization/runs/{run_id}/risk")
+    async def market_optimization_risk(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.optimization_risk(run_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _optimization_http_error(exc) from exc
+
+    @app.get("/market/optimization/runs/{run_id}/liquidity")
+    async def market_optimization_liquidity(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.optimization_liquidity(run_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _optimization_http_error(exc) from exc
+
+    @app.get("/market/optimization/runs/{run_id}/rebalancing")
+    async def market_optimization_rebalancing(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.optimization_rebalancing(run_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _optimization_http_error(exc) from exc
+
+    @app.get("/market/optimization/runs/{run_id}/scenarios")
+    async def market_optimization_scenarios(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.optimization_scenarios(run_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _optimization_http_error(exc) from exc
+
+    @app.post("/market/optimization/runs/{run_id}/scenarios")
+    async def market_optimization_run_scenarios(
+        run_id: str,
+        payload: dict[str, Any],
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(
+                nova.novamarket.optimization_run_scenarios, run_id, payload
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _optimization_http_error(exc) from exc
+
+    @app.post("/market/optimization/runs/{run_id}/backtests")
+    async def market_optimization_backtest(
+        run_id: str,
+        payload: dict[str, Any],
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(nova.novamarket.optimization_backtest, run_id, payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _optimization_http_error(exc) from exc
+
+    @app.get("/market/optimization/runs/{run_id}/handoff")
+    async def market_optimization_handoff(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.optimization_handoff(run_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _optimization_http_error(exc) from exc
+
+    @app.post("/market/optimization/runs/{run_id}/cancel")
+    async def market_optimization_cancel(
+        run_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.optimization_cancel(run_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _optimization_http_error(exc) from exc
+
+    @app.get("/market/optimization/backtests")
+    async def market_optimization_backtests(
+        run_id: str = "",
+        limit: int = 50,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.optimization_backtests(run_id=run_id, limit=limit, offset=offset)
+        except Exception as exc:  # noqa: BLE001
+            raise _optimization_http_error(exc) from exc
+
+    @app.get("/market/optimization/backtests/{backtest_id}")
+    async def market_optimization_backtest_record(
+        backtest_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.optimization_backtest_record(backtest_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _optimization_http_error(exc) from exc
+
+    # -- PI-20: prediction intelligence dashboard (read-only) ----------------
+    def _dashboard_http_error(exc: Exception) -> HTTPException:
+        from novacontrol.novamarket.dashboard import (
+            DashboardError,
+            DashboardNotFoundError,
+            DashboardStoreError,
+            DashboardValidationError,
+        )
+
+        if isinstance(exc, HTTPException):
+            return exc
+        detail = str(exc)
+        if isinstance(exc, DashboardNotFoundError):
+            return HTTPException(status_code=404, detail=detail)
+        if isinstance(exc, DashboardValidationError):
+            return HTTPException(status_code=422, detail=detail)
+        if isinstance(exc, DashboardStoreError):
+            return HTTPException(status_code=503, detail=detail)
+        if isinstance(exc, DashboardError):
+            return HTTPException(status_code=422, detail=detail)
+        if isinstance(exc, PermissionError):
+            return HTTPException(status_code=403, detail=detail)
+        return HTTPException(status_code=500, detail=detail)
+
+    def _dashboard_filters(
+        instrument_id: str = "",
+        exchange: str = "",
+        sector: str = "",
+        regime: str = "",
+        horizon: str = "",
+        model_id: str = "",
+        direction: str = "",
+        validity: str = "",
+        evaluation_start: str = "",
+        evaluation_end: str = "",
+        decision_status: str = "",
+        agent_id: str = "",
+        portfolio_id: str = "",
+        research_status: str = "",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        from novacontrol.novamarket.dashboard import DashboardFilters
+
+        return DashboardFilters.from_mapping(
+            {
+                "instrument_id": instrument_id,
+                "exchange": exchange,
+                "sector": sector,
+                "regime": regime,
+                "horizon": horizon,
+                "model_id": model_id,
+                "direction": direction,
+                "validity": validity,
+                "evaluation_start": evaluation_start,
+                "evaluation_end": evaluation_end,
+                "decision_status": decision_status,
+                "agent_id": agent_id,
+                "portfolio_id": portfolio_id,
+                "research_status": research_status,
+                "limit": limit,
+                "offset": offset,
+            }
+        ).to_dict()
+
+    @app.get("/market/intelligence/status")
+    async def market_intelligence_status(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.dashboard_status()
+        except Exception as exc:  # noqa: BLE001
+            raise _dashboard_http_error(exc) from exc
+
+    @app.get("/market/intelligence/contracts")
+    async def market_intelligence_contracts(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.dashboard_contract()
+        except Exception as exc:  # noqa: BLE001
+            raise _dashboard_http_error(exc) from exc
+
+    @app.get("/market/intelligence/navigation")
+    async def market_intelligence_navigation(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.dashboard_navigation()
+        except Exception as exc:  # noqa: BLE001
+            raise _dashboard_http_error(exc) from exc
+
+    @app.get("/market/intelligence/overview")
+    async def market_intelligence_overview(
+        instrument_id: str = "",
+        exchange: str = "",
+        sector: str = "",
+        regime: str = "",
+        horizon: str = "",
+        model_id: str = "",
+        direction: str = "",
+        validity: str = "",
+        limit: int = 50,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            filters = _dashboard_filters(
+                instrument_id=instrument_id,
+                exchange=exchange,
+                sector=sector,
+                regime=regime,
+                horizon=horizon,
+                model_id=model_id,
+                direction=direction,
+                validity=validity,
+                limit=limit,
+                offset=offset,
+            )
+            return nova.novamarket.dashboard_overview(filters)
+        except Exception as exc:  # noqa: BLE001
+            raise _dashboard_http_error(exc) from exc
+
+    @app.get("/market/intelligence/instruments/{instrument_id}")
+    async def market_intelligence_instrument(
+        instrument_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.dashboard_instrument(instrument_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _dashboard_http_error(exc) from exc
+
+    @app.get("/market/intelligence/forecasts")
+    async def market_intelligence_forecasts(
+        instrument_id: str = "",
+        exchange: str = "",
+        sector: str = "",
+        regime: str = "",
+        horizon: str = "",
+        model_id: str = "",
+        direction: str = "",
+        validity: str = "",
+        limit: int = 50,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            filters = _dashboard_filters(
+                instrument_id=instrument_id,
+                exchange=exchange,
+                sector=sector,
+                regime=regime,
+                horizon=horizon,
+                model_id=model_id,
+                direction=direction,
+                validity=validity,
+                limit=limit,
+                offset=offset,
+            )
+            return nova.novamarket.dashboard_forecasts(filters)
+        except Exception as exc:  # noqa: BLE001
+            raise _dashboard_http_error(exc) from exc
+
+    @app.get("/market/intelligence/compare")
+    async def market_intelligence_compare(
+        instrument_id: str = "",
+        exchange: str = "",
+        sector: str = "",
+        regime: str = "",
+        horizon: str = "",
+        model_id: str = "",
+        direction: str = "",
+        validity: str = "",
+        limit: int = 100,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            filters = _dashboard_filters(
+                instrument_id=instrument_id,
+                exchange=exchange,
+                sector=sector,
+                regime=regime,
+                horizon=horizon,
+                model_id=model_id,
+                direction=direction,
+                validity=validity,
+                limit=limit,
+                offset=offset,
+            )
+            return nova.novamarket.dashboard_compare(filters)
+        except Exception as exc:  # noqa: BLE001
+            raise _dashboard_http_error(exc) from exc
+
+    @app.get("/market/intelligence/horizons/{instrument_id}")
+    async def market_intelligence_horizons(
+        instrument_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.dashboard_horizons(instrument_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _dashboard_http_error(exc) from exc
+
+    @app.get("/market/intelligence/lifecycle")
+    async def market_intelligence_lifecycle(
+        cycle_id: str = "",
+        instrument_id: str = "",
+        limit: int = 20,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.dashboard_lifecycle(
+                cycle_id=cycle_id, instrument_id=instrument_id, limit=limit
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _dashboard_http_error(exc) from exc
+
+    @app.get("/market/intelligence/performance")
+    async def market_intelligence_performance(
+        evaluation_id: str = "",
+        instrument_id: str = "",
+        horizon: str = "",
+        evaluation_start: str = "",
+        evaluation_end: str = "",
+        limit: int = 20,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.dashboard_performance(
+                evaluation_id=evaluation_id,
+                instrument_id=instrument_id,
+                horizon=horizon,
+                evaluation_start=evaluation_start,
+                evaluation_end=evaluation_end,
+                limit=limit,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _dashboard_http_error(exc) from exc
+
+    @app.get("/market/intelligence/regimes")
+    async def market_intelligence_regimes(
+        instrument_id: str = "",
+        limit: int = 100,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.dashboard_regimes(instrument_id=instrument_id, limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            raise _dashboard_http_error(exc) from exc
+
+    @app.get("/market/intelligence/decisions")
+    async def market_intelligence_decisions(
+        instrument_id: str = "",
+        status: str = "",
+        agent_id: str = "",
+        limit: int = 30,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.dashboard_decisions(
+                instrument_id=instrument_id,
+                status=status,
+                agent_id=agent_id,
+                limit=limit,
+                offset=offset,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _dashboard_http_error(exc) from exc
+
+    @app.get("/market/intelligence/decisions/{cycle_id}")
+    async def market_intelligence_decision(
+        cycle_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.dashboard_decision(cycle_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _dashboard_http_error(exc) from exc
+
+    @app.get("/market/intelligence/explain/{subject_id}")
+    async def market_intelligence_explain(
+        subject_id: str,
+        kind: str = "",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.dashboard_explain(subject_id, kind=kind)
+        except Exception as exc:  # noqa: BLE001
+            raise _dashboard_http_error(exc) from exc
+
+    @app.get("/market/intelligence/attribution/{forecast_id}")
+    async def market_intelligence_attribution(
+        forecast_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.dashboard_attribution(forecast_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _dashboard_http_error(exc) from exc
+
+    @app.get("/market/intelligence/evidence/{subject_id}")
+    async def market_intelligence_evidence(
+        subject_id: str,
+        kind: str = "",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.dashboard_evidence(subject_id, kind=kind)
+        except Exception as exc:  # noqa: BLE001
+            raise _dashboard_http_error(exc) from exc
+
+    @app.get("/market/intelligence/research")
+    async def market_intelligence_research(
+        instrument_id: str = "",
+        run_id: str = "",
+        research_status: str = "",
+        limit: int = 20,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.dashboard_research(
+                instrument_id=instrument_id,
+                run_id=run_id,
+                research_status=research_status,
+                limit=limit,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _dashboard_http_error(exc) from exc
+
+    @app.get("/market/intelligence/portfolio")
+    async def market_intelligence_portfolio(
+        portfolio_id: str = "",
+        limit: int = 20,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.dashboard_portfolio(portfolio_id=portfolio_id, limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            raise _dashboard_http_error(exc) from exc
+
+    @app.get("/market/intelligence/policies")
+    async def market_intelligence_policies(
+        policy_id: str = "",
+        limit: int = 30,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.dashboard_policies(policy_id=policy_id, limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            raise _dashboard_http_error(exc) from exc
+
+    @app.get("/market/intelligence/replay/{cycle_id}")
+    async def market_intelligence_replay(
+        cycle_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.dashboard_replay(cycle_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _dashboard_http_error(exc) from exc
+
+    @app.get("/market/intelligence/filters")
+    async def market_intelligence_filters(
+        name: str = "default",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.dashboard_filters(name=name)
+        except Exception as exc:  # noqa: BLE001
+            raise _dashboard_http_error(exc) from exc
+
+    @app.put("/market/intelligence/filters")
+    async def market_intelligence_save_filters(
+        payload: dict[str, Any],
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.dashboard_save_filters(
+                payload, name=str(payload.get("name") or "default")
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _dashboard_http_error(exc) from exc
+
+    # -- PI-21: advanced autonomous portfolio management ---------------------
+    def _portfolio_management_http_error(exc: Exception) -> HTTPException:
+        from novacontrol.novamarket.portfolio_management import PortfolioManagementError
+
+        if isinstance(exc, HTTPException):
+            return exc
+        if isinstance(exc, PortfolioManagementError):
+            return HTTPException(
+                status_code=exc.http_status,
+                detail={"error": exc.code, "message": exc.message},
+            )
+        if isinstance(exc, PermissionError):
+            return HTTPException(status_code=403, detail=str(exc))
+        return HTTPException(status_code=500, detail=str(exc))
+
+    @app.get("/market/portfolio-management/status")
+    async def market_portfolio_management_status(
+        operator_ok: bool = Depends(autonomy_operator_state),
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.portfolio_management_status(operator_authorized=operator_ok)
+        except Exception as exc:  # noqa: BLE001
+            raise _portfolio_management_http_error(exc) from exc
+
+    @app.get("/market/portfolio-management/contracts")
+    async def market_portfolio_management_contracts(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.portfolio_management_contract()
+        except Exception as exc:  # noqa: BLE001
+            raise _portfolio_management_http_error(exc) from exc
+
+    @app.get("/market/portfolio-management/navigation")
+    async def market_portfolio_management_navigation(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.portfolio_management_navigation()
+        except Exception as exc:  # noqa: BLE001
+            raise _portfolio_management_http_error(exc) from exc
+
+    @app.get("/market/portfolio-management/config")
+    async def market_portfolio_management_config(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.portfolio_management_config()
+        except Exception as exc:  # noqa: BLE001
+            raise _portfolio_management_http_error(exc) from exc
+
+    @app.put("/market/portfolio-management/config")
+    async def market_portfolio_management_update_config(
+        payload: dict[str, Any],
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.portfolio_management_update_config(payload, actor=_operator)
+        except Exception as exc:  # noqa: BLE001
+            raise _portfolio_management_http_error(exc) from exc
+
+    @app.post("/market/portfolio-management/review")
+    async def market_portfolio_management_review(
+        payload: dict[str, Any] | None = None,
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        body = payload or {}
+        try:
+            return await nova.novamarket.portfolio_management_run(
+                portfolio_id=str(body.get("portfolio_id") or ""),
+                horizon=str(body.get("horizon") or "5d"),
+                trigger=str(body.get("trigger") or "manual"),
+                request_id=str(body.get("request_id") or ""),
+                actor=_operator,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _portfolio_management_http_error(exc) from exc
+
+    @app.get("/market/portfolio-management/cycles")
+    async def market_portfolio_management_cycles(
+        portfolio_id: str = "",
+        status: str = "",
+        limit: int = 50,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.portfolio_management_cycles(
+                portfolio_id=portfolio_id,
+                status=status,
+                limit=limit,
+                offset=offset,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _portfolio_management_http_error(exc) from exc
+
+    @app.get("/market/portfolio-management/cycles/{cycle_id}")
+    async def market_portfolio_management_cycle(
+        cycle_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.portfolio_management_cycle(cycle_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _portfolio_management_http_error(exc) from exc
+
+    @app.get("/market/portfolio-management/cycles/{cycle_id}/events")
+    async def market_portfolio_management_cycle_events(
+        cycle_id: str,
+        limit: int = 200,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.portfolio_management_events(cycle_id, limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            raise _portfolio_management_http_error(exc) from exc
+
+    @app.post("/market/portfolio-management/cycles/{cycle_id}/handoff")
+    async def market_portfolio_management_handoff(
+        cycle_id: str,
+        payload: dict[str, Any] | None = None,
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        body = payload or {}
+        try:
+            return await nova.novamarket.portfolio_management_handoff(
+                cycle_id,
+                actor=_operator,
+                max_changes=int(body.get("max_changes") or 10),
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _portfolio_management_http_error(exc) from exc
+
+    @app.post("/market/portfolio-management/cycles/{cycle_id}/reconcile")
+    async def market_portfolio_management_reconcile(
+        cycle_id: str,
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        try:
+            return await nova.novamarket.portfolio_management_reconcile(cycle_id, actor=_operator)
+        except Exception as exc:  # noqa: BLE001
+            raise _portfolio_management_http_error(exc) from exc
+
+    @app.post("/market/portfolio-management/recover")
+    async def market_portfolio_management_recover(
+        payload: dict[str, Any] | None = None,
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        body = payload or {}
+        try:
+            return await nova.novamarket.portfolio_management_recover(
+                reason=str(body.get("reason") or "PI-21 operator recovery")
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _portfolio_management_http_error(exc) from exc
+
+    @app.get("/market/portfolio-management/portfolios/{portfolio_id}/snapshot")
+    async def market_portfolio_management_snapshot(
+        portfolio_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.portfolio_management_snapshot(portfolio_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _portfolio_management_http_error(exc) from exc
+
+    @app.get("/market/portfolio-management/portfolios/{portfolio_id}/positions")
+    async def market_portfolio_management_positions(
+        portfolio_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.portfolio_management_positions(portfolio_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _portfolio_management_http_error(exc) from exc
+
+    @app.get("/market/portfolio-management/portfolios/{portfolio_id}/opportunities")
+    async def market_portfolio_management_opportunities(
+        portfolio_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.portfolio_management_opportunities(portfolio_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _portfolio_management_http_error(exc) from exc
+
+    @app.get("/market/portfolio-management/portfolios/{portfolio_id}/decisions")
+    async def market_portfolio_management_decisions(
+        portfolio_id: str,
+        limit: int = 100,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.portfolio_management_decisions(portfolio_id, limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            raise _portfolio_management_http_error(exc) from exc
+
+    @app.get("/market/portfolio-management/portfolios/{portfolio_id}/capital")
+    async def market_portfolio_management_capital(
+        portfolio_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.portfolio_management_capital(portfolio_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _portfolio_management_http_error(exc) from exc
+
+    @app.get("/market/portfolio-management/portfolios/{portfolio_id}/cash")
+    async def market_portfolio_management_cash(
+        portfolio_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.portfolio_management_cash(portfolio_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _portfolio_management_http_error(exc) from exc
+
+    @app.get("/market/portfolio-management/portfolios/{portfolio_id}/exposure")
+    async def market_portfolio_management_exposure(
+        portfolio_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.portfolio_management_exposure(portfolio_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _portfolio_management_http_error(exc) from exc
+
+    @app.get("/market/portfolio-management/portfolios/{portfolio_id}/rebalancing")
+    async def market_portfolio_management_rebalancing(
+        portfolio_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.portfolio_management_rebalance(portfolio_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _portfolio_management_http_error(exc) from exc
+
+    @app.get("/market/portfolio-management/portfolios/{portfolio_id}/analytics")
+    async def market_portfolio_management_analytics(
+        portfolio_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.portfolio_management_analytics(portfolio_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _portfolio_management_http_error(exc) from exc
+
+    # -- PI-22: advanced risk intelligence ----------------------------------
+    def _risk_intelligence_http_error(exc: Exception) -> HTTPException:
+        from novacontrol.novamarket.risk_intelligence import RiskIntelligenceError
+
+        if isinstance(exc, HTTPException):
+            return exc
+        if isinstance(exc, RiskIntelligenceError):
+            return HTTPException(
+                status_code=exc.http_status,
+                detail={"error": exc.code, "message": exc.message},
+            )
+        if isinstance(exc, PermissionError):
+            return HTTPException(status_code=403, detail=str(exc))
+        return HTTPException(status_code=500, detail=str(exc))
+
+    @app.get("/market/risk-intelligence/status")
+    async def market_risk_intelligence_status(
+        operator_ok: bool = Depends(autonomy_operator_state),
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.risk_intelligence_status(operator_authorized=operator_ok)
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    @app.get("/market/risk-intelligence/contracts")
+    async def market_risk_intelligence_contracts(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.risk_intelligence_contract()
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    @app.get("/market/risk-intelligence/navigation")
+    async def market_risk_intelligence_navigation(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.risk_intelligence_navigation()
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    @app.get("/market/risk-intelligence/config")
+    async def market_risk_intelligence_config(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.risk_intelligence_config()
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    @app.put("/market/risk-intelligence/config")
+    async def market_risk_intelligence_update_config(
+        payload: dict[str, Any],
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.risk_intelligence_update_config(payload, actor=_operator)
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    @app.post("/market/risk-intelligence/analyze")
+    async def market_risk_intelligence_analyze(
+        payload: dict[str, Any] | None = None,
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        body = payload or {}
+        try:
+            return await nova.novamarket.risk_intelligence_analyze(
+                portfolio_id=str(body.get("portfolio_id") or ""),
+                horizon=str(body.get("horizon") or "5d"),
+                trigger=str(body.get("trigger") or "manual"),
+                request_id=str(body.get("request_id") or ""),
+                actor=_operator,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    @app.get("/market/risk-intelligence/portfolios/{portfolio_id}/overview")
+    async def market_risk_intelligence_overview(
+        portfolio_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.risk_intelligence_overview(portfolio_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    @app.get("/market/risk-intelligence/portfolios/{portfolio_id}/positions")
+    async def market_risk_intelligence_positions(
+        portfolio_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.risk_intelligence_section(portfolio_id, "positions")
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    @app.get("/market/risk-intelligence/portfolios/{portfolio_id}/concentration")
+    async def market_risk_intelligence_concentration(
+        portfolio_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.risk_intelligence_section(portfolio_id, "concentration")
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    @app.get("/market/risk-intelligence/portfolios/{portfolio_id}/correlation")
+    async def market_risk_intelligence_correlation(
+        portfolio_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.risk_intelligence_section(portfolio_id, "correlation")
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    @app.get("/market/risk-intelligence/portfolios/{portfolio_id}/volatility")
+    async def market_risk_intelligence_volatility(
+        portfolio_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.risk_intelligence_section(portfolio_id, "volatility")
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    @app.get("/market/risk-intelligence/portfolios/{portfolio_id}/drawdown")
+    async def market_risk_intelligence_drawdown(
+        portfolio_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.risk_intelligence_section(portfolio_id, "drawdown")
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    @app.get("/market/risk-intelligence/portfolios/{portfolio_id}/liquidity")
+    async def market_risk_intelligence_liquidity(
+        portfolio_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.risk_intelligence_section(portfolio_id, "liquidity")
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    @app.get("/market/risk-intelligence/portfolios/{portfolio_id}/regime")
+    async def market_risk_intelligence_regime(
+        portfolio_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.risk_intelligence_section(portfolio_id, "regime")
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    @app.get("/market/risk-intelligence/portfolios/{portfolio_id}/history")
+    async def market_risk_intelligence_history(
+        portfolio_id: str,
+        limit: int = 50,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.risk_intelligence_history(
+                portfolio_id, limit=max(1, min(limit, 200)), offset=max(0, offset)
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    @app.get("/market/risk-intelligence/portfolios/{portfolio_id}/trend")
+    async def market_risk_intelligence_trend(
+        portfolio_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.risk_intelligence_trend(portfolio_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    @app.get("/market/risk-intelligence/portfolios/{portfolio_id}/recommendations")
+    async def market_risk_intelligence_recommendations(
+        portfolio_id: str,
+        limit: int = 100,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.risk_intelligence_recommendations(
+                portfolio_id=portfolio_id, limit=max(1, min(limit, 200))
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    @app.get("/market/risk-intelligence/alerts")
+    async def market_risk_intelligence_alerts(
+        portfolio_id: str = "",
+        status: str = "",
+        limit: int = 100,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.risk_intelligence_alerts(
+                portfolio_id=portfolio_id, status=status, limit=max(1, min(limit, 200))
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    @app.post("/market/risk-intelligence/alerts/{alert_id}/action")
+    async def market_risk_intelligence_alert_action(
+        alert_id: str,
+        payload: dict[str, Any] | None = None,
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        body = payload or {}
+        try:
+            return await nova.novamarket.risk_intelligence_update_alert(
+                alert_id, action=str(body.get("action") or ""), actor=_operator
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    @app.get("/market/risk-intelligence/scenarios")
+    async def market_risk_intelligence_scenarios(
+        portfolio_id: str = "",
+        limit: int = 100,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.risk_intelligence_scenarios(
+                portfolio_id, limit=max(1, min(limit, 200))
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    @app.post("/market/risk-intelligence/scenarios")
+    async def market_risk_intelligence_create_scenario(
+        payload: dict[str, Any],
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.risk_intelligence_create_scenario(payload, actor=_operator)
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    @app.post("/market/risk-intelligence/portfolios/{portfolio_id}/scenarios/run")
+    async def market_risk_intelligence_run_scenario(
+        portfolio_id: str,
+        payload: dict[str, Any] | None = None,
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        body = payload or {}
+        try:
+            return await nova.novamarket.risk_intelligence_run_scenario(
+                portfolio_id,
+                scenario_id=str(body.get("scenario_id") or ""),
+                config_payload=body,
+                actor=_operator,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    @app.get("/market/risk-intelligence/portfolios/{portfolio_id}/scenario-runs")
+    async def market_risk_intelligence_scenario_runs(
+        portfolio_id: str,
+        limit: int = 50,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.risk_intelligence_scenario_runs(
+                portfolio_id, limit=max(1, min(limit, 200))
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    @app.get("/market/risk-intelligence/portfolios/{portfolio_id}/stress-tests")
+    async def market_risk_intelligence_stress_results(
+        portfolio_id: str,
+        limit: int = 50,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.risk_intelligence_stress_results(
+                portfolio_id, limit=max(1, min(limit, 200))
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    @app.post("/market/risk-intelligence/portfolios/{portfolio_id}/stress-tests")
+    async def market_risk_intelligence_run_stress(
+        portfolio_id: str,
+        payload: dict[str, Any] | None = None,
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        body = payload or {}
+        try:
+            shock = body.get("shock_pct")
+            try:
+                shock_pct = None if shock is None else float(shock)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=422, detail="shock_pct must be numeric") from exc
+            return await nova.novamarket.risk_intelligence_run_stress(
+                portfolio_id,
+                mode=str(body.get("mode") or "hypothetical"),
+                scenario_id=str(body.get("scenario_id") or ""),
+                shock_pct=shock_pct,
+                actor=_operator,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    @app.post("/market/risk-intelligence/recover")
+    async def market_risk_intelligence_recover(
+        payload: dict[str, Any] | None = None,
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        body = payload or {}
+        try:
+            return await nova.novamarket.risk_intelligence_recover(
+                reason=str(body.get("reason") or "PI-22 operator recovery")
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _risk_intelligence_http_error(exc) from exc
+
+    # -- PI-23: forecast optimization ----------------------------------------
+    def _forecast_intelligence_http_error(exc: Exception) -> HTTPException:
+        from novacontrol.novamarket.contracts import NotOperationalError
+        from novacontrol.novamarket.forecast_intelligence import ForecastIntelligenceError
+
+        if isinstance(exc, HTTPException):
+            return exc
+        if isinstance(exc, ForecastIntelligenceError):
+            return HTTPException(
+                status_code=exc.http_status,
+                detail={"error": exc.code, "message": exc.message},
+            )
+        if isinstance(exc, PermissionError):
+            return HTTPException(status_code=403, detail=str(exc))
+        if isinstance(exc, NotOperationalError):
+            return HTTPException(status_code=503, detail=str(exc))
+        return HTTPException(status_code=500, detail=str(exc))
+
+    @app.get("/market/forecast-intelligence/status")
+    async def market_forecast_intelligence_status(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.forecast_intelligence_status()
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_intelligence_http_error(exc) from exc
+
+    @app.get("/market/forecast-intelligence/contracts")
+    async def market_forecast_intelligence_contracts(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.forecast_intelligence_contract()
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_intelligence_http_error(exc) from exc
+
+    @app.get("/market/forecast-intelligence/navigation")
+    async def market_forecast_intelligence_navigation(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.forecast_intelligence_navigation()
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_intelligence_http_error(exc) from exc
+
+    @app.get("/market/forecast-intelligence/config")
+    async def market_forecast_intelligence_config(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.forecast_intelligence_config()
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_intelligence_http_error(exc) from exc
+
+    @app.put("/market/forecast-intelligence/config")
+    async def market_forecast_intelligence_update_config(
+        payload: dict[str, Any],
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.forecast_intelligence_update_config(
+                payload, actor=_operator
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_intelligence_http_error(exc) from exc
+
+    @app.get("/market/forecast-intelligence/registry")
+    async def market_forecast_intelligence_registry(
+        instrument_id: str = "",
+        horizon: str = "",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.forecast_intelligence_registry(
+                instrument_id=instrument_id, horizon=horizon
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_intelligence_http_error(exc) from exc
+
+    @app.get("/market/forecast-intelligence/history")
+    async def market_forecast_intelligence_history(
+        instrument_id: str = "",
+        horizon: str = "",
+        kind: str = "",
+        limit: int = 100,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.forecast_intelligence_history(
+                instrument_id=instrument_id, horizon=horizon, kind=kind, limit=limit
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_intelligence_http_error(exc) from exc
+
+    @app.get("/market/forecast-intelligence/overview")
+    async def market_forecast_intelligence_overview(
+        instrument_id: str = "",
+        horizon: str = "",
+        limit: int = 100,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.forecast_intelligence_overview(
+                instrument_id=instrument_id, horizon=horizon, limit=limit
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_intelligence_http_error(exc) from exc
+
+    @app.get("/market/forecast-intelligence/comparison/{instrument_id}")
+    async def market_forecast_intelligence_comparison(
+        instrument_id: str,
+        horizon: str = "5d",
+        task: str = "return_regression",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.forecast_intelligence_comparison(
+                instrument_id, horizon, task
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_intelligence_http_error(exc) from exc
+
+    @app.get("/market/forecast-intelligence/horizons/{instrument_id}")
+    async def market_forecast_intelligence_horizons(
+        instrument_id: str,
+        task: str = "return_regression",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.forecast_intelligence_horizons(instrument_id, task)
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_intelligence_http_error(exc) from exc
+
+    @app.get("/market/forecast-intelligence/regimes/{instrument_id}")
+    async def market_forecast_intelligence_regimes(
+        instrument_id: str,
+        horizon: str = "5d",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.forecast_intelligence_regimes(instrument_id, horizon)
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_intelligence_http_error(exc) from exc
+
+    @app.post("/market/forecast-intelligence/instruments")
+    async def market_forecast_intelligence_instruments(
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        body = payload or {}
+        raw = body.get("instrument_ids") or ()
+        ids = [str(item) for item in raw] if isinstance(raw, (list, tuple)) else []
+        try:
+            return nova.novamarket.forecast_intelligence_instruments(
+                ids,
+                str(body.get("horizon") or "5d"),
+                str(body.get("task") or "return_regression"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_intelligence_http_error(exc) from exc
+
+    @app.post("/market/forecast-intelligence/evaluate")
+    async def market_forecast_intelligence_evaluate(
+        payload: dict[str, Any] | None = None,
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.forecast_intelligence_evaluate(
+                payload or {}, actor=_operator
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_intelligence_http_error(exc) from exc
+
+    @app.post("/market/forecast-intelligence/select")
+    async def market_forecast_intelligence_select(
+        payload: dict[str, Any] | None = None,
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.forecast_intelligence_select(
+                payload or {}, actor=_operator
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_intelligence_http_error(exc) from exc
+
+    @app.post("/market/forecast-intelligence/calibration")
+    async def market_forecast_intelligence_calibration(
+        payload: dict[str, Any] | None = None,
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.forecast_intelligence_calibrate(
+                payload or {}, actor=_operator
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_intelligence_http_error(exc) from exc
+
+    @app.post("/market/forecast-intelligence/uncertainty")
+    async def market_forecast_intelligence_uncertainty(
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.forecast_intelligence_uncertainty(payload or {})
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_intelligence_http_error(exc) from exc
+
+    @app.post("/market/forecast-intelligence/disagreement")
+    async def market_forecast_intelligence_disagreement(
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.forecast_intelligence_disagreement(payload or {})
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_intelligence_http_error(exc) from exc
+
+    @app.post("/market/forecast-intelligence/consistency")
+    async def market_forecast_intelligence_consistency(
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        body = payload or {}
+        try:
+            return nova.novamarket.forecast_intelligence_consistency(
+                str(body.get("instrument_id") or "")
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_intelligence_http_error(exc) from exc
+
+    @app.post("/market/forecast-intelligence/drift")
+    async def market_forecast_intelligence_drift(
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.forecast_intelligence_drift(payload or {})
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_intelligence_http_error(exc) from exc
+
+    @app.post("/market/forecast-intelligence/degradation")
+    async def market_forecast_intelligence_degradation(
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.forecast_intelligence_degradation(payload or {})
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_intelligence_http_error(exc) from exc
+
+    @app.post("/market/forecast-intelligence/weights")
+    async def market_forecast_intelligence_weights(
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.forecast_intelligence_weights(payload or {})
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_intelligence_http_error(exc) from exc
+
+    @app.post("/market/forecast-intelligence/reliability")
+    async def market_forecast_intelligence_reliability(
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.forecast_intelligence_reliability(payload or {})
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_intelligence_http_error(exc) from exc
+
+    @app.post("/market/forecast-intelligence/fallback")
+    async def market_forecast_intelligence_fallback(
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.forecast_intelligence_fallback(payload or {})
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_intelligence_http_error(exc) from exc
+
+    @app.post("/market/forecast-intelligence/analyze")
+    async def market_forecast_intelligence_analyze(
+        payload: dict[str, Any] | None = None,
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.forecast_intelligence_analyze(
+                payload or {}, actor=_operator
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_intelligence_http_error(exc) from exc
+
+    @app.get("/market/forecast-intelligence/health")
+    async def market_forecast_intelligence_health(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.forecast_intelligence_health()
+        except Exception as exc:  # noqa: BLE001
+            raise _forecast_intelligence_http_error(exc) from exc
+
+    # -- PI-24: event-aware predictive intelligence --------------------------
+    def _event_intelligence_http_error(exc: Exception) -> HTTPException:
+        from novacontrol.novamarket.contracts import NotOperationalError
+        from novacontrol.novamarket.event_intelligence import EventIntelligenceError
+
+        if isinstance(exc, EventIntelligenceError):
+            return HTTPException(
+                status_code=exc.http_status,
+                detail={"error": exc.code, "message": exc.message},
+            )
+        if isinstance(exc, PermissionError):
+            return HTTPException(status_code=403, detail=str(exc))
+        if isinstance(exc, NotOperationalError):
+            return HTTPException(status_code=503, detail=str(exc))
+        return HTTPException(status_code=500, detail=str(exc))
+
+    @app.get("/market/event-intelligence/status")
+    async def market_event_intelligence_status(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.event_intelligence_status()
+        except Exception as exc:  # noqa: BLE001
+            raise _event_intelligence_http_error(exc) from exc
+
+    @app.get("/market/event-intelligence/contracts")
+    async def market_event_intelligence_contracts(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.event_intelligence_contract()
+        except Exception as exc:  # noqa: BLE001
+            raise _event_intelligence_http_error(exc) from exc
+
+    @app.get("/market/event-intelligence/navigation")
+    async def market_event_intelligence_navigation(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.event_intelligence_navigation()
+        except Exception as exc:  # noqa: BLE001
+            raise _event_intelligence_http_error(exc) from exc
+
+    @app.get("/market/event-intelligence/config")
+    async def market_event_intelligence_config(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.event_intelligence_config()
+        except Exception as exc:  # noqa: BLE001
+            raise _event_intelligence_http_error(exc) from exc
+
+    @app.put("/market/event-intelligence/config")
+    async def market_event_intelligence_update_config(
+        payload: dict[str, Any],
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.event_intelligence_update_config(
+                payload, actor=_operator
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _event_intelligence_http_error(exc) from exc
+
+    @app.get("/market/event-intelligence/events")
+    async def market_event_intelligence_events(
+        instrument_id: str = "",
+        status: str = "",
+        group: str = "",
+        limit: int = 50,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.event_intelligence_events(
+                instrument_id=instrument_id,
+                status=status,
+                group=group,
+                limit=limit,
+                offset=offset,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _event_intelligence_http_error(exc) from exc
+
+    @app.get("/market/event-intelligence/events/{event_id}")
+    async def market_event_intelligence_event(
+        event_id: str,
+        version: int | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.event_intelligence_event(
+                event_id, version=version
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _event_intelligence_http_error(exc) from exc
+
+    @app.get("/market/event-intelligence/timeline")
+    async def market_event_intelligence_timeline(
+        event_id: str = "",
+        instrument_id: str = "",
+        horizon: str = "5d",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.event_intelligence_timeline(
+                {
+                    "event_id": event_id,
+                    "instrument_id": instrument_id,
+                    "horizon": horizon,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _event_intelligence_http_error(exc) from exc
+
+    @app.post("/market/event-intelligence/relevance")
+    async def market_event_intelligence_relevance(
+        payload: dict[str, Any] | None = None,
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.event_intelligence_relevance(
+                payload or {}, actor=_operator
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _event_intelligence_http_error(exc) from exc
+
+    @app.post("/market/event-intelligence/impact")
+    async def market_event_intelligence_impact(
+        payload: dict[str, Any] | None = None,
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.event_intelligence_impact(payload or {})
+        except Exception as exc:  # noqa: BLE001
+            raise _event_intelligence_http_error(exc) from exc
+
+    @app.post("/market/event-intelligence/warnings")
+    async def market_event_intelligence_warnings(
+        payload: dict[str, Any] | None = None,
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.event_intelligence_warnings(payload or {})
+        except Exception as exc:  # noqa: BLE001
+            raise _event_intelligence_http_error(exc) from exc
+
+    @app.post("/market/event-intelligence/features")
+    async def market_event_intelligence_features(
+        payload: dict[str, Any] | None = None,
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.event_intelligence_features(payload or {})
+        except Exception as exc:  # noqa: BLE001
+            raise _event_intelligence_http_error(exc) from exc
+
+    @app.post("/market/event-intelligence/forecast-context")
+    async def market_event_intelligence_forecast_context(
+        payload: dict[str, Any] | None = None,
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.event_intelligence_forecasts(payload or {})
+        except Exception as exc:  # noqa: BLE001
+            raise _event_intelligence_http_error(exc) from exc
+
+    @app.post("/market/event-intelligence/outcomes")
+    async def market_event_intelligence_outcomes(
+        payload: dict[str, Any] | None = None,
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.event_intelligence_outcomes(payload or {})
+        except Exception as exc:  # noqa: BLE001
+            raise _event_intelligence_http_error(exc) from exc
+
+    @app.post("/market/event-intelligence/outcomes/study")
+    async def market_event_intelligence_outcome_study(
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.event_intelligence_outcome_study(payload or {})
+        except Exception as exc:  # noqa: BLE001
+            raise _event_intelligence_http_error(exc) from exc
+
+    @app.post("/market/event-intelligence/forecast-evaluation")
+    async def market_event_intelligence_forecast_evaluation(
+        payload: dict[str, Any] | None = None,
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        """Event-aware versus non-event-aware forecast error (persisted evidence)."""
+
+        try:
+            return nova.novamarket.event_intelligence_forecast_evaluation(payload or {})
+        except Exception as exc:  # noqa: BLE001
+            raise _event_intelligence_http_error(exc) from exc
+
+    @app.post("/market/event-intelligence/agents")
+    async def market_event_intelligence_agents(
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        body = payload or {}
+        try:
+            return nova.novamarket.event_intelligence_agent_context(
+                str(body.get("instrument_id") or ""),
+                str(body.get("horizon") or "5d"),
+                portfolio_id=str(body.get("portfolio_id") or ""),
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _event_intelligence_http_error(exc) from exc
+
+    @app.get("/market/event-intelligence/portfolio/{portfolio_id}/context")
+    async def market_event_intelligence_portfolio_context(
+        portfolio_id: str,
+        horizon: str = "5d",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.event_intelligence_portfolio_context(
+                portfolio_id, horizon=horizon
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _event_intelligence_http_error(exc) from exc
+
+    @app.post("/market/event-intelligence/sync")
+    async def market_event_intelligence_sync(
+        payload: dict[str, Any] | None = None,
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        body = payload or {}
+        try:
+            return nova.novamarket.event_intelligence_sync(
+                instrument_id=str(body.get("instrument_id") or ""),
+                limit=int(body.get("limit") or 200),
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _event_intelligence_http_error(exc) from exc
+
+    @app.post("/market/event-intelligence/ingest")
+    async def market_event_intelligence_ingest(
+        payload: dict[str, Any] | None = None,
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        try:
+            return await nova.novamarket.event_intelligence_ingest(
+                str((payload or {}).get("source_id") or "")
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _event_intelligence_http_error(exc) from exc
+
+    @app.post("/market/event-intelligence/analyze")
+    async def market_event_intelligence_analyze(
+        payload: dict[str, Any] | None = None,
+        _operator: str = Depends(require_autonomy_operator),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.event_intelligence_analyze(
+                payload or {}, actor=_operator
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _event_intelligence_http_error(exc) from exc
+
+    @app.get("/market/event-intelligence/overview")
+    async def market_event_intelligence_overview(
+        instrument_id: str = "",
+        horizon: str = "5d",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.event_intelligence_overview(
+                instrument_id=instrument_id, horizon=horizon
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _event_intelligence_http_error(exc) from exc
+
+    @app.get("/market/event-intelligence/history")
+    async def market_event_intelligence_history(
+        kind: str = "",
+        event_id: str = "",
+        instrument_id: str = "",
+        horizon: str = "",
+        limit: int = 100,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.event_intelligence_history(
+                kind=kind,
+                event_id=event_id,
+                instrument_id=instrument_id,
+                horizon=horizon,
+                limit=limit,
+                offset=offset,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise _event_intelligence_http_error(exc) from exc
+
+    @app.get("/market/event-intelligence/health")
+    async def market_event_intelligence_health(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.event_intelligence_health()
+        except Exception as exc:  # noqa: BLE001
+            raise _event_intelligence_http_error(exc) from exc
+
+    # -- PI-11: forecast evaluation ------------------------------------------
+    def _evaluation_http_error(exc: Exception) -> Any:
+        from fastapi import HTTPException
+        from novacontrol.novamarket.evaluation import (
+            EvaluationError,
+            EvaluationNotFoundError,
+        )
+
+        if isinstance(exc, HTTPException):
+            return exc
+        if isinstance(exc, EvaluationNotFoundError):
+            return HTTPException(status_code=404, detail=str(exc))
+        if isinstance(exc, EvaluationError):
+            return HTTPException(status_code=422, detail=str(exc))
+        return HTTPException(status_code=500, detail=str(exc))
+
+    @app.get("/market/evaluations/status")
+    async def market_evaluation_status(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.novamarket.evaluation_status()
+
+    @app.get("/market/evaluations/contracts")
+    async def market_evaluation_contracts(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.novamarket.evaluation_contract()
+
+    @app.get("/market/evaluations")
+    async def market_evaluations(
+        limit: int = 50, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.evaluation_list(limit)
+        except Exception as exc:  # noqa: BLE001
+            raise _evaluation_http_error(exc) from exc
+
+    @app.post("/market/evaluations")
+    async def market_evaluation_create(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Evaluate stored forecasts; never generates or trades a forecast."""
+        try:
+            return await nova.novamarket.evaluation_create(payload)
+        except Exception as exc:  # noqa: BLE001
+            raise _evaluation_http_error(exc) from exc
+
+    @app.get("/market/evaluations/{evaluation_id}")
+    async def market_evaluation(
+        evaluation_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.novamarket.evaluation(evaluation_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _evaluation_http_error(exc) from exc
+
+    @app.get("/market/evaluations/{evaluation_id}/verify")
+    async def market_evaluation_verify(
+        evaluation_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return await nova.novamarket.evaluation_verify(evaluation_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _evaluation_http_error(exc) from exc
+
+    @app.post("/market/evaluations/{evaluation_id}/reproduce")
+    async def market_evaluation_reproduce(
+        evaluation_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return await nova.novamarket.evaluation_reproduce(evaluation_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _evaluation_http_error(exc) from exc
 
     # -- NM-12: non-executing shadow mode ------------------------------------
     def _shadow_http_error(exc: Exception) -> Any:

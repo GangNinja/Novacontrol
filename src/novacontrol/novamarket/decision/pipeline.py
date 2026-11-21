@@ -50,6 +50,14 @@ from novacontrol.novamarket.decision.models import (
     ensure_proposal_transition,
     utcnow,
 )
+from novacontrol.novamarket.decision.forecast import (
+    FORECAST_DECISION_CONTRACT_VERSION,
+    ForecastDecisionConfig,
+    ForecastDecisionConfigError,
+    ForecastDecisionEvaluator,
+    ForecastDecisionStatus,
+    ForecastDecisionType,
+)
 from novacontrol.novamarket.decision.store import DecisionStore
 from novacontrol.novamarket.portfolio.models import policy_for
 from novacontrol.novamarket.strategies.models import StrategySignal, SignalType
@@ -139,6 +147,18 @@ class AutonomyDecisionPipeline:
         publisher: Callable[[str, dict[str, Any]], Any] | None = None,
         clock: Callable[[], datetime] | None = None,
         risk_timeout_seconds: float = 30.0,
+        forecasts: Any | None = None,
+        features: Any | None = None,
+        radar: Any | None = None,
+        evaluations: Any | None = None,
+        open_orders: Callable[[str, str], Sequence[Mapping[str, Any]]] | None = None,
+        forecast_config: ForecastDecisionConfig | Mapping[str, Any] | None = None,
+        advisory_evidence: Callable[[DecisionSignal], Mapping[str, Any] | None]
+        | None = None,
+        forecast_optimization_evidence: Callable[
+            [DecisionSignal], Mapping[str, Any] | None
+        ]
+        | None = None,
     ) -> None:
         self._runtime = runtime
         self._strategies = strategies
@@ -146,6 +166,18 @@ class AutonomyDecisionPipeline:
         self._portfolios = portfolios
         self._market_data = market_data
         self._publisher = publisher
+        self._forecasts = forecasts
+        self._features = features
+        self._radar = radar
+        self._evaluations = evaluations
+        self._open_orders = open_orders
+        self._forecast_config_override = forecast_config
+        # Read-only PI-17 evidence; it never selects an action or a risk outcome.
+        self._advisory_evidence = advisory_evidence
+        self._advisory_error = ""
+        # Read-only PI-23 selection/reliability/fallback evidence; same rule.
+        self._forecast_optimization_evidence = forecast_optimization_evidence
+        self._forecast_optimization_error = ""
         self._clock = clock or utcnow
         self._risk_timeout_seconds = max(0.1, min(float(risk_timeout_seconds), 300.0))
         self._store = DecisionStore(runtime.store, clock=self._clock)
@@ -200,6 +232,16 @@ class AutonomyDecisionPipeline:
             "runtime": "AT-01",
             "risk_authority": "NM-08 is the sole risk authority",
             "execution_authority": "NM-10 (not called by AT-03)",
+            "prediction_integration": {
+                "phase": "PI-12",
+                "contract_version": FORECAST_DECISION_CONTRACT_VERSION,
+                "forecast_sources": ["PI-08", "PI-10", "PI-11"],
+                "decision_types": [item.value for item in ForecastDecisionType],
+                "configured": self._forecasts is not None,
+                "forecast_authorizes_action": False,
+                "risk_authority": "NM-08",
+                "execution_authority": "NM-10",
+            },
             "horizon_mapping": dict(HORIZON_MAPPING),
             "signal_directions": [item.value for item in SignalType],
             "proposal_statuses": [item.value for item in DecisionProposalStatus],
@@ -289,6 +331,8 @@ class AutonomyDecisionPipeline:
                 "signals": metrics["signals"],
                 "proposals": metrics["proposals"],
                 "risk_assessments": metrics["risk_assessments"],
+                "prediction_decisions": metrics.get("prediction_decisions", 0),
+                "prediction_outcomes": metrics.get("prediction_outcomes", 0),
             },
             "health": {
                 "state": "degraded" if health_reasons else "ok",
@@ -298,6 +342,20 @@ class AutonomyDecisionPipeline:
             },
             "last_error": self._last_error,
             "last_error_code": self._last_error_code,
+            "advisory_evidence": {
+                "reader": self._advisory_evidence is not None,
+                "source": "PI-17 advisory handoff (read-only)",
+                "read_only": True,
+                "affects_action": False,
+                "last_error": self._advisory_error,
+            },
+            "forecast_optimization_evidence": {
+                "reader": self._forecast_optimization_evidence is not None,
+                "source": "PI-23 forecast optimization evidence (read-only)",
+                "read_only": True,
+                "affects_action": False,
+                "last_error": self._forecast_optimization_error,
+            },
             "controls": ["run"],
             "scheduler": {
                 "hosted_by": "novamarket_runtime",
@@ -320,6 +378,9 @@ class AutonomyDecisionPipeline:
             "evaluations": evaluations,
             "signals": signals,
             "proposals": proposals,
+            "prediction_decisions": self._store.prediction_decisions(
+                run_id=run_id, limit=500
+            )["items"],
             "events": self._store.events(run_id=run_id, limit=500),
             "execution_allowed": False,
             "orders_possible": False,
@@ -376,17 +437,121 @@ class AutonomyDecisionPipeline:
                 str(signal.get("evaluation_id") or "")
             )
         risk = self._store.risk_assessment(proposal_id)
+        prediction_decision = self._store.prediction_decision_for_proposal(proposal_id)
         return {
             "ok": True,
             "proposal": proposal,
             "signal": signal,
             "evaluation": evaluation,
             "risk": risk,
+            "prediction_decision": prediction_decision,
+            "prediction_outcome": (
+                self._store.prediction_outcome(
+                    str(prediction_decision.get("decision_id"))
+                )
+                if prediction_decision
+                else None
+            ),
             "events": self._store.events(proposal_id=proposal_id, limit=200),
             "execution_allowed": False,
             "orders_possible": False,
             "is_executed": False,
         }
+
+    # -- PI-12 forecast decision reads ---------------------------------------
+    def forecast_config(self) -> ForecastDecisionConfig:
+        if isinstance(self._forecast_config_override, ForecastDecisionConfig):
+            return self._forecast_config_override
+        if isinstance(self._forecast_config_override, Mapping):
+            return ForecastDecisionConfig.from_mapping(self._forecast_config_override)
+        stored = self._store.forecast_decision_policy()
+        if stored is not None:
+            try:
+                return ForecastDecisionConfig.from_mapping(stored)
+            except ForecastDecisionConfigError:
+                _LOGGER.warning(
+                    "novamarket.decision.invalid_forecast_policy; using defaults"
+                )
+        return ForecastDecisionConfig()
+
+    def forecast_policy(self) -> dict[str, Any]:
+        config = self.forecast_config()
+        stored = self._store.forecast_decision_policy()
+        return {
+            "ok": True,
+            "policy": config.to_dict(),
+            "digest": config.digest(),
+            "source": "stored" if stored is not None else "default",
+            "updated_at": (stored or {}).get("updated_at"),
+            "risk_authority": "NM-08",
+            "execution_authority": "NM-10",
+        }
+
+    def set_forecast_policy(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        config = ForecastDecisionConfig.from_mapping(payload)
+        saved = self._store.save_forecast_decision_policy(
+            config.to_dict(), at=self._now()
+        )
+        self._forecast_config_override = config
+        return {
+            "ok": True,
+            "policy": config.to_dict(),
+            "digest": config.digest(),
+            "updated_at": saved.get("updated_at"),
+            "risk_authority": "NM-08",
+            "execution_authority": "NM-10",
+        }
+
+    def prediction_decisions(
+        self,
+        *,
+        run_id: str = "",
+        portfolio_id: str = "",
+        instrument_id: str = "",
+        decision_type: str = "",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        body = self._store.prediction_decisions(
+            run_id=run_id,
+            portfolio_id=portfolio_id,
+            instrument_id=instrument_id,
+            decision_type=decision_type,
+            limit=limit,
+            offset=offset,
+        )
+        return {"ok": True, **body, "decisions": body["items"]}
+
+    def prediction_decision_detail(self, decision_id: str) -> dict[str, Any]:
+        decision = self._store.prediction_decision(decision_id)
+        if decision is None:
+            raise DecisionNotFound(f"unknown prediction decision {decision_id!r}")
+        proposal = self._store.proposal(str(decision.get("proposal_id") or ""))
+        signal = self._store.signal(str((proposal or {}).get("signal_id") or ""))
+        risk = (
+            self._store.risk_assessment(str((proposal or {}).get("proposal_id") or ""))
+            if proposal
+            else None
+        )
+        return {
+            "ok": True,
+            "decision": decision,
+            "proposal": proposal,
+            "signal": signal,
+            "risk": risk,
+            "outcome": self._store.prediction_outcome(decision_id),
+            "events": decision.get("events") or [],
+            "execution_allowed": False,
+            "orders_possible": False,
+            "paper_only": True,
+            "live_trading": False,
+        }
+
+    def prediction_outcomes(
+        self, *, limit: int = 100, offset: int = 0
+    ) -> dict[str, Any]:
+        body = self._store.prediction_outcomes(limit=limit, offset=offset)
+        return {"ok": True, **body, "outcomes": body["items"]}
 
     def execution_proposal(self, proposal_id: str) -> dict[str, Any] | None:
         """The ADDITIVE NM-10 adapter view; persisted AT-03 state is untouched.
@@ -534,7 +699,7 @@ class AutonomyDecisionPipeline:
                     "no active configured portfolio is eligible for decisions",
                 )
             active_strategies = self._active_strategies()
-            if not active_strategies:
+            if not active_strategies and self._forecasts is None:
                 raise DecisionStateError(
                     DecisionErrorCode.NO_ACTIVE_STRATEGY.value,
                     "no active NM-09 strategy applies to the configured horizon",
@@ -547,6 +712,7 @@ class AutonomyDecisionPipeline:
                     "candidates": [row["instrument_id"] for row in candidates],
                     "portfolios": [row["portfolio_id"] for row in portfolios],
                     "strategies": [row["strategy_id"] for row in active_strategies],
+                    "prediction_integration": self._forecasts is not None,
                 }
             )
             run = DecisionRun(
@@ -591,10 +757,22 @@ class AutonomyDecisionPipeline:
                 "rejected": 0,
                 "invalid": 0,
                 "errors": 0,
+                "prediction_decisions": 0,
+                "prediction_buy": 0,
+                "prediction_sell": 0,
+                "prediction_hold": 0,
+                "prediction_wait": 0,
+                "prediction_no_action": 0,
+                "prediction_skipped": 0,
             }
             failure_code = ""
             failure_message = ""
+            strategy_skip: set[tuple[str, str]] = set()
             try:
+                if self._forecasts is not None:
+                    strategy_skip = await self._evaluate_forecasts(
+                        run, cycle, portfolios, candidates, counts, actor=actor
+                    )
                 for portfolio in portfolios:
                     for strategy in active_strategies:
                         if portfolio["horizon"] not in strategy["horizons"]:
@@ -608,6 +786,11 @@ class AutonomyDecisionPipeline:
                                 candidates,
                                 counts,
                                 actor=actor,
+                                skip={
+                                    instrument
+                                    for portfolio_id, instrument in strategy_skip
+                                    if portfolio_id == portfolio["portfolio_id"]
+                                },
                             )
                         except DecisionError as exc:
                             counts["errors"] += 1
@@ -700,6 +883,15 @@ class AutonomyDecisionPipeline:
                     "orders_possible": False,
                     "paper_only": True,
                     "live_trading": False,
+                    "prediction_decisions": counts["prediction_decisions"],
+                    "prediction_decisions_by_type": {
+                        "BUY": counts["prediction_buy"],
+                        "SELL": counts["prediction_sell"],
+                        "HOLD": counts["prediction_hold"],
+                        "WAIT": counts["prediction_wait"],
+                        "NO_ACTION": counts["prediction_no_action"],
+                    },
+                    "prediction_skipped_existing": counts["prediction_skipped"],
                 }
             )
             return body
@@ -843,6 +1035,540 @@ class AutonomyDecisionPipeline:
                 break
         return selected
 
+    # -- PI-12 forecast evaluation -------------------------------------------
+    async def _evaluate_forecasts(
+        self,
+        run: DecisionRun,
+        cycle: Mapping[str, Any],
+        portfolios: Sequence[Mapping[str, Any]],
+        candidates: Sequence[Mapping[str, Any]],
+        counts: dict[str, int],
+        *,
+        actor: str,
+    ) -> set[tuple[str, str]]:
+        config = self.forecast_config()
+        evaluator = ForecastDecisionEvaluator(config)
+        skip: set[tuple[str, str]] = set()
+        for portfolio in portfolios:
+            portfolio_id = str(portfolio["portfolio_id"])
+            for candidate in candidates:
+                instrument_id = str(candidate["instrument_id"])
+                exchange = str(candidate["exchange"])
+                quality = _text(candidate.get("data_quality")) or "unavailable"
+                forecast_error = ""
+                try:
+                    forecasts = self._forecast_rows(instrument_id)
+                except Exception as exc:  # noqa: BLE001 - required evidence fails closed
+                    forecasts = []
+                    forecast_error = f"{type(exc).__name__}: {exc}"
+                orders, order_error = self._orders_for(portfolio_id, instrument_id)
+                if forecast_error or order_error:
+                    message = (
+                        "required forecast evidence is unavailable; no trade is allowed: "
+                        f"{forecast_error}"
+                        if forecast_error
+                        else "open-order state is unavailable; no trade is allowed: "
+                        f"{order_error}"
+                    )
+                    self._persist_forecast_error(
+                        run,
+                        cycle,
+                        portfolio,
+                        candidate,
+                        config,
+                        counts,
+                        skip,
+                        message,
+                    )
+                    raise DecisionPipelineError(
+                        DecisionErrorCode.PIPELINE_FAILED.value, message
+                    )
+                try:
+                    evaluation = self._forecast_evaluation(
+                        instrument_id, ""
+                    )
+                except Exception as exc:  # noqa: BLE001 - evidence is optional
+                    evaluation = {
+                        "available": False,
+                        "reason": f"PI-11 evidence unavailable: {type(exc).__name__}: {exc}",
+                        "automatic_promotion": False,
+                    }
+                try:
+                    bars = self._forecast_bars(instrument_id)
+                    regime = self._forecast_regime(instrument_id)
+                    events = self._forecast_events(instrument_id)
+                    draft = evaluator.evaluate(
+                        instrument_id=instrument_id,
+                        exchange=exchange,
+                        portfolio=portfolio,
+                        forecasts=forecasts,
+                        bars=bars,
+                        regime=regime,
+                        events=events,
+                        open_orders=orders,
+                        evaluation_evidence=evaluation,
+                        candidate_quality=quality,
+                        now=self._now(),
+                    )
+                    await self._persist_forecast_decision(
+                        run,
+                        cycle,
+                        portfolio,
+                        candidate,
+                        draft,
+                        config,
+                        counts,
+                        skip,
+                        actor=actor,
+                        quality=quality,
+                    )
+                except Exception as exc:  # noqa: BLE001 - isolate candidate evaluation
+                    _LOGGER.exception(
+                        "novamarket.decision.forecast_failed run=%s instrument=%s",
+                        run.run_id,
+                        instrument_id,
+                    )
+                    self._persist_forecast_error(
+                        run,
+                        cycle,
+                        portfolio,
+                        candidate,
+                        config,
+                        counts,
+                        skip,
+                        f"{type(exc).__name__}: {exc}",
+                    )
+        return skip
+
+    def _forecast_rows(self, instrument_id: str) -> list[dict[str, Any]]:
+        if self._forecasts is None:
+            return []
+        body = self._forecasts.forecasts(instrument_id)
+        rows = body.get("forecasts") if isinstance(body, Mapping) else body
+        return [dict(row) for row in rows or () if isinstance(row, Mapping)]
+
+    def _forecast_evaluation(
+        self, instrument_id: str, horizon: str
+    ) -> dict[str, Any]:
+        if self._forecasts is not None and callable(
+            getattr(self._forecasts, "evaluation_evidence", None)
+        ):
+            return dict(self._forecasts.evaluation_evidence(instrument_id, horizon))
+        if self._evaluations is not None:
+            body = self._evaluations.list(limit=20)
+            return {
+                "available": bool(body.get("evaluations")),
+                "reports": body.get("evaluations") or [],
+                "automatic_promotion": False,
+            }
+        return {"available": False, "automatic_promotion": False}
+
+    def _forecast_bars(self, instrument_id: str) -> list[Any]:
+        if self._market_data is None:
+            return []
+        try:
+            page = self._market_data.bars(
+                instrument_id, limit=60, ascending=True
+            )
+        except Exception:  # noqa: BLE001 - an empty context is explicit
+            return []
+        if isinstance(page, Mapping):
+            rows = page.get("bars") or page.get("items") or ()
+        else:
+            rows = getattr(page, "items", ()) or ()
+        # A partial session bar is not a completed observation.  It may be
+        # useful to an intraday forecast, but it must not become the technical
+        # confirmation for a swing/long-term decision.
+        return [
+            row
+            for row in rows
+            if not (
+                bool(row.get("partial"))
+                if isinstance(row, Mapping)
+                else bool(getattr(row, "partial", False))
+            )
+        ]
+
+    def _forecast_regime(self, instrument_id: str) -> Any:
+        if self._features is None:
+            return None
+        try:
+            return self._features.latest_regime(instrument_id)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _forecast_events(self, instrument_id: str) -> list[Mapping[str, Any]]:
+        if self._radar is None:
+            return []
+        try:
+            body = self._radar.instrument_events(instrument_id, limit=20)
+        except Exception:  # noqa: BLE001
+            return []
+        rows = body.get("events") if isinstance(body, Mapping) else body
+        return [row for row in rows or () if isinstance(row, Mapping)]
+
+    def _orders_for(
+        self, portfolio_id: str, instrument_id: str
+    ) -> tuple[list[Mapping[str, Any]], str]:
+        if self._open_orders is None:
+            return [], ""
+        try:
+            rows = self._open_orders(portfolio_id, instrument_id)
+            if rows is None:
+                return [], "the open-order provider returned no readable state"
+            return [row for row in rows if isinstance(row, Mapping)], ""
+        except Exception as exc:  # noqa: BLE001 - unknown orders must fail closed
+            return [], f"{type(exc).__name__}: {exc}"
+
+    def _forecast_signal(
+        self,
+        run: DecisionRun,
+        portfolio: Mapping[str, Any],
+        candidate: Mapping[str, Any],
+        prediction_decision_id: str,
+        draft: Any,
+        config: ForecastDecisionConfig,
+    ) -> DecisionSignal:
+        now = self._now()
+        primary = dict(draft.primary_forecast or {})
+        target = _as_datetime(primary.get("target_at")) or (
+            now + timedelta(minutes=config.decision_ttl_minutes)
+        )
+        ttl = now + timedelta(minutes=config.decision_ttl_minutes)
+        expires_at = min(target, ttl) if target > now else ttl
+        forecast_ids = tuple(
+            dict.fromkeys(
+                str(row.get("forecast_id") or "")
+                for row in draft.forecasts
+                if row.get("forecast_id")
+            )
+        )
+        models = tuple(
+            dict.fromkeys(
+                item
+                for item in [
+                    _text(primary.get("model_version")),
+                    *[str(value) for value in primary.get("member_versions") or ()],
+                ]
+                if item
+            )
+        )
+        confidence = (
+            draft.probability_up
+            if draft.side == "buy"
+            else draft.probability_down
+        )
+        rationale = "PI-12 forecast decision: " + "; ".join(draft.reasons[:5])
+        return DecisionSignal(
+            signal_id=decision_id("psig_", prediction_decision_id),
+            evaluation_id="",
+            run_id=run.run_id,
+            monitoring_cycle_id=run.monitoring_cycle_id,
+            strategy_id="pi12_forecast",
+            strategy_version=config.version,
+            portfolio_id=str(portfolio["portfolio_id"]),
+            instrument_id=str(candidate["instrument_id"]),
+            exchange=str(candidate["exchange"]),
+            horizon=str(portfolio["horizon"]),
+            direction=draft.side,
+            created_at=now,
+            source_market_data_at=_as_datetime(primary.get("data_observed_at"))
+            or now,
+            expires_at=expires_at,
+            rationale=rationale,
+            confidence=str(confidence) if confidence is not None else None,
+            reference_price=draft.reference_price or None,
+            data_quality="measured",
+            freshness="fresh",
+            validation=SignalValidation.VALID,
+            validation_error="",
+            conditions=tuple(
+                [
+                    "pi12_forecast",
+                    "forecast_authorizes_action:false",
+                    "risk_authority:NM-08",
+                    "execution_authority:NM-10",
+                    f"prediction_decision:{prediction_decision_id}",
+                    f"forecast_horizon:{draft.horizon}",
+                    *[f"forecast:{item}" for item in forecast_ids],
+                ]
+            ),
+            prediction_decision_id=prediction_decision_id,
+            forecast_ids=forecast_ids,
+            forecast_horizon=draft.horizon,
+            ensemble_version=_text(primary.get("ensemble_id")),
+            model_versions=models,
+        )
+
+    async def _persist_forecast_decision(
+        self,
+        run: DecisionRun,
+        cycle: Mapping[str, Any],
+        portfolio: Mapping[str, Any],
+        candidate: Mapping[str, Any],
+        draft: Any,
+        config: ForecastDecisionConfig,
+        counts: dict[str, int],
+        skip: set[tuple[str, str]],
+        *,
+        actor: str,
+        quality: str,
+    ) -> None:
+        instrument_id = str(candidate["instrument_id"])
+        portfolio_id = str(portfolio["portfolio_id"])
+        primary = dict(draft.primary_forecast or {})
+        forecast_id = _text(primary.get("forecast_id")) or "none"
+        key_payload = {
+            "cycle": run.monitoring_cycle_id,
+            "portfolio": portfolio_id,
+            "instrument": instrument_id,
+            "horizon": draft.horizon or "none",
+            "forecast": forecast_id,
+            "policy": config.digest(),
+            "type": draft.decision_type.value,
+        }
+        decision_key = digest_payload(key_payload)
+        decision_id = "pdec_" + decision_key
+        existing = self._store.prediction_decision(decision_id)
+        if existing is None:
+            existing = self._store.prediction_decision_by_key(decision_key)
+        if existing is not None:
+            counts["prediction_skipped"] += 1
+            skip.add((portfolio_id, instrument_id))
+            return
+        proposal: DecisionProposal | None = None
+        status = ForecastDecisionStatus.DECISION_GENERATED.value
+        signal_id = ""
+        skip_reason = ""
+        if draft.decision_type in {
+            ForecastDecisionType.BUY,
+            ForecastDecisionType.SELL,
+        } and draft.action and draft.side:
+            signal = self._forecast_signal(
+                run, portfolio, candidate, decision_id, draft, config
+            )
+            signal_id = signal.signal_id
+            self._store.save_signal(signal)
+            counts["signals"] += 1
+            proposal, created, skip_reason = self._ensure_proposal(
+                run, signal, portfolio, candidate
+            )
+            if proposal is None:
+                status = ForecastDecisionStatus.PROPOSAL_SKIPPED.value
+                counts["invalid"] += 1
+            else:
+                if created:
+                    counts["proposals"] += 1
+                if proposal.status is DecisionProposalStatus.RISK_PENDING:
+                    proposal = await self._assess_proposal(
+                        run, proposal, counts, actor=actor
+                    )
+                if proposal.status is DecisionProposalStatus.RISK_APPROVED:
+                    status = ForecastDecisionStatus.RISK_APPROVED.value
+                    counts["approved"] += 1
+                elif proposal.status is DecisionProposalStatus.RISK_PENDING:
+                    status = ForecastDecisionStatus.RISK_PENDING.value
+                elif proposal.status in {
+                    DecisionProposalStatus.RISK_REJECTED,
+                    DecisionProposalStatus.RISK_RESTRICTED,
+                    DecisionProposalStatus.RISK_REVIEW,
+                }:
+                    counts["rejected"] += 1
+                    status = {
+                        DecisionProposalStatus.RISK_REJECTED: ForecastDecisionStatus.RISK_REJECTED.value,
+                        DecisionProposalStatus.RISK_RESTRICTED: ForecastDecisionStatus.RISK_RESTRICTED.value,
+                        DecisionProposalStatus.RISK_REVIEW: ForecastDecisionStatus.RISK_REVIEW.value,
+                    }[proposal.status]
+                else:
+                    status = ForecastDecisionStatus.PROPOSAL_SKIPPED.value
+        payload = draft.to_payload()
+        payload.update(
+            {
+                "decision_id": decision_id,
+                "decision_key": decision_key,
+                "run_id": run.run_id,
+                "monitoring_cycle_id": run.monitoring_cycle_id,
+                "cycle_id": run.monitoring_cycle_id,
+                "portfolio_id": portfolio_id,
+                "instrument_id": instrument_id,
+                "exchange": str(candidate["exchange"]),
+                "candidate_quality": quality,
+                "mode": run.mode,
+                "actor": actor,
+                "created_at": self._now().isoformat(),
+                "status": status,
+                "decision_status": status,
+                "primary_forecast_id": forecast_id if forecast_id != "none" else "",
+                "forecast_ids": [
+                    str(row.get("forecast_id") or "")
+                    for row in draft.forecasts
+                    if row.get("forecast_id")
+                ],
+                "forecast_version": _text(primary.get("model_version")),
+                "ensemble_version": _text(primary.get("ensemble_id")),
+                "model_versions": [
+                    str(value)
+                    for value in [
+                        row.get("forecast_id") and row.get("model_version")
+                        for row in draft.forecasts
+                    ]
+                    if value
+                ],
+                "signal_id": signal_id,
+                "proposal_id": str(proposal.proposal_id) if proposal else "",
+                "order_id": "",
+                "risk_decision_id": (
+                    str(proposal.risk_decision_id) if proposal else ""
+                ),
+                "risk_outcome": str(proposal.risk_outcome) if proposal else "",
+                "risk_result": (
+                    self._store.risk_assessment(proposal.proposal_id)
+                    if proposal
+                    else None
+                ),
+                "proposal_skip_reason": skip_reason,
+                "error": "",
+                "policy": config.to_dict(),
+                "policy_digest": config.digest(),
+            }
+        )
+        payload["decision_digest"] = digest_payload(
+            {
+                "decision_id": decision_id,
+                "decision_type": draft.decision_type.value,
+                "horizon": draft.horizon,
+                "forecast_ids": payload["forecast_ids"],
+                "policy_digest": payload["policy_digest"],
+                "reasons": list(draft.reasons),
+            }
+        )
+        saved = self._store.save_prediction_decision(payload)
+        self._store.append_prediction_decision_event(
+            decision_id,
+            "decision.generated",
+            {
+                "status": status,
+                "decision_type": draft.decision_type.value,
+                "proposal_id": payload["proposal_id"],
+                "risk_outcome": payload["risk_outcome"],
+                "error": "",
+            },
+            at=self._now(),
+        )
+        if proposal is not None:
+            self._store.append_prediction_decision_event(
+                decision_id,
+                "proposal.created",
+                {
+                    "status": status,
+                    "proposal_id": proposal.proposal_id,
+                    "risk_decision_id": proposal.risk_decision_id,
+                    "risk_outcome": proposal.risk_outcome,
+                },
+                at=self._now(),
+            )
+        counts["prediction_decisions"] += 1
+        counter = {
+            ForecastDecisionType.BUY: "prediction_buy",
+            ForecastDecisionType.SELL: "prediction_sell",
+            ForecastDecisionType.HOLD: "prediction_hold",
+            ForecastDecisionType.WAIT: "prediction_wait",
+            ForecastDecisionType.NO_ACTION: "prediction_no_action",
+        }[draft.decision_type]
+        counts[counter] += 1
+        # A candidate with stored forecast evidence is owned by PI-12, including
+        # NO_ACTION (for example a downward forecast with no long position) so an
+        # independent strategy cannot silently trade against the recorded
+        # forecast. With no selected forecast at all, existing NM-09 strategy
+        # evaluation remains available, preserving prior autonomous behaviour.
+        if (
+            draft.decision_type is not ForecastDecisionType.NO_ACTION
+            or draft.horizon_evidence
+        ):
+            skip.add((portfolio_id, instrument_id))
+        self._event(
+            run.run_id,
+            f"prediction.{draft.decision_type.value.lower()}",
+            draft.reasons[0] if draft.reasons else "forecast decision recorded",
+            decision_id=decision_id,
+            instrument_id=instrument_id,
+            portfolio_id=portfolio_id,
+            horizon=draft.horizon,
+            status=status,
+            proposal_id=str(saved.get("proposal_id") or ""),
+        )
+
+    def _persist_forecast_error(
+        self,
+        run: DecisionRun,
+        cycle: Mapping[str, Any],
+        portfolio: Mapping[str, Any],
+        candidate: Mapping[str, Any],
+        config: ForecastDecisionConfig,
+        counts: dict[str, int],
+        skip: set[tuple[str, str]],
+        message: str,
+    ) -> None:
+        portfolio_id = str(portfolio["portfolio_id"])
+        instrument_id = str(candidate["instrument_id"])
+        key = digest_payload(
+            {
+                "cycle": run.monitoring_cycle_id,
+                "portfolio": portfolio_id,
+                "instrument": instrument_id,
+                "error": message,
+            }
+        )
+        decision_id = "pdec_" + key
+        if self._store.prediction_decision(decision_id) is None:
+            payload = {
+                "decision_id": decision_id,
+                "decision_key": key,
+                "run_id": run.run_id,
+                "monitoring_cycle_id": run.monitoring_cycle_id,
+                "cycle_id": run.monitoring_cycle_id,
+                "portfolio_id": portfolio_id,
+                "instrument_id": instrument_id,
+                "exchange": str(candidate["exchange"]),
+                "decision_type": ForecastDecisionType.WAIT.value,
+                "horizon": "",
+                "primary_forecast_id": "",
+                "status": ForecastDecisionStatus.DECISION_ERROR.value,
+                "created_at": self._now().isoformat(),
+                "reasons": ["the forecast decision could not be evaluated; no trade is allowed"],
+                "contradictions": [message],
+                "observations": [],
+                "model_conclusions": [],
+                "forecast_ids": [],
+                "signal_id": "",
+                "proposal_id": "",
+                "order_id": "",
+                "error": message,
+                "policy": config.to_dict(),
+                "policy_digest": config.digest(),
+                "risk_authority": "NM-08",
+                "execution_authority": "NM-10",
+                "automatic_promotion": False,
+            }
+            self._store.save_prediction_decision(payload)
+            self._store.append_prediction_decision_event(
+                decision_id,
+                "decision.error",
+                {"status": ForecastDecisionStatus.DECISION_ERROR.value, "error": message},
+                at=self._now(),
+            )
+            counts["prediction_decisions"] += 1
+            counts["prediction_wait"] += 1
+        skip.add((portfolio_id, instrument_id))
+        self._event(
+            run.run_id,
+            "prediction.error",
+            message,
+            decision_id=decision_id,
+            instrument_id=instrument_id,
+            portfolio_id=portfolio_id,
+        )
+
     # -- evaluation -----------------------------------------------------------
     async def _evaluate_strategy(
         self,
@@ -854,6 +1580,7 @@ class AutonomyDecisionPipeline:
         counts: dict[str, int],
         *,
         actor: str,
+        skip: set[str] | None = None,
     ) -> None:
         strategy_id = str(strategy["strategy_id"])
         portfolio_id = str(portfolio["portfolio_id"])
@@ -891,6 +1618,15 @@ class AutonomyDecisionPipeline:
 
         for candidate in candidates:
             instrument_id = str(candidate["instrument_id"])
+            if skip and instrument_id in skip:
+                self._event(
+                    run.run_id,
+                    "strategy.skipped_prediction_primary",
+                    "a PI-12 forecast decision owns this candidate in this run",
+                    strategy_id=strategy_id,
+                    instrument_id=instrument_id,
+                )
+                continue
             raw = by_instrument.get(instrument_id)
             await self._evaluate_instrument(
                 run,
@@ -1205,6 +1941,8 @@ class AutonomyDecisionPipeline:
         proposal_id = decision_id(
             "dprop_", signal.signal_id, action, str(notional), signal.strategy_version
         )
+        advisory = self._advisory_for_signal(signal)
+        optimization = self._forecast_optimization_for_signal(signal)
         proposal = DecisionProposal(
             proposal_id=proposal_id,
             run_id=run.run_id,
@@ -1228,6 +1966,13 @@ class AutonomyDecisionPipeline:
             data_quality=signal.data_quality,
             source_market_data_at=signal.source_market_data_at,
             updated_at=now,
+            prediction_decision_id=signal.prediction_decision_id,
+            forecast_ids=signal.forecast_ids,
+            forecast_horizon=signal.forecast_horizon,
+            ensemble_version=signal.ensemble_version,
+            model_versions=signal.model_versions,
+            advisory_evidence=advisory,
+            forecast_optimization_evidence=optimization,
         )
         saved = self._store.save_proposal(proposal)
         if str(saved.get("status")) != DecisionProposalStatus.CREATED.value:
@@ -1498,11 +2243,79 @@ class AutonomyDecisionPipeline:
             ),
             risk_error=str(body.get("risk_error") or ""),
             updated_at=_as_datetime(body.get("updated_at")),
+            prediction_decision_id=str(body.get("prediction_decision_id") or ""),
+            forecast_ids=tuple(str(item) for item in body.get("forecast_ids") or ()),
+            forecast_horizon=str(body.get("forecast_horizon") or ""),
+            ensemble_version=str(body.get("ensemble_version") or ""),
+            model_versions=tuple(
+                str(item) for item in body.get("model_versions") or ()
+            ),
+            advisory_evidence=(
+                dict(body["advisory_evidence"])
+                if isinstance(body.get("advisory_evidence"), Mapping)
+                else None
+            ),
+            forecast_optimization_evidence=(
+                dict(body["forecast_optimization_evidence"])
+                if isinstance(body.get("forecast_optimization_evidence"), Mapping)
+                else None
+            ),
         )
+
+    def _advisory_for_signal(
+        self, signal: DecisionSignal
+    ) -> dict[str, Any] | None:
+        """Return the PI-17 advisory evidence for this signal, or ``None``.
+
+        The reader is only asked once a proposal is actually being created, so a
+        disabled, paused or foreign-leased runtime never consumes the handoff.
+        A failure is recorded and ignored: advisory evidence must never turn a
+        decision into an error.
+        """
+
+        reader = self._advisory_evidence
+        if reader is None:
+            self._advisory_error = ""
+            return None
+        try:
+            body = reader(signal)
+        except Exception as exc:  # noqa: BLE001 - evidence must never block a decision
+            self._advisory_error = f"{type(exc).__name__}: {exc}"[:300]
+            return None
+        self._advisory_error = ""
+        if not isinstance(body, Mapping):
+            return None
+        return {str(key): value for key, value in body.items()}
+
+    def _forecast_optimization_for_signal(
+        self, signal: DecisionSignal
+    ) -> dict[str, Any] | None:
+        """Return the PI-23 evidence for this signal, or ``None``.
+
+        Asked only when a proposal is actually being created, so a disabled,
+        paused or foreign-leased runtime never consumes the records.  A failure
+        is recorded and ignored: evidence must never turn a decision into an
+        error.
+        """
+
+        reader = self._forecast_optimization_evidence
+        if reader is None:
+            self._forecast_optimization_error = ""
+            return None
+        try:
+            body = reader(signal)
+        except Exception as exc:  # noqa: BLE001 - evidence must never block a decision
+            self._forecast_optimization_error = f"{type(exc).__name__}: {exc}"[:300]
+            return None
+        self._forecast_optimization_error = ""
+        if not isinstance(body, Mapping):
+            return None
+        return {str(key): value for key, value in body.items()}
 
     def _event(
         self,
         run_id: str,
+
         kind: str,
         message: str,
         *,

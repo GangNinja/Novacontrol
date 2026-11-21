@@ -1,10 +1,10 @@
 # NovaMarket — Autonomous Paper Trading Architecture
 
-**Status:** **AT-01 IMPLEMENTED** (runtime and safety shell only). AT-02–AT-06 are not approved, not started and not implemented. Where this document conflicts with `AUTONOMOUS_TRADING_OWNER_DECISIONS.md` (owner-approved 10 November 2026), the owner decisions win.
+**Status:** **AT-01 through AT-06 and PI-12 IMPLEMENTED.** Sections 3–12 record the original architecture/design baseline; the accepted implementation is evidenced by `AT-01_IMPLEMENTATION_REPORT.md`, `AUTONOMOUS_TRADING_AT02_REPORT.md`, `AUTONOMOUS_TRADING_AT03_REPORT.md`, `AUTONOMOUS_TRADING_AT04_REPORT.md`, `AUTONOMOUS_TRADING_AT05_REPORT.md`, `AUTONOMOUS_TRADING_AT06_REPORT.md`, `AUTONOMOUS_TRADING_FINAL_ACCEPTANCE_REPORT.md` and `PI12_COMPLETION_REPORT.md`. Where this document conflicts with `AUTONOMOUS_TRADING_OWNER_DECISIONS.md` (owner-approved 10 November 2026), the owner decisions win.
 
 **Date:** 9 November 2026
 
-**Scope:** Architecture and implementation planning only. No application source, schema, migration, runtime configuration, commit or push is changed by this document.
+**Scope:** Architecture and implementation planning baseline. The original design sections are preserved; section 13 records the implemented PI-12 prediction-trading integration. No commit or push is made by this document.
 
 **Baseline:** NovaMarket NM-01–NM-14, including the 9 November 2026 acceptance report and the three preserved QA fixes (BUG-QA-001, BUG-QA-002, BUG-QA-003).
 
@@ -71,7 +71,7 @@ The three QA fixes remain part of the baseline and are not touched by this desig
 - refreshes the event radar when due;
 - refreshes bars for currently held instruments when due.
 
-It does **not** call discovery, evaluate strategies, assess proposals, submit orders or monitor exits.
+In the original AT-01 baseline it did **not** call discovery, evaluate strategies, assess proposals, submit orders or monitor exits. The accepted implementation now hosts the AT-02 monitoring runner, AT-03 decision pipeline, AT-04 paper forwarding, AT-05 exits and PI-12 outcome measurement in this same tick (section 13); it still uses the existing services and adds no second scheduler.
 
 `runtime_status()` currently reports `task_running`, `interval_seconds`, `paused`, `last_tick`, `last_event_refresh`, `last_position_refresh`, `last_error` and the refresh plan. This is the correct integration point for an autonomy tick, but it is not itself an autonomy manager.
 
@@ -388,7 +388,7 @@ A start-up assertion checks the execution contract flags and refuses to bring th
 
 ## 8. Persistence
 
-`AutonomyStore` uses the **same SQLite database file** as the other NovaMarket stores (the service's existing data path). It gets its own schema version and tables; no existing table is altered. DDL is proposed only; it has not been executed.
+`AutonomyStore` uses the **same SQLite database file** as the other NovaMarket stores (the service's existing data path). It gets its own schema version and tables; no existing table is altered. The AT-01–AT-06 schema is implemented and exercised by the accepted phase tests; PI-12 adds only decision-audit tables and leaves the existing financial tables untouched.
 
 Core tables:
 
@@ -464,4 +464,182 @@ Primary source files verified for this design:
 - `src/novacontrol/api/app.py`, `src/novacontrol/api/models.py`, `src/novacontrol/api/route_consumers.py` — API registration.
 - `web/src/App.tsx`, `web/src/nav.ts`, `web/src/pages/*.tsx` — existing UI surfaces.
 
-**Implementation status:** architecture only. No source file, schema, migration or runtime setting was changed by this task.
+**Implementation status:** AT-01 through AT-06 are implemented and accepted;
+the PI-12 integration is implemented and evidenced in
+`PI12_COMPLETION_REPORT.md`.
+
+---
+
+## 13. PI-12 — Prediction-driven autonomous decisions (implemented)
+
+PI-12 adds an additive forecast path inside the accepted AT-03 decision pipeline.
+It does not create a second autonomy runtime, risk engine, execution engine,
+portfolio or scheduler.
+
+### 13.1 Runtime flow
+
+The AT-02 completed, session-eligible monitoring cycle supplies the bounded
+candidate list (maximum 20, no duplicate instrument). For each eligible
+portfolio and candidate the PI-12 source reads stored PI-08/PI-10 forecasts; it
+never generates a forecast. It then reads market bars, PI-04 regime, NM-04
+events, PI-11 evaluation evidence, existing positions and NM-10 open orders, and
+produces a deterministic BUY/SELL/HOLD/WAIT/NO_ACTION decision.
+
+BUY and SELL are represented as ordinary AT-03 `DecisionSignal` and
+`DecisionProposal` records. HOLD/WAIT/NO_ACTION persist the decision and create
+no proposal. The existing NM-08 assessment remains mandatory for every
+proposal. The existing AT-04 paper-execution pipeline is the only path that can
+submit an approved proposal to NM-10. PI-12 never calls `apply`, `submit`,
+`record_fill` or any wallet/ledger/portfolio mutation.
+
+### 13.2 Safety and modes
+
+AT-01 mode semantics are unchanged: disabled performs no scans or decisions;
+monitoring records decisions without order submission; autonomous requires the
+server-side operator authorization and the existing lease; paused allows
+protective exits but no new entries. The kill switch blocks new actions and
+does not assert that already submitted orders were cancelled. Recovery returns
+the runtime to disabled and never auto-resumes. One cycle at a time, persistent
+cycle identity, idempotent decision keys and NM-10 proposal/order uniqueness
+prevent duplicate orders after repeated events or restarts.
+
+### 13.3 Multi-horizon, evidence and outcomes
+
+Selection is explicit per portfolio horizon: short-term prioritises 1h over
+5m/15m/20m/1d/3d; medium-term prioritises 5d/3d/1d/30d; long-term prioritises
+90d/30d. Conflicting eligible directions produce WAIT (default), not a merged
+trade. The decision stores the chosen horizon, all horizon evidence, forecast
+and model/ensemble versions, uncertainty, disagreement, expected return,
+reference/target timestamps, technical/regime/event/fundamental context,
+portfolio context and rationale. Forecast accuracy, decision correctness, NM-10
+execution state and paper P&L are recorded as separate outcome evidence.
+
+### 13.4 API and UI
+
+The authenticated surface is `GET /market/autonomy/decisions/predictions`,
+`GET /market/autonomy/decisions/predictions/{decision_id}`,
+`GET /market/autonomy/decisions/outcomes`,
+`POST /market/autonomy/decisions/outcomes/run` and GET/PUT
+`/market/autonomy/decisions/forecast-policy`. The React Autonomy workspace shows
+current mode/controls, the selected policy, decision counts, evidence,
+risk/order status and outcomes. These controls are convenience only; the server
+re-checks the bearer token, operator token, mode and lease on every action.
+
+### 13.5 Known limitations
+
+- The local database may have no operational forecasts or PI-11 reports; an
+  empty result is reported honestly rather than simulated.
+- Model training, scheduler backfill and automatic policy/model promotion are
+  outside PI-12; PI-13 and later phases own the learning architecture.
+- Outcome measurement waits for a real stored bar at or after the forecast
+  target; provider outages remain pending.
+
+## 14. PI-13 — Reinforcement-learning research boundary (implemented)
+
+PI-13 adds an isolated `/market/rl` research environment and the React **RL
+Research** workspace. It reuses PI-02 dataset membership, PI-04 features, PI-09
+forecast contracts and the NM-10 pricing/fee functions, but it owns a private
+SQLite experience database and a private virtual cash/position book. It has no
+reference to the autonomy runtime, NM-08 policy store, NM-10 execution engine,
+portfolio store, wallet or ledger, so an RL step cannot place a paper order,
+mutate a position, bypass risk or change autonomy mode.
+
+The environment supports long-only BUY/SELL/HOLD/WAIT/NO_ACTION with bounded
+sizing. A decision after completed bar T simulates at the next completed bar's
+open using the disclosed synthetic slippage/fee assumptions, never at the most
+favourable historical price. Observations are point-in-time and feature/
+forecast rows dated after the observation are withheld. Termination and
+step-limit truncation are distinct, and a failed or cancelled episode cannot
+affect another episode or production state.
+
+The reward interface reports transition-derived components with a deliberately
+zero total. PI-14 owns reward weights, policy evaluation and any promotion
+governance. PI-13 provides no automatic policy promotion, no live-trading or
+autonomy connection, and no production performance claim. Its completion report
+is `PI13_COMPLETION_REPORT.md`.
+
+## 15. PI-14 — Reward and policy evaluation boundary (implemented)
+
+PI-14 adds `/market/rewards/*` and the React **Reward Evaluation** workspace. It
+consumes PI-13 transitions and drives fresh PI-13 environments for policy
+evaluation. Reward configurations, results, evaluations and comparisons live in
+the isolated `novamarket_rl.sqlite3` research database and are append-only where
+historical evidence must be preserved.
+
+Reward totals are transparent component-weight aggregations of profitability,
+risk, cost, decision quality, forecast utilization, discipline, portfolio
+management and execution quality. The default weights and scales are documented
+as experimental, not financially validated. A profitable action is not
+automatically a good decision, and a loss is not automatically a bad decision:
+decision quality is evaluated from the information available at the decision
+timestamp.
+
+No-action, rule-based, PI-12-adapter and seeded experimental-RL baselines share
+the same dataset, dates, virtual capital, costs and risk constraints. Each run
+uses a private environment; chronological split and walk-forward validity are
+enforced. Cancellation stops a run at the next simulation step boundary and
+persists partial experimental evidence; all evaluation work is bounded.
+
+The reward package has no execution, portfolio, risk, autonomy, wallet or ledger
+authority. It cannot submit an NM-10 order, create a production fill, bypass
+NM-08, change an autonomy mode or operator permission, activate a policy or
+enable live trading. There is no automatic promotion control in the API or UI.
+Its completion report is `PI14_COMPLETION_REPORT.md`.
+
+## 16. PI-21 — Advanced portfolio management boundary (implemented)
+
+PI-21 composes the existing autonomous-trading, portfolio, prediction, research,
+optimisation and multi-agent surfaces into advisory portfolio-management
+cycles. It reads the authoritative NM-07 snapshot and never owns a second
+portfolio, valuation, cash, ledger, risk or execution state. Cycles persist only
+`pm_*` management research in `novamarket_portfolio_management.sqlite3`.
+
+The management cycle itself cannot submit an order. A separate explicit handoff
+matches persisted decisions to an existing AT-03 proposal that NM-08 already
+approved and continues it through the existing PI-12 execution workflow. NM-10
+remains the sole paper-execution and reconciliation authority. Scheduled review
+requires enabled, non-killed autonomy; manual review is read-only; handoff
+requires autonomous mode, a valid lease and the dedicated server-side operator
+token. Scheduled reviews are hosted by the existing single NovaMarket autonomy
+runtime tick (`_runtime_tick` → `PortfolioManagementService.maybe_run`), which
+re-checks the runtime mode, the durable lease and the kill switch before asking
+the coordinator for one due review; PI-21 adds a cadence and durable attempt
+record, never a second scheduler, thread or timer. Kill-switch, idempotency, single-cycle concurrency, partial-fill honesty
+and recovery-to-disabled are preserved. Experimental RL policies remain
+advisory and cannot be activated or promoted by PI-21.
+
+The 21 authenticated `/market/portfolio-management/*` routes and the React
+Portfolio Management workspace expose status, snapshots, position/opportunity,
+capital/cash, exposure, rebalancing, decision history, cycle status, handoff and
+reconciliation. No route mutates financial state directly. Full contracts and
+verification are in [PI21_COMPLETION_REPORT.md](PI21_COMPLETION_REPORT.md).
+
+## 17. PI-22 — Risk intelligence boundary (implemented)
+
+PI-22 is an advisory risk-intelligence layer, not a second risk authority. It
+reads authoritative NM-07 snapshots and NM-08 portfolio/position assessments and
+produces explainable instrument, position, sector, portfolio, regime, liquidity
+and capital-allocation evidence. It reuses NM-08 volatility, VaR/CVaR,
+correlation and HHI metrics. Missing or stale evidence yields
+`insufficient_data`, `stale_data` or `completed_with_warnings`, never zero risk.
+
+The risk level is the maximum explained component level; no arbitrary weighted
+composite score is used. Concentration, correlation, volatility, drawdown,
+liquidity, scenario and stress methodologies are documented in
+[ARCHITECTURE.md](ARCHITECTURE.md) and the consolidated
+[PI22_COMPLETION_REPORT.md](PI22_COMPLETION_REPORT.md). Scenarios and stress
+results are deterministic hypothetical analysis, not forecasts, and never
+mutate balances. Price, VaR, liquidity, pending-order and combined scenarios
+have distinct assumptions; missing liquidity or VaR evidence is reported and
+fails closed rather than becoming zero loss. Uncovered liquidity positions are
+not treated as liquid. Warnings use stable deduplication keys and configurable
+cooldowns; recommendations are always advisory and carry the PI-21 → NM-08 →
+PI-12 → NM-10 workflow.
+
+Autonomy modes, operator permission, kill-switch semantics, one-cycle
+concurrency and recovery-to-disabled remain owned by AT-01/PI-12. Scheduled
+PI-22 scans are refused while autonomy is disabled. PI-22 cannot authorize an
+order, submit an order, reconcile a fill or change a portfolio, cash or ledger
+balance. The 26 authenticated `/market/risk-intelligence/*` routes and the React
+Risk Intelligence workspace expose analysis, evidence, scenario/stress history
+and alert status only; no financial mutation control exists.

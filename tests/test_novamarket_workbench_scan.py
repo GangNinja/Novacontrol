@@ -274,3 +274,96 @@ def test_store_inventory_offset_is_deterministic_and_does_not_repeat() -> None:
     assert [row["instrument_id"] for row in second["items"]] == ["XNSE:B", "XNSE:C"]
     assert second["has_more"] is False
     assert second["next_offset"] is None
+
+
+class _CappedSeriesEngine(_FakeEngine):
+    """A series longer than the store's page cap, capped exactly like the store."""
+
+    page_cap = 200
+
+    def __init__(self, count: int = 320) -> None:
+        super().__init__(1)
+        self.ids = ["XNSE:LONG"]
+        self.count = count
+
+    def bars(
+        self,
+        instrument_id: str,
+        *,
+        interval: DataInterval,
+        limit: int,
+        ascending: bool,
+    ) -> _Page:
+        bars = [_bar(instrument_id, index) for index in range(self.count)]
+        page = min(int(limit), self.page_cap)
+        window = bars[:page] if ascending else bars[-page:]
+        return _Page(window, len(bars), page, 0)
+
+
+def test_instrument_analysis_reads_the_newest_bars_not_the_oldest_page() -> None:
+    """An ascending page read would make the oldest stored bar look "latest"."""
+
+    engine = _CappedSeriesEngine()
+    result = _workbench(engine).instrument("XNSE:LONG", interval="1d")
+
+    newest = _bar("XNSE:LONG", engine.count - 1)
+    oldest_in_window = _bar("XNSE:LONG", engine.count - engine.page_cap)
+
+    assert result["ok"] is True
+    assert result["coverage"]["stored_bars"] == engine.page_cap
+    assert result["as_of"] == newest.observed_at.isoformat()
+    assert result["last_price"] == float(newest.close)
+    assert result["coverage"]["first_bar"] == oldest_in_window.observed_at.isoformat()
+
+
+class _CappedReplayEngine(_FakeEngine):
+    """A series longer than the store's page cap, capped and cut off like the store."""
+
+    page_cap = 200
+
+    def __init__(self, count: int = 320) -> None:
+        super().__init__(1)
+        self.ids = ["XNSE:LONG"]
+        self.count = count
+
+    def bars(
+        self,
+        instrument_id: str,
+        *,
+        interval: DataInterval,
+        limit: int,
+        ascending: bool,
+        end: datetime | None = None,
+    ) -> _Page:
+        bars = [_bar(instrument_id, index) for index in range(self.count)]
+        if end is not None:
+            bars = [bar for bar in bars if bar.observed_at <= end]
+        page = min(int(limit), self.page_cap)
+        window = bars[:page] if ascending else bars[-page:]
+        return _Page(window, len(bars), page, 0)
+
+
+def test_replay_reads_the_newest_bars_before_the_cutoff_not_the_oldest_page() -> None:
+    """An ascending page read would replay the oldest bars instead of those before the cutoff."""
+
+    engine = _CappedReplayEngine()
+    cutoff_index = 299
+    cutoff = _bar("XNSE:LONG", cutoff_index)
+    result = _workbench(engine).replay(
+        "XNSE:LONG",
+        end_date=cutoff.observed_at.date().isoformat(),
+        limit=engine.page_cap,
+    )
+
+    # The page cap leaves 300 bars at or before the cutoff, so the newest page
+    # is bars 100..299 -- not the series start that an ascending read returned.
+    window = engine.page_cap
+    first_in_window = _bar("XNSE:LONG", cutoff_index + 1 - window)
+
+    assert result["ok"] is True
+    assert result["coverage"]["bars"] == window
+    assert result["coverage"]["first"] == first_in_window.observed_at.isoformat()
+    assert result["coverage"]["last"] == cutoff.observed_at.isoformat()
+    assert result["as_of"] == cutoff.observed_at.isoformat()
+    assert round(result["bars"][0]["close"], 2) == round(float(first_in_window.close), 2)
+    assert round(result["bars"][-1]["close"], 2) == round(float(cutoff.close), 2)

@@ -406,5 +406,134 @@ class AutonomyApiTests(unittest.TestCase):
         self.assertTrue(expected.issubset(surface))
 
 
+class LoopbackAdminKeyTests(unittest.TestCase):
+    """The loopback admin key opens every local door and nothing else.
+
+    The local Vite proxy sends one loopback-only credential so a browser tab
+    never prompts; it must act as the ordinary API credential and as the
+    autonomy-operator credential.  The same key must be worthless from any
+    non-loopback client, where only the configured tokens count.  This also
+    pins that the operator-token separation survives: an ordinary credential
+    still cannot start the runtime.
+    """
+
+    _ADMIN = "loopback-admin-key"
+    _API = "api-secret"
+    _OPERATOR = "operator-secret"
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory(ignore_cleanup_errors=True)
+        self._env = mock.patch.dict(
+            os.environ,
+            {
+                "NOVACONTROL_API_TOKEN": self._API,
+                "NOVACONTROL_AUTONOMY_OPERATOR_TOKEN": self._OPERATOR,
+                "NOVACONTROL_ADMIN_TOKEN": self._ADMIN,
+            },
+            clear=False,
+        )
+        self._env.start()
+        from novacontrol.api.app import create_app
+
+        self.app = create_app(data_dir=self._tmp.name)
+        self.loopback = TestClient(self.app, client=("127.0.0.1", 51100))
+        self.remote = TestClient(self.app, client=("10.1.2.3", 51100))
+
+    def tearDown(self) -> None:
+        self.loopback.close()
+        self.remote.close()
+        self._env.stop()
+        self._tmp.cleanup()
+
+    def _admin_headers(self) -> dict[str, str]:
+        # Exactly what the local Vite proxy sends: both credential headers.
+        return {
+            "Authorization": f"Bearer {self._ADMIN}",
+            "X-Autonomy-Operator-Token": self._ADMIN,
+        }
+
+    def test_loopback_admin_key_authorizes_ordinary_and_operator_routes(self) -> None:
+        ordinary = self.loopback.get("/status", headers={"Authorization": f"Bearer {self._ADMIN}"})
+        self.assertEqual(ordinary.status_code, 200, ordinary.text)
+
+        status = self.loopback.get("/market/autonomy/status", headers=self._admin_headers())
+        self.assertEqual(status.status_code, 200, status.text)
+        self.assertTrue(status.json()["operator_authorized"])
+        self.assertTrue(status.json()["operator_authorization_configured"])
+
+        started = self.loopback.post(
+            "/market/autonomy/start",
+            headers=self._admin_headers(),
+            json={"mode": "monitoring", "reason": "loopback admin key"},
+        )
+        self.assertEqual(started.status_code, 200, started.text)
+        self.assertEqual(started.json()["mode"], "monitoring")
+        self.assertTrue(started.json()["operator_authorized"])
+
+        stopped = self.loopback.post(
+            "/market/autonomy/stop", headers=self._admin_headers(), json={}
+        )
+        self.assertEqual(stopped.status_code, 200, stopped.text)
+        self.assertEqual(stopped.json()["mode"], "disabled")
+
+    def test_the_same_key_is_rejected_from_a_non_loopback_client(self) -> None:
+        ordinary = self.remote.get("/status", headers={"Authorization": f"Bearer {self._ADMIN}"})
+        self.assertEqual(ordinary.status_code, 401, ordinary.text)
+
+        status = self.remote.get("/market/autonomy/status", headers=self._admin_headers())
+        self.assertEqual(status.status_code, 401, status.text)
+        self.assertNotIn("operator_authorized", status.json())
+
+        started = self.remote.post(
+            "/market/autonomy/start",
+            headers=self._admin_headers(),
+            json={"mode": "monitoring"},
+        )
+        self.assertEqual(started.status_code, 401, started.text)
+        refused_status = self.remote.get(
+            "/market/autonomy/status", headers={"Authorization": f"Bearer {self._API}"}
+        )
+        self.assertEqual(refused_status.json()["mode"], "disabled")
+
+        # The configured tokens still work from a remote address, so the
+        # refusal above is about the admin key and not about the client.
+        configured = self.remote.get("/status", headers={"Authorization": f"Bearer {self._API}"})
+        self.assertEqual(configured.status_code, 200, configured.text)
+        configured_operator = self.remote.get(
+            "/market/autonomy/status",
+            headers={
+                "Authorization": f"Bearer {self._API}",
+                "X-Autonomy-Operator-Token": self._OPERATOR,
+            },
+        )
+        self.assertEqual(configured_operator.status_code, 200, configured_operator.text)
+        self.assertTrue(configured_operator.json()["operator_authorized"])
+
+    def test_ordinary_auth_still_cannot_control_the_runtime(self) -> None:
+        refused = self.loopback.post(
+            "/market/autonomy/start",
+            headers={"Authorization": f"Bearer {self._API}"},
+            json={"mode": "monitoring"},
+        )
+        self.assertEqual(refused.status_code, 403, refused.text)
+        status = self.loopback.get(
+            "/market/autonomy/status", headers={"Authorization": f"Bearer {self._API}"}
+        )
+        self.assertFalse(status.json()["operator_authorized"])
+        self.assertEqual(status.json()["mode"], "disabled")
+
+        # The admin key is not the operator token either: a deployment that
+        # never configures it cannot be steered with a guess.
+        wrong_key = self.loopback.post(
+            "/market/autonomy/start",
+            headers={
+                "Authorization": f"Bearer {self._API}",
+                "X-Autonomy-Operator-Token": "not-the-admin-key",
+            },
+            json={"mode": "monitoring"},
+        )
+        self.assertEqual(wrong_key.status_code, 403, wrong_key.text)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -17,7 +17,7 @@ import {
   ShieldCheck,
   TimerReset,
 } from "lucide-react";
-import { apiDelete, apiPost, apiPut } from "../api";
+import { apiDelete, apiPost, apiPut, LOCAL_ADMIN_PROXY } from "../api";
 import { useApi, useDocumentTitle } from "../hooks";
 import { dateTime, timeAgo, title } from "../lib";
 import {
@@ -68,6 +68,18 @@ export function AutonomyPage() {
     refreshMs: 15_000,
     operatorToken,
   });
+  const predictionDecisions = useApi<any>(
+    "/market/autonomy/decisions/predictions?limit=20",
+    { refreshMs: 15_000, operatorToken },
+  );
+  const predictionOutcomes = useApi<any>(
+    "/market/autonomy/decisions/outcomes?limit=20",
+    { refreshMs: 30_000, operatorToken },
+  );
+  const forecastPolicy = useApi<any>("/market/autonomy/decisions/forecast-policy", {
+    refreshMs: 60_000,
+    operatorToken,
+  });
   const executions = useApi<any>("/market/autonomy/executions/status", {
     refreshMs: 10_000,
     operatorToken,
@@ -116,6 +128,10 @@ export function AutonomyPage() {
   const recentExecutions = paper.recent || [];
   const lastExecution = paper.last_execution || {};
   const lastDecisionRun = decision.last_run || {};
+  const predictionRows = predictionDecisions.data?.decisions || [];
+  const predictionCounts = decision.metrics?.prediction_decisions_by_type || {};
+  const predictionOutcomeRows = predictionOutcomes.data?.outcomes || [];
+  const policy = forecastPolicy.data?.policy || {};
   const session = monitor.session || {};
   const lease = data.lease || {};
   const health = data.health || {};
@@ -146,6 +162,8 @@ export function AutonomyPage() {
       status.refresh();
       monitoring.refresh();
       decisions.refresh();
+      predictionDecisions.refresh();
+      predictionOutcomes.refresh();
       executions.refresh();
       exits.refresh();
       exitPositions.refresh();
@@ -174,6 +192,8 @@ export function AutonomyPage() {
       status.refresh();
       monitoring.refresh();
       decisions.refresh();
+      predictionDecisions.refresh();
+      predictionOutcomes.refresh();
       executions.refresh();
       exits.refresh();
       exitPositions.refresh();
@@ -201,10 +221,12 @@ export function AutonomyPage() {
         { operatorToken },
       );
       toast.push(
-        `Decision run ${result?.status || "completed"}: ${result?.evaluations ?? 0} evaluations, ${result?.approved ?? 0} NM-08 approved, ${result?.rejected ?? 0} rejected.`,
+        `Decision run ${result?.status || "completed"}: ${result?.prediction_decisions ?? 0} forecast decisions (${result?.prediction_decisions_by_type?.BUY ?? 0} BUY, ${result?.prediction_decisions_by_type?.SELL ?? 0} SELL), ${result?.approved ?? 0} NM-08 approved, ${result?.rejected ?? 0} rejected.`,
         result?.status === "completed" ? "success" : "error",
       );
       decisions.refresh();
+      predictionDecisions.refresh();
+      predictionOutcomes.refresh();
       status.refresh();
       monitoring.refresh();
     } catch (error: any) {
@@ -322,6 +344,32 @@ export function AutonomyPage() {
     }
   };
 
+  const measurePredictionOutcomes = async () => {
+    setBusy("outcomes");
+    try {
+      const result = await apiPost(
+        "/market/autonomy/decisions/outcomes/run",
+        { limit: 50 },
+        undefined,
+        { operatorToken },
+      );
+      toast.push(
+        `Outcome measurement: ${result?.measured_count ?? 0} measured, ${result?.pending_count ?? 0} still pending. No portfolio or ledger was mutated.`,
+        "success",
+      );
+      predictionOutcomes.refresh();
+      predictionDecisions.refresh();
+      decisions.refresh();
+    } catch (error: any) {
+      toast.push(
+        error?.detail?.message || error?.detail || "Outcome measurement was refused.",
+        "error",
+      );
+    } finally {
+      setBusy("");
+    }
+  };
+
   const runExitSupervision = async () => {
     setBusy("exits");
     try {
@@ -355,7 +403,7 @@ export function AutonomyPage() {
       <PageHeader
         eyebrow="System / Autonomy"
         title={<>A shell with a <em>brake, not an engine.</em></>}
-        description="AT-01 owns the lease and mode; AT-02 supplies verified-session monitoring; AT-03 evaluates existing NM-09 strategies and records NM-08 risk decisions; AT-04 forwards risk-approved entries through NM-10; AT-05 supervises stop-loss, target and trailing exits and records advisory entry-to-exit learning evidence. No live broker, real-money order or direct financial mutation exists."
+        description="AT-01 owns the lease and mode; AT-02 supplies verified-session monitoring; PI-12 interprets stored PI-08/PI-10 forecasts across compatible horizons and AT-03 records BUY, SELL, HOLD, WAIT or NO_ACTION evidence; NM-08 remains the risk authority; AT-04 forwards only approved entries through NM-10; AT-05 supervises protective exits. No live broker, real-money order or direct financial mutation exists."
         meta={
           <>
             <span className="meta-item"><ShieldCheck size={13} /> Paper only</span>
@@ -413,12 +461,12 @@ export function AutonomyPage() {
             action={<Badge tone={authorized ? "good" : configured ? "warn" : "bad"}>{authorized ? "Verified" : configured ? "Not presented" : "Not configured"}</Badge>}
           />
           <div className="settings-fields">
-            <Field label="Autonomy operator token" hint="Sent as X-Autonomy-Operator-Token. Held in memory for this page; never written to local or session storage.">
+            <Field label="Autonomy operator token" hint={LOCAL_ADMIN_PROXY ? "The local admin proxy already authorizes this session; no token is needed here." : "Sent as X-Autonomy-Operator-Token. Held in memory for this page; never written to local or session storage."}>
               <TextInput
                 type="password"
                 value={operatorToken}
                 onChange={(event) => setOperatorToken(event.target.value)}
-                placeholder="Paste the dedicated operator token"
+                placeholder={LOCAL_ADMIN_PROXY ? "Local admin session active" : "Paste the dedicated operator token"}
                 autoComplete="off"
               />
             </Field>
@@ -720,7 +768,7 @@ export function AutonomyPage() {
       <Card>
         <CardHeader
           title="Decision and risk pipeline"
-          subtitle="NM-09 signal → AT-03 proposal → NM-08 risk decision; never an order"
+          subtitle="PI-08/PI-10 forecast or NM-09 signal → AT-03 proposal → NM-08 risk decision; never an order"
           action={
             <Badge tone={decision.health?.state === "ok" ? "good" : decision.initialised ? "warn" : "neutral"}>
               {decision.health?.state ? title(decision.health.state) : "Not enabled"}
@@ -729,7 +777,7 @@ export function AutonomyPage() {
         />
         <div className="dashboard-grid">
           <dl className="key-value-list">
-            <KeyValue label="Engine">NM-09 evaluate → NM-08 assess</KeyValue>
+            <KeyValue label="Engine">PI-12 forecast / NM-09 evaluate → NM-08 assess</KeyValue>
             <KeyValue label="Runtime mode">{decision.runtime_mode ? title(decision.runtime_mode) : "—"}</KeyValue>
             <KeyValue label="Monitoring cycle" mono>{decision.monitoring_cycle_id || "—"}</KeyValue>
             <KeyValue label="Last run">{lastDecisionRun.status ? title(lastDecisionRun.status) : "—"}</KeyValue>
@@ -737,6 +785,7 @@ export function AutonomyPage() {
           </dl>
           <dl className="key-value-list">
             <KeyValue label="Evaluations">{String(decision.counts?.evaluations ?? 0)}</KeyValue>
+            <KeyValue label="Forecast decisions">{String(decision.counts?.prediction_decisions ?? 0)}</KeyValue>
             <KeyValue label="Signals">{String(decision.counts?.signals ?? 0)}</KeyValue>
             <KeyValue label="Proposals">{String(decision.counts?.proposals ?? 0)}</KeyValue>
             <KeyValue label="NM-08 decisions">{String(decision.counts?.risk_assessments ?? 0)}</KeyValue>
@@ -786,7 +835,109 @@ export function AutonomyPage() {
           </Button>
         </div>
         <p className="muted">
-          This button evaluates existing active strategies against the latest completed, session-eligible AT-02 cycle and submits each eligible intent to NM-08. An NM-08 approval is shown as a decision, never as an order, fill or completed trade.
+          This button evaluates stored final forecasts under the PI-12 multi-horizon policy and any existing active NM-09 strategies against the latest completed, session-eligible AT-02 cycle. Each eligible BUY/SELL becomes an ordinary AT-03 proposal and is submitted to NM-08; HOLD, WAIT and NO_ACTION do not. An approval is a decision, never an order, fill or completed trade.
+        </p>
+      </Card>
+
+      <Card>
+        <CardHeader
+          title="Prediction-driven decisions"
+          subtitle="PI-12 · stored PI-08/PI-10 forecast → multi-horizon policy → AT-03 → NM-08; NM-10 only after an approved proposal"
+          action={
+            <Badge tone={predictionDecisions.data ? "good" : "neutral"}>
+              {forecastPolicy.data?.source ? `Policy ${forecastPolicy.data.source}` : "Reading policy"}
+            </Badge>
+          }
+        />
+        <div className="metric-grid metric-grid-four">
+          <Metric label="BUY" value={String(predictionCounts.BUY ?? 0)} help="Forecast-driven entries; risk is still NM-08" tone="warn" icon={<ArrowRight size={16} />} />
+          <Metric label="SELL" value={String(predictionCounts.SELL ?? 0)} help="Existing long positions only; no shorts" tone="warn" icon={<ShieldAlert size={16} />} />
+          <Metric label="HOLD" value={String(predictionCounts.HOLD ?? 0)} help="Retain an existing position" icon={<ShieldCheck size={16} />} />
+          <Metric label="WAIT / NO_ACTION" value={`${predictionCounts.WAIT ?? 0} / ${predictionCounts.NO_ACTION ?? 0}`} help="No forced trade" icon={<Activity size={16} />} />
+        </div>
+        <div className="dashboard-grid">
+          <dl className="key-value-list">
+            <KeyValue label="Policy version" mono>{policy.version || "—"}</KeyValue>
+            <KeyValue label="Short-term horizons">{(policy.horizons?.short_term || []).join(", ") || "—"}</KeyValue>
+            <KeyValue label="Medium-term horizons">{(policy.horizons?.medium_term || []).join(", ") || "—"}</KeyValue>
+            <KeyValue label="Long-term horizons">{(policy.horizons?.long_term || []).join(", ") || "—"}</KeyValue>
+            <KeyValue label="Horizon conflict">{title(policy.conflict_policy || "wait")}</KeyValue>
+          </dl>
+          <dl className="key-value-list">
+            <KeyValue label="Minimum expected return">{policy.min_expected_return != null ? `${(Number(policy.min_expected_return) * 100).toFixed(1)}%` : "—"}</KeyValue>
+            <KeyValue label="Minimum calibrated probability">{policy.min_probability != null ? Number(policy.min_probability).toFixed(2) : "—"}</KeyValue>
+            <KeyValue label="Maximum model disagreement">{policy.max_disagreement != null ? Number(policy.max_disagreement).toFixed(2) : "—"}</KeyValue>
+            <KeyValue label="Automatic promotion"><StatusBadge value={policy.automatic_promotion ? "unexpected" : "off"} /></KeyValue>
+            <KeyValue label="Risk / execution authority">NM-08 / NM-10</KeyValue>
+          </dl>
+        </div>
+        {predictionDecisions.loading && !predictionDecisions.data ? (
+          <LoadingBlock rows={3} label="Reading forecast decisions…" />
+        ) : predictionDecisions.error && !predictionDecisions.data ? (
+          <ErrorBlock message={predictionDecisions.error.detail} onRetry={predictionDecisions.refresh} />
+        ) : predictionRows.length === 0 ? (
+          <p className="muted">
+            No forecast decision has been recorded. A completed monitoring cycle plus stored final PI-08/PI-10 forecasts is required; missing or incompatible evidence produces WAIT or NO_ACTION, never a fabricated trade.
+          </p>
+        ) : (
+          <div className="key-value-list">
+            {predictionRows.map((row: any) => {
+              const forecast = row.primary_forecast || {};
+              const portfolio = row.portfolio_context || {};
+              const risk = row.risk_result || {};
+              const expected = row.expected_return != null ? `${(Number(row.expected_return) * 100).toFixed(2)}%` : "—";
+              return (
+                <KeyValue
+                  key={row.decision_id}
+                  label={`${row.decision_type || "—"} · ${row.instrument_id || "—"} · ${row.horizon || "no horizon"} · ${title(row.status || "generated")}`}
+                >
+                  forecast {forecast.predicted_direction || "—"} {expected} · uncertainty {row.uncertainty || "—"} · disagreement {row.disagreement ?? "—"} · regime {row.regime_context?.primary || "—"}
+                  {" · "}portfolio {row.portfolio_id || "—"} · cash {portfolio.cash ?? "—"} · holding {portfolio.holding ? `${portfolio.holding.quantity || "?"} shares` : "none"}
+                  {row.reasons?.length ? ` · ${row.reasons.slice(0, 2).join(" · ")}` : ""}
+                  {row.primary_forecast_id ? ` · forecast ${row.primary_forecast_id}` : ""}
+                  {forecast.model_version ? ` · model ${forecast.model_version}` : ""}
+                  {row.proposal_id ? ` · proposal ${row.proposal_id}` : ""}
+                  {risk.outcome ? ` · NM-08 ${risk.outcome}` : row.status?.startsWith("risk_") ? ` · NM-08 ${row.status}` : ""}
+                  {row.error ? ` · failed closed: ${row.error}` : ""}
+                </KeyValue>
+              );
+            })}
+          </div>
+        )}
+        <div className="dashboard-grid">
+          <div className="key-value-list">
+            <div className="muted">Outcome tracking</div>
+            {predictionOutcomeRows.length === 0 ? (
+              <p className="muted">No measured outcome yet. Forecast accuracy, decision quality, execution and paper P&amp;L are stored separately once the target bar exists.</p>
+            ) : (
+              predictionOutcomeRows.slice(0, 8).map((row: any) => (
+                <KeyValue
+                  key={row.outcome_id || row.decision_id}
+                  label={`${row.decision_type || "—"} · ${row.instrument_id || "—"} · ${title(row.actual_direction || "measured")}`}
+                >
+                  forecast {row.forecast?.correct === true ? "correct" : row.forecast?.correct === false ? "incorrect" : "not scored"} · decision {row.decision?.correct === true ? "sound" : row.decision?.correct === false ? "missed" : "not scored"} · execution {title(row.execution?.status || "not submitted")} · paper P&amp;L {row.portfolio?.paper_pnl ?? "—"} · actual {row.actual_return != null ? `${(Number(row.actual_return) * 100).toFixed(2)}%` : "—"}
+                </KeyValue>
+              ))
+            )}
+          </div>
+          <div className="inline-note">
+            <strong>Evidence stays separated.</strong>
+            <p>A correct forecast is not automatically a good decision, and a profitable paper order does not prove the forecast was accurate. No model weight, policy threshold or promotion is changed by this evidence.</p>
+          </div>
+        </div>
+        <div className="row-actions">
+          <Button variant="primary" icon={<Workflow size={14} />} loading={busy === "decision"} disabled={!controlsEnabled || Boolean(decisionBlockedReason)} onClick={runDecision}>
+            Run forecast + strategy decisions
+          </Button>
+          <Button variant="secondary" icon={<CheckCircle2 size={14} />} loading={busy === "outcomes"} disabled={!controlsEnabled} onClick={measurePredictionOutcomes}>
+            Measure due outcomes
+          </Button>
+          <Button variant="ghost" icon={<RefreshCw size={14} />} onClick={() => { predictionDecisions.refresh(); predictionOutcomes.refresh(); forecastPolicy.refresh(); }}>
+            Refresh prediction decisions
+          </Button>
+        </div>
+        <p className="muted">
+          Every BUY/SELL is an ordinary AT-03 proposal and is sent to NM-08. Only autonomous mode, a valid lease and AT-04 can forward an approved proposal to NM-10; monitoring records decisions without orders. HOLD, WAIT and NO_ACTION never create a proposal. The policy is server-side and configurable through the authenticated forecast-policy API.
         </p>
       </Card>
 

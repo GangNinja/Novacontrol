@@ -58,6 +58,20 @@ worker = [
 ai = [
   "langgraph>=0.2",
 ]
+prediction = [
+  # PI-06 gradient-boosting models.  Optional so a base install remains usable
+  # when the native wheels are unavailable; the service reports the missing
+  # backend instead of crashing the prediction subsystem.
+  "xgboost>=2.1,<4",
+  "lightgbm>=4.5,<5",
+  "numpy>=1.26",
+]
+lstm = [
+  # PI-07 sequence models.  CPU is the supported default; the optional extra
+  # keeps torch out of base installs and still reports availability honestly.
+  "torch>=2.2,<3",
+  "numpy>=1.26",
+]
 vision = [
   "opencv-python>=4.10",
   "easyocr>=1.7",

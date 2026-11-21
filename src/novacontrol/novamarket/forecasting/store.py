@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS forecast_training_runs (
     version TEXT NOT NULL DEFAULT '',
     started_at TEXT NOT NULL,
     finished_at TEXT NOT NULL,
+    recorded_at TEXT NOT NULL DEFAULT '',
     samples INTEGER NOT NULL DEFAULT 0,
     payload TEXT NOT NULL
 );
@@ -153,6 +154,20 @@ class ForecastStore:
                 "INSERT OR IGNORE INTO forecast_meta(key, value) VALUES(?, ?)",
                 ("schema_version", str(SCHEMA_VERSION)),
             )
+            # Existing files predate recorded_at, so it is added rather than
+            # assumed: runs written before it sort last, which is honest - they
+            # are older than anything recorded after the upgrade.
+            columns = {
+                str(row["name"])
+                for row in self._connection.execute(
+                    "PRAGMA table_info(forecast_training_runs)"
+                )
+            }
+            if "recorded_at" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE forecast_training_runs "
+                    "ADD COLUMN recorded_at TEXT NOT NULL DEFAULT ''"
+                )
             self._connection.commit()
 
     def close(self) -> None:
@@ -482,11 +497,17 @@ class ForecastStore:
         return json.loads(row["metrics"]) if row is not None else {}
 
     def save_training_run(self, payload: dict[str, Any]) -> None:
+        # finished_at is the stop cutoff, shared by every run that trained up to
+        # the same point, and started_at is the training window's first bar.  The
+        # record timestamp is the only field that says which run was produced
+        # last, so it is stored explicitly and used to break those ties.
+        recorded_at = str(payload.get("recorded_at") or self._clock().isoformat())
+        body = {**payload, "recorded_at": recorded_at}
         with self._lock:
             self._connection.execute(
                 "INSERT OR REPLACE INTO forecast_training_runs(run_id, instrument_id, horizon, "
-                "model_id, version, started_at, finished_at, samples, payload) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
+                "model_id, version, started_at, finished_at, recorded_at, samples, payload) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (
                     payload["run_id"],
                     payload["instrument_id"],
@@ -495,8 +516,9 @@ class ForecastStore:
                     payload.get("version", ""),
                     payload["started_at"],
                     payload["finished_at"],
+                    recorded_at,
                     int(payload.get("samples", 0)),
-                    json.dumps(payload, sort_keys=True),
+                    json.dumps(body, sort_keys=True),
                 ),
             )
             self._commit()
@@ -505,7 +527,7 @@ class ForecastStore:
         with self._lock:
             rows = self._connection.execute(
                 "SELECT payload FROM forecast_training_runs "
-                "ORDER BY finished_at DESC LIMIT ?",
+                "ORDER BY finished_at DESC, recorded_at DESC, run_id DESC LIMIT ?",
                 (max(1, min(int(limit), 100)),),
             ).fetchall()
         return [json.loads(row["payload"]) for row in rows]

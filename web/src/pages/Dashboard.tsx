@@ -273,7 +273,7 @@ export function DashboardPage() {
       </div>
 
       <div className="metric-grid">
-        <Metric label="Overall P&L" value={hasPortfolios ? money(summary.portfolio_pnl_inr) : "—"} help="Realized + unrealized" icon={<TrendingUp size={17} />} tone={num(summary.portfolio_pnl_inr) < 0 ? "bad" : "good"} />
+        <Metric label="Overall P&L" value={hasPortfolios ? money(summary.portfolio_pnl_inr) : "—"} help="Realized + unrealized" icon={<TrendingUp size={17} />} tone={summary.portfolio_pnl_inr == null ? "neutral" : num(summary.portfolio_pnl_inr) < 0 ? "bad" : "good"} />
         <Metric label="Paper orders" value={summary.paper_orders ?? 0} help={`${summary.paper_fills ?? 0} fills recorded`} icon={<Gauge size={17} />} tone="accent" />
         <Metric label="Risk decisions" value={summary.risk_decisions ?? 0} help="NM-08 authoritative" icon={<ShieldAlert size={17} />} />
         <Metric label="Shadow sessions" value={summary.shadow_sessions ?? 0} help={`${summary.backtests ?? 0} backtests`} icon={<ChartNoAxesCombined size={17} />} tone="warn" />

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -307,6 +308,11 @@ class DecisionSignal:
     validation: SignalValidation
     validation_error: str
     conditions: tuple[str, ...]
+    prediction_decision_id: str = ""
+    forecast_ids: tuple[str, ...] = ()
+    forecast_horizon: str = ""
+    ensemble_version: str = ""
+    model_versions: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -332,6 +338,11 @@ class DecisionSignal:
             "validation": self.validation.value,
             "validation_error": self.validation_error,
             "conditions": list(self.conditions),
+            "prediction_decision_id": self.prediction_decision_id,
+            "forecast_ids": list(self.forecast_ids),
+            "forecast_horizon": self.forecast_horizon,
+            "ensemble_version": self.ensemble_version,
+            "model_versions": list(self.model_versions),
             "is_signal": True,
             "is_order": False,
         }
@@ -368,6 +379,13 @@ class DecisionProposal:
     risk_restrictions: tuple[str, ...] = ()
     risk_error: str = ""
     updated_at: datetime | None = None
+    prediction_decision_id: str = ""
+    forecast_ids: tuple[str, ...] = ()
+    forecast_horizon: str = ""
+    ensemble_version: str = ""
+    model_versions: tuple[str, ...] = ()
+    advisory_evidence: Mapping[str, Any] | None = None
+    forecast_optimization_evidence: Mapping[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -405,6 +423,26 @@ class DecisionProposal:
             "risk_state_version": self.risk_state_version,
             "risk_restrictions": list(self.risk_restrictions),
             "risk_error": self.risk_error,
+            "prediction_decision_id": self.prediction_decision_id,
+            "forecast_ids": list(self.forecast_ids),
+            "forecast_horizon": self.forecast_horizon,
+            "ensemble_version": self.ensemble_version,
+            "model_versions": list(self.model_versions),
+            # PI-17 advisory evidence is read-only metadata; it is never an
+            # input to the action, the NM-08 risk gate or NM-10 execution.
+            "advisory_evidence": (
+                dict(self.advisory_evidence)
+                if isinstance(self.advisory_evidence, Mapping)
+                else None
+            ),
+            # PI-23 selection/reliability/fallback evidence is read-only
+            # metadata; it is never an input to the action, the NM-08 risk gate
+            # or NM-10 execution.
+            "forecast_optimization_evidence": (
+                dict(self.forecast_optimization_evidence)
+                if isinstance(self.forecast_optimization_evidence, Mapping)
+                else None
+            ),
             "updated_at": (self.updated_at or self.created_at).isoformat(),
             "execution_allowed": False,
             "is_executed": False,

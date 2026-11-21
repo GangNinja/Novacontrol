@@ -11,7 +11,7 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 from novacontrol.novamarket.autonomy.store import AutonomyStore
 from novacontrol.novamarket.decision.models import (
@@ -30,7 +30,7 @@ from novacontrol.novamarket.decision.models import (
     utcnow,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS decision_meta (
@@ -150,6 +150,81 @@ BEFORE DELETE ON decision_risk_assessments
 BEGIN
     SELECT RAISE(ABORT, 'decision risk assessments are immutable');
 END;
+
+-- PI-12: forecast-driven decisions are append-only records with separate
+-- append-only status events.  A later state never rewrites what was decided.
+CREATE TABLE IF NOT EXISTS prediction_decisions (
+    decision_id TEXT PRIMARY KEY,
+    decision_key TEXT NOT NULL UNIQUE,
+    run_id TEXT NOT NULL,
+    monitoring_cycle_id TEXT NOT NULL,
+    portfolio_id TEXT NOT NULL,
+    instrument_id TEXT NOT NULL,
+    decision_type TEXT NOT NULL,
+    horizon TEXT NOT NULL DEFAULT '',
+    primary_forecast_id TEXT NOT NULL DEFAULT '',
+    proposal_id TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    payload TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_prediction_decisions_run
+    ON prediction_decisions(run_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_prediction_decisions_portfolio
+    ON prediction_decisions(portfolio_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_prediction_decisions_instrument
+    ON prediction_decisions(instrument_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_prediction_decisions_type
+    ON prediction_decisions(decision_type, created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_prediction_decisions_proposal
+    ON prediction_decisions(proposal_id);
+CREATE TABLE IF NOT EXISTS prediction_decision_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL UNIQUE,
+    decision_id TEXT NOT NULL REFERENCES prediction_decisions(decision_id),
+    at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    payload TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_prediction_decision_events
+    ON prediction_decision_events(decision_id, id);
+CREATE TABLE IF NOT EXISTS prediction_decision_outcomes (
+    outcome_id TEXT PRIMARY KEY,
+    decision_id TEXT NOT NULL UNIQUE REFERENCES prediction_decisions(decision_id),
+    measured_at TEXT NOT NULL,
+    payload TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_prediction_decision_outcomes_time
+    ON prediction_decision_outcomes(measured_at DESC);
+CREATE TRIGGER IF NOT EXISTS prediction_decisions_immutable_update
+BEFORE UPDATE ON prediction_decisions
+BEGIN
+    SELECT RAISE(ABORT, 'prediction decisions are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS prediction_decisions_immutable_delete
+BEFORE DELETE ON prediction_decisions
+BEGIN
+    SELECT RAISE(ABORT, 'prediction decisions are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS prediction_decision_events_immutable_update
+BEFORE UPDATE ON prediction_decision_events
+BEGIN
+    SELECT RAISE(ABORT, 'prediction decision events are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS prediction_decision_events_immutable_delete
+BEFORE DELETE ON prediction_decision_events
+BEGIN
+    SELECT RAISE(ABORT, 'prediction decision events are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS prediction_decision_outcomes_immutable_update
+BEFORE UPDATE ON prediction_decision_outcomes
+BEGIN
+    SELECT RAISE(ABORT, 'prediction decision outcomes are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS prediction_decision_outcomes_immutable_delete
+BEFORE DELETE ON prediction_decision_outcomes
+BEGIN
+    SELECT RAISE(ABORT, 'prediction decision outcomes are immutable');
+END;
 """
 
 
@@ -170,7 +245,8 @@ class DecisionStore:
         with self._lock:
             self._connection.executescript(_SCHEMA)
             self._connection.execute(
-                "INSERT OR IGNORE INTO decision_meta(key, value) VALUES(?, ?)",
+                "INSERT INTO decision_meta(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 ("schema_version", str(SCHEMA_VERSION)),
             )
             self._connection.commit()
@@ -588,6 +664,338 @@ class DecisionStore:
             result.append(body)
         return result
 
+    # -- PI-12 forecast decisions --------------------------------------------
+    def save_prediction_decision(self, body: Mapping[str, Any]) -> dict[str, Any]:
+        decision_key = str(body.get("decision_key") or "")
+        decision_id = str(body.get("decision_id") or "")
+        if not decision_key or not decision_id:
+            raise DecisionStateError(
+                DecisionErrorCode.INVALID_REQUEST.value,
+                "a prediction decision needs an id and a key",
+            )
+        payload = dict(body)
+        existing = self.prediction_decision_by_key(decision_key)
+        if existing is not None:
+            return existing
+        try:
+            with self.transaction():
+                self._connection.execute(
+                    "INSERT INTO prediction_decisions(decision_id, decision_key, "
+                    "run_id, monitoring_cycle_id, portfolio_id, instrument_id, "
+                    "decision_type, horizon, primary_forecast_id, proposal_id, "
+                    "created_at, payload) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        decision_id,
+                        decision_key,
+                        str(body.get("run_id") or ""),
+                        str(body.get("monitoring_cycle_id") or ""),
+                        str(body.get("portfolio_id") or ""),
+                        str(body.get("instrument_id") or ""),
+                        str(body.get("decision_type") or ""),
+                        str(body.get("horizon") or ""),
+                        str(body.get("primary_forecast_id") or ""),
+                        str(body.get("proposal_id") or ""),
+                        str(body.get("created_at") or self._clock().isoformat()),
+                        json.dumps(payload, sort_keys=True, default=str),
+                    ),
+                )
+        except sqlite3.IntegrityError:
+            existing = self.prediction_decision_by_key(decision_key)
+            if existing is not None:
+                return existing
+            raise
+        found = self.prediction_decision(decision_id)
+        if found is None:
+            raise DecisionStateError(
+                DecisionErrorCode.PIPELINE_FAILED.value,
+                "the prediction decision could not be read after persistence",
+            )
+        return found
+
+    def prediction_decision(self, decision_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT payload FROM prediction_decisions WHERE decision_id = ?",
+                (str(decision_id),),
+            ).fetchone()
+            if row is None:
+                return None
+            body = dict(json.loads(row["payload"]))
+            events = self._prediction_events(str(decision_id))
+        return self._with_prediction_status(body, events)
+
+    def prediction_decision_by_key(self, key: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT payload, decision_id FROM prediction_decisions WHERE decision_key = ?",
+                (str(key),),
+            ).fetchone()
+            if row is None:
+                return None
+            body = dict(json.loads(row["payload"]))
+            events = self._prediction_events(str(row["decision_id"]))
+        return self._with_prediction_status(body, events)
+
+    def prediction_decision_for_proposal(
+        self, proposal_id: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT payload, decision_id FROM prediction_decisions "
+                "WHERE proposal_id = ? ORDER BY created_at DESC LIMIT 1",
+                (str(proposal_id),),
+            ).fetchone()
+            if row is None:
+                return None
+            body = dict(json.loads(row["payload"]))
+            events = self._prediction_events(str(row["decision_id"]))
+        return self._with_prediction_status(body, events)
+
+    def prediction_decisions(
+        self,
+        *,
+        run_id: str = "",
+        portfolio_id: str = "",
+        instrument_id: str = "",
+        decision_type: str = "",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        for column, value in (
+            ("run_id", run_id),
+            ("portfolio_id", portfolio_id),
+            ("instrument_id", instrument_id),
+            ("decision_type", decision_type),
+        ):
+            if value:
+                clauses.append(f"{column}=?")
+                params.append(value)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        capped = max(1, min(int(limit), 500))
+        start = max(0, int(offset))
+        with self._lock:
+            total = int(
+                self._connection.execute(
+                    "SELECT COUNT(*) AS n FROM prediction_decisions" + where,
+                    tuple(params),
+                ).fetchone()["n"]
+            )
+            rows = self._connection.execute(
+                "SELECT decision_id, payload FROM prediction_decisions"
+                + where
+                + " ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
+                tuple(params + [capped, start]),
+            ).fetchall()
+            items: list[dict[str, Any]] = []
+            for row in rows:
+                body = dict(json.loads(row["payload"]))
+                body = self._with_prediction_status(
+                    body, self._prediction_events(str(row["decision_id"]))
+                )
+                items.append(body)
+        return {
+            "items": items,
+            "total": total,
+            "limit": capped,
+            "offset": start,
+            "has_more": start + len(items) < total,
+        }
+
+    def append_prediction_decision_event(
+        self,
+        decision_id: str,
+        kind: str,
+        payload: Mapping[str, Any] | None = None,
+        *,
+        at: datetime | None = None,
+    ) -> dict[str, Any]:
+        found = self.prediction_decision(decision_id)
+        if found is None:
+            raise DecisionNotFound(f"unknown prediction decision {decision_id!r}")
+        body = dict(payload or {})
+        when = at or self._clock()
+        event_id = "pevt_" + digest_payload(
+            {
+                "decision": decision_id,
+                "kind": kind,
+                "at": when.isoformat(),
+                "payload": body,
+            }
+        )
+        with self.transaction():
+            self._connection.execute(
+                "INSERT OR IGNORE INTO prediction_decision_events("
+                "event_id, decision_id, at, kind, payload) VALUES (?,?,?,?,?)",
+                (
+                    event_id,
+                    decision_id,
+                    when.isoformat(),
+                    str(kind),
+                    json.dumps(body, sort_keys=True, default=str),
+                ),
+            )
+        updated = self.prediction_decision(decision_id)
+        return updated if updated is not None else found
+
+    def prediction_decision_events(self, decision_id: str) -> list[dict[str, Any]]:
+        return self._prediction_events(decision_id)
+
+    def _prediction_events(self, decision_id: str) -> list[dict[str, Any]]:
+        rows = self._connection.execute(
+            "SELECT event_id, at, kind, payload FROM prediction_decision_events "
+            "WHERE decision_id = ? ORDER BY id ASC",
+            (str(decision_id),),
+        ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            body = dict(row)
+            body["payload"] = json.loads(body["payload"])
+            result.append(body)
+        return result
+
+    @staticmethod
+    def _with_prediction_status(
+        body: dict[str, Any], events: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        current = str(body.get("status") or "decision_generated")
+        execution: dict[str, Any] = {}
+        for event in events:
+            payload = event.get("payload") or {}
+            status = str(payload.get("status") or "")
+            if status:
+                current = status
+            if str(event.get("kind") or "").startswith("execution."):
+                for key in (
+                    "execution_id",
+                    "order_id",
+                    "order_status",
+                    "failure_code",
+                    "execution_error",
+                ):
+                    if key in payload:
+                        body[key] = payload[key]
+                        execution[key] = payload[key]
+                execution["status"] = current
+        body["initial_status"] = str(body.get("status") or "decision_generated")
+        body["status"] = current
+        if execution:
+            body["execution"] = {
+                "execution_id": str(execution.get("execution_id") or ""),
+                "order_id": str(execution.get("order_id") or ""),
+                "order_status": str(execution.get("order_status") or ""),
+                "failure_code": str(execution.get("failure_code") or ""),
+                "error": str(execution.get("execution_error") or ""),
+                "status": str(execution.get("status") or current),
+            }
+        body["events"] = events
+        return body
+
+    def save_prediction_decision_outcome(self, body: Mapping[str, Any]) -> dict[str, Any]:
+        decision_id = str(body.get("decision_id") or "")
+        if self.prediction_decision(decision_id) is None:
+            raise DecisionNotFound(f"unknown prediction decision {decision_id!r}")
+        outcome_id = str(body.get("outcome_id") or "")
+        if not outcome_id:
+            outcome_id = "pout_" + digest_payload(
+                {"decision_id": decision_id, "measured_at": body.get("measured_at")}
+            )
+        payload = dict(body)
+        payload["outcome_id"] = outcome_id
+        try:
+            with self.transaction():
+                self._connection.execute(
+                    "INSERT INTO prediction_decision_outcomes("
+                    "outcome_id, decision_id, measured_at, payload) VALUES (?,?,?,?)",
+                    (
+                        outcome_id,
+                        decision_id,
+                        str(body.get("measured_at") or self._clock().isoformat()),
+                        json.dumps(payload, sort_keys=True, default=str),
+                    ),
+                )
+        except sqlite3.IntegrityError:
+            existing = self.prediction_outcome(decision_id)
+            if existing is not None:
+                return existing
+            raise
+        found = self.prediction_outcome(decision_id)
+        return found if found is not None else payload
+
+    def prediction_outcome(self, decision_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT payload FROM prediction_decision_outcomes WHERE decision_id = ?",
+                (str(decision_id),),
+            ).fetchone()
+        return dict(json.loads(row["payload"])) if row else None
+
+    def prediction_outcomes(
+        self, *, limit: int = 100, offset: int = 0
+    ) -> dict[str, Any]:
+        capped = max(1, min(int(limit), 500))
+        start = max(0, int(offset))
+        with self._lock:
+            total = int(
+                self._connection.execute(
+                    "SELECT COUNT(*) AS n FROM prediction_decision_outcomes"
+                ).fetchone()["n"]
+            )
+            rows = self._connection.execute(
+                "SELECT payload FROM prediction_decision_outcomes "
+                "ORDER BY measured_at DESC, rowid DESC LIMIT ? OFFSET ?",
+                (capped, start),
+            ).fetchall()
+        return {
+            "items": [dict(json.loads(row["payload"])) for row in rows],
+            "total": total,
+            "limit": capped,
+            "offset": start,
+            "has_more": start + len(rows) < total,
+        }
+
+    def pending_prediction_decisions(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        awaitable = max(1, min(int(limit), 500))
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT d.decision_id, d.payload FROM prediction_decisions d "
+                "LEFT JOIN prediction_decision_outcomes o "
+                "ON o.decision_id = d.decision_id WHERE o.decision_id IS NULL "
+                "AND d.primary_forecast_id != '' "
+                "ORDER BY d.created_at ASC LIMIT ?",
+                (awaitable,),
+            ).fetchall()
+            result: list[dict[str, Any]] = []
+            for row in rows:
+                body = dict(json.loads(row["payload"]))
+                body = self._with_prediction_status(
+                    body, self._prediction_events(str(row["decision_id"]))
+                )
+                result.append(body)
+        return result
+
+    def forecast_decision_policy(self) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT value FROM decision_meta WHERE key = ?",
+                ("pi12_forecast_policy",),
+            ).fetchone()
+        return dict(json.loads(row["value"])) if row else None
+
+    def save_forecast_decision_policy(
+        self, body: Mapping[str, Any], *, at: datetime | None = None
+    ) -> dict[str, Any]:
+        payload = dict(body)
+        payload["updated_at"] = (at or self._clock()).isoformat()
+        with self.transaction():
+            self._connection.execute(
+                "INSERT INTO decision_meta(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                ("pi12_forecast_policy", json.dumps(payload, sort_keys=True, default=str)),
+            )
+        return payload
+
     # -- metrics --------------------------------------------------------------
     def metrics(self) -> dict[str, Any]:
         with self._lock:
@@ -606,6 +1014,14 @@ class DecisionStore:
             assessments = self._connection.execute(
                 "SELECT COUNT(*) AS n FROM decision_risk_assessments"
             ).fetchone()["n"]
+            prediction_types = self._connection.execute(
+                "SELECT decision_type, COUNT(*) AS n FROM prediction_decisions "
+                "GROUP BY decision_type"
+            ).fetchall()
+            prediction_total = sum(row["n"] for row in prediction_types)
+            prediction_outcomes = self._connection.execute(
+                "SELECT COUNT(*) AS n FROM prediction_decision_outcomes"
+            ).fetchone()["n"]
         return {
             "runs": sum(row["n"] for row in runs),
             "runs_by_status": {row["status"]: row["n"] for row in runs},
@@ -614,6 +1030,11 @@ class DecisionStore:
             "proposals": sum(row["n"] for row in proposals),
             "proposals_by_status": {row["status"]: row["n"] for row in proposals},
             "risk_assessments": assessments,
+            "prediction_decisions": prediction_total,
+            "prediction_decisions_by_type": {
+                row["decision_type"]: row["n"] for row in prediction_types
+            },
+            "prediction_outcomes": prediction_outcomes,
         }
 
     def status(self) -> dict[str, Any]:

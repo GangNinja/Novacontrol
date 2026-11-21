@@ -29,9 +29,17 @@ PYTHONPATH=src ../.venv/Scripts/python.exe -m uvicorn novacontrol.api.app:create
 
 ## Authentication
 
-The UI asks for the backend bearer token at runtime and keeps it in the current
-tab's `sessionStorage`. Configure `NOVACONTROL_API_TOKEN` on the backend. Tokens
-are never bundled, committed, or written to local storage.
+During local development the Vite proxy supplies a loopback-only admin session
+(`Authorization` and `X-Autonomy-Operator-Token`), so a new tab opens the desk
+without a token prompt. The backend accepts this credential only from loopback
+clients, and only when the backend was started with `NOVACONTROL_ADMIN_TOKEN`
+set; the local `start.ps1` sets it to `narasimha-novacontrol`, and setting a
+different value rotates the key.
+
+A separately hosted frontend still asks for the backend bearer token at runtime
+and keeps it in the current tab's `sessionStorage`. Configure
+`NOVACONTROL_API_TOKEN` on the backend. Tokens are never bundled, committed, or
+written to local storage.
 
 ## Build and deploy
 

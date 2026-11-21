@@ -538,9 +538,11 @@ class PortfolioEngine:
         )
         return {"ok": True, "valuation": value.to_dict(), "snapshot": snapshot.to_dict()}
 
-    def valuations(self, portfolio_id: str, *, limit: int = 200) -> dict[str, Any]:
+    def valuations(
+        self, portfolio_id: str, *, limit: int = 200, latest: bool = False
+    ) -> dict[str, Any]:
         self._record(portfolio_id)
-        rows = self._store.valuations(portfolio_id, limit=limit)
+        rows = self._store.valuations(portfolio_id, limit=limit, latest=latest)
         return {"ok": True, "valuations": rows, "total": len(rows)}
 
     def decisions(self, portfolio_id: str, *, limit: int = 100) -> dict[str, Any]:

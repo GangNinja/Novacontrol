@@ -41,7 +41,12 @@ export type ApiState<T> = {
 
 export function useApi<T = any>(
   path: string | null,
-  options: { refreshMs?: number; enabled?: boolean; operatorToken?: string } = {},
+  options: {
+    refreshMs?: number;
+    refreshKey?: number;
+    enabled?: boolean;
+    operatorToken?: string;
+  } = {},
 ): ApiState<T> {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(Boolean(path && options.enabled !== false));
@@ -99,6 +104,13 @@ export function useApi<T = any>(
     const timer = window.setInterval(() => void load(true), options.refreshMs);
     return () => window.clearInterval(timer);
   }, [path, options.refreshMs, load]);
+
+  useEffect(() => {
+    if (!path || !options.refreshKey) return;
+    void load(true);
+    // `load` is keyed by the request path; the revision is the refresh trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [options.refreshKey]);
 
   return {
     data,

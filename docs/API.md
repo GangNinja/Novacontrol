@@ -94,7 +94,13 @@ This generated reference covers the REST routes registered by the NovaControl ap
 - `GET /market/autonomy/decisions/signals`: Generated signals with validation and provenance; filters: `run_id`, `strategy_id`, `portfolio_id`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/autonomy/decisions/proposals`: Proposal history with NM-08 outcomes; filters: `run_id`, `portfolio_id`, `instrument_id`, `status`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/autonomy/decisions/proposals/{proposal_id}`: One proposal with its signal, evaluation, NM-08 decision and events; never an order. *(frontend: no web panel - API/CLI or infrastructure)*
-- `POST /market/autonomy/decisions/run`: Run AT-03 strategy evaluation and NM-08 risk assessment; requires the operator token and never submits an order, fill or financial mutation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/decisions/predictions`: PI-12 forecast-driven decisions with evidence, horizon, forecast identity and current risk/order status; filters: `run_id`, `portfolio_id`, `instrument_id`, `decision_type`, `limit`, `offset`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/decisions/predictions/{decision_id}`: One PI-12 decision with its forecast evidence, immutable audit events, NM-08 result, AT-03 proposal and stored outcome. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/decisions/outcomes`: Measured PI-12 outcomes separated into forecast accuracy, decision quality, execution and paper P&L; `limit`, `offset`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/autonomy/decisions/forecast-policy`: The effective PI-12 multi-horizon selection and reliability policy, its digest and source. *(frontend: no web panel - API/CLI or infrastructure)*
+- `PUT /market/autonomy/decisions/forecast-policy`: Validate and persist the PI-12 horizon selection/reliability policy; requires the operator token and cannot promote a model. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/autonomy/decisions/outcomes/run`: Measure due PI-12 outcomes from stored forecasts, market bars and NM-10 records; requires the operator token and never mutates a portfolio or ledger. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/autonomy/decisions/run`: Run AT-03 forecast/strategy evaluation and NM-08 risk assessment; requires the operator token and never submits an order, fill or financial mutation. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/autonomy/executions/contracts`: Static AT-04 paper-execution capabilities, statuses, idempotency rules, error codes and non-goals. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/autonomy/executions/status`: AT-04 journal health, counts, runtime mode/lease gate and recent execution intents. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/autonomy/executions`: Autonomous paper-execution intents, newest first; filters: `status`, `portfolio_id`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
@@ -167,17 +173,31 @@ This generated reference covers the REST routes registered by the NovaControl ap
 - `POST /market/watchlists/{watchlist_id}/members`: Add an instrument. Body: `instrument_id`, optional `reason`. *(frontend: no web panel - API/CLI or infrastructure)*
 - `DELETE /market/watchlists/{watchlist_id}/members/{instrument_id}`: Remove a member, keeping its membership history. Query parameter: optional `reason`. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /market/watchlists/{watchlist_id}/rename`: Rename a watchlist in place without changing its stable id or membership history. Body: `name`. *(frontend: no web panel - API/CLI or infrastructure)*
-- `POST /market/forecasts`: Generate and store one probabilistic forecast. Body: `instrument_id`, `horizon`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/forecasts`: Generate and store one forecast. Body: `instrument_id`, `horizon`, optional `engine` (`statistical`, `gradient`, `lstm`). *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/forecasts`: Stored forecasts, newest first. Query parameters: `instrument_id`, `horizon`, `status`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
-- `GET /market/forecasts/status`: Forecast horizons, policy, model states and totals. *(frontend: no web panel - API/CLI or infrastructure)*
-- `GET /market/forecasts/models`: Model versions, lifecycle states and measured metrics. Query parameters: `instrument_id`, `horizon`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecasts/status`: Forecast horizons, policy, model-family states (statistical, gradient, LSTM) and totals. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecasts/models`: Statistical, gradient and LSTM model versions with lifecycle states and measured metrics. Query parameters: `instrument_id`, `horizon`. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/forecasts/performance`: Measured performance snapshots and the live aggregate. Query parameters: `model_id`, `instrument_id`, `horizon`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/forecasts/calibration`: The calibration report for one model and horizon. Query parameters: `model_id`, `horizon`. *(frontend: no web panel - API/CLI or infrastructure)*
-- `POST /market/forecasts/train`: Run chronological walk-forward comparison and calibration. Body: `instrument_id`, `horizon`. *(frontend: no web panel - API/CLI or infrastructure)*
-- `POST /market/forecasts/evaluate`: Resolve every forecast whose target data now exists. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/forecasts/train`: Run chronological walk-forward training and comparison for the selected engine. Body: `instrument_id`, `horizon`, optional `engine` (`statistical`, `gradient`, `lstm`). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/forecasts/evaluate`: Resolve every forecast whose target data now exists; optional `engine=lstm` resolves only LSTM forecasts. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /market/forecasts/models/{model_id}/promote`: Promote a model that already has walk-forward evidence. Body: `instrument_id`, `horizon`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecasts/{forecast_id}/explain`: On-demand global importance and local attribution for one statistical, gradient or LSTM forecast. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/forecasts/{forecast_id}`: One immutable forecast record. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/forecasts/{forecast_id}/outcome`: The recorded outcome, or a pending state with the reason. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/forecasts/cycles`: Schedule one durable forecast lifecycle for an instrument and horizon; optional `target_at`, `resolution`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecasts/cycles`: Forecast cycles, most recently scheduled first so a new lifecycle is always on the first page. Query parameters: `instrument_id`, `exchange`, `horizon`, `state`, `target_date`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecasts/cycles/{cycle_id}`: One forecast cycle with checkpoint timeline, immutable versions, revisions and outcomes. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecasts/scheduler`: PI-09 scheduler health, durable queue state, missed checkpoints and forecast-only authority. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/forecasts/scheduler/tick`: Run a bounded authenticated due-checkpoint batch; never creates an order or fill. Body: optional `limit` 1-20. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecasts/missed`: Checkpoints whose planned or retry time passed without completion. Query parameter: `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecasts/evaluations/pending`: Target-time evaluations waiting on validated observations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecasts/accuracy`: Forecast accuracy history by stage with sample counts and reliability caveats. Query parameters: `instrument_id`, `horizon`, `stage`, `cycle_id`, `model_id`, `model_version`, `ensemble_id`, `target_date`, `regime`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/forecasts/horizons`: Generate 1d/3d/5d/30d/90d forecasts through the existing PI-08 ensemble, with point-in-time fundamentals and validated context. Body: `instrument_id`, optional `horizons`, `as_of`, `fundamentals`, `news_events`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecasts/horizons/status`: PI-10 horizon profiles, target semantics, evidence rules and unchanged NM-08/NM-10 authorities. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecasts/horizons/performance`: Outcome metrics separated by horizon, stage and family; no blended cross-horizon accuracy. Query parameters: `instrument_id`, `horizon`, `family`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecasts/horizons/{instrument_id}/context`: Point-in-time sector, benchmark, peer, fundamental and event context. Query parameter: optional `as_of`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecasts/horizons/{instrument_id}`: Latest stored forecast for each of the five horizons with uncertainty, evidence and cross-horizon alignment. Query parameter: optional `as_of`. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /market/portfolios`: Create and fund one simulated portfolio. Body: `horizon`, `funding_wallet_id`, `capital`, optional `name`. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/portfolios`: Every portfolio. Query parameters: `horizon`, `status`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/portfolios/status`: Portfolio counts, states and the three horizon policies. *(frontend: no web panel - API/CLI or infrastructure)*
@@ -272,6 +292,289 @@ This generated reference covers the REST routes registered by the NovaControl ap
 - `GET /market/backtests/{backtest_id}/data-quality`: Dataset provenance, unavailable bars and documented limitations. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/backtests/{backtest_id}/verify`: Replay the persisted bars and verify the reproducibility hash. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /market/backtests/{backtest_id}/sensitivity`: Run explicit parameter variants without claiming out-of-sample validity. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/rl/status`: RL environment counts, isolation guarantees and health. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/rl/contracts`: Versioned observation, action, reward and transition contracts. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/rl/health`: Bounded resource, latency, error and storage health for RL research. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/rl/environments`: Create an immutable isolated RL environment configuration. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/rl/environments`: List persisted RL environment configurations, newest first. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/rl/environments/{environment_id}`: One RL environment configuration and its version evidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/rl/environments/{environment_id}/episodes`: Start a reproducible isolated historical RL episode. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/rl/episodes`: List RL episodes and their simulated summaries. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/rl/episodes/{episode_id}`: One RL episode, its observation and simulated portfolio state. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/rl/episodes/{episode_id}/step`: Apply one validated RL action and record the resulting transition. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/rl/episodes/{episode_id}/reset`: Reset one RL episode to its initial simulated state and clear its experiences. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/rl/episodes/{episode_id}/cancel`: Cancel a live RL episode without touching any production book. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/rl/episodes/{episode_id}/transitions`: Bounded transition history for one RL episode. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/rl/episodes/{episode_id}/experiences`: Bounded experience records with dataset and feature provenance. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/rewards/status`: Reward and policy-evaluation counts, isolation guarantees and health. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/rewards/contracts`: Reward component, normalization and policy-evaluation contracts. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/rewards/health`: Bounded reward-store and calculation health. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/rewards/baselines`: Baseline policies, shared evaluation conditions and limitations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/rewards/configurations`: Create or reuse an immutable experimental reward configuration. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/rewards/configurations`: List persisted reward configurations, newest first. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/rewards/configurations/{config_id}`: One immutable reward configuration and its version evidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/rewards/episodes/{episode_id}/calculate`: Calculate and persist component rewards for stored PI-13 transitions. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/rewards/episodes/{episode_id}`: Persisted reward results and attribution for one RL episode. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/rewards/results/{reward_id}`: One reproducible reward result and its component breakdown. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/rewards/evaluations`: Evaluate policies on identical chronological historical conditions. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/rewards/evaluations/cancel`: Request cancellation of a running bounded policy evaluation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/rewards/evaluations`: List persisted policy evaluations, newest first. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/rewards/evaluations/{evaluation_id}`: One policy evaluation with metrics and limitations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/rewards/comparisons`: Persisted baseline comparisons with identical-condition evidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/rewards/stability`: Compare policy stability across named chronological splits. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/rewards/walk-forward`: Evaluate successive out-of-sample historical windows without test fitting. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/training/status`: Experimental RL training counts, resource bounds and isolation guarantees. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/training/contracts`: DQN selection rationale, bounded limits and training contracts. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/training/health`: Training worker, storage and resource health. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/training/datasets`: Stored PI-02 dataset versions a training run can reference, with their instruments. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/training/configurations`: Create or reuse an immutable versioned training configuration. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/training/configurations`: List persisted training configurations, newest first. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/training/configurations/{config_id}`: One immutable training configuration and its validation evidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/training/validate`: Validate a training configuration without starting a run. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/training/runs`: Start a bounded isolated DQN training run. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/training/runs`: List experimental training runs and progress. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/training/runs/{run_id}`: One training run, its lifecycle and latest metrics. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/training/runs/{run_id}/pause`: Request a safe checkpoint pause of a training run. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/training/runs/{run_id}/resume`: Resume a paused training run in its worker. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/training/runs/{run_id}/cancel`: Cancel a training run at the next safe step boundary. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/training/runs/{run_id}/retry`: Start a new training run from a terminal run's configuration. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/training/runs/{run_id}/metrics`: Bounded learning, action and resource metrics for one run. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/training/runs/{run_id}/checkpoints`: Checkpoint history with integrity metadata. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/training/runs/{run_id}/checkpoints`: Request a manual checkpoint at the next safe boundary. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/training/checkpoints/{checkpoint_id}`: One checkpoint and its integrity metadata. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/training/checkpoints/{checkpoint_id}/resume`: Resume training from a validated checkpoint as a new run. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/training/policies`: List experimental policy artifacts with lifecycle status. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/training/policies/{policy_id}`: One experimental policy artifact and its evaluation evidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/training/policies/{policy_id}/archive`: Archive a research policy; never activate it. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/training/policies/{policy_id}/validate`: Validate a trained policy on the chronological validation split. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/training/policies/{policy_id}/test`: Evaluate a validated policy on the untouched out-of-sample split. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/training/compare`: Compare policies only when their recorded historical conditions match. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/training/optimize`: Start a bounded random or grid hyperparameter search using train/validation only. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/training/searches/{search_id}`: One bounded hyperparameter search and its trial evidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/training/evaluations`: Persisted PI-15 validation and out-of-sample evidence records. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/adaptive/status`: Adaptive-intelligence counts, source availability and advisory guarantees. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/adaptive/contracts`: Detectors, thresholds, recommendation vocabulary and safety boundaries. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/adaptive/health`: Adaptive store and source health. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/adaptive/dashboard`: Latest regime, suitability, drift, degradation and adaptation evidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/adaptive/configurations`: Create or reuse an immutable detection configuration. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/adaptive/configurations`: List persisted detection configurations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/adaptive/configurations/{config_id}`: One immutable detection configuration. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/adaptive/regime/analyze`: Analyze a PI-04 regime snapshot without inventing a conflicting label. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/adaptive/regime/latest`: Latest persisted regime analysis for one instrument. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/adaptive/regime/annotations`: Create a versioned derived regime annotation without mutating experiences. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/adaptive/regime/annotations`: List derived regime annotations and preserved source timestamps. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/adaptive/regime/evaluations`: Record one PI-14 evaluation as regime-specific policy evidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/adaptive/regime/evaluations`: Regime-specific policy performance with sample-size caveats. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/adaptive/experiences/query`: Retrieve regime-labelled experiences available at an explicit as-of time. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/adaptive/changes/detect`: Detect meaningful market-condition change with supporting evidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/adaptive/changes`: Persisted market-condition change events. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/adaptive/drift/detect`: Detect data or concept drift with future outcomes excluded. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/adaptive/drift`: Persisted drift results and their parameters. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/adaptive/degradation/monitor`: Monitor persistent policy-performance degradation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/adaptive/degradation`: Persisted policy-degradation assessments. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/adaptive/suitability/assess`: Assess experimental policy suitability for one regime. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/adaptive/suitability`: Persisted policy-suitability assessments. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/adaptive/recommendations`: Generate an evidence-based advisory adaptation recommendation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/adaptive/recommendations`: Persisted adaptation recommendations with hysteresis state. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/adaptive/recommendations/{recommendation_id}/acknowledge`: Acknowledge an advisory recommendation; never activates a policy. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/adaptive/retraining`: Record a retraining recommendation without starting training. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/adaptive/retraining`: Persisted retraining recommendations and required conditions. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/adaptive/reassessments`: Create an explicit bounded reassessment request. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/adaptive/reassessments`: List reassessment requests and outcomes. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/adaptive/reassessments/{reassessment_id}/run`: Run one explicitly authorised bounded reassessment. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/adaptive/reassessments/{reassessment_id}`: One reassessment request and its result. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/multiagent/status`: Multi-agent counts, advisory guarantees and preserved authority boundaries. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/multiagent/contracts`: Agent roles, communication contracts, conflict rules and resource limits. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/multiagent/health`: Agent health, isolated store health and authority isolation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/multiagent/agents`: Registered financial-intelligence agents, configuration and performance. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/multiagent/agents/{agent_id}`: One agent's contract, health, configuration history and performance. *(frontend: no web panel - API/CLI or infrastructure)*
+- `PUT /market/multiagent/agents/{agent_id}/config`: Update an agent's enabled state, timeout or read capabilities within its fixed role boundary. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/multiagent/cycles`: Create a bounded decision cycle for one instrument and one horizon. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/multiagent/cycles`: List decision cycles and their orchestration status. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/multiagent/cycles/{cycle_id}`: One decision cycle with runs, conflicts, decision and events. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/multiagent/cycles/{cycle_id}/run`: Run a pending decision cycle with bounded concurrent agents. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/multiagent/cycles/{cycle_id}/cancel`: Cancel a pending or running research cycle; never cancels an order. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/multiagent/cycles/{cycle_id}/agents`: Agent responses and validated communication records for a cycle. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/multiagent/cycles/{cycle_id}/evidence`: Shared evidence with provenance, freshness and validation state. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/multiagent/cycles/{cycle_id}/conflicts`: Conflicts, severity, resolution rules and unresolved disagreements. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/multiagent/cycles/{cycle_id}/decision`: The advisory recommendation with confidence limitations and explanation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/multiagent/cycles/{cycle_id}/handoff`: Explicit advisory handoff into PI-12, NM-08 and NM-10; never an order. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/multiagent/history`: Advisory decision history kept separate from financial accounting. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/multiagent/performance`: Execution reliability for every agent, with historical quality left unclaimed. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/multiagent/performance/{agent_id}`: One agent's latency, failure, validation and evidence reliability. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/optimization/status`: Optimization store counts, limits and preserved NM-08/NM-10 authority. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/optimization/contracts`: Objectives, methods, constraints, statuses and safety boundaries. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/optimization/health`: Isolated optimization-store health and authority isolation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/optimization/configs`: Create a validated portfolio optimization configuration. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/optimization/configs`: List saved optimization configurations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/optimization/configs/{config_id}`: One saved optimization configuration. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/optimization/validate`: Validate authoritative portfolio, market, forecast and covariance inputs without generating an allocation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/optimization/runs`: Run a constrained optimization and persist an isolated advisory result. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/optimization/runs`: List optimization runs and statuses. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/optimization/history`: Optimization research history kept separate from portfolio accounting. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/optimization/latest`: Latest completed optimization for a portfolio and optional horizon. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/optimization/runs/{run_id}`: One optimization run with provenance, warnings and full analysis. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/optimization/runs/{run_id}/allocations`: Target weights, capital and cash reserve for one run. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/optimization/runs/{run_id}/diversification`: Concentration and correlation-based diversification metrics. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/optimization/runs/{run_id}/risk`: Research risk metrics; NM-08 remains the operational authority. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/optimization/runs/{run_id}/liquidity`: Liquidity participation estimates and limitations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/optimization/runs/{run_id}/rebalancing`: Advisory rebalancing actions, costs and thresholds. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/optimization/runs/{run_id}/scenarios`: Historical and hypothetical stress scenarios for one run. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/optimization/runs/{run_id}/scenarios`: Add operator-defined hypothetical shocks to a run. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/optimization/runs/{run_id}/backtests`: Compare allocation strategies on point-in-time history with costs. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/optimization/runs/{run_id}/handoff`: Advisory handoff into PI-12, NM-08 and NM-10; never an order. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/optimization/runs/{run_id}/cancel`: Cancel a running research optimization; never cancels an order. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/optimization/backtests`: List stored strategy backtests. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/optimization/backtests/{backtest_id}`: One stored strategy backtest and its method comparison. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/research/status`: Financial-research store counts, limits and preserved NM-08/NM-10 authority. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/research/contracts`: Research horizons, analysis types, verification rules, point-in-time rules and authority boundaries. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/research/health`: Isolated research-store health and authority isolation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/research/runs`: Create a bounded point-in-time company-research task. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/research/runs/{run_id}/run`: Execute a pending research task and persist its evidence-linked report. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/research/runs/{run_id}/cancel`: Cancel an eligible research task; never cancels an order. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/research/runs/{run_id}/refresh`: Refresh a completed research report into a new version without overwriting the prior conclusion. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/research/runs`: List research tasks and statuses. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/research/history`: Research history kept separate from financial accounting. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/research/latest`: Latest completed research for an instrument and optional horizon. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/research/runs/{run_id}`: One research task with provenance, claims, warnings and full analysis. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/research/runs/{run_id}/company`: Company profile with evidence, verification and missing-field disclosure. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/research/runs/{run_id}/financials`: Point-in-time statement analysis, TTM, ratios and restatements. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/research/runs/{run_id}/events`: Corporate events with announcement/effective dates and verification. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/research/runs/{run_id}/news`: News evidence, sentiment interpretation and untrusted-content flags. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/research/runs/{run_id}/sector`: Sector and industry context with source period. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/research/runs/{run_id}/peers`: Documented peer selection and comparison results. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/research/runs/{run_id}/valuation`: Relative or DCF valuation assumptions, range, sensitivity and limitations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/research/runs/{run_id}/thesis`: Evidence-linked investment thesis and uncertainty; never an execution authorization. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/research/runs/{run_id}/evidence`: Every eligible evidence record with source, time and verification. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/research/runs/{run_id}/claims`: Material claims linked to evidence, including conflicts and unverified claims. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/research/runs/{run_id}/features`: Versioned, point-in-time research features for PI-04 evaluation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/research/runs/{run_id}/handoff`: Structured advisory handoff to PI-12/PI-17/PI-18 and NM-08/NM-10. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/research/monitor`: Rate-limited targeted refresh check for one instrument; no background polling. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/intelligence/status`: Dashboard initialisation, preference-store health and preserved authority boundaries. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/intelligence/contracts`: Dashboard statuses, horizons, separation rules and read-only safety contract. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/intelligence/navigation`: Dashboard views and supported filters for consistent frontend navigation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/intelligence/overview`: Prediction, model, decision, regime, research and portfolio summary with bounded filters. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/intelligence/instruments/{instrument_id}`: Instrument price, freshness, chart, regime, research and forecast intelligence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/intelligence/forecasts`: Normalized forecast rows with model versions, intervals and calibration status. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/intelligence/compare`: Model comparison only within a shared reference timestamp, target and horizon. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/intelligence/horizons/{instrument_id}`: Separate intraday, swing and long-term forecast families without merged targets. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/intelligence/lifecycle`: Recorded forecast checkpoint status, lateness and immutable versions. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/intelligence/performance`: Forecast evaluation metrics with sample size and accuracy/profit separation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/intelligence/regimes`: Current and historical market regimes, transitions, drift and suitability. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/intelligence/decisions`: Paginated multi-agent decision history with confidence provenance. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/intelligence/decisions/{cycle_id}`: Complete agent contributions, evidence, conflicts and final recommendation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/intelligence/explain/{subject_id}`: Decision, forecast or research explanation assembled from recorded evidence only. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/intelligence/attribution/{forecast_id}`: Model-specific feature attribution where the model actually computed it. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/intelligence/evidence/{subject_id}`: Evidence provenance timeline for a decision or research run. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/intelligence/research`: Financial research runs, reported facts, thesis, uncertainty and provenance. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/intelligence/portfolio`: Authoritative portfolio snapshot separated from experimental optimization advice. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/intelligence/policies`: Experimental RL policies, training evidence, drift, degradation and retraining advice. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/intelligence/replay/{cycle_id}`: Point-in-time decision replay with future news, evidence and research excluded. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/intelligence/filters`: Saved presentation-only dashboard filter preset and available presets. *(frontend: no web panel - API/CLI or infrastructure)*
+- `PUT /market/intelligence/filters`: Save a presentation-only dashboard filter preset; no financial state is changed. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolio-management/status`: Management cycles, runtime mode, lease, kill-switch and authority boundaries. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolio-management/contracts`: Portfolio-management actions, horizons, statuses and financial-isolation contract. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolio-management/navigation`: Advanced portfolio-management views and supported controls. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolio-management/config`: Versioned management thresholds, reserve target and change history. *(frontend: no web panel - API/CLI or infrastructure)*
+- `PUT /market/portfolio-management/config`: Update advisory management thresholds; no portfolio, cash or ledger state is changed. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/portfolio-management/review`: Run one authoritative-snapshot portfolio review and record explainable advisory decisions. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolio-management/cycles`: Paginated management-cycle history, newest first. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolio-management/cycles/{cycle_id}`: One management cycle with snapshot references, decisions, analytics and events. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolio-management/cycles/{cycle_id}/events`: Durable management-cycle event history. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/portfolio-management/cycles/{cycle_id}/handoff`: Ask existing PI-12/AT-04 execution to continue matching persisted NM-08-approved proposals. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/portfolio-management/cycles/{cycle_id}/reconcile`: Reconcile PI-21 handoff records through the authoritative NM-10 execution engine. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/portfolio-management/recover`: Interrupt abandoned PI-21 cycles and existing autonomy work; recovery always returns to disabled. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolio-management/portfolios/{portfolio_id}/snapshot`: Latest authoritative portfolio snapshot reference with valuation provenance and anomalies. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolio-management/portfolios/{portfolio_id}/positions`: Position assessments with evidence, regime, research and recommended action. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolio-management/portfolios/{portfolio_id}/opportunities`: Bounded opportunity discovery with portfolio compatibility and allocation proposals. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolio-management/portfolios/{portfolio_id}/decisions`: Portfolio decision history with supporting and contradictory evidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolio-management/portfolios/{portfolio_id}/capital`: Capital deployment recommendation that reconciles available and reserved virtual cash. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolio-management/portfolios/{portfolio_id}/cash`: Cash and reserve management recommendation without modifying balances. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolio-management/portfolios/{portfolio_id}/exposure`: Instrument, sector, concentration and diversification exposure research metrics. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolio-management/portfolios/{portfolio_id}/rebalancing`: Bounded PI-18-informed rebalancing proposal with costs, turnover and risk restrictions. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/portfolio-management/portfolios/{portfolio_id}/analytics`: Portfolio performance separated from recommendation and decision quality. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk-intelligence/status`: Risk-intelligence runtime, store, assessment and authority status. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk-intelligence/contracts`: Risk levels, statuses, methodologies, limits and financial-isolation contract. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk-intelligence/navigation`: Risk-intelligence workspace views and supported controls. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk-intelligence/config`: Versioned analytical risk thresholds and change history. *(frontend: no web panel - API/CLI or infrastructure)*
+- `PUT /market/risk-intelligence/config`: Update analytical thresholds; no portfolio, cash or ledger state is changed. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/risk-intelligence/analyze`: Run one bounded advisory risk assessment from authoritative snapshots. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk-intelligence/portfolios/{portfolio_id}/overview`: Latest portfolio risk overview with evidence, trend and warnings. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk-intelligence/portfolios/{portfolio_id}/positions`: Position-level risk, liquidity, drawdown, forecast and NM-08 references. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk-intelligence/portfolios/{portfolio_id}/concentration`: Instrument, sector, industry, HHI and effective-holdings concentration. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk-intelligence/portfolios/{portfolio_id}/correlation`: Timestamp-aligned pairwise and rolling correlation evidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk-intelligence/portfolios/{portfolio_id}/volatility`: Historical volatility, downside deviation, VaR and CVaR. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk-intelligence/portfolios/{portfolio_id}/drawdown`: Authoritative portfolio drawdown episodes, duration and recovery. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk-intelligence/portfolios/{portfolio_id}/liquidity`: Position/ADV, spread, impact ranges and liquidity classification. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk-intelligence/portfolios/{portfolio_id}/regime`: Stored PI-04/PI-16 regime exposure with confidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk-intelligence/portfolios/{portfolio_id}/history`: Paginated immutable risk-assessment history, newest first. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk-intelligence/portfolios/{portfolio_id}/trend`: Risk trend across recorded assessments, separate from performance. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk-intelligence/portfolios/{portfolio_id}/recommendations`: Advisory protective recommendations with NM-08 workflow references. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk-intelligence/alerts`: Deduplicated risk warnings filtered by portfolio and status. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/risk-intelligence/alerts/{alert_id}/action`: Acknowledge, resolve or reopen a risk warning; no financial mutation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk-intelligence/scenarios`: Saved hypothetical scenario configurations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/risk-intelligence/scenarios`: Create a bounded hypothetical scenario; never a prediction or order. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/risk-intelligence/portfolios/{portfolio_id}/scenarios/run`: Run an isolated scenario against the latest analytical snapshot. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk-intelligence/portfolios/{portfolio_id}/scenario-runs`: Reproducible scenario-run history with assumptions and digests. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/risk-intelligence/portfolios/{portfolio_id}/stress-tests`: Historical, hypothetical, volatility, correlation, liquidity and combined stress results. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/risk-intelligence/portfolios/{portfolio_id}/stress-tests`: Run an isolated stress test with explicit assumptions and limits. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/risk-intelligence/recover`: Recover interrupted analytical work; recovery never enables trading. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecast-intelligence/status`: Forecast-optimization runtime, evidence and authority status. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecast-intelligence/contracts`: Selection, calibration, drift, reliability and financial-isolation contracts. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecast-intelligence/navigation`: Forecast-optimization workspace views and supported controls. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecast-intelligence/config`: Current bounded evidence thresholds for PI-23 decisions. *(frontend: no web panel - API/CLI or infrastructure)*
+- `PUT /market/forecast-intelligence/config`: Update advisory thresholds; no model, weight, risk or order is changed. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecast-intelligence/registry`: Model evidence registry without automatic promotion. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecast-intelligence/history`: Append-only PI-23 analysis history, newest first. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecast-intelligence/overview`: Forecast-optimization overview from persisted evaluations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecast-intelligence/comparison/{instrument_id}`: Compare models on one instrument, horizon and task. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecast-intelligence/horizons/{instrument_id}`: Cross-horizon consistency and per-horizon evidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecast-intelligence/regimes/{instrument_id}`: Regime-conditioned model evidence and reliability. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/forecast-intelligence/instruments`: Cross-instrument consistency for a bounded instrument set. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/forecast-intelligence/evaluate`: Evaluate chronological model evidence without a test-set selection. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/forecast-intelligence/select`: Recommend a model from validation evidence; never promote it. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/forecast-intelligence/calibration`: Fit and holdout-evaluate a calibration without production mutation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/forecast-intelligence/uncertainty`: Separate interval, model and regime uncertainty. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/forecast-intelligence/disagreement`: Model disagreement with stale and missing evidence named. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/forecast-intelligence/consistency`: Per-instrument multi-horizon forecast consistency. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/forecast-intelligence/drift`: PSI/KS drift and residual degradation evidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/forecast-intelligence/degradation`: Performance degradation against a chronological baseline. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/forecast-intelligence/weights`: Bounded advisory weight recommendations; production weights are unchanged. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/forecast-intelligence/reliability`: Categorical reliability states with evidence limitations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/forecast-intelligence/fallback`: Fallback or abstention recommendation without executing a forecast. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/forecast-intelligence/analyze`: Run the full advisory forecast-optimization analysis. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/forecast-intelligence/health`: Store integrity and dependency health for PI-23. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/event-intelligence/status`: PI-24 counts, latest event evidence and authority boundaries. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/event-intelligence/contracts`: Event groups, statuses, relevance classes and limitations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/event-intelligence/navigation`: Event-intelligence workspace views and authority contract. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/event-intelligence/config`: Bounded event-intelligence thresholds. *(frontend: no web panel - API/CLI or infrastructure)*
+- `PUT /market/event-intelligence/config`: Update bounded event-intelligence thresholds. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/event-intelligence/events`: Normalized NM-04 events with PI-24 status and provenance. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/event-intelligence/events/{event_id}`: One normalized event with source evidence and transitions. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/event-intelligence/timeline`: Event version, publication and processing timeline. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/event-intelligence/relevance`: Assess instrument, sector, market or insufficient event relevance. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/event-intelligence/impact`: Event impact channels and observed historical co-movement. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/event-intelligence/warnings`: Event-approaching, uncertainty and volatility warnings for a horizon. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/event-intelligence/features`: Point-in-time event feature snapshot for PI-04. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/event-intelligence/forecast-context`: Event-aware forecast context without forecast or model mutation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/event-intelligence/outcomes`: Record an observed event outcome from stored market bars. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/event-intelligence/outcomes/study`: Reproducible historical event-outcome study. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/event-intelligence/forecast-evaluation`: Event-aware versus non-event-aware forecast error comparison. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/event-intelligence/agents`: Read-only verified event evidence for existing PI-17 agents. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/event-intelligence/portfolio/{portfolio_id}/context`: Portfolio event exposure and uncertainty for PI-21/PI-22. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/event-intelligence/sync`: Normalize current NM-04 events into the PI-24 evidence store. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/event-intelligence/ingest`: Refresh an existing NM-04 feed and normalize its events. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/event-intelligence/analyze`: Run relevance, features, warnings, forecast context and agent evidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/event-intelligence/overview`: Event counts, status distribution and current warnings. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/event-intelligence/history`: Immutable PI-24 relevance, feature, warning and outcome records. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/event-intelligence/health`: PI-24 store integrity, counts and source errors. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/evaluations/status`: Forecast-evaluation counts, evidence sources and authority boundaries. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/evaluations/contracts`: Forecast-evaluation methodology, leakage controls and limitations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/evaluations`: List persisted forecast-evaluation reports, newest first. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/evaluations`: Evaluate stored forecasts and target outcomes without generating a forecast or trading. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/evaluations/{evaluation_id}`: One immutable forecast-evaluation report with provenance and metrics. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/evaluations/{evaluation_id}/verify`: Recompute the stored evaluation report hash; never overwrites the report. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/evaluations/{evaluation_id}/reproduce`: Re-run the stored evaluation configuration and compare its evidence hash. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/shadow/status`: Shadow session counts and non-execution guarantees. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/shadow/contracts`: Shadow lifecycle, pipeline, projection semantics and safety boundaries. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /market/shadow/sessions`: Create a non-executing shadow session with an immutable baseline. *(frontend: no web panel - API/CLI or infrastructure)*

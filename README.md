@@ -6,7 +6,7 @@ NovaMarket is a standalone web application for market research, portfolio constr
 
 > **Safety boundary:** NovaMarket has no broker client, no live-order route and no real-money trading path. `GET /market/execution/status` reports `paper_only: true`, `live_trading: false` and `broker_connected: false`. Paper fills are simulation results, not exchange executions. Market-data availability does not imply live trading capability.
 
-**Status:** NM-01 through NM-14 accepted baseline, 9 November 2026. Final acceptance is **PASS within internal acceptance scope**: 25/25 routes, 480/480 recorded controls, 792 passed tests and 2 skipped. External WCAG certification and independent penetration testing are **not** claimed. See [Release Notes](docs/RELEASE_NOTES.md) and the [NM-14 final report](docs/NM14_FINAL_ACCEPTANCE_REPORT.md).
+**Status:** NM-01 through NM-14 accepted baseline (9 November 2026), extended by the PI-01 through PI-24 prediction-intelligence roadmap (18 November 2026). NM-14 acceptance is **PASS within internal acceptance scope** (25/25 routes, 480/480 recorded controls, 792 passed tests, 2 skipped); PI-24 closes at **PASS for implementation and integration scope**, with its production/live-data qualification **PARTIAL**. The generated API reference covers **933 routes**. External WCAG certification and independent penetration testing are **not** claimed. See [Release Notes](docs/RELEASE_NOTES.md), the [NM-14 final report](docs/NM14_FINAL_ACCEPTANCE_REPORT.md) and the [PI-24 final report](docs/PI24_FINAL_COMPLETION_REPORT.md).
 
 ![NovaMarket dashboard](docs/screenshots/dashboard-desktop.png)
 
@@ -25,6 +25,11 @@ NovaMarket combines one backend service with one React frontend:
 - **Backtesting:** isolated point-in-time replay with costs, risk decisions and reproducibility checks.
 - **Shadow mode:** hypothetical decisions and projections with no wallet, ledger, portfolio or execution gateway.
 - **Adaptive learning:** evidence, experiments, candidate evaluation, governance, versioning and rollback.
+- **Event intelligence:** ingestion, normalization, classification, verification, instrument/sector mapping, impact, timeline and outcome tracking over NM-04 evidence.
+- **Prediction intelligence:** point-in-time datasets, features and regimes; statistical, gradient-boosting and LSTM models; ensembles with calibration, disagreement and uncertainty; chronological evaluation, research, filings and event-aware outcomes.
+- **Forecast optimization:** PI-23 selection, reliability, calibration, drift and fallback records, exposed to decisions as **read-only evidence**.
+- **Autonomous management and risk intelligence:** PI-21 review cycles, capital allocation and advisory proposals; PI-22 explainable position, concentration, correlation, volatility, scenario and liquidity risk.
+- **Scheduling and dashboards:** PI-09/PI-10 lifecycle checkpoints, PI-16 drift and degradation monitoring, and consolidated dashboard and alert surfaces.
 
 NovaMarket does **not** provide real-money execution, a brokerage connection, bank rails, investment advice or guaranteed returns.
 
@@ -51,6 +56,13 @@ NovaMarket does **not** provide real-money execution, a brokerage connection, ba
 | Shadow | Non-executing sessions, decisions, projections, outcomes, comparisons and health |
 | Learning | Evidence, experiments, candidate evaluation, approval, promotion, rollback and monitoring |
 | Operations | Health, capabilities, activity, audit, notifications and lifecycle controls |
+| Event intelligence | Event ingestion, normalization, classification, verification, instrument/sector mapping, impact, timeline and outcomes |
+| Prediction intelligence | Datasets, features/regimes, statistical, gradient and LSTM models, ensembles, chronological evaluation and event-aware outcomes |
+| Forecast optimization | PI-23 selection, reliability, calibration, drift and fallback records, surfaced as read-only decision evidence |
+| Portfolio management | PI-21 review cycles, allocation, rebalance proposals, attribution and advisory hand-off |
+| Risk intelligence | PI-22 position, concentration, correlation, volatility, scenario, stress and liquidity analytics with explicit evidence gaps |
+| Research and filings | Company research, filing ingestion and evidence libraries |
+| Scheduling and dashboard | Lifecycle checkpoints, drift monitoring, consolidated dashboards, alerts and notifications |
 
 ## Architecture at a glance
 
@@ -142,9 +154,14 @@ The Vite UI is the primary interface. The FastAPI root (`/`) belongs to NovaCont
 
 NovaMarket configuration is validated, versioned and persisted in `data/novamarket.json`; its live view is `GET /market/config`. The default mode is `observe`; `live` is refused and `paper` is reserved by the contract. Runtime financial state lives in:
 
-- `data/novamarket.sqlite3` — market data, radar, discovery, forecasts, wallets, ledger, portfolios, risk, strategies and paper execution.
+- `data/novamarket.sqlite3` — market data, radar, discovery, forecasts, wallets, ledger, portfolios, risk, strategies, decisions and paper execution.
 - `data/novamarket_shadow.sqlite3` — shadow sessions and decisions.
 - `data/novamarket_learning.sqlite3` — learning evidence, experiments, candidates and versions.
+- `data/novamarket_forecast_intelligence.sqlite3` — PI-23 selection, reliability and fallback evidence.
+- `data/novamarket_risk_intelligence.sqlite3` — PI-22 risk assessments and snapshots.
+- `data/novamarket_portfolio_management.sqlite3` — PI-21 review cycles, capital and snapshots.
+- `data/novamarket_event_intelligence.sqlite3` — PI-24 event evidence and outcomes.
+- `data/novamarket_evaluation.sqlite3`, `data/novamarket_research.sqlite3`, `data/novamarket_rl.sqlite3`, `data/novamarket_adaptive.sqlite3`, `data/novamarket_multiagent.sqlite3`, `data/novamarket_optimization.sqlite3`, `data/novamarket_dashboard.sqlite3` — PI-11 evaluation, research, RL, adaptive learning, multi-agent, optimisation and dashboard stores.
 - `data/audit/audit.jsonl` — shared NovaControl audit trail.
 
 The isolated `.ui_audit/` directory contains acceptance evidence and a separate SQLite database. It is **not** the normal runtime database.
@@ -212,6 +229,9 @@ These checks verify software behavior. They do **not** constitute an external ac
 | [Developer Guide](docs/DEVELOPER_GUIDE.md) | Development, adding routes/pages, tests, builds and safe financial changes |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Symptoms, supported causes, diagnostics and safe resolutions |
 | [Release Notes](docs/RELEASE_NOTES.md) | NM-14 acceptance baseline, evidence, performance and limitations |
+| [PI-24 final report](docs/PI24_FINAL_COMPLETION_REPORT.md) | PI-01 through PI-24 reconciliation, event-aware intelligence, verdict and limitations |
+| [Prediction Intelligence architecture](docs/PREDICTION_INTELLIGENCE_ARCHITECTURE.md) | Datasets, models, ensembles, evaluation, forecast optimisation and decision evidence |
+| [Filings](docs/FILINGS.md) | Filing ingestion, evidence and research integration |
 | [Documentation Completion Report](docs/DOCUMENTATION_COMPLETION_REPORT.md) | What was documented, verified and left open |
 
 ## Known limitations
@@ -223,6 +243,8 @@ These checks verify software behavior. They do **not** constitute an external ac
 - **EOD/delayed market data.** Quotes are observations at their timestamps; freshness must be checked before use.
 - **Provider dependence.** Yahoo/CoinGecko availability and rate limits are outside NovaMarket's control.
 - **Internal reviews only.** Accessibility and security results are automated/internal, not certifications.
+- **PI-23 evidence scope is unresolved in production.** Decision signals carry the portfolio horizon (`short_term`, `medium_term`, `long_term`) while PI-23 records are keyed by `5m`…`90d`; the live decision path therefore records `unknown horizon 'short_term'` and attaches no evidence until a scope rule is chosen.
+- **AT-03 candidate selection is blocked by an exchange-identifier mismatch.** Monitoring stores venue codes (`NSE`, `BSE`) while instrument ids are MIC-prefixed (`XNSE:`, `XBOM:`), so a real monitoring cycle produces no decision candidates. Both items are open defects found in live verification.
 - **No investment advice.** Backtests and forecasts are research outputs, not promises.
 
 ## License and ownership

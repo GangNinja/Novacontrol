@@ -30,6 +30,8 @@ from novacontrol.api.route_consumers import ROUTE_CONSUMERS
 from novacontrol.application import NovaControlApplication
 from novacontrol.browser import NoopBrowserRunner
 from novacontrol.desktop import NoopDesktopRunner
+from novacontrol.novamarket.prediction.models import ForecastOutput
+from novacontrol.novamarket.scheduling.models import ForecastOutcome
 
 _MARKET_ROUTES = {
     # NM-12: Shadow Mode's non-executing surface.
@@ -116,6 +118,14 @@ _MARKET_ROUTES = {
     ("GET", "/market/backtests/{backtest_id}/data-quality"),
     ("GET", "/market/backtests/{backtest_id}/verify"),
     ("POST", "/market/backtests/{backtest_id}/sensitivity"),
+    # PI-11: forecast evaluation over existing forecast stores.
+    ("GET", "/market/evaluations/status"),
+    ("GET", "/market/evaluations/contracts"),
+    ("GET", "/market/evaluations"),
+    ("POST", "/market/evaluations"),
+    ("GET", "/market/evaluations/{evaluation_id}"),
+    ("GET", "/market/evaluations/{evaluation_id}/verify"),
+    ("POST", "/market/evaluations/{evaluation_id}/reproduce"),
     ("GET", "/market/strategies/catalog"),
     ("GET", "/market/strategies"),
     ("POST", "/market/strategies"),
@@ -240,6 +250,22 @@ _MARKET_ROUTES = {
     ("POST", "/market/forecasts/models/{model_id}/promote"),
     ("GET", "/market/forecasts/{forecast_id}"),
     ("GET", "/market/forecasts/{forecast_id}/outcome"),
+    ("GET", "/market/forecasts/{forecast_id}/explain"),
+    # PI-09: durable forecast lifecycle scheduling.
+    ("POST", "/market/forecasts/cycles"),
+    ("GET", "/market/forecasts/cycles"),
+    ("GET", "/market/forecasts/cycles/{cycle_id}"),
+    ("GET", "/market/forecasts/scheduler"),
+    ("POST", "/market/forecasts/scheduler/tick"),
+    ("GET", "/market/forecasts/missed"),
+    ("GET", "/market/forecasts/evaluations/pending"),
+    ("GET", "/market/forecasts/accuracy"),
+    # PI-10: swing and long-term horizons.
+    ("POST", "/market/forecasts/horizons"),
+    ("GET", "/market/forecasts/horizons/status"),
+    ("GET", "/market/forecasts/horizons/performance"),
+    ("GET", "/market/forecasts/horizons/{instrument_id}/context"),
+    ("GET", "/market/forecasts/horizons/{instrument_id}"),
     ("POST", "/market/portfolios"),
     ("GET", "/market/portfolios"),
     ("GET", "/market/portfolios/status"),
@@ -257,6 +283,105 @@ _MARKET_ROUTES = {
     ("POST", "/market/portfolios/{portfolio_id}/apply"),
     ("POST", "/market/portfolios/{portfolio_id}/status"),
     ("POST", "/market/portfolios/{portfolio_id}/close"),
+    # PI-13: isolated RL research (no production execution authority).
+    ("GET", "/market/rl/status"),
+    ("GET", "/market/rl/contracts"),
+    ("GET", "/market/rl/health"),
+    ("POST", "/market/rl/environments"),
+    ("GET", "/market/rl/environments"),
+    ("GET", "/market/rl/environments/{environment_id}"),
+    ("POST", "/market/rl/environments/{environment_id}/episodes"),
+    ("GET", "/market/rl/episodes"),
+    ("GET", "/market/rl/episodes/{episode_id}"),
+    ("POST", "/market/rl/episodes/{episode_id}/step"),
+    ("POST", "/market/rl/episodes/{episode_id}/reset"),
+    ("POST", "/market/rl/episodes/{episode_id}/cancel"),
+    ("GET", "/market/rl/episodes/{episode_id}/transitions"),
+    ("GET", "/market/rl/episodes/{episode_id}/experiences"),
+    # PI-15: isolated training and experimental policy research.
+    ("GET", "/market/training/status"),
+    ("GET", "/market/training/contracts"),
+    ("GET", "/market/training/health"),
+    ("GET", "/market/training/configurations"),
+    ("POST", "/market/training/configurations"),
+    ("GET", "/market/training/configurations/{config_id}"),
+    ("POST", "/market/training/validate"),
+    ("GET", "/market/training/runs"),
+    ("POST", "/market/training/runs"),
+    ("GET", "/market/training/runs/{run_id}"),
+    ("GET", "/market/training/runs/{run_id}/metrics"),
+    ("GET", "/market/training/runs/{run_id}/checkpoints"),
+    ("POST", "/market/training/runs/{run_id}/checkpoints"),
+    ("POST", "/market/training/runs/{run_id}/pause"),
+    ("POST", "/market/training/runs/{run_id}/resume"),
+    ("POST", "/market/training/runs/{run_id}/cancel"),
+    ("POST", "/market/training/runs/{run_id}/retry"),
+    ("GET", "/market/training/checkpoints/{checkpoint_id}"),
+    ("POST", "/market/training/checkpoints/{checkpoint_id}/resume"),
+    ("POST", "/market/training/optimize"),
+    ("GET", "/market/training/searches/{search_id}"),
+    ("GET", "/market/training/evaluations"),
+    # PI-16: advisory adaptive-intelligence surface.
+    ("GET", "/market/adaptive/status"),
+    ("GET", "/market/adaptive/contracts"),
+    ("GET", "/market/adaptive/health"),
+    ("GET", "/market/adaptive/dashboard"),
+    ("POST", "/market/adaptive/configurations"),
+    ("GET", "/market/adaptive/configurations"),
+    ("GET", "/market/adaptive/configurations/{config_id}"),
+    ("POST", "/market/adaptive/regime/analyze"),
+    ("GET", "/market/adaptive/regime/latest"),
+    ("POST", "/market/adaptive/regime/annotations"),
+    ("GET", "/market/adaptive/regime/annotations"),
+    ("POST", "/market/adaptive/regime/evaluations"),
+    ("GET", "/market/adaptive/regime/evaluations"),
+    ("POST", "/market/adaptive/experiences/query"),
+    ("POST", "/market/adaptive/changes/detect"),
+    ("GET", "/market/adaptive/changes"),
+    ("POST", "/market/adaptive/drift/detect"),
+    ("GET", "/market/adaptive/drift"),
+    ("POST", "/market/adaptive/degradation/monitor"),
+    ("GET", "/market/adaptive/degradation"),
+    ("POST", "/market/adaptive/suitability/assess"),
+    ("GET", "/market/adaptive/suitability"),
+    ("POST", "/market/adaptive/recommendations"),
+    ("GET", "/market/adaptive/recommendations"),
+    ("POST", "/market/adaptive/recommendations/{recommendation_id}/acknowledge"),
+    ("POST", "/market/adaptive/retraining"),
+    ("GET", "/market/adaptive/retraining"),
+    ("POST", "/market/adaptive/reassessments"),
+    ("GET", "/market/adaptive/reassessments"),
+    ("POST", "/market/adaptive/reassessments/{reassessment_id}/run"),
+    ("GET", "/market/adaptive/reassessments/{reassessment_id}"),
+    ("GET", "/market/training/policies"),
+    ("GET", "/market/training/policies/{policy_id}"),
+    ("POST", "/market/training/policies/{policy_id}/validate"),
+    ("POST", "/market/training/policies/{policy_id}/test"),
+    ("POST", "/market/training/policies/{policy_id}/archive"),
+    ("POST", "/market/training/compare"),
+    # PI-20: unified read-only prediction intelligence dashboard.
+    ("GET", "/market/intelligence/status"),
+    ("GET", "/market/intelligence/contracts"),
+    ("GET", "/market/intelligence/navigation"),
+    ("GET", "/market/intelligence/overview"),
+    ("GET", "/market/intelligence/instruments/{instrument_id}"),
+    ("GET", "/market/intelligence/forecasts"),
+    ("GET", "/market/intelligence/compare"),
+    ("GET", "/market/intelligence/horizons/{instrument_id}"),
+    ("GET", "/market/intelligence/lifecycle"),
+    ("GET", "/market/intelligence/performance"),
+    ("GET", "/market/intelligence/regimes"),
+    ("GET", "/market/intelligence/decisions"),
+    ("GET", "/market/intelligence/decisions/{cycle_id}"),
+    ("GET", "/market/intelligence/explain/{subject_id}"),
+    ("GET", "/market/intelligence/attribution/{forecast_id}"),
+    ("GET", "/market/intelligence/evidence/{subject_id}"),
+    ("GET", "/market/intelligence/research"),
+    ("GET", "/market/intelligence/portfolio"),
+    ("GET", "/market/intelligence/policies"),
+    ("GET", "/market/intelligence/replay/{cycle_id}"),
+    ("GET", "/market/intelligence/filters"),
+    ("PUT", "/market/intelligence/filters"),
 }
 
 
@@ -376,6 +501,23 @@ class NovaMarketStatusApiTests(_MarketApiCase):
                 "market.learning.run",
                 "market.learning.manage",
                 "market.learning.approve",
+                # PI-01: prediction contracts and immutable evidence.
+                "market.prediction.read",
+                "market.prediction.run",
+                "market.prediction.models",
+                "market.prediction.evidence",
+                # PI-02: versioned historical datasets.
+                "market.dataset.read",
+                "market.dataset.build",
+                "market.dataset.manage",
+                # PI-03: the controlled low-latency gateway.
+                "market.gateway.read",
+                "market.gateway.intraday",
+                "market.gateway.manage",
+                # PI-04: features and market regimes.
+                "market.feature.read",
+                "market.feature.generate",
+                "market.feature.manage",
             },
         )
         self.assertTrue(capabilities["market.status"]["available"])
@@ -409,7 +551,7 @@ class NovaMarketContractApiTests(_MarketApiCase):
         self.assertEqual(body["money"]["exchange_rate"], "1 NC = ₹1")
         self.assertEqual(body["permissions"]["real_money_trading"], False)
 
-        self.assertEqual(len(body["events"]["implemented"]), 168)
+        self.assertEqual(len(body["events"]["implemented"]), 196)
         implemented = {spec["name"] for spec in body["events"]["implemented"]}
         self.assertIn("novamarket.data.available", implemented)
         self.assertIn("novamarket.data.freshness_changed", implemented)
@@ -642,6 +784,58 @@ class NovaMarketWorkspaceApiTests(_MarketApiCase):
         )
 
 
+class MultiAgentApiTests(_MarketApiCase):
+    """PI-17's HTTP surface drives the coordinator without financial mutation."""
+
+    def test_cycle_is_advisory_and_leaves_financial_state_untouched(self) -> None:
+        assert self._nova is not None
+        wallet_before = self._nova.novamarket.wallet_status()
+        portfolios_before = self._nova.novamarket.portfolio_status()
+
+        status = self._client.get("/market/multiagent/status")
+        self.assertEqual(status.status_code, 200, status.text)
+        self.assertEqual(status.json()["phase"], "PI-17")
+        self.assertTrue(status.json()["advisory_only"])
+        self.assertFalse(status.json()["production_authority"])
+
+        created = self._client.post(
+            "/market/multiagent/cycles",
+            json={
+                "instrument_id": "XNSE:ALPHA",
+                "exchange": "XNSE",
+                "horizon": "5d",
+            },
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        cycle_id = created.json()["cycle"]["cycle_id"]
+
+        run = self._client.post(f"/market/multiagent/cycles/{cycle_id}/run", json={})
+        self.assertEqual(run.status_code, 200, run.text)
+        body = run.json()
+        self.assertIn(body["cycle"]["status"], {"completed", "degraded"})
+        self.assertEqual(body["decision"]["action"], "no_action")
+        self.assertIsNone(body["decision"]["confidence"])
+
+        handoff = self._client.get(
+            f"/market/multiagent/cycles/{cycle_id}/handoff"
+        )
+        self.assertEqual(handoff.status_code, 200, handoff.text)
+        self.assertTrue(handoff.json()["advisory_only"])
+        self.assertFalse(handoff.json()["production_authority"])
+        self.assertFalse(handoff.json()["order_submitted"])
+
+        evidence = self._client.get(
+            f"/market/multiagent/cycles/{cycle_id}/evidence"
+        )
+        self.assertEqual(evidence.status_code, 200, evidence.text)
+        self.assertGreaterEqual(evidence.json()["count"], 0)
+        missing = self._client.get("/market/multiagent/cycles/not_a_cycle")
+        self.assertEqual(missing.status_code, 404)
+
+        self.assertEqual(self._nova.novamarket.wallet_status(), wallet_before)
+        self.assertEqual(self._nova.novamarket.portfolio_status(), portfolios_before)
+
+
 class NovaMarketCorsTests(unittest.TestCase):
     """CORS is opt-in, exact and never a wildcard."""
 
@@ -779,7 +973,248 @@ class NovaMarketLifecycleApiTests(_MarketApiCase):
             ),
             1,
         )
-        self.assertEqual(len(self._status()["capabilities"]), 47)
+        self.assertEqual(len(self._status()["capabilities"]), 60)
+
+
+@unittest.skipIf(TestClient is None, "fastapi.testclient requires httpx")
+class PredictionEvaluationApiTests(_MarketApiCase):
+    """PI-11's evaluation surface persists and verifies explicit evidence."""
+
+    @staticmethod
+    def _record(
+        index: int,
+        predicted: str = "101",
+        *,
+        model_id: str = "fixture_model",
+        ensemble_id: str = "",
+    ) -> dict[str, Any]:
+        generated = datetime(2026, 1, 5 + index, 10, 0, tzinfo=UTC)
+        return {
+            "forecast_id": f"api_fx_{index}",
+            "source": "records",
+            "origin": "synthetic_fixture",
+            "instrument_id": "XNSE:ALPHA",
+            "horizon": "5d",
+            "generated_at": generated.isoformat(),
+            "target_at": (generated + timedelta(days=5)).isoformat(),
+            "reference_at": generated.isoformat(),
+            "actual_observed_at": (generated + timedelta(days=5)).isoformat(),
+            "reference_price": 100,
+            "predicted_price": predicted,
+            "actual_price": 100,
+            "predicted_return": 0.01,
+            "actual_return": 0.0,
+            "predicted_direction": "up",
+            "p_up": 0.6,
+            "p_down": 0.3,
+            "p_neutral": 0.1,
+            "probability_status": "calibrated",
+            "interval_lower": -0.05,
+            "interval_upper": 0.08,
+            "model_id": model_id,
+            "ensemble_id": ensemble_id,
+            "dataset_version": "fixture-ds-1",
+            "feature_set_version": "fixture-fs-1",
+        }
+
+    def test_evaluation_create_verify_and_reproduce(self) -> None:
+        payload = {
+            "name": "HTTP fixture evaluation",
+            "sources": ["records"],
+            "record_origin": "synthetic_fixture",
+            "as_of": datetime(2026, 2, 1, tzinfo=UTC).isoformat(),
+            "min_samples": 2,
+            "records": [self._record(0), self._record(1, "99")],
+        }
+        created = self._client.post("/market/evaluations", json=payload)
+        self.assertEqual(created.status_code, 200, created.text)
+        body = created.json()
+        self.assertEqual(body["samples"], 2)
+        self.assertEqual(body["phase"], "PI-11")
+        self.assertEqual(body["source_summary"]["counts"]["records"], 2)
+        self.assertIn("price", body["metrics"])
+        self.assertFalse(body["metrics"]["models"]["automatic_promotion"])
+
+        listing = self._client.get("/market/evaluations")
+        self.assertEqual(listing.status_code, 200, listing.text)
+        self.assertEqual(listing.json()["total"], 1)
+        status = self._client.get("/market/evaluations/status")
+        self.assertEqual(status.status_code, 200, status.text)
+        self.assertEqual(status.json()["evaluations"]["total"], 1)
+
+        detail = self._client.get(f"/market/evaluations/{body['evaluation_id']}")
+        self.assertEqual(detail.status_code, 200, detail.text)
+        self.assertEqual(detail.json()["report_hash"], body["report_hash"])
+
+        verify = self._client.get(
+            f"/market/evaluations/{body['evaluation_id']}/verify"
+        )
+        self.assertEqual(verify.status_code, 200, verify.text)
+        self.assertTrue(verify.json()["ok"])
+
+        before_replay = self._client.get("/market/evaluations/status").json()
+        replay = self._client.post(
+            f"/market/evaluations/{body['evaluation_id']}/reproduce"
+        )
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertTrue(replay.json()["ok"], replay.text)
+        self.assertTrue(replay.json()["same_data_digest"])
+        after_replay = self._client.get("/market/evaluations/status").json()
+        self.assertEqual(
+            after_replay["evaluations"]["total"],
+            before_replay["evaluations"]["total"],
+        )
+
+    def test_string_source_filter_is_normalized(self) -> None:
+        created = self._client.post(
+            "/market/evaluations",
+            json={
+                "sources": "records",
+                "as_of": datetime(2026, 2, 1, tzinfo=UTC).isoformat(),
+                "partial": 1,
+                "records": [self._record(0), self._record(1, "99")],
+            },
+        )
+        # Unknown config fields are still rejected before evaluation.
+        self.assertEqual(created.status_code, 422, created.text)
+        created = self._client.post(
+            "/market/evaluations",
+            json={
+                "sources": "records",
+                "as_of": datetime(2026, 2, 1, tzinfo=UTC).isoformat(),
+                "records": [self._record(0), self._record(1, "99")],
+            },
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        self.assertEqual(created.json()["samples"], 2)
+
+    def test_model_and_ensemble_filters_are_persisted_and_applied(self) -> None:
+        model_payload = {
+            "sources": ["records"],
+            "record_origin": "synthetic_fixture",
+            "as_of": datetime(2026, 2, 1, tzinfo=UTC).isoformat(),
+            "models": ["model_a"],
+            "records": [
+                self._record(0, model_id="model_a"),
+                self._record(1, "99", model_id="model_b"),
+            ],
+        }
+        created = self._client.post("/market/evaluations", json=model_payload)
+        self.assertEqual(created.status_code, 200, created.text)
+        body = created.json()
+        self.assertEqual(body["samples"], 1)
+        self.assertEqual(body["config"]["models"], ["model_a"])
+        self.assertEqual(body["records_sample"][0]["model_id"], "model_a")
+
+        ensemble_payload = {
+            "sources": ["records"],
+            "record_origin": "synthetic_fixture",
+            "as_of": datetime(2026, 2, 1, tzinfo=UTC).isoformat(),
+            "models": ["ens_api"],
+            "records": [
+                self._record(0, model_id="", ensemble_id="ens_api"),
+                self._record(1, "99", model_id="", ensemble_id="ens_other"),
+            ],
+        }
+        created = self._client.post("/market/evaluations", json=ensemble_payload)
+        self.assertEqual(created.status_code, 200, created.text)
+        body = created.json()
+        self.assertEqual(body["samples"], 1)
+        self.assertEqual(body["config"]["models"], ["ens_api"])
+        self.assertEqual(body["records_sample"][0]["ensemble_id"], "ens_api")
+
+    def test_invalid_configuration_is_422_and_unknown_is_404(self) -> None:
+        bad = self._client.post(
+            "/market/evaluations",
+            json={"sources": ["records"], "unknown_field": 1},
+        )
+        self.assertEqual(bad.status_code, 422, bad.text)
+        empty_sources = self._client.post(
+            "/market/evaluations", json={"sources": []}
+        )
+        self.assertEqual(empty_sources.status_code, 422, empty_sources.text)
+        missing = self._client.get("/market/evaluations/pev_missing")
+        self.assertEqual(missing.status_code, 404, missing.text)
+
+    def test_status_contract_and_authority_are_explicit(self) -> None:
+        status = self._client.get("/market/evaluations/status")
+        self.assertEqual(status.status_code, 200, status.text)
+        self.assertEqual(status.json()["authority"]["execution_authority"], "NM-10")
+        contract = self._client.get("/market/evaluations/contracts")
+        self.assertEqual(contract.status_code, 200, contract.text)
+        self.assertEqual(contract.json()["phase"], "PI-11")
+        self.assertTrue(contract.json()["authority"]["paper_only"])
+
+
+class AdaptiveIntelligenceApiTests(_MarketApiCase):
+    """The PI-16 API is real, authenticated and advisory-only."""
+
+    def test_status_is_available_before_initialisation(self) -> None:
+        response = self._client.get("/market/adaptive/status")
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["phase"], "PI-16")
+        self.assertFalse(body["production_authority"])
+        self.assertFalse(body["activation_available"])
+
+    def test_drift_detection_persists_evidence(self) -> None:
+        start = datetime(2025, 1, 1, tzinfo=UTC)
+        reference = [
+            {
+                "timestamp": (start + timedelta(days=index)).isoformat(),
+                "returns": 0.001,
+                "features": {"rsi_14": 50.0},
+            }
+            for index in range(20)
+        ]
+        current = [
+            {
+                "timestamp": (start + timedelta(days=30 + index)).isoformat(),
+                "returns": 0.03,
+                "features": {"rsi_14": 80.0},
+            }
+            for index in range(20)
+        ]
+        response = self._client.post(
+            "/market/adaptive/drift/detect",
+            json={
+                "scope": "XNSE:ALPHA",
+                "kind": "data",
+                "as_of": (start + timedelta(days=80)).isoformat(),
+                "reference": reference,
+                "current": current,
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["drift"]["status"], "data_drift")
+        listing = self._client.get("/market/adaptive/drift?limit=10")
+        self.assertEqual(listing.status_code, 200, listing.text)
+        self.assertGreaterEqual(listing.json()["total"], 1)
+
+    def test_forbidden_automatic_promotion_is_422(self) -> None:
+        response = self._client.post(
+            "/market/adaptive/configurations",
+            json={"automatic_promotion": True},
+        )
+        self.assertEqual(response.status_code, 422, response.text)
+
+    def test_unknown_reassessment_is_404(self) -> None:
+        response = self._client.get("/market/adaptive/reassessments/ada_missing")
+        self.assertEqual(response.status_code, 404, response.text)
+
+    def test_no_activation_route_exists(self) -> None:
+        paths = {
+            route.path
+            for route in ApiSurface.default().routes
+            if route.path.startswith("/market/adaptive/")
+        }
+        for forbidden in (
+            "/market/adaptive/activate",
+            "/market/adaptive/promote",
+            "/market/adaptive/orders",
+            "/market/adaptive/execute",
+        ):
+            self.assertNotIn(forbidden, paths)
 
 
 class NovaMarketRouteContractTests(unittest.TestCase):
@@ -788,7 +1223,7 @@ class NovaMarketRouteContractTests(unittest.TestCase):
     def test_every_market_route_is_on_the_api_surface(self) -> None:
         routes = {(route.method, route.path) for route in ApiSurface.default().routes}
         self.assertEqual(routes & _MARKET_ROUTES, _MARKET_ROUTES)
-        self.assertEqual(len(_MARKET_ROUTES), 223)
+        self.assertEqual(len(_MARKET_ROUTES), 339)
 
     def test_every_market_route_declares_a_non_render_consumer(self) -> None:
         for route in _MARKET_ROUTES:
@@ -805,6 +1240,114 @@ class NovaMarketRouteContractTests(unittest.TestCase):
             paths,
             {
                 "/market/status",
+                "/market/adaptive/status",
+                "/market/adaptive/contracts",
+                "/market/adaptive/health",
+                "/market/adaptive/dashboard",
+                "/market/adaptive/configurations",
+                "/market/adaptive/configurations/{config_id}",
+                "/market/adaptive/regime/analyze",
+                "/market/adaptive/regime/latest",
+                "/market/adaptive/regime/annotations",
+                "/market/adaptive/regime/evaluations",
+                "/market/adaptive/experiences/query",
+                "/market/adaptive/changes/detect",
+                "/market/adaptive/changes",
+                "/market/adaptive/drift/detect",
+                "/market/adaptive/drift",
+                "/market/adaptive/degradation/monitor",
+                "/market/adaptive/degradation",
+                "/market/adaptive/suitability/assess",
+                "/market/adaptive/suitability",
+                "/market/adaptive/recommendations",
+                "/market/adaptive/recommendations/{recommendation_id}/acknowledge",
+                "/market/adaptive/retraining",
+                "/market/adaptive/reassessments",
+                "/market/adaptive/reassessments/{reassessment_id}/run",
+                "/market/adaptive/reassessments/{reassessment_id}",
+                "/market/multiagent/status",
+                "/market/multiagent/contracts",
+                "/market/multiagent/health",
+                "/market/multiagent/agents",
+                "/market/multiagent/agents/{agent_id}",
+                "/market/multiagent/agents/{agent_id}/config",
+                "/market/multiagent/cycles",
+                "/market/multiagent/cycles/{cycle_id}",
+                "/market/multiagent/cycles/{cycle_id}/agents",
+                "/market/multiagent/cycles/{cycle_id}/run",
+                "/market/multiagent/cycles/{cycle_id}/cancel",
+                "/market/multiagent/cycles/{cycle_id}/evidence",
+                "/market/multiagent/cycles/{cycle_id}/conflicts",
+                "/market/multiagent/cycles/{cycle_id}/decision",
+                "/market/multiagent/cycles/{cycle_id}/handoff",
+                "/market/multiagent/history",
+                "/market/multiagent/performance",
+                "/market/multiagent/performance/{agent_id}",
+                "/market/optimization/status",
+                "/market/optimization/contracts",
+                "/market/optimization/health",
+                "/market/optimization/configs",
+                "/market/optimization/configs/{config_id}",
+                "/market/optimization/validate",
+                "/market/optimization/runs",
+                "/market/optimization/history",
+                "/market/optimization/latest",
+                "/market/optimization/runs/{run_id}",
+                "/market/optimization/runs/{run_id}/allocations",
+                "/market/optimization/runs/{run_id}/diversification",
+                "/market/optimization/runs/{run_id}/risk",
+                "/market/optimization/runs/{run_id}/liquidity",
+                "/market/optimization/runs/{run_id}/rebalancing",
+                "/market/optimization/runs/{run_id}/scenarios",
+                "/market/optimization/runs/{run_id}/backtests",
+                "/market/optimization/runs/{run_id}/handoff",
+                "/market/optimization/runs/{run_id}/cancel",
+                "/market/optimization/backtests",
+                "/market/optimization/backtests/{backtest_id}",
+                "/market/intelligence/status",
+                "/market/intelligence/contracts",
+                "/market/intelligence/navigation",
+                "/market/intelligence/overview",
+                "/market/intelligence/instruments/{instrument_id}",
+                "/market/intelligence/forecasts",
+                "/market/intelligence/compare",
+                "/market/intelligence/horizons/{instrument_id}",
+                "/market/intelligence/lifecycle",
+                "/market/intelligence/performance",
+                "/market/intelligence/regimes",
+                "/market/intelligence/decisions",
+                "/market/intelligence/decisions/{cycle_id}",
+                "/market/intelligence/explain/{subject_id}",
+                "/market/intelligence/attribution/{forecast_id}",
+                "/market/intelligence/evidence/{subject_id}",
+                "/market/intelligence/research",
+                "/market/intelligence/portfolio",
+                "/market/intelligence/policies",
+                "/market/intelligence/replay/{cycle_id}",
+                "/market/intelligence/filters",
+                "/market/research/status",
+                "/market/research/contracts",
+                "/market/research/health",
+                "/market/research/runs",
+                "/market/research/runs/{run_id}",
+                "/market/research/runs/{run_id}/run",
+                "/market/research/runs/{run_id}/cancel",
+                "/market/research/runs/{run_id}/refresh",
+                "/market/research/runs/{run_id}/company",
+                "/market/research/runs/{run_id}/financials",
+                "/market/research/runs/{run_id}/events",
+                "/market/research/runs/{run_id}/news",
+                "/market/research/runs/{run_id}/sector",
+                "/market/research/runs/{run_id}/peers",
+                "/market/research/runs/{run_id}/valuation",
+                "/market/research/runs/{run_id}/thesis",
+                "/market/research/runs/{run_id}/evidence",
+                "/market/research/runs/{run_id}/claims",
+                "/market/research/runs/{run_id}/features",
+                "/market/research/runs/{run_id}/handoff",
+                "/market/research/history",
+                "/market/research/latest",
+                "/market/research/monitor",
                 "/market/overview",
                 "/market/contracts",
                 "/market/config",
@@ -871,6 +1414,19 @@ class NovaMarketRouteContractTests(unittest.TestCase):
                 "/market/forecasts/models/{model_id}/promote",
                 "/market/forecasts/{forecast_id}",
                 "/market/forecasts/{forecast_id}/outcome",
+                "/market/forecasts/{forecast_id}/explain",
+                "/market/forecasts/cycles",
+                "/market/forecasts/cycles/{cycle_id}",
+                "/market/forecasts/scheduler",
+                "/market/forecasts/scheduler/tick",
+                "/market/forecasts/missed",
+                "/market/forecasts/evaluations/pending",
+                "/market/forecasts/accuracy",
+                "/market/forecasts/horizons",
+                "/market/forecasts/horizons/status",
+                "/market/forecasts/horizons/performance",
+                "/market/forecasts/horizons/{instrument_id}/context",
+                "/market/forecasts/horizons/{instrument_id}",
                 "/market/portfolios",
                 "/market/portfolios/status",
                 "/market/portfolios/horizons",
@@ -962,6 +1518,12 @@ class NovaMarketRouteContractTests(unittest.TestCase):
                 "/market/backtests/{backtest_id}/data-quality",
                 "/market/backtests/{backtest_id}/verify",
                 "/market/backtests/{backtest_id}/sensitivity",
+                "/market/evaluations/status",
+                "/market/evaluations/contracts",
+                "/market/evaluations",
+                "/market/evaluations/{evaluation_id}",
+                "/market/evaluations/{evaluation_id}/verify",
+                "/market/evaluations/{evaluation_id}/reproduce",
                 "/market/shadow/status",
                 "/market/shadow/contracts",
                 "/market/shadow/sessions",
@@ -1033,7 +1595,68 @@ class NovaMarketRouteContractTests(unittest.TestCase):
                 "/market/autonomy/decisions/signals",
                 "/market/autonomy/decisions/proposals",
                 "/market/autonomy/decisions/proposals/{proposal_id}",
+                "/market/autonomy/decisions/predictions",
+                "/market/autonomy/decisions/predictions/{decision_id}",
+                "/market/autonomy/decisions/outcomes",
+                "/market/autonomy/decisions/outcomes/run",
+                "/market/autonomy/decisions/forecast-policy",
                 "/market/autonomy/decisions/run",
+                # PI-13: isolated RL research, not a production mutation path.
+                "/market/rl/status",
+                "/market/rl/contracts",
+                "/market/rl/health",
+                "/market/rl/environments",
+                "/market/rl/environments/{environment_id}",
+                "/market/rl/environments/{environment_id}/episodes",
+                "/market/rl/episodes",
+                "/market/rl/episodes/{episode_id}",
+                "/market/rl/episodes/{episode_id}/step",
+                "/market/rl/episodes/{episode_id}/reset",
+                "/market/rl/episodes/{episode_id}/cancel",
+                "/market/rl/episodes/{episode_id}/transitions",
+                "/market/rl/episodes/{episode_id}/experiences",
+                # PI-14: isolated reward and policy evaluation surfaces.
+                "/market/rewards/status",
+                "/market/rewards/contracts",
+                "/market/rewards/health",
+                "/market/rewards/baselines",
+                "/market/rewards/configurations",
+                "/market/rewards/configurations/{config_id}",
+                "/market/rewards/episodes/{episode_id}/calculate",
+                "/market/rewards/episodes/{episode_id}",
+                "/market/rewards/results/{reward_id}",
+                "/market/rewards/evaluations",
+                "/market/rewards/evaluations/cancel",
+                "/market/rewards/evaluations/{evaluation_id}",
+                "/market/rewards/comparisons",
+                "/market/rewards/stability",
+                "/market/rewards/walk-forward",
+                # PI-15: isolated training and experimental policy research.
+                "/market/training/status",
+                "/market/training/contracts",
+                "/market/training/health",
+                "/market/training/configurations",
+                "/market/training/configurations/{config_id}",
+                "/market/training/validate",
+                "/market/training/runs",
+                "/market/training/runs/{run_id}",
+                "/market/training/runs/{run_id}/metrics",
+                "/market/training/runs/{run_id}/checkpoints",
+                "/market/training/runs/{run_id}/pause",
+                "/market/training/runs/{run_id}/resume",
+                "/market/training/runs/{run_id}/cancel",
+                "/market/training/runs/{run_id}/retry",
+                "/market/training/checkpoints/{checkpoint_id}",
+                "/market/training/checkpoints/{checkpoint_id}/resume",
+                "/market/training/optimize",
+                "/market/training/searches/{search_id}",
+                "/market/training/evaluations",
+                "/market/training/policies",
+                "/market/training/policies/{policy_id}",
+                "/market/training/policies/{policy_id}/validate",
+                "/market/training/policies/{policy_id}/test",
+                "/market/training/policies/{policy_id}/archive",
+                "/market/training/compare",
                 # AT-04: paper execution through NM-10.
                 "/market/autonomy/executions/contracts",
                 "/market/autonomy/executions/status",
@@ -1055,6 +1678,104 @@ class NovaMarketRouteContractTests(unittest.TestCase):
                 "/market/autonomy/exits/decisions/{decision_id}/reconcile",
                 "/market/autonomy/exits/learning",
                 "/market/autonomy/exits/run",
+                # PI-21: advisory portfolio management, no direct order or
+                # financial mutation route.
+                "/market/portfolio-management/status",
+                "/market/portfolio-management/contracts",
+                "/market/portfolio-management/navigation",
+                "/market/portfolio-management/config",
+                "/market/portfolio-management/review",
+                "/market/portfolio-management/cycles",
+                "/market/portfolio-management/cycles/{cycle_id}",
+                "/market/portfolio-management/cycles/{cycle_id}/events",
+                "/market/portfolio-management/cycles/{cycle_id}/handoff",
+                "/market/portfolio-management/cycles/{cycle_id}/reconcile",
+                "/market/portfolio-management/recover",
+                "/market/portfolio-management/portfolios/{portfolio_id}/snapshot",
+                "/market/portfolio-management/portfolios/{portfolio_id}/positions",
+                "/market/portfolio-management/portfolios/{portfolio_id}/opportunities",
+                "/market/portfolio-management/portfolios/{portfolio_id}/decisions",
+                "/market/portfolio-management/portfolios/{portfolio_id}/capital",
+                "/market/portfolio-management/portfolios/{portfolio_id}/cash",
+                "/market/portfolio-management/portfolios/{portfolio_id}/exposure",
+                "/market/portfolio-management/portfolios/{portfolio_id}/rebalancing",
+                "/market/portfolio-management/portfolios/{portfolio_id}/analytics",
+                # PI-22: advisory risk intelligence, no direct order or
+                # financial mutation route.
+                "/market/risk-intelligence/status",
+                "/market/risk-intelligence/contracts",
+                "/market/risk-intelligence/navigation",
+                "/market/risk-intelligence/config",
+                "/market/risk-intelligence/analyze",
+                "/market/risk-intelligence/portfolios/{portfolio_id}/overview",
+                "/market/risk-intelligence/portfolios/{portfolio_id}/positions",
+                "/market/risk-intelligence/portfolios/{portfolio_id}/concentration",
+                "/market/risk-intelligence/portfolios/{portfolio_id}/correlation",
+                "/market/risk-intelligence/portfolios/{portfolio_id}/volatility",
+                "/market/risk-intelligence/portfolios/{portfolio_id}/drawdown",
+                "/market/risk-intelligence/portfolios/{portfolio_id}/liquidity",
+                "/market/risk-intelligence/portfolios/{portfolio_id}/regime",
+                "/market/risk-intelligence/portfolios/{portfolio_id}/history",
+                "/market/risk-intelligence/portfolios/{portfolio_id}/trend",
+                "/market/risk-intelligence/portfolios/{portfolio_id}/recommendations",
+                "/market/risk-intelligence/alerts",
+                "/market/risk-intelligence/alerts/{alert_id}/action",
+                "/market/risk-intelligence/scenarios",
+                "/market/risk-intelligence/portfolios/{portfolio_id}/scenarios/run",
+                "/market/risk-intelligence/portfolios/{portfolio_id}/scenario-runs",
+                "/market/risk-intelligence/portfolios/{portfolio_id}/stress-tests",
+                "/market/risk-intelligence/recover",
+                # PI-23: advisory forecast optimization, not an order or model
+                # promotion route.
+                "/market/forecast-intelligence/status",
+                "/market/forecast-intelligence/contracts",
+                "/market/forecast-intelligence/navigation",
+                "/market/forecast-intelligence/config",
+                "/market/forecast-intelligence/registry",
+                "/market/forecast-intelligence/history",
+                "/market/forecast-intelligence/overview",
+                "/market/forecast-intelligence/comparison/{instrument_id}",
+                "/market/forecast-intelligence/horizons/{instrument_id}",
+                "/market/forecast-intelligence/regimes/{instrument_id}",
+                "/market/forecast-intelligence/instruments",
+                "/market/forecast-intelligence/evaluate",
+                "/market/forecast-intelligence/select",
+                "/market/forecast-intelligence/calibration",
+                "/market/forecast-intelligence/uncertainty",
+                "/market/forecast-intelligence/disagreement",
+                "/market/forecast-intelligence/consistency",
+                "/market/forecast-intelligence/drift",
+                "/market/forecast-intelligence/degradation",
+                "/market/forecast-intelligence/weights",
+                "/market/forecast-intelligence/reliability",
+                "/market/forecast-intelligence/fallback",
+                "/market/forecast-intelligence/analyze",
+                "/market/forecast-intelligence/health",
+                # PI-24: advisory event intelligence over NM-04 evidence, with
+                # no forecast mutation, risk decision or order route.
+                "/market/event-intelligence/status",
+                "/market/event-intelligence/contracts",
+                "/market/event-intelligence/navigation",
+                "/market/event-intelligence/config",
+                "/market/event-intelligence/events",
+                "/market/event-intelligence/events/{event_id}",
+                "/market/event-intelligence/timeline",
+                "/market/event-intelligence/relevance",
+                "/market/event-intelligence/impact",
+                "/market/event-intelligence/warnings",
+                "/market/event-intelligence/features",
+                "/market/event-intelligence/forecast-context",
+                "/market/event-intelligence/outcomes",
+                "/market/event-intelligence/outcomes/study",
+                "/market/event-intelligence/forecast-evaluation",
+                "/market/event-intelligence/agents",
+                "/market/event-intelligence/portfolio/{portfolio_id}/context",
+                "/market/event-intelligence/sync",
+                "/market/event-intelligence/ingest",
+                "/market/event-intelligence/analyze",
+                "/market/event-intelligence/overview",
+                "/market/event-intelligence/history",
+                "/market/event-intelligence/health",
             },
         )
         self.assertNotIn("/market/trade/live", paths)
@@ -1658,6 +2379,145 @@ class ForecastApiTests(_MarketApiCase):
             json={"instrument_id": "XNSE:MISSING", "horizon": "next_session"},
         )
         self.assertEqual(response.status_code, 404)
+
+    def test_pfc_detail_and_outcome_read_the_lifecycle_store(self) -> None:
+        """PI-09 ``pfc_`` reads come from PI-01, not the PI-08 forecast store."""
+        assert self._nova is not None
+        store = self._nova.novamarket.prediction_service().store
+        now = datetime.now(UTC).replace(microsecond=0)
+
+        def forecast(
+            forecast_id: str, lifecycle_id: str, generated: datetime, target: datetime
+        ) -> ForecastOutput:
+            return ForecastOutput(
+                forecast_id=forecast_id,
+                lifecycle_id=lifecycle_id,
+                lifecycle_stage="t_minus_1",
+                instrument_id="XNSE:API09",
+                exchange="XNSE",
+                currency="INR",
+                reference_price=Decimal("100"),
+                reference_at=generated,
+                predicted_price=Decimal("101"),
+                predicted_return=0.01,
+                direction="up",
+                lower_return=-0.05,
+                upper_return=0.08,
+                lower_price=Decimal("95"),
+                upper_price=Decimal("108"),
+                uncertainty="medium",
+                uncertainty_width=0.13,
+                p_up=None,
+                p_down=None,
+                p_neutral=None,
+                probability_status="unavailable",
+                calibration_status="uncalibrated",
+                confidence=None,
+                ensemble_id="ens_api09",
+                model_id="ensemble",
+                model_version="pi08-api09",
+                member_versions=("xgboost@v1",),
+                forecast_horizon="1d",
+                target_at=target,
+                generated_at=generated,
+                data_observed_at=generated - timedelta(minutes=1),
+                data_received_at=generated - timedelta(minutes=1),
+                data_resolution="1d",
+                data_freshness="fresh",
+                data_quality="valid",
+                data_snapshot_id=f"snap_{forecast_id}",
+                validity="valid",
+                validity_conditions=(),
+                disagreement=0.0,
+                digest="c" * 64,
+                feature_set_version="api09-features",
+                dataset_version="api09-dataset",
+            )
+
+        pending_forecast = forecast(
+            "pfc_api09_pending",
+            "lc_api09_pending",
+            now,
+            now + timedelta(hours=1),
+        )
+        evaluated_forecast = forecast(
+            "pfc_api09_evaluated",
+            "lc_api09_evaluated",
+            now - timedelta(hours=2),
+            now - timedelta(hours=1),
+        )
+        self.assertTrue(store.save_forecast(pending_forecast))
+        self.assertTrue(store.save_forecast(evaluated_forecast))
+
+        detail = self._client.get("/market/forecasts/pfc_api09_pending")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["forecast_id"], "pfc_api09_pending")
+        self.assertEqual(detail.json()["lifecycle_id"], "lc_api09_pending")
+        self.assertEqual(
+            detail.json()["forecast_target_timestamp"],
+            pending_forecast.target_at.isoformat(),
+        )
+
+        pending = self._client.get("/market/forecasts/pfc_api09_pending/outcome")
+        self.assertEqual(pending.status_code, 200)
+        self.assertEqual(pending.json()["status"], "pending")
+        self.assertEqual(pending.json()["cycle_id"], "lc_api09_pending")
+        self.assertEqual(
+            pending.json()["target_at"], pending_forecast.target_at.isoformat()
+        )
+
+        self.assertTrue(
+            store.save_outcome(
+                ForecastOutcome(
+                    outcome_id="pout_api09_evaluated",
+                    cycle_id=evaluated_forecast.lifecycle_id,
+                    forecast_id=evaluated_forecast.forecast_id,
+                    stage="t_minus_1",
+                    target_at=evaluated_forecast.target_at,
+                    actual_observed_at=evaluated_forecast.target_at
+                    + timedelta(minutes=1),
+                    evaluated_at=evaluated_forecast.target_at + timedelta(minutes=2),
+                    observation_delay_seconds=60.0,
+                    actual_price=Decimal("102"),
+                    actual_return=0.02,
+                    predicted_price=Decimal("101"),
+                    predicted_return=0.01,
+                    predicted_direction="up",
+                    actual_direction="up",
+                    direction_correct=True,
+                    price_error=Decimal("-1"),
+                    absolute_price_error=Decimal("1"),
+                    percentage_price_error=0.01,
+                    return_error=-0.01,
+                    absolute_return_error=0.01,
+                    inside_interval=True,
+                    interval_lower=-0.05,
+                    interval_upper=0.08,
+                    interval_width=0.13,
+                )
+            )
+        )
+
+        evaluated = self._client.get("/market/forecasts/pfc_api09_evaluated/outcome")
+        self.assertEqual(evaluated.status_code, 200)
+        self.assertEqual(evaluated.json()["status"], "evaluated")
+        self.assertEqual(evaluated.json()["cycle_id"], "lc_api09_evaluated")
+        self.assertEqual(evaluated.json()["forecast_id"], "pfc_api09_evaluated")
+        self.assertEqual(evaluated.json()["actual_price"], "102")
+        self.assertTrue(evaluated.json()["direction_correct"])
+
+        evaluated_detail = self._client.get("/market/forecasts/pfc_api09_evaluated")
+        self.assertEqual(evaluated_detail.status_code, 200)
+        self.assertEqual(evaluated_detail.json()["lifecycle_id"], "lc_api09_evaluated")
+        self.assertEqual(
+            evaluated_detail.json()["forecast_target_timestamp"],
+            evaluated_forecast.target_at.isoformat(),
+        )
+
+        for suffix in ("", "/outcome"):
+            with self.subTest(suffix=suffix):
+                unknown = self._client.get(f"/market/forecasts/pfc_api09_missing{suffix}")
+                self.assertEqual(unknown.status_code, 404)
 
 
 _BACKTEST_NOW = datetime(2026, 1, 2, 15, 30, tzinfo=UTC)

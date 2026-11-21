@@ -78,6 +78,11 @@ IMPLEMENTED_EVENTS: tuple[EventType, ...] = (
     EventType.NOVAMARKET_HEALTH_CHANGED,
     EventType.NOVAMARKET_WARNING,
     EventType.NOVAMARKET_ERROR,
+    EventType.NOVAMARKET_RL_EPISODE_STARTED,
+    EventType.NOVAMARKET_RL_STEP,
+    EventType.NOVAMARKET_RL_EPISODE_COMPLETED,
+    EventType.NOVAMARKET_RL_EPISODE_RESET,
+    EventType.NOVAMARKET_RL_EPISODE_CANCELLED,
     EventType.NOVAMARKET_DISABLED,
     EventType.NOVAMARKET_SHUTDOWN,
     # NM-02: market-data reliability. Every payload names what was observed or
@@ -254,6 +259,39 @@ IMPLEMENTED_EVENTS: tuple[EventType, ...] = (
     EventType.NOVAMARKET_LEARNING_CANDIDATE_SHADOW_VALIDATED,
     EventType.NOVAMARKET_LEARNING_CANDIDATE_PROMOTED,
     EventType.NOVAMARKET_LEARNING_STRATEGY_ROLLED_BACK,
+    # PI-01: prediction intelligence. Published only after the immutable
+    # forecast, stage, evaluation or evidence row is committed. These carry
+    # evidence identifiers, never an order or a fill.
+    EventType.NOVAMARKET_PREDICTION_LIFECYCLE_CREATED,
+    EventType.NOVAMARKET_PREDICTION_MODEL_REGISTERED,
+    EventType.NOVAMARKET_PREDICTION_ABSTAINED,
+    EventType.NOVAMARKET_PREDICTION_FORECAST_GENERATED,
+    EventType.NOVAMARKET_PREDICTION_FORECAST_CONFIRMED,
+    EventType.NOVAMARKET_PREDICTION_CONFIRMATION_SKIPPED,
+    EventType.NOVAMARKET_PREDICTION_FORECAST_EVALUATED,
+    EventType.NOVAMARKET_PREDICTION_DECISION_EVIDENCE_READY,
+    # PI-02: historical dataset builds and versions. Evidence identifiers and
+    # measured coverage only; no price payload and no order/fill.
+    EventType.NOVAMARKET_DATASET_BUILD_STARTED,
+    EventType.NOVAMARKET_DATASET_BUILD_COMPLETED,
+    EventType.NOVAMARKET_DATASET_BUILD_FAILED,
+    EventType.NOVAMARKET_DATASET_VERSION_CREATED,
+    EventType.NOVAMARKET_DATASET_VALIDATION_INCOMPLETE,
+    # PI-04: features, regimes and preprocessing. Identifiers, quality and
+    # versions only; never a price vector or a trading action.
+    EventType.NOVAMARKET_FEATURES_GENERATED,
+    EventType.NOVAMARKET_FEATURES_FAILED,
+    EventType.NOVAMARKET_REGIME_DETECTED,
+    EventType.NOVAMARKET_REGIME_TRANSITIONED,
+    EventType.NOVAMARKET_PREPROCESSING_FITTED,
+    EventType.NOVAMARKET_FEATURE_SELECTION_COMPLETED,
+    # PI-17/PI-18/PI-19 and PI-14..PI-16 health: one announcement per completed
+    # operation so open dashboard views refetch without polling. Each payload
+    # names the committed record; none carries an order or a mutation.
+    EventType.NOVAMARKET_AGENT_CYCLE_COMPLETED,
+    EventType.NOVAMARKET_OPTIMIZATION_RECOMMENDATION_CREATED,
+    EventType.NOVAMARKET_RESEARCH_RUN_COMPLETED,
+    EventType.NOVAMARKET_POLICY_DEGRADED,
 )
 
 IMPLEMENTED_EVENT_NAMES: frozenset[str] = frozenset(

@@ -51,7 +51,10 @@ export function nameOf(row: any): string {
 }
 
 export function ScoreBar({ value, tone = "accent" }: { value: unknown; tone?: "accent" | "blue" | "danger" | "gold" }) {
-  const score = Math.max(0, Math.min(100, num(value, 0)));
+  // A missing score is not a zero score: keep the meter off the page.
+  const numeric = num(value, NaN);
+  if (!Number.isFinite(numeric)) return <span className="muted">—</span>;
+  const score = Math.max(0, Math.min(100, numeric));
   return (
     <div className={`score-meter score-meter-${tone}`} title={`${score.toFixed(1)} / 100`}>
       <span style={{ width: `${score}%` }} />

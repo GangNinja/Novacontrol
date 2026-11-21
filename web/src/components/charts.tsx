@@ -44,7 +44,7 @@ export function LineChart({
 }) {
   const [hover, setHover] = useState<number | null>(null);
   const gradientId = useId().replace(/:/g, "");
-  if (data.length < 2) {
+  if (data.length === 0) {
     return (
       <div className={`chart-empty ${className || ""}`} style={{ height }}>
         <span>{empty}</span>
@@ -59,7 +59,10 @@ export function LineChart({
   const span = max - min || 1;
   const plotW = width - pad.left - pad.right;
   const plotH = heightValue - pad.top - pad.bottom;
-  const x = (index: number) => pad.left + (index / (data.length - 1)) * plotW;
+  // A single observation is a real measurement: centre it instead of calling
+  // the chart empty, which contradicted "appears after the first episode".
+  const x = (index: number) =>
+    pad.left + (data.length > 1 ? index / (data.length - 1) : 0.5) * plotW;
   const y = (value: number) => pad.top + (1 - (value - min) / span) * plotH;
   const line = data.map((point, index) => `${index === 0 ? "M" : "L"}${x(index)},${y(point.value)}`).join(" ");
   const area = `${line} L${x(data.length - 1)},${pad.top + plotH} L${pad.left},${pad.top + plotH} Z`;
@@ -97,11 +100,11 @@ export function LineChart({
               fill="transparent"
               onMouseEnter={() => setHover(index)}
             />
-            {hover === index && <circle cx={x(index)} cy={y(point.value)} r="4" fill={color} stroke="var(--bg)" strokeWidth="2" />}
+            {(hover === index || data.length === 1) && <circle cx={x(index)} cy={y(point.value)} r="4" fill={color} stroke="var(--bg)" strokeWidth="2" />}
           </g>
         ))}
         {[0, Math.floor((data.length - 1) / 2), data.length - 1].filter((value, index, list) => list.indexOf(value) === index).map((index) => (
-          <text key={index} x={x(index)} y={heightValue - 8} textAnchor={index === 0 ? "start" : index === data.length - 1 ? "end" : "middle"} className="chart-axis">
+          <text key={index} x={x(index)} y={heightValue - 8} textAnchor={index === 0 && data.length > 1 ? "start" : index === data.length - 1 && data.length > 1 ? "end" : "middle"} className="chart-axis">
             {data[index].label}
           </text>
         ))}
