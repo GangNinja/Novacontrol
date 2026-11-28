@@ -1702,6 +1702,39 @@ Reports: [DF6_LIVE_UIA_VERIFICATION_REPORT.md](DF6_LIVE_UIA_VERIFICATION_REPORT.
 never run; the recorded 16/16 DF-6 evidence predates them and remains valid for its own
 checks.
 
+### O.11 Live UIA verification executed (2026-11-28, operator-authorized)
+
+The operator authorized exactly one disposable `NovaUiaProbe` window: one
+`ValuePattern.SetValue`, one `InvokePattern.Invoke`, six refusal checks and cleanup.
+`PYTHONPATH=src python tmp/group1/verify_uia_live.py --authorize-live` exited `0` with
+**23/23 checks PASS**: element resolved by AutomationId with pid and top-level window
+bound, `ValuePattern.SetValue` wrote `hello from the UIA transport` (confirmed by the
+probe's own JSONL publisher **and** a read-only `WM_GETTEXT` of the EDIT control),
+`InvokePattern.Invoke` produced exactly one click whose handler observed that text,
+and the five unsafe targets were refused with the correct reasons
+(`element_unavailable`, `stale_element`, `ambiguous_element`, `element_ownership_mismatch`,
+`unsupported_capability`) while the controller raised `PasteContainmentError` instead of
+falling back to the keyboard. Zero-input: probe `keys: 0`, probe `mouse: 0`, and the
+session input tick moved **0 ms** across the 2.30 s run against a measured ambient rate
+of 991.8 ms/s.
+
+The run found **four defects that only the live transport could expose**, all fixed at
+the cause with regression tests in `tests/test_df6_uia_live_defects.py` (7 tests):
+the ownership check compared an element's own child HWND with the bound window; pattern
+detection used `is not None` on a NULL COM pointer and so reported every pattern on
+every element (which disabled the unsupported-capability refusal); the top-level walk
+stopped at handle `0` when the desktop root reports its own handle (`#32769`); and
+element re-acquisition searched from the element's own handle, so every operation
+reported "no longer present in its window". `ComtypesUiaBackend.verified_live` is now
+`true`.
+
+This does **not** close DF-6: games, canvas/custom-drawn surfaces and any control that
+needs a real keystroke stay outside the profile (the probe's Panel exposing no pattern is
+the measured example), and the isolated session still reports
+`no_session_transport`. DF-6 stays **PARTIAL**, interactive keyboard **BEST_EFFORT**,
+Group 1 **NOT CLOSED**. Report:
+[DF6_LIVE_UIA_VERIFICATION_REPORT.md](DF6_LIVE_UIA_VERIFICATION_REPORT.md).
+
 ### M.10 Acceptance matrix (updated)
 
 | Row | Criterion | Status |
@@ -1713,8 +1746,8 @@ checks.
 | DF-6 | operator-loop mid-action crash | **PARTIAL** (§N: crash/fail-closed PASS, identity containment FAIL) |
 | DF-6-L1 | paste tail after a mid-delivery target death | **CONTAINED in the guaranteed profiles, BOUNDED in the labelled one (§O.9)** |
 | DF-6-L1 | interactive keyboard profile | **BEST_EFFORT** — chord split into gated edges, ≤1 input event per identity check, race recorded (43 ledger tests) |
-| DF-6-L1 | UIA profile | **IMPLEMENTED, TRANSPORT CONSTRUCTIBLE, NOT LIVE-VERIFIED** — the COM class creates on this host and the production backend reports available; no element was acted on (§O.10) |
-| DF-6-L1 | UIA live harness | **PREPARED, AWAITING AUTHORIZATION** — 14 checks, disposable probe, zero-keyboard evidence, `--authorize-live` gate |
+| DF-6-L1 | UIA profile | **LIVE-VERIFIED (2026-11-28)** — 23/23 checks against the authorized disposable probe: element resolution, `ValuePattern.SetValue`, one `InvokePattern.Invoke`, six correct refusals, zero key/mouse messages, `verified_live: true` (§O.11) |
+| DF-6-L1 | UIA live harness | **EXECUTED (2026-11-28)** — 23 checks, disposable probe, ambient-baselined zero-input evidence, `--authorize-live` gate; four live-only defects found and fixed with regression tests (§O.11) |
 | DF-6-L1 | isolated-session profile | **BLOCKED** — no session/VM transport configured (`no_session_transport`), requirements now written down exactly |
 | LIM-2 | recovery diagnosis + duplicate-input prevention | **PASS** (25 tests) |
 | LIM-2 audit | retry classification fails closed | **PASS** (this pass) |

@@ -697,8 +697,10 @@ Evidence `tmp/group1/midaction_crash_evidence_20261127T010222.json` (sha256
   scenarios plus UIA, session, clipboard and integrity suites) and **399 passed** across the
   DF-6/desktop/DF-6-input/D12/LIM-2/AgentCore/Phase 29/30/31 suites; mypy and ruff clean on
   the new modules. The
-  interactive keyboard profile stays **BEST_EFFORT** and row 20 stays **PARTIAL** until a
-  guaranteed profile is live-verified in a separately authorised run. Reports:
+  interactive keyboard profile stays **BEST_EFFORT** and row 20 stays **PARTIAL**; the UIA
+  profile was live-verified on 2026-11-28 in a separately authorised run (23/23 against a
+  disposable probe, zero key/mouse events), while the isolated session remains
+  `no_session_transport`. Reports:
   [DF6_CONTAINMENT_IMPLEMENTATION_REPORT.md](DF6_CONTAINMENT_IMPLEMENTATION_REPORT.md),
   [DF6_DISPATCH_LEDGER_TEST_REPORT.md](DF6_DISPATCH_LEDGER_TEST_REPORT.md),
   [DF6_WINDOWS_SESSION_ARCHITECTURE.md](DF6_WINDOWS_SESSION_ARCHITECTURE.md).

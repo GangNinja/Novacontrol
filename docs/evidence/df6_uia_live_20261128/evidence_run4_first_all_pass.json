@@ -1,0 +1,622 @@
+{
+  "adapter_availability": {
+    "available": true,
+    "backend": "ComtypesUiaBackend",
+    "detail": "UI Automation client created (transport not verified live).",
+    "verified_live": false
+  },
+  "at": "2026-11-28T22:01:05",
+  "checks": [
+    {
+      "detail": {
+        "seconds": 2.0,
+        "tick_delta_ms": 0
+      },
+      "name": "K0 ambient input baseline (no probe, no UIA)",
+      "ok": null
+    },
+    {
+      "detail": {
+        "handle": 1180862,
+        "pid": 24940,
+        "title": "NovaUiaProbe"
+      },
+      "name": "R0 probe window ready",
+      "ok": null
+    },
+    {
+      "detail": {
+        "hwnd": 1180862
+      },
+      "name": "R1 probe window found by pid",
+      "ok": true
+    },
+    {
+      "detail": "NovaUiaProbe",
+      "name": "R2 probe title is the disposable window",
+      "ok": true
+    },
+    {
+      "detail": {
+        "available": true,
+        "backend": "ComtypesUiaBackend",
+        "detail": "UI Automation client created (transport not verified live).",
+        "verified_live": false
+      },
+      "name": "R3 COM transport availability",
+      "ok": null
+    },
+    {
+      "detail": "UI Automation client created (transport not verified live).",
+      "name": "R3a COM transport constructs",
+      "ok": true
+    },
+    {
+      "detail": [
+        {
+          "automation_id": "txtMessage",
+          "control_type": "50004",
+          "enabled": true,
+          "name": "Message:",
+          "offscreen": false,
+          "patterns": [
+            "ValuePattern"
+          ],
+          "pid": 24940,
+          "runtime_id": [
+            42,
+            2556426
+          ],
+          "top_level_handle": 1180862,
+          "window_handle": 2556426
+        }
+      ],
+      "name": "1 element resolved by AutomationId",
+      "ok": true
+    },
+    {
+      "detail": {
+        "element_pid": 24940,
+        "expected": 24940
+      },
+      "name": "2 element owned by the probe process",
+      "ok": true
+    },
+    {
+      "detail": {
+        "element_hwnd": 2556426,
+        "element_top_level": 1180862,
+        "expected": 1180862
+      },
+      "name": "3 element belongs to the probe window",
+      "ok": true
+    },
+    {
+      "detail": [
+        "ValuePattern"
+      ],
+      "name": "4 ValuePattern is exposed",
+      "ok": true
+    },
+    {
+      "detail": {
+        "enabled": true,
+        "offscreen": false
+      },
+      "name": "5 element is enabled and on screen",
+      "ok": true
+    },
+    {
+      "detail": {
+        "containment": "uia",
+        "detail": "ValuePattern succeeded on 'Message:'.",
+        "element": {
+          "automation_id": "txtMessage",
+          "control_type": "50004",
+          "enabled": true,
+          "name": "Message:",
+          "offscreen": false,
+          "patterns": [
+            "ValuePattern"
+          ],
+          "pid": 24940,
+          "runtime_id": [
+            42,
+            2556426
+          ],
+          "top_level_handle": 1180862,
+          "window_handle": 2556426
+        },
+        "keyboard_events": 0,
+        "ok": true,
+        "operation": "set_value",
+        "refusal": "",
+        "target": {
+          "automation_id": "txtMessage",
+          "control_type": "",
+          "name": "",
+          "window_handle": 1180862,
+          "window_pid": 24940
+        },
+        "value": "hello from the UIA transport"
+      },
+      "name": "6 SetValue accepted by the pattern",
+      "ok": true
+    },
+    {
+      "detail": {
+        "native_text": "",
+        "state_text": "hello from the UIA transport"
+      },
+      "name": "8a independent state shows the typed text",
+      "ok": true
+    },
+    {
+      "detail": {
+        "containment": "uia",
+        "detail": "InvokePattern succeeded on 'Apply'.",
+        "element": {
+          "automation_id": "btnApply",
+          "control_type": "50000",
+          "enabled": true,
+          "name": "Apply",
+          "offscreen": false,
+          "patterns": [
+            "InvokePattern"
+          ],
+          "pid": 24940,
+          "runtime_id": [
+            42,
+            852278
+          ],
+          "top_level_handle": 1180862,
+          "window_handle": 852278
+        },
+        "keyboard_events": 0,
+        "ok": true,
+        "operation": "invoke",
+        "refusal": "",
+        "target": {
+          "automation_id": "btnApply",
+          "control_type": "",
+          "name": "",
+          "window_handle": 1180862,
+          "window_pid": 24940
+        },
+        "value": null
+      },
+      "name": "7 Invoke accepted by the pattern",
+      "ok": true
+    },
+    {
+      "detail": {
+        "clicks_before": 0,
+        "clicks_now": 1
+      },
+      "name": "8b independent state shows exactly one click",
+      "ok": true
+    },
+    {
+      "detail": {
+        "applied": "hello from the UIA transport"
+      },
+      "name": "8c the application observed the typed text",
+      "ok": true
+    },
+    {
+      "detail": {
+        "containment": "uia",
+        "detail": "The element is disabled; interacting with it would not be a real interaction.",
+        "element": {
+          "automation_id": "btnDisabled",
+          "control_type": "50000",
+          "enabled": false,
+          "name": "Disabled",
+          "offscreen": false,
+          "patterns": [
+            "InvokePattern"
+          ],
+          "pid": 24940,
+          "runtime_id": [
+            42,
+            721202
+          ],
+          "top_level_handle": 1180862,
+          "window_handle": 721202
+        },
+        "keyboard_events": 0,
+        "ok": false,
+        "operation": "invoke",
+        "refusal": "element_unavailable",
+        "target": {
+          "automation_id": "btnDisabled",
+          "control_type": "",
+          "name": "",
+          "window_handle": 1180862,
+          "window_pid": 24940
+        },
+        "value": null
+      },
+      "name": "9 disabled control refused",
+      "ok": true
+    },
+    {
+      "detail": {
+        "containment": "uia",
+        "detail": "No element matching 'nope_missing' exists in the bound window now.",
+        "element": null,
+        "keyboard_events": 0,
+        "ok": false,
+        "operation": "invoke",
+        "refusal": "stale_element",
+        "target": {
+          "automation_id": "nope_missing",
+          "control_type": "",
+          "name": "",
+          "window_handle": 1180862,
+          "window_pid": 24940
+        },
+        "value": null
+      },
+      "name": "10 absent element refused",
+      "ok": true
+    },
+    {
+      "detail": {
+        "containment": "uia",
+        "detail": "2 elements match 'btnDuplicate'; refusing to choose one. The target must identify a single control.",
+        "element": null,
+        "keyboard_events": 0,
+        "ok": false,
+        "operation": "invoke",
+        "refusal": "ambiguous_element",
+        "target": {
+          "automation_id": "btnDuplicate",
+          "control_type": "",
+          "name": "",
+          "window_handle": 1180862,
+          "window_pid": 24940
+        },
+        "value": null
+      },
+      "name": "11 ambiguous element refused",
+      "ok": true
+    },
+    {
+      "detail": {
+        "containment": "uia",
+        "detail": "The element belongs to pid 24940, not the bound pid 4088 \u2014 refusing to interact with another process.",
+        "element": {
+          "automation_id": "btnApply",
+          "control_type": "50000",
+          "enabled": true,
+          "name": "Apply",
+          "offscreen": false,
+          "patterns": [
+            "InvokePattern"
+          ],
+          "pid": 24940,
+          "runtime_id": [
+            42,
+            852278
+          ],
+          "top_level_handle": 1180862,
+          "window_handle": 852278
+        },
+        "keyboard_events": 0,
+        "ok": false,
+        "operation": "invoke",
+        "refusal": "element_ownership_mismatch",
+        "target": {
+          "automation_id": "btnApply",
+          "control_type": "",
+          "name": "",
+          "window_handle": 1180862,
+          "window_pid": 4088
+        },
+        "value": null
+      },
+      "name": "12 foreign-owned element refused",
+      "ok": true
+    },
+    {
+      "detail": {
+        "containment": "uia",
+        "detail": "The control exposes no patterns, not ValuePattern. This application type is unsupported by the UIA profile and needs an isolated session instead.",
+        "element": {
+          "automation_id": "pnlCanvas",
+          "control_type": "50033",
+          "enabled": true,
+          "name": "",
+          "offscreen": false,
+          "patterns": [],
+          "pid": 24940,
+          "runtime_id": [
+            42,
+            1442008
+          ],
+          "top_level_handle": 1180862,
+          "window_handle": 1442008
+        },
+        "keyboard_events": 0,
+        "ok": false,
+        "operation": "set_value",
+        "refusal": "unsupported_capability",
+        "target": {
+          "automation_id": "pnlCanvas",
+          "control_type": "",
+          "name": "",
+          "window_handle": 1180862,
+          "window_pid": 24940
+        },
+        "value": null
+      },
+      "name": "13 unsupported pattern refused",
+      "ok": true
+    },
+    {
+      "detail": "UI Automation refused the input (unsupported_capability): The control exposes no patterns, not ValuePattern. This application type is unsupported by the UIA profile and needs an isolated session instead.",
+      "name": "14 unsupported control does not fall back to the keyboard",
+      "ok": true
+    },
+    {
+      "detail": {
+        "ambient_rate_ms_per_s": 0.0,
+        "run_rate_ms_per_s": 0.0,
+        "run_seconds": 2.26,
+        "tick_after": 28811890,
+        "tick_before": 28811890
+      },
+      "name": "K1 no input attributable to this run (tick rate <= ambient rate)",
+      "ok": true
+    },
+    {
+      "detail": {
+        "keys": 0
+      },
+      "name": "K2 the probe received no key message",
+      "ok": true
+    },
+    {
+      "detail": {
+        "mouse": 0
+      },
+      "name": "K3 the probe received no mouse message",
+      "ok": true
+    }
+  ],
+  "element": {
+    "automation_id": "txtMessage",
+    "control_type": "50004",
+    "enabled": true,
+    "name": "Message:",
+    "offscreen": false,
+    "patterns": [
+      "ValuePattern"
+    ],
+    "pid": 24940,
+    "runtime_id": [
+      42,
+      2556426
+    ],
+    "top_level_handle": 1180862,
+    "window_handle": 2556426
+  },
+  "failed": 0,
+  "finished_at": "2026-11-28T22:01:08",
+  "keyboard": {
+    "ambient_delta_ms": 0,
+    "ambient_rate_ms_per_s": 0.0,
+    "ambient_seconds": 2.0,
+    "probe_keys": 0,
+    "probe_mouse": 0,
+    "run_rate_ms_per_s": 0.0,
+    "run_seconds": 2.26,
+    "tick_after": 28811890,
+    "tick_before": 28811890
+  },
+  "kind": "df6_live_uia",
+  "operations": [
+    {
+      "containment": "uia",
+      "detail": "ValuePattern succeeded on 'Message:'.",
+      "element": {
+        "automation_id": "txtMessage",
+        "control_type": "50004",
+        "enabled": true,
+        "name": "Message:",
+        "offscreen": false,
+        "patterns": [
+          "ValuePattern"
+        ],
+        "pid": 24940,
+        "runtime_id": [
+          42,
+          2556426
+        ],
+        "top_level_handle": 1180862,
+        "window_handle": 2556426
+      },
+      "keyboard_events": 0,
+      "ok": true,
+      "operation": "set_value",
+      "refusal": "",
+      "target": {
+        "automation_id": "txtMessage",
+        "control_type": "",
+        "name": "",
+        "window_handle": 1180862,
+        "window_pid": 24940
+      },
+      "value": "hello from the UIA transport"
+    },
+    {
+      "containment": "uia",
+      "detail": "InvokePattern succeeded on 'Apply'.",
+      "element": {
+        "automation_id": "btnApply",
+        "control_type": "50000",
+        "enabled": true,
+        "name": "Apply",
+        "offscreen": false,
+        "patterns": [
+          "InvokePattern"
+        ],
+        "pid": 24940,
+        "runtime_id": [
+          42,
+          852278
+        ],
+        "top_level_handle": 1180862,
+        "window_handle": 852278
+      },
+      "keyboard_events": 0,
+      "ok": true,
+      "operation": "invoke",
+      "refusal": "",
+      "target": {
+        "automation_id": "btnApply",
+        "control_type": "",
+        "name": "",
+        "window_handle": 1180862,
+        "window_pid": 24940
+      },
+      "value": null
+    },
+    {
+      "containment": "uia",
+      "detail": "The element is disabled; interacting with it would not be a real interaction.",
+      "element": {
+        "automation_id": "btnDisabled",
+        "control_type": "50000",
+        "enabled": false,
+        "name": "Disabled",
+        "offscreen": false,
+        "patterns": [
+          "InvokePattern"
+        ],
+        "pid": 24940,
+        "runtime_id": [
+          42,
+          721202
+        ],
+        "top_level_handle": 1180862,
+        "window_handle": 721202
+      },
+      "keyboard_events": 0,
+      "ok": false,
+      "operation": "invoke",
+      "refusal": "element_unavailable",
+      "target": {
+        "automation_id": "btnDisabled",
+        "control_type": "",
+        "name": "",
+        "window_handle": 1180862,
+        "window_pid": 24940
+      },
+      "value": null
+    },
+    {
+      "containment": "uia",
+      "detail": "No element matching 'nope_missing' exists in the bound window now.",
+      "element": null,
+      "keyboard_events": 0,
+      "ok": false,
+      "operation": "invoke",
+      "refusal": "stale_element",
+      "target": {
+        "automation_id": "nope_missing",
+        "control_type": "",
+        "name": "",
+        "window_handle": 1180862,
+        "window_pid": 24940
+      },
+      "value": null
+    },
+    {
+      "containment": "uia",
+      "detail": "2 elements match 'btnDuplicate'; refusing to choose one. The target must identify a single control.",
+      "element": null,
+      "keyboard_events": 0,
+      "ok": false,
+      "operation": "invoke",
+      "refusal": "ambiguous_element",
+      "target": {
+        "automation_id": "btnDuplicate",
+        "control_type": "",
+        "name": "",
+        "window_handle": 1180862,
+        "window_pid": 24940
+      },
+      "value": null
+    },
+    {
+      "containment": "uia",
+      "detail": "The element belongs to pid 24940, not the bound pid 4088 \u2014 refusing to interact with another process.",
+      "element": {
+        "automation_id": "btnApply",
+        "control_type": "50000",
+        "enabled": true,
+        "name": "Apply",
+        "offscreen": false,
+        "patterns": [
+          "InvokePattern"
+        ],
+        "pid": 24940,
+        "runtime_id": [
+          42,
+          852278
+        ],
+        "top_level_handle": 1180862,
+        "window_handle": 852278
+      },
+      "keyboard_events": 0,
+      "ok": false,
+      "operation": "invoke",
+      "refusal": "element_ownership_mismatch",
+      "target": {
+        "automation_id": "btnApply",
+        "control_type": "",
+        "name": "",
+        "window_handle": 1180862,
+        "window_pid": 4088
+      },
+      "value": null
+    },
+    {
+      "containment": "uia",
+      "detail": "The control exposes no patterns, not ValuePattern. This application type is unsupported by the UIA profile and needs an isolated session instead.",
+      "element": {
+        "automation_id": "pnlCanvas",
+        "control_type": "50033",
+        "enabled": true,
+        "name": "",
+        "offscreen": false,
+        "patterns": [],
+        "pid": 24940,
+        "runtime_id": [
+          42,
+          1442008
+        ],
+        "top_level_handle": 1180862,
+        "window_handle": 1442008
+      },
+      "keyboard_events": 0,
+      "ok": false,
+      "operation": "set_value",
+      "refusal": "unsupported_capability",
+      "target": {
+        "automation_id": "pnlCanvas",
+        "control_type": "",
+        "name": "",
+        "window_handle": 1180862,
+        "window_pid": 24940
+      },
+      "value": null
+    }
+  ],
+  "passed": 22,
+  "probe_pid": 24940,
+  "probe_script": "tmp\\group1\\uia_probe_app.ps1",
+  "state_file": "tmp\\group1\\uia_probe_state_20261128T220103.jsonl"
+}

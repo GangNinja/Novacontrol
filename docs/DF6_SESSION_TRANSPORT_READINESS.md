@@ -139,3 +139,25 @@ decision, and the first two are the ones worth scheduling.
 
 Until 1–5 exist, the profile stays **BLOCKED**, and no test in this repository may
 report it as verified.
+
+## 9. Update — the UIA half is no longer a preparation (2026-11-28)
+
+The element-scoped profile described above was **executed** against a disposable
+`NovaUiaProbe` window under explicit operator authorization: 23/23 checks, exit 0, with
+`ValuePattern.SetValue` and `InvokePattern.Invoke` both confirmed by the application's own
+state, six correct refusals, and zero keyboard/mouse events. Details:
+[DF6_LIVE_UIA_VERIFICATION_REPORT.md](DF6_LIVE_UIA_VERIFICATION_REPORT.md).
+
+What that changes here: the "UIA first, then session" ordering is still right, and the
+reason for the session profile is now measured rather than assumed — the probe's own Panel
+exposed **no automation pattern at all**, which is the same shape as a canvas, a game
+surface or a custom-drawn control. Every such target is refused
+(`unsupported_capability`), and this report's requirement list for a real session/VM
+transport is unchanged:
+
+* the session profile stays **BLOCKED — `no_session_transport`**;
+* `CreateDesktop` plus a hidden desktop is still **not** a substitute (input into it is
+  invisible to the user, and the DF-6 failure was about the user's interactive session);
+* `PostMessage`/`WM_CLICK`-style substitutes are still refused rather than implemented.
+
+The live run did not touch, and cannot support any claim about, the session profile.

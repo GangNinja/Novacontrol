@@ -1,0 +1,4 @@
+﻿{"event":"ready","at":"2026-11-28T16:33:04.8970262Z","pid":10584,"clicks":0,"text":"","applied":"","keys":0,"mouse":0,"title":"NovaUiaProbe","handle":917814,"started":"2026-11-28T16:33:04.6905207Z"}
+{"event":"text","at":"2026-11-28T16:33:05.8415893Z","pid":10584,"clicks":0,"text":"hello from the UIA transport","applied":"","keys":0,"mouse":0}
+{"event":"apply","at":"2026-11-28T16:33:06.5469671Z","pid":10584,"clicks":1,"text":"hello from the UIA transport","applied":"hello from the UIA transport","keys":0,"mouse":0,"applied_text":"hello from the UIA transport"}
+{"event":"closed","at":"2026-11-28T16:33:07.6254340Z","pid":10584,"clicks":1,"text":"hello from the UIA transport","applied":"hello from the UIA transport","keys":0,"mouse":0}

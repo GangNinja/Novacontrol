@@ -117,6 +117,24 @@ python -m novacontrol
   not move: UIA **not live-verified**, isolated session **BLOCKED**, interactive keyboard
   **BEST_EFFORT**, DF-6 **PARTIAL**. Reports: DF6_LIVE_UIA_VERIFICATION_REPORT.md,
   DF6_TEST_SUITE_RECOVERY_REPORT.md, DF6_SESSION_TRANSPORT_READINESS.md; report §O.10.
+- **DF-6 live UIA verification EXECUTED (2026-11-28, operator-authorized).** The disposable
+  `NovaUiaProbe` run finished **23/23 PASS, exit 0**: `txtMessage` resolved by AutomationId
+  with its pid and top-level window bound, `ValuePattern.SetValue` wrote
+  `hello from the UIA transport` (verified by the probe's own JSONL **and** a read-only
+  `WM_GETTEXT` of the EDIT control), `InvokePattern.Invoke` produced exactly one click whose
+  handler observed that text, and five unsafe targets were refused with the correct reasons
+  (disabled, absent, ambiguous, foreign pid, pattern-less) while the controller raised
+  `PasteContainmentError` instead of falling back to the keyboard. Zero-input: probe
+  `keys: 0`, probe `mouse: 0`, session input tick **0 ms drift** over 2.30 s against a
+  measured ambient 991.8 ms/s. The run found **four defects only a live transport could
+  expose** — ownership compared an element's own child HWND with the bound window, pattern
+  detection treated a NULL COM pointer as a pattern (so every element "exposed" all four and
+  the unsupported-capability refusal could never fire), the top-level walk stopped at handle 0
+  when the desktop reports its own (`#32769`), and re-acquisition searched from the element's
+  own handle — all fixed at the cause with regression tests; `verified_live` is now `true`.
+  Statuses do not move: interactive keyboard **BEST_EFFORT**, isolated session **BLOCKED**
+  (`no_session_transport`), DF-6 **PARTIAL**, Group 1 **NOT CLOSED**. The preserved failed
+  evidence is byte-identical. Report: DF6_LIVE_UIA_VERIFICATION_REPORT.md; matrix §O.11.
 - Group verdict: **NOT CLOSED**. Phase 31 #6 is now PASS, #13 is PASS under adopted interpretation A, D12 is closed and LIM-2 is remediated (with retry classification now failing closed); the outstanding environment-dependent rows are **DF-1…DF-5, DF-7** (second display, authorized resolution change, OS sleep/resume, multi-hour soak, development-environment workflow, OS reboot) and **LIM-1** remains a documented functional limitation rather than an acceptance criterion; the live operator-loop gate was executed on 2026-11-27 and confirms LIM-2's `recheck` guard, but DF-6's operator-loop half is **PARTIAL** (identity containment fails; earlier 16/16 PASS retracted). Report: [GROUP1_PHASES27_31_AUDIT_AND_ACCEPTANCE_REPORT.md](GROUP1_PHASES27_31_AUDIT_AND_ACCEPTANCE_REPORT.md).
 
 ## Phase 39 — Portfolio Manager for Multiple AI-Run Ventures (2026-11-24)

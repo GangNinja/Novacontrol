@@ -6953,3 +6953,37 @@ suite was recovered, and running it found a real defect.
   `docs/DF6_SESSION_TRANSPORT_READINESS.md`), DF-6 **PARTIAL**, Group 1 **NOT CLOSED**. The
   preserved failed evidence is byte-identical (sha256
   `2dfb0a4e18ecf0c50916e107e75fd91c8d3c47bb2d46413719f2e58d0e31cf34`). No commit, no push.
+
+### 2026-11-28 — DF-6 live UI Automation verification executed (operator-authorized)
+
+* **Authorized scope, exactly:** one disposable `NovaUiaProbe` window, one
+  `ValuePattern.SetValue`, one `InvokePattern.Invoke`, six refusal checks, zero-input
+  verification, cleanup. Nothing else on the desktop was enumerated for interaction,
+  addressed, or closed.
+* **Result: 23/23 checks PASS, exit 0** (`tmp/group1/verify_uia_live.py --authorize-live`,
+  evidence in `docs/evidence/df6_uia_live_20261128/`). `txtMessage` resolved by
+  AutomationId; `SetValue` wrote `hello from the UIA transport`, confirmed by the probe's
+  own JSONL publisher **and** a read-only `WM_GETTEXT` of the EDIT control; `Invoke` caused
+  exactly one click whose handler observed that text; disabled / absent / ambiguous /
+  foreign-pid / pattern-less targets were refused with the correct reasons and the
+  controller raised `PasteContainmentError` rather than falling back to the keyboard.
+* **Zero input:** probe `keys: 0`, probe `mouse: 0` (counter added for this run), and the
+  session input tick did not move at all across the 2.30 s run. An ambient baseline taken
+  first measured 991.8 ms/s of background input on this machine, which is why the check
+  compares rates instead of asserting a static tick — and why the report states that
+  `GetLastInputInfo` is session-wide and cannot attribute input, only fail to show ours.
+* **Four defects found only by the live transport**, all fixed at the cause with
+  regression tests (`tests/test_df6_uia_live_defects.py`, 7 tests): ownership compared an
+  element's own child HWND with the bound window; `GetCurrentPattern` returns S_OK with a
+  NULL pointer, and `is not None` made **every** element report **every** pattern (so the
+  unsupported-capability refusal could never fire); the top-level walk stopped at handle 0
+  while the desktop root reports its own (`#32769` → 65548); and re-acquisition searched
+  from the element's own handle, so both operations reported "no longer present in its
+  window". `ComtypesUiaBackend.verified_live` is now `true`.
+* **Statuses do not move:** interactive keyboard **BEST_EFFORT**, isolated session
+  **BLOCKED** (`no_session_transport`), DF-6 **PARTIAL** (the UIA subcriterion is met; the
+  arbitrary-application requirement still needs the session milestone), Group 1 **NOT
+  CLOSED**. Games, canvas/custom-drawn surfaces and anything needing a real keystroke stay
+  outside the profile — the probe's Panel exposing no pattern is the measured example.
+  The preserved failed evidence is byte-identical (sha256
+  `2dfb0a4e18ecf0c50916e107e75fd91c8d3c47bb2d46413719f2e58d0e31cf34`).

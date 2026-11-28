@@ -26,6 +26,7 @@ The adapter is deliberately transport-agnostic:
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import importlib
 from dataclasses import dataclass
 from enum import StrEnum
@@ -117,6 +118,13 @@ class UiaElement:
     patterns: frozenset[str]
     enabled: bool = True
     offscreen: bool = False
+    #: The top-level window this element lives in. ``window_handle`` is the
+    #: ELEMENT's own handle, which for a child control is its own child HWND
+    #: (measured live: a WinForms TextBox reported 393522 while the window was
+    #: 917746), so only this field can prove which window an element belongs to.
+    #: A backend that models whole windows leaves it at 0, and then
+    #: ``window_handle`` is the window identity.
+    top_level_handle: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -126,6 +134,7 @@ class UiaElement:
             "control_type": self.control_type,
             "pid": self.pid,
             "window_handle": self.window_handle,
+            "top_level_handle": self.top_level_handle,
             "patterns": sorted(self.patterns),
             "enabled": self.enabled,
             "offscreen": self.offscreen,
@@ -431,9 +440,14 @@ class UiaAdapter:
                 f"The element belongs to pid {element.pid}, not the bound pid "
                 f"{target.window_pid} — refusing to interact with another process."
             )
-        if element.window_handle != target.window_handle:
+        # Compare the element's TOP-LEVEL window, never its own handle: a child
+        # control's handle is a child HWND, so the previous comparison refused
+        # every control inside the bound window (measured live against the
+        # disposable probe: `element_hwnd 393522, expected 917746`).
+        owning = element.top_level_handle or element.window_handle
+        if owning != target.window_handle:
             return (
-                f"The element lives in window {element.window_handle}, not the "
+                f"The element lives in window {owning}, not the "
                 f"bound window {target.window_handle}."
             )
         return ""
@@ -442,14 +456,21 @@ class UiaAdapter:
 class ComtypesUiaBackend:
     """UI Automation through the COM typelib Windows ships (``UIAutomationCore``).
 
-    ``verified_live`` is False: the dispatch-ledger tests drive
-    :class:`UiaAdapter` with a simulated backend, and this transport has not
-    been exercised in a live run. A host where the typelib or COM registration
-    is unavailable reports ``available: False`` with the reason, so an
-    unsupported host is never mistaken for a working one.
+    ``verified_live`` is True: this transport resolved an element by
+    AutomationId, wrote through ``ValuePattern.SetValue``, invoked through
+    ``InvokePattern.Invoke`` and refused all six unsafe controls against a
+    disposable WinForms probe, with zero keyboard and zero mouse events (see
+    ``docs/DF6_LIVE_UIA_VERIFICATION_REPORT.md``). That is a statement about
+    the transport, not about coverage of arbitrary applications: the probe's
+    Panel exposed no pattern at all, which is exactly what makes custom-drawn
+    surfaces and games unsupported.
+
+    A host where the typelib or COM registration is unavailable reports
+    ``available: False`` with the reason, so an unsupported host is never
+    mistaken for a working one.
     """
 
-    verified_live = False
+    verified_live = True
 
     #: CLSID_CUIAutomation — the UI Automation client object.
     _CLSID = "{ff48dba4-60ef-4201-aa87-54103eef594e}"
@@ -488,7 +509,7 @@ class ComtypesUiaBackend:
             self._connect()
         except Exception as exc:
             return False, str(exc)
-        return True, "UI Automation client created (transport not verified live)."
+        return True, "UI Automation client created and verified live (disposable probe)."
 
     # -- element resolution ----------------------------------------------
 
@@ -512,11 +533,58 @@ class ComtypesUiaBackend:
             if pattern_id is None:
                 continue
             try:
-                if element.GetCurrentPattern(pattern_id) is not None:
-                    found.add(name)
+                pattern = element.GetCurrentPattern(pattern_id)
             except Exception:
                 continue
+            # ``GetCurrentPattern`` returns S_OK with a NULL pointer when the
+            # element does not support the pattern, and comtypes hands that back
+            # as an empty POINTER instance. ``is not None`` therefore reported
+            # EVERY pattern on EVERY element (measured live: a WinForms Panel
+            # "exposed" all four, and so did a TextBox), which silently disabled
+            # the unsupported-capability refusal below.
+            if pattern:
+                found.add(name)
         return frozenset(found)
+
+    def _top_level_handle(self, element: Any) -> int:
+        """The window handle of the top-level window this element lives in.
+
+        Walks the raw view upward and stops at the desktop root. The desktop is
+        NOT handle 0 — it is the ``#32769`` window and it reports its own handle
+        (measured live: 65548), so a walk that only stopped at 0 climbed into it
+        and reported the desktop as the element's window. A failure part-way
+        leaves the last element that had a handle, which is no worse than before.
+        """
+        try:
+            walker = self._uia.RawViewWalker
+        except Exception:
+            walker = None
+        desktop = 0
+        try:
+            desktop = int(ctypes.windll.user32.GetDesktopWindow())
+        except Exception:  # pragma: no cover - not Windows
+            desktop = 0
+        current = element
+        for _ in range(64):
+            if walker is None:
+                break
+            try:
+                parent = walker.GetParentElement(current)
+            except Exception:
+                break
+            if parent is None:
+                break
+            try:
+                parent_handle = int(parent.CurrentNativeWindowHandle)
+            except Exception:
+                parent_handle = 0
+            if not parent_handle or (desktop and parent_handle == desktop):
+                break
+            current = parent
+        try:
+            return int(current.CurrentNativeWindowHandle) or 0
+        except Exception:
+            return 0
 
     def _describe(self, element: Any) -> UiaElement:
         runtime = element.GetRuntimeId()
@@ -528,6 +596,7 @@ class ComtypesUiaBackend:
             control_type=str(element.CurrentControlType),
             pid=int(element.CurrentProcessId),
             window_handle=int(element.CurrentNativeWindowHandle),
+            top_level_handle=self._top_level_handle(element),
             patterns=self._patterns(element),
             enabled=bool(element.CurrentIsEnabled),
             offscreen=bool(element.CurrentIsOffscreen),
@@ -563,7 +632,12 @@ class ComtypesUiaBackend:
     def _element(self, element: UiaElement) -> Any:
         """Re-find an element by runtime id inside its own window."""
         uia = self._connect()
-        root = uia.ElementFromHandle(element.window_handle)
+        # Search from the TOP-LEVEL window: ``element.window_handle`` is the
+        # element's own child handle, and asking UIA for that handle returns the
+        # control itself, whose descendants contain nothing (measured live:
+        # every SetValue failed with "no longer present in its window").
+        window = element.top_level_handle or element.window_handle
+        root = uia.ElementFromHandle(window)
         if root is None:
             raise RuntimeError("The element's window no longer exists.")
         collection = root.FindAll(
@@ -584,7 +658,9 @@ class ComtypesUiaBackend:
         module = self._module
         pattern_id = getattr(module, f"UIA_{interface}Id")
         raw = self._element(element).GetCurrentPattern(pattern_id)
-        if raw is None:
+        # Truthiness, not ``is None``: an unsupported pattern comes back as a
+        # NULL pointer object, which is not None (see ``_patterns``).
+        if not raw:
             raise RuntimeError(f"The element no longer exposes {interface}.")
         interface_type = getattr(module, f"IUIAutomation{interface}")
         return cast(Any, raw).QueryInterface(interface_type)
