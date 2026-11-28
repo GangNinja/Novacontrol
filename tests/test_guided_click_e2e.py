@@ -113,7 +113,19 @@ class GuidedClickPlaywrightBase(unittest.TestCase):
                 self.server.kill()
         if self.server and self.server.stderr:
             self.server.stderr.close()
-        self.tmp.cleanup()
+        # Terminating a Windows uvicorn process can return before every SQLite
+        # handle has been released; deleting the disposable data dir in that
+        # window fails with WinError 32 even though the test itself passed.
+        # Retry briefly, and still fail if the lock does not clear.
+        deadline = time.monotonic() + 10.0
+        while True:
+            try:
+                self.tmp.cleanup()
+                break
+            except PermissionError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.25)
         for frame in ("vision_locate.png", "vision_after.png"):
             try:
                 (ROOT / frame).unlink()

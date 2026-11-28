@@ -105,8 +105,15 @@ A caller-supplied configuration is included in the grid rather than silently
 discarded. The grid remains bounded and is evaluated on validation data only.
 
 Model selection uses validation return MAE, with directional accuracy as a
-tie-break. It does not choose the lowest training error, and test data is never
-consulted for selection. No model is automatically promoted.
+tie-break. A challenger must beat the `random_walk` validation MAE by the
+pre-registered relative margin fixed in `statistical/validation.py`
+(`SELECTION_MARGIN_PCT = 5.0`); otherwise `random_walk` is retained. If the
+baseline was not in the caller's model list, it is evaluated as the comparison
+reference rather than skipped. If the baseline is missing or lacks enough
+finite validation observations, selection
+abstains rather than comparing against an unknown reference. It does not choose
+the lowest training error, and test data is never consulted for selection. No
+model is automatically promoted.
 
 ## 5. Supported forecast horizons
 

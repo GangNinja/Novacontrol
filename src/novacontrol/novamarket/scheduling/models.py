@@ -121,6 +121,7 @@ class HorizonSchedulePolicy:
 
 
 _INTRADAY = (
+    ForecastHorizon.MINUTES_1,
     ForecastHorizon.MINUTES_5,
     ForecastHorizon.MINUTES_15,
     ForecastHorizon.MINUTES_20,
@@ -128,6 +129,18 @@ _INTRADAY = (
 )
 
 HORIZON_SCHEDULE_POLICIES: dict[ForecastHorizon, HorizonSchedulePolicy] = {
+    ForecastHorizon.MINUTES_1: HorizonSchedulePolicy(
+        ForecastHorizon.MINUTES_1,
+        target_rule="intraday_duration",
+        initial_rule="fixed_lead",
+        initial_lead_seconds=60,
+        first_lead_seconds=30,
+        final_lead_seconds=5,
+        description=(
+            "A real one-minute cycle: initial at creation, T-30s confirmation "
+            "and T-5s final confirmation before the one-minute target."
+        ),
+    ),
     ForecastHorizon.MINUTES_5: HorizonSchedulePolicy(
         ForecastHorizon.MINUTES_5,
         target_rule="intraday_duration",

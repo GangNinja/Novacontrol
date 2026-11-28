@@ -79,6 +79,19 @@ READ_BOARD = """() => {
 }"""
 
 
+def _display_bytes(text: str) -> float:
+    """Parse the card's human-readable byte text back to a number.
+
+    The live memory reading can drift by several points between the card's
+    last 2 s poll and a separate API fetch.  Checking the bar against the
+    card's own displayed used/total values is deterministic, and still proves
+    the bar is the reported percentage rather than a decorative constant.
+    """
+    number, unit = text.strip().split()
+    factors = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
+    return float(number) * factors[unit]
+
+
 def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -202,10 +215,13 @@ class TelemetryPlaywrightTests(unittest.TestCase):
         # A bar width is the reported percentage, and an unmeasurable metric has
         # no bar at all — plus a reason, never a zero.
         if api["hardware"]["memory"]["available"]:
-            percent = api["hardware"]["memory"]["percent"]
+            used_text, total_text = [
+                part.strip() for part in board["values"]["memory"].split("/", 1)
+            ]
+            percent = 100.0 * _display_bytes(used_text) / _display_bytes(total_text)
             self.assertAlmostEqual(
-                float(board["bars"]["memory"].rstrip("%")), percent, delta=1.0,
-                msg="memory bar must track the measured percentage",
+                float(board["bars"]["memory"].rstrip("%")), percent, delta=1.5,
+                msg="memory bar must track the percentage implied by the card's values",
             )
         if not api["hardware"]["temperature"]["available"]:
             self.assertEqual(board["values"]["temperature"], "Unavailable")

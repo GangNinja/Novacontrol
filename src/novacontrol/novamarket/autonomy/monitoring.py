@@ -14,7 +14,7 @@ deliberately imports none of them.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -28,9 +28,10 @@ from novacontrol.novamarket.autonomy.models import (
 from novacontrol.novamarket.autonomy.runtime import AutonomyRuntime
 from novacontrol.novamarket.autonomy.session import (
     SessionDecision,
+    canonical_mic,
     evaluate_session,
 )
-from novacontrol.novamarket.discovery.models import TriggerKind
+from novacontrol.novamarket.discovery.models import TriggerKind, UniverseFilter
 
 BATCH_CAP = 20
 REFRESH_FLOOR_SECONDS = 900
@@ -53,6 +54,19 @@ class MonitoringRefused(RuntimeError):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+def _canonical_instrument_id(value: object) -> str:
+    """Return ``MIC:SYMBOL`` for a complete identity, else an empty string."""
+
+    text = str(value or "").strip()
+    if ":" not in text:
+        return ""
+    exchange, symbol = text.split(":", 1)
+    mic = canonical_mic(exchange)
+    if not mic or not symbol.strip():
+        return ""
+    return f"{mic}:{symbol.strip()}"
 
 
 def _parse(value: object) -> datetime | None:
@@ -140,12 +154,14 @@ class AutonomyMonitoring:
         discovery: Callable[[], Any | None],
         clock: Callable[[], datetime] | None = None,
         instrument_lookup: Callable[[str], Any] | None = None,
+        universe: Callable[[], Sequence[str]] | None = None,
     ) -> None:
         self._runtime = runtime
         self._store = runtime.store
         self._discovery = discovery
         self._clock = clock or (lambda: datetime.now(UTC))
         self._instrument_lookup = instrument_lookup
+        self._universe = universe or (lambda: ())
         self._lock = asyncio.Lock()
 
     @property
@@ -486,7 +502,14 @@ class AutonomyMonitoring:
                 now=now,
                 phase=MonitoringCycleStatus.ELIGIBILITY_FILTERING.value,
             )
-            accepted, rejected = self._normalise(candidates, config.exchange)
+            configured = tuple(
+                str(item or "").strip().upper()
+                for item in self._universe()
+                if str(item or "").strip()
+            )
+            accepted, rejected = self._normalise(
+                candidates, config.exchange, configured
+            )
             self._store.update_monitoring_cycle(
                 cycle_id,
                 now=now,
@@ -678,11 +701,33 @@ class AutonomyMonitoring:
                 MonitoringErrorCode.MARKET_DATA_UNAVAILABLE.value,
                 "the discovery engine or market data is not initialised",
             )
+        # Discovery is scoped per cycle: the shared engine is also the manual
+        # discovery surface, so mutating its UniverseFilter here would leak the
+        # monitoring exchange into unrelated runs.
+        base = getattr(engine, "universe", None)
+        configured = tuple(
+            str(item or "").strip().upper()
+            for item in self._universe()
+            if str(item or "").strip()
+        )
+        scope = UniverseFilter(
+            asset_classes=tuple(getattr(base, "asset_classes", ("equity", "etf", "index"))),
+            exchanges=(config.exchange,),
+            max_instruments=config.max_instruments_per_cycle,
+            exclude_unknown_trading_status=bool(
+                getattr(base, "exclude_unknown_trading_status", False)
+            ),
+        )
         last_error: Exception | None = None
         for _attempt in range(config.retry_max + 1):
             try:
                 result = await asyncio.wait_for(
-                    engine.run_cycle(force=True, trigger=TriggerKind.MANUAL),
+                    engine.run_cycle(
+                        force=True,
+                        trigger=TriggerKind.MANUAL,
+                        universe=scope,
+                        instrument_ids=configured or None,
+                    ),
                     timeout=float(config.cycle_timeout_seconds),
                 )
                 if isinstance(result, dict):
@@ -725,11 +770,15 @@ class AutonomyMonitoring:
         return list(rows) if isinstance(rows, list) else []
 
     def _normalise(
-        self, rows: list[dict[str, Any]], exchange: str
+        self,
+        rows: list[dict[str, Any]],
+        exchange: str,
+        universe: Sequence[str] = (),
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         accepted: list[dict[str, Any]] = []
         rejected: list[dict[str, Any]] = []
         seen: set[str] = set()
+        allowed = {str(item or "").strip().upper() for item in universe}
         for row in rows:
             if not isinstance(row, dict):
                 rejected.append(
@@ -745,7 +794,7 @@ class AutonomyMonitoring:
                 continue
             instrument_id = str(row.get("instrument_id") or "").strip()
             symbol = str(row.get("symbol") or "").strip()
-            row_exchange = str(row.get("exchange") or exchange).strip().upper()
+            row_exchange = canonical_mic(str(row.get("exchange") or exchange))
             if not instrument_id:
                 rejected.append(
                     {
@@ -771,6 +820,21 @@ class AutonomyMonitoring:
                 )
                 continue
             seen.add(instrument_id)
+            if allowed and instrument_id.upper() not in allowed:
+                rejected.append(
+                    {
+                        "instrument_id": instrument_id,
+                        "symbol": symbol,
+                        "exchange": row_exchange,
+                        "disposition": "rejected",
+                        "reason": (
+                            "OUTSIDE_CONFIGURED_UNIVERSE: candidate is not in the "
+                            "configured instrument allow-list"
+                        ),
+                        "rank": 0,
+                    }
+                )
+                continue
             if self._instrument_lookup is not None:
                 try:
                     instrument = self._instrument_lookup(instrument_id)
@@ -789,10 +853,50 @@ class AutonomyMonitoring:
                     )
                     continue
                 if isinstance(instrument, dict):
+                    looked_up_identity = str(
+                        instrument.get("instrument_id") or ""
+                    ).strip()
+                    if looked_up_identity and (
+                        _canonical_instrument_id(looked_up_identity)
+                        != _canonical_instrument_id(instrument_id)
+                    ):
+                        rejected.append(
+                            {
+                                "instrument_id": instrument_id,
+                                "symbol": symbol,
+                                "exchange": row_exchange,
+                                "disposition": "rejected",
+                                "reason": (
+                                    "INVALID_INSTRUMENT: lookup returned "
+                                    f"{looked_up_identity!r} for {instrument_id!r}"
+                                ),
+                                "rank": 0,
+                            }
+                        )
+                        continue
                     symbol = str(instrument.get("symbol") or symbol)
-                    row_exchange = str(
-                        instrument.get("exchange") or row_exchange
-                    ).upper()
+                    row_exchange = canonical_mic(
+                        str(
+                            instrument.get("mic")
+                            or instrument.get("exchange")
+                            or row_exchange
+                        )
+                    )
+            if row_exchange != exchange:
+                rejected.append(
+                    {
+                        "instrument_id": instrument_id,
+                        "symbol": symbol,
+                        "exchange": row_exchange,
+                        "disposition": "rejected",
+                        "reason": (
+                            f"EXCHANGE_MISMATCH: candidate {row_exchange} "
+                            f"does not belong to configured {exchange}"
+                        ),
+                        "rank": 0,
+                    }
+                )
+                continue
             quality = row.get("data_quality")
             evaluation = row.get("evaluation")
             if not quality and isinstance(evaluation, dict):

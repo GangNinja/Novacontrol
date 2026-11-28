@@ -23,6 +23,18 @@ os.environ.setdefault("NOVACONTROL_DISABLE_TELEMETRY_SAMPLER", "1")
 # tests that exercise the adapter inject a fake fetcher instead.
 os.environ.setdefault("NOVACONTROL_DISABLE_FILINGS", "1")
 
+# Test apps are tokenless loopback instances unless a test explicitly patches
+# credentials.  This is the same explicit development opt-in production code
+# requires; it is never a default of the application factory.
+os.environ.setdefault("NOVACONTROL_ALLOW_ANONYMOUS_LOCAL", "1")
+
+# Browser E2E specs launch uvicorn in a SUBPROCESS, where pytest is not in
+# sys.modules, so envloader cannot apply its in-process test guard.  Inherit an
+# explicit skip instead: a developer's .env credential would otherwise switch
+# the spawned server out of tokenless loopback mode and every static page would
+# render "Authentication required."  Production still loads .env normally.
+os.environ.setdefault("NOVACONTROL_SKIP_DOTENV", "1")
+
 
 def shell_launch_offenders(source_code: str) -> list[str]:
     """AST scan for shell-capable subprocess launches in a module's source.

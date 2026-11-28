@@ -17,6 +17,57 @@ python -m unittest discover -s tests
 python -m novacontrol
 ```
 
+## NovaMarket Stage C — Fresh Real-Market Acceptance V2 (2026-11-27)
+
+**Status: NSE + BSE acceptance executed — Stage C NOT CLOSED.**
+
+The original preflight and scope correction are preserved in [STAGE_C_PREFLIGHT_REPORT.md](STAGE_C_PREFLIGHT_REPORT.md) and [STAGE_C_SCOPE_CORRECTION_REPORT.md](STAGE_C_SCOPE_CORRECTION_REPORT.md). The current run was limited to Indian exchanges. NYSE remains deferred and untouched.
+
+| Case | Instrument / Yahoo mapping | Portfolio | Strategy | Final runtime |
+|---|---|---|---|---|
+| NSE | XNSE:RELIANCE / RELIANCE.NS | pf_7ab7772f077b63516f76 | strat_5325afdf7e1fa071 | disabled, auto_start=false |
+| BSE | XBOM:RELIANCE / RELIANCE.BO | pf_e0f549adee684a9f8a56 | strat_6f94ba703c207203 | disabled, auto_start=false |
+| NYSE (deferred) | XNYS:AAPL / AAPL | pf_56a70a4c1c0d8349b8b1 | strat_d175e7d2f015e1b7 | untouched by this acceptance |
+
+On 27 November, genuine Yahoo provider observations, verified exchange sessions, supported ingestion, monitoring and one decision evaluation ran in separate isolated NSE and BSE stores. Each run produced one signal but zero proposals and zero orders. BSE had eight daily closes where the strategy required fourteen; its latest completed daily bar was 25 November, while NSE's latest was 26 November. No close-of-session capture, naturally eligible paper trade, exit or matured forecast outcome was observed.
+
+| Criterion | Current result |
+|---|---|
+| C1 — NSE decision path | PARTIAL |
+| C2 — BSE decision path | PARTIAL |
+| C3 — 20m and configured intervals | PARTIAL |
+| C4 — Indian daily bars | **PASS** — 101 genuine BSE sessions, 26 Nov included, official bhavcopy provenance |
+| C5 — pause/resume and audit | **PASS** — durable append-only control audit with actor, sequencing and refused attempts |
+| C6 — restart and lease recovery | PASS |
+| C7 — natural end-to-end paper lifecycle | NOT VERIFIED |
+
+The final [acceptance matrix](STAGE_C_ACCEPTANCE_MATRIX.md) and [closure report](STAGE_C_CLOSURE_REPORT.md) record why the Stage C gate is still open. Supporting documents: [execution journal](STAGE_C_EXECUTION_JOURNAL.md), [NSE evidence](STAGE_C_NSE_REAL_MARKET_REPORT.md), [BSE evidence](STAGE_C_BSE_REAL_MARKET_REPORT.md), [decision path](STAGE_C_DECISION_PATH_ACCEPTANCE.md), [timeframe data](STAGE_C_TIMEFRAME_DATA_VALIDATION.md), [runtime recovery](STAGE_C_RUNTIME_RECOVERY_REPORT.md), [performance](STAGE_C_PERFORMANCE_REPORT.md) and [defect register](STAGE_C_DEFECT_REGISTER.md).
+
+All market activity used isolated paper stores. Read-only checks found INR 100,000 seeded portfolio capital, zero realized P&L and no positions or orders. The normal user financial store and user configuration were not opened or modified. Both runtimes were stopped with auto_start=false and no lease; no listeners remained on acceptance ports 8001, 5174 or 8002.
+
+No production source files changed. Harness corrections and failed attempts are preserved in the execution journal. No full test suite, static analysis, type check or CI suite was run in this live acceptance session. The prior 8,154-passed full-suite result remains historical and was not rerun. No commit, push, deployment, reset, clean or stash was performed.
+
+### Stage C remediation (engineering, 2026-11-27)
+
+The engineering remediation that followed the [defect diagnosis](STAGE_C_DEFECT_DIAGNOSIS.md) is recorded in [STAGE_C_MASTER_REMEDIATION_REPORT.md](STAGE_C_MASTER_REMEDIATION_REPORT.md) and [STAGE_C_REMEDIATION_MATRIX.md](STAGE_C_REMEDIATION_MATRIX.md). The paragraph above that says "no production source files changed" describes the acceptance session only; the remediation changed source as listed in that report.
+
+- R-01 fixed PI-12's technical context: one interval per horizon, newest-first, session/timestamp deduplicated, chronological, and fail-closed below 21 complete bars.
+- R-02 added schema v5 `autonomy_control_events`: append-only, actor-attributed, sequenced, restart-persistent, transactionally consistent with every mode change, and recording refused/no-op attempts without changing state.
+- R-03 added a deterministic one-close-per-session policy (official bhavcopy preferred) and enforced it in the BSE importer, the SMA reader and the decision context.
+- R-04 restored official BSE daily history into the isolated XBOM store: 101 distinct sessions (100 official bars + 8 Yahoo, 6 sessions with both), first 1 July 2026, last 26 November 2026, after a byte-backed backup. `2026-07-08` is a genuine provider gap; `2026-11-27` was an intraday day with no published bhavcopy. No bar was synthesised and the normal financial store was not touched.
+- R-05 is **PASS**: 5m history was backfilled through the production ingest path into both isolated stores (XNSE 846 inserted, XBOM 835, after byte-backed SHA-256 backups), and the verifier now normalises epoch/ISO stamps and recomputes each 20m bar from the independently stored 5m rows. Result on **both** exchanges: 1000/1000 independent 5m components, 250/250 20m bars independently recomputed, 0 mismatches.
+- R-06 anchored the 20m grid on the exchange session open and discloses `session_anchor` in provider metadata.
+- R-07 replaced per-bar synchronous SQLite commits with one transaction per provider page: 500 bars went from 696.07 ms peak event-loop lag and 500 commits to 31.42 ms and 1 commit in the controlled benchmark.
+- R-08: **SC-R08-01 is FIXED** — one canonical map in `decision/forecast.py` (`5d↔one_week`, `3d↔few_sessions`, `30d↔one_month`, `90d↔three_months`), the PI-12 lookup queries the store unfiltered then filters canonically, and the risk bridge resolves both forms while intraday stays excluded. NSE trained from 248 genuine daily bars (`bootstrap` active + 5 candidates) and its stored forecast `fc_42d151e421dd9f79a566` is now returned by `models(horizon="5d")`. BSE remains **BLOCKED**: 108 stored daily rows across 101 sessions against a 140-bar minimum; the minimum was not lowered and no bar was synthesised.
+- R-09 (C1 interpretation) and R-10 (full-session procedure) are documented; neither changes a criterion without operator approval.
+
+Checks actually run: 35 focused Stage C remediation tests, the per-file suite matrix (see [final test report](STAGE_C_FINAL_TEST_REPORT.md)), mypy clean on `src` and `src --platform win32` (729 files), Ruff clean on all new files, API reference in sync at 936 routes, `PRAGMA integrity_check` = ok on both isolated stores, and a pre-existing desktop capture desync fixed (81/81 in `test_desktop.py`). No commit, push, deploy, reset, clean or stash was performed.
+
+Criterion status after remediation: C1 PARTIAL, C2 PARTIAL, C3 **PASS**, C4 **PASS**, C5 **PASS**, C6 PASS, C7 NOT VERIFIED, Stage C OPEN, Stage D NOT STARTED.
+
+The forecast position and the operator gates are detailed in [forecast readiness](STAGE_C_FORECAST_READINESS_REPORT.md) and the [acceptance readiness checklist](STAGE_C_ACCEPTANCE_READINESS_CHECKLIST.md). Tests passing never closes Stage C: C1's interpretation (R-09), C2's BSE forecast history and C7's natural lifecycle are operator/market actions.
+
+The Stage C fallback checkpoint is 30 November 2026. Keep the milestone open and do not begin Stage D until every applicable requirement is PASS.
 ## Completed Foundation Work
 
 - Repository metadata and dependency declaration

@@ -15,16 +15,18 @@ timestamps; the engine adds instrument identity, quality and freshness.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 from urllib.parse import quote as urlquote
+from zoneinfo import ZoneInfo
 
 from novacontrol.novamarket.contracts import (
     ProviderInvalidResponseError,
     ProviderSymbolNotFoundError,
     ProviderUnsupportedIntervalError,
 )
+from novacontrol.novamarket.marketdata.calendar import calendar_by_mic
 from novacontrol.novamarket.marketdata.models import (
     AssetClass,
     DataInterval,
@@ -48,6 +50,9 @@ _INTERVALS: dict[DataInterval, str] = {
     DataInterval.MINUTE_1: "1m",
     DataInterval.MINUTE_5: "5m",
     DataInterval.MINUTE_15: "15m",
+    # Yahoo has no native 20m interval.  The request uses 5m and the adapter
+    # combines four consecutive bars exactly; it never relabels 15m/30m data.
+    DataInterval.MINUTE_20: "5m",
     DataInterval.MINUTE_30: "30m",
     DataInterval.HOUR_1: "60m",
     DataInterval.DAY_1: "1d",
@@ -58,6 +63,7 @@ _RANGE_FOR: dict[DataInterval, str] = {
     DataInterval.MINUTE_1: "7d",
     DataInterval.MINUTE_5: "60d",
     DataInterval.MINUTE_15: "60d",
+    DataInterval.MINUTE_20: "60d",
     DataInterval.MINUTE_30: "60d",
     DataInterval.HOUR_1: "730d",
     DataInterval.DAY_1: "10y",
@@ -118,8 +124,10 @@ class YahooAdapter(MarketDataAdapter):
                     "Unofficial Yahoo chart endpoint, not a licensed real-time "
                     "feed; free/delayed data only. Commercial use or redistribution "
                     "requires a licensed provider.",
-                    "Intraday history is limited: 1m to 7 days, 5m/15m/30m to 60 "
-                    "days, 1h to 730 days.",
+                    "Intraday history is limited: 1m to 7 days, 5m/15m/20m/30m to "
+                    "60 days, 1h to 730 days.",
+                    "20m bars are exact aggregates of four consecutive 5m Yahoo "
+                    "bars; no native 20m response is claimed.",
                     "Yahoo can change or restrict the endpoint without notice.",
                     "Some indices and FX pairs have no volume; it is stored as "
                     "absent, never as zero.",
@@ -247,9 +255,12 @@ class YahooAdapter(MarketDataAdapter):
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit must be a positive integer")
         limit = min(limit, 5_000)
+        derived_20m = canonical is DataInterval.MINUTE_20
+        request_interval = _INTERVALS[canonical]
+        source_interval = DataInterval.MINUTE_5 if derived_20m else canonical
         symbol = instrument.provider_symbol(self.name)
         params: dict[str, str] = {
-            "interval": _INTERVALS[canonical],
+            "interval": request_interval,
             "includePrePost": "false",
             "events": "div,splits",
         }
@@ -303,7 +314,7 @@ class YahooAdapter(MarketDataAdapter):
             volume = volumes[index] if index < len(volumes) else None
             bars.append(
                 ProviderBar(
-                    interval=canonical,
+                    interval=source_interval,
                     open=opens[index],
                     high=highs[index],
                     low=lows[index],
@@ -315,7 +326,9 @@ class YahooAdapter(MarketDataAdapter):
                     provider_metadata={
                         "symbol": str(meta.get("symbol") or symbol),
                         "exchange": str(meta.get("exchangeName") or ""),
-                        "interval": _INTERVALS[canonical],
+                        "interval": canonical.value if derived_20m else request_interval,
+                        "yahoo_interval": request_interval,
+                        "derived_from": "5m" if derived_20m else None,
                         "timestamp_basis": "bar start",
                     },
                     raw={
@@ -333,6 +346,17 @@ class YahooAdapter(MarketDataAdapter):
                 "Yahoo returned no complete OHLCV rows", provider=self.name
             )
         bars.sort(key=lambda item: item.observed_at)
+        if derived_20m:
+            bars = _aggregate_20m(
+                bars,
+                timezone,
+                session_open_minute=_session_open_minute(instrument, timezone),
+            )
+            if not bars:
+                raise ProviderInvalidResponseError(
+                    "Yahoo returned no complete 20m aggregates from 5m bars",
+                    provider=self.name,
+                )
         return tuple(bars[-limit:])
 
     async def lookup(self, provider_symbol: str) -> ProviderInstrument:
@@ -436,6 +460,115 @@ class YahooAdapter(MarketDataAdapter):
         if not isinstance(quotes, list) or not quotes or not isinstance(quotes[0], dict):
             return {}
         return quotes[0]
+
+
+def _session_open_minute(instrument: Any, timezone: str) -> int | None:
+    """The exchange session open on the provider's clock, when it is known."""
+
+    mic = str(getattr(instrument, "mic", "") or "")
+    calendar = calendar_by_mic(mic) if mic else None
+    if calendar is None or not calendar.sessions:
+        return None
+    if calendar.timezone != timezone:
+        # A different zone cannot be re-anchored by clock time; the caller
+        # falls back to the disclosed page anchor instead.
+        return None
+    session = calendar.sessions[0]
+    return session.open_time.hour * 60 + session.open_time.minute
+
+
+def _aggregate_20m(
+    bars: list[ProviderBar],
+    timezone: str,
+    *,
+    session_open_minute: int | None = None,
+) -> list[ProviderBar]:
+    """Combine four consecutive 5m bars into one exact 20m bar.
+
+    Yahoo does not publish 20m bars.  The request therefore reads 5m bars and
+    groups them on the exchange's session clock.  A group is emitted only when
+    all four 5m components are present, so a missing row is never filled and the
+    result is not a resampled approximation.  The source timestamps are recorded
+    in each bar's provenance.
+    """
+    try:
+        zone = ZoneInfo(timezone)
+    except Exception:
+        zone = ZoneInfo("UTC")
+    local = [(bar.observed_at.astimezone(zone), bar) for bar in bars]
+    if not local:
+        return []
+    # The grid belongs to the exchange session, not to whichever bar the
+    # provider page happens to start with.  A page that begins at 09:20
+    # must not shift every 20m bucket five minutes late.
+    anchor = (
+        session_open_minute
+        if session_open_minute is not None
+        else min(moment.hour * 60 + moment.minute for moment, _ in local)
+    )
+    groups: dict[tuple[date, int], list[tuple[int, ProviderBar]]] = {}
+    for moment, bar in local:
+        minute = moment.hour * 60 + moment.minute
+        delta = minute - anchor
+        if delta < 0 or delta % 5:
+            continue
+        bucket = delta // 20
+        groups.setdefault((moment.date(), bucket), []).append(
+            (delta - bucket * 20, bar)
+        )
+    aggregated: list[ProviderBar] = []
+    for components in groups.values():
+        components.sort(key=lambda item: item[0])
+        if [offset for offset, _ in components] != [0, 5, 10, 15]:
+            continue
+        rows = [bar for _, bar in components]
+        if len({bar.currency for bar in rows}) != 1:
+            continue
+        volume = (
+            sum(
+                (bar.volume for bar in rows if bar.volume is not None),
+                Decimal(0),
+            )
+            if all(bar.volume is not None for bar in rows)
+            else None
+        )
+        first = rows[0]
+        aggregated.append(
+            ProviderBar(
+                interval=DataInterval.MINUTE_20,
+                open=first.open,
+                high=max(bar.high for bar in rows),
+                low=min(bar.low for bar in rows),
+                close=rows[-1].close,
+                volume=volume,
+                currency=first.currency,
+                observed_at=first.observed_at,
+                source_timezone=first.source_timezone,
+                partial=any(bar.partial for bar in rows),
+                provider_metadata={
+                    **dict(first.provider_metadata),
+                    "interval": DataInterval.MINUTE_20.value,
+                    "yahoo_interval": "5m",
+                    "derived_from": "5m",
+                    "aggregation": "exact aggregate of four consecutive 5m bars",
+                    "session_anchor": (
+                        "session_open"
+                        if session_open_minute is not None
+                        else "page_minimum"
+                    ),
+                    "component_count": 4,
+                    "component_timestamps": [
+                        bar.observed_at.isoformat() for bar in rows
+                    ],
+                },
+                raw={
+                    "derived_from": "5m",
+                    "components": [dict(bar.raw) for bar in rows],
+                },
+            )
+        )
+    aggregated.sort(key=lambda item: item.observed_at)
+    return aggregated
 
 
 def _epoch(value: object, *, field_name: str) -> datetime:

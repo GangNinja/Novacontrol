@@ -1382,7 +1382,10 @@ class ServiceTests(unittest.TestCase):
         self.assertTrue(self.service.set_recording(True))
 
     def test_retention_removes_old_rows_from_every_store(self) -> None:
-        now = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
+        # Retention compares against the real clock.  A hard-coded "now" makes
+        # the supposedly fresh row age past the policy as the calendar moves;
+        # use the current instant so only the deliberately old row expires.
+        now = datetime.now(UTC)
         self.service.record(make_trajectory(timestamp=(now - timedelta(days=90)).isoformat()))
         self.service.record(
             make_trajectory(

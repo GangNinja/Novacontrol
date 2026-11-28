@@ -4,7 +4,7 @@
 
 **Date:** 9 November 2026
 
-**Scope:** Architecture and implementation planning baseline. The original design sections are preserved; section 13 records the implemented PI-12 prediction-trading integration. No commit or push is made by this document.
+**Scope:** Architecture and implementation planning baseline. The original design sections are preserved; section 13 records the implemented PI-12 prediction-trading integration. **Implementation note (AT-06, 23 November 2026):** the later runtime added a persisted application auto-start policy and bounded stale-lease retry. It does not auto-resume a paused mode; an emergency stop disables auto-start. Where the baseline below says auto-start does not exist, this note and the AT-06/remediation reports supersede it. No commit or push is made by this document.
 
 **Baseline:** NovaMarket NM-01–NM-14, including the 9 November 2026 acceptance report and the three preserved QA fixes (BUG-QA-001, BUG-QA-002, BUG-QA-003).
 
@@ -380,7 +380,7 @@ The following are hard invariants, not defaults:
 5. **Fail closed.** A stale price, unknown calendar coverage, unavailable risk engine, unavailable execution engine, lost lease or unreadable portfolio means no new order.
 6. **No duplicate order.** The proposal ID and `execution_orders.proposal_id` uniqueness provide idempotency; autonomy never invents a second order ID.
 7. **No automatic learning promotion.** Learning recommendations require the existing governance flow.
-8. **No automatic restart into autonomous mode.** Owner decision OD-06: a restart always comes up `disabled` and requires an authorized operator to start the shell again. Auto-start and auto-resume do not exist (`resume_on_restart` is not a supported setting).
+8. **No implicit resume; bounded application auto-start only.** Owner decision OD-06's safety intent remains: a paused mode is never silently resumed, and a restart does not restore a paused state. The later AT-06 implementation added an explicit, persisted auto-start opt-in (`auto_start` / `auto_start_mode`): a graceful shutdown preserves the operator's policy, an emergency stop disables it persistently, and a stale foreign lease is retried only after it demonstrably expires (never stolen). See `AUTONOMOUS_PAPER_TRADING_RUNTIME_INTEGRATION_REPORT.md` and `AUTONOMOUS_DECISION_PATH_REMEDIATION_REPORT.md`.
 
 A start-up assertion checks the execution contract flags and refuses to bring the autonomy runtime out of `disabled` if any paper-only invariant is not true. This is a defensive assertion, not a replacement for the existing execution checks.
 

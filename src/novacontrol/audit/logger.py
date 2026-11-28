@@ -20,9 +20,12 @@ those, builds each record and hands it over.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import os
 import tempfile
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -111,8 +114,19 @@ class JsonlAuditSink:
 
     def append(self, record: Mapping[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(json_safe(record), ensure_ascii=False) + "\n")
+        line = json.dumps(json_safe(record), ensure_ascii=False) + "\n"
+        last_error: OSError | None = None
+        for attempt in range(3):
+            try:
+                with self.path.open("a", encoding="utf-8") as handle:
+                    handle.write(line)
+                return
+            except OSError as exc:
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(0.05 * (attempt + 1))
+        assert last_error is not None
+        raise last_error
 
     def read(self, limit: int = 0) -> list[Mapping[str, Any]]:
         if not self.path.exists():
@@ -158,12 +172,21 @@ class JsonlAuditSink:
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
                 for row in records:
                     handle.write(json.dumps(json_safe(row), ensure_ascii=False) + "\n")
-            os.replace(temporary, self.path)
+            last_error: OSError | None = None
+            for attempt in range(3):
+                try:
+                    os.replace(temporary, self.path)
+                    break
+                except OSError as exc:
+                    last_error = exc
+                    if attempt < 2:
+                        time.sleep(0.05 * (attempt + 1))
+            else:
+                assert last_error is not None
+                raise last_error
         except BaseException:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(temporary)
-            except OSError:
-                pass
             raise
 
 
@@ -207,6 +230,9 @@ class AuditLogger:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._records = 0
         self._redaction_total = 0
+        self._write_failures = 0
+        self._last_write_error = ""
+        self._last_write_failure_at = ""
         self._sink: AuditSink | None = None
         self.attach_sink(sink if sink is not None else InMemoryAuditSink())
 
@@ -297,7 +323,11 @@ class AuditLogger:
             redactions=total,
             redacted_kinds=kinds,
         )
-        self.sink.append(row.to_dict())
+        try:
+            self.sink.append(row.to_dict())
+        except Exception as exc:
+            self.note_failure(exc)
+            raise
         self._records += 1
         self._redaction_total += total
         cap = self.retention.max_records
@@ -322,6 +352,22 @@ class AuditLogger:
 
     def count(self) -> int:
         return self._records
+
+    def note_failure(self, exc: BaseException) -> None:
+        """Make an audit write failure visible without writing another secret.
+
+        The request path may still return its business result, but the failure
+        is counted, retained in ``/audit/status``, and logged at CRITICAL.  A
+        failed audit trail is therefore degraded and observable, never silent.
+        """
+        self._write_failures += 1
+        self._last_write_error = self.redactor.redact_text(str(exc)).text or type(exc).__name__
+        self._last_write_failure_at = self._clock().isoformat()
+        logging.getLogger("novacontrol.audit").critical(
+            "audit_write_failed count=%d error=%s",
+            self._write_failures,
+            self._last_write_error,
+        )
 
     # -- deletion and retention ------------------------------------------------
 
@@ -383,6 +429,10 @@ class AuditLogger:
             "oldest": min(stamps) if stamps else "",
             "newest": max(stamps) if stamps else "",
             "redaction_marker": REDACTED,
+            "write_failures": self._write_failures,
+            "last_write_error": self._last_write_error,
+            "last_write_failure_at": self._last_write_failure_at,
+            "degraded": self._write_failures > 0,
         }
 
     def to_dict(self) -> dict[str, Any]:

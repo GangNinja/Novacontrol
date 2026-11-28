@@ -1171,6 +1171,8 @@ class AutonomyExitSupervisor:
                 "price": str(fill.price),
                 "gross_value": str(fill.gross_value),
                 "total_fees": str(fill.total_fees),
+                "slippage_amount": str(fill.slippage_amount),
+                "slippage_pct": str(fill.slippage_pct),
                 "net_cash": str(fill.net_cash),
                 "executed_at": fill.executed_at.isoformat(),
                 "ledger_transaction_ids": list(fill.ledger_transaction_ids),
@@ -1259,6 +1261,14 @@ class AutonomyExitSupervisor:
             "updated_at": self._now_iso(),
             "reconciliation": dict(reconciliation),
         }
+        # AT-06/PI-15 bridge: a complete, reconciled round trip becomes one
+        # verified experience with an actual-outcome reward.  It is advisory;
+        # no policy is trained, promoted or allowed to trade.
+        from novacontrol.novamarket.learning.paper_feedback import (
+            build_paper_experience,
+        )
+
+        evidence["rl_feedback"] = build_paper_experience(evidence)
         stored = self.execution.store.save_learning_evidence(evidence)
         if self._learning_recorder is not None:
             try:
@@ -1334,6 +1344,8 @@ class AutonomyExitSupervisor:
                     "quantity": str(fill.quantity),
                     "price": str(fill.price),
                     "total_fees": str(fill.total_fees),
+                    "slippage_amount": str(fill.slippage_amount),
+                    "slippage_pct": str(fill.slippage_pct),
                     "executed_at": fill.executed_at.isoformat(),
                     "ledger_transaction_ids": list(fill.ledger_transaction_ids),
                 }

@@ -492,6 +492,20 @@ threatened correctness or the paper-trading loop.
 
 **Conclusion:** NovaMarket is ready for **controlled paper-trading operation**
 on simulated or paper data, with the risk gate and accounting verified. It is
-not ready for live trading, and the 1-minute decision hierarchy remains the
-one substantive engineering gap to close before claiming the full intended
-multi-timeframe design. No PI-25 or new roadmap stage was created.
+not ready for live trading. No PI-25 or new roadmap stage was created.
+
+---
+
+## Post-closure enhancement — multi-timeframe hierarchy (21 November 2026)
+
+The one substantive gap recorded in §7 and §16 has since been implemented as a
+post-PI-24 enhancement: a 20-minute context → 5-minute setup → 1-minute timing
+layer with an explicit conflict matrix, a real one-minute forecast cycle, and a
+day-trading-only proposal gate before NM-08. It is documented in
+[MULTITIMEFRAME_TRADING_INTELLIGENCE.md](MULTITIMEFRAME_TRADING_INTELLIGENCE.md).
+
+This addendum does not rewrite the historical closure evidence above. The
+forecasting/strategy readiness verdict remains **PARTIAL** until the hierarchy
+has a larger chronological sample; the real-data evaluation covers two stored
+sessions and two enhanced simulated trades, and no accuracy or profitability
+improvement is claimed. Live-market readiness remains **BLOCKED**.

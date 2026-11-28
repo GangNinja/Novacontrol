@@ -2,6 +2,8 @@
 
 **Verdict:** **PASS** for the approved AT-01 scope, with the limitations stated in §9.
 
+**Historical-scope note:** this report describes the AT-01 shell only. AT-06 later added a persisted application auto-start opt-in, bounded stale-lease retry and pause-mode restoration; AT-01's “no automatic resume” rule still means a paused mode is never silently resumed and an emergency stop remains persistent. See `AUTONOMOUS_DECISION_PATH_REMEDIATION_REPORT.md` for current behaviour.
+
 **Date:** 10 November 2026
 
 **Authoritative decisions:** `AUTONOMOUS_TRADING_OWNER_DECISIONS.md` (owner-approved 10 November 2026).

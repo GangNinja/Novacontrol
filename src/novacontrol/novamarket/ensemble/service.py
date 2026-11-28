@@ -82,6 +82,7 @@ _INTERVAL_SECONDS = {
     DataInterval.MINUTE_1: 60.0,
     DataInterval.MINUTE_5: 300.0,
     DataInterval.MINUTE_15: 900.0,
+    DataInterval.MINUTE_20: 1200.0,
     DataInterval.MINUTE_30: 1800.0,
     DataInterval.HOUR_1: 3600.0,
     DataInterval.DAY_1: 86400.0,

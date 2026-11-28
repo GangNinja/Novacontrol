@@ -191,7 +191,11 @@ class Harness(unittest.IsolatedAsyncioTestCase):
         self.market.observed_at = self.now
 
     async def signal_for(
-        self, sid: str, signal_type: str = "buy", *, notional_price: str = "100.00"
+        self,
+        sid: str,
+        signal_type: str = "buy",
+        *,
+        notional_price: str | None = "100.00",
     ) -> dict[str, Any]:
         from novacontrol.novamarket.strategies.models import StrategySignal, SignalType, strategy_id
 
@@ -213,7 +217,9 @@ class Harness(unittest.IsolatedAsyncioTestCase):
             confidence=Decimal("0.5"),
             explanation="test signal",
             expires_at=self.now + timedelta(hours=1),
-            reference_price=Decimal(notional_price),
+            reference_price=(
+                Decimal(notional_price) if notional_price is not None else None
+            ),
             data_quality="measured",
         )
         self.strategies.store.save_signal(signal)
@@ -418,6 +424,7 @@ class HoldingPortfolio:
             "holdings": [
                 {
                     "instrument_id": "XNSE:GAMMA",
+                    "quantity": "1",
                     "market_value": "100.00",
                     "weight": "0.01",
                     "sector": "Technology",
@@ -587,6 +594,25 @@ class RiskContractTests(Harness):
         exit_signal = await self.signal_for(sid, "exit")
         with self.assertRaises(StrategyValidationError):
             await self.strategies.propose(exit_signal["signal_id"], notional="50.00")
+
+    async def test_an_exit_at_a_new_price_uses_the_held_quantity(self) -> None:
+        sid = await self.make()
+        self.strategies._portfolios = HoldingPortfolio(self.portfolio_id)
+        self.strategies.set_risk(StubRisk("approved"))
+        exit_signal = await self.signal_for(
+            sid, "exit", notional_price="90.00"
+        )
+        proposal = (
+            await self.strategies.propose(exit_signal["signal_id"])
+        )["proposal"]
+        self.assertEqual(proposal["notional"], "90.00")
+        self.assertEqual(proposal["status"], "approved")
+
+    async def test_a_signal_without_a_positive_reference_price_fails_closed(self) -> None:
+        sid = await self.make()
+        signal = await self.signal_for(sid, "buy", notional_price=None)
+        with self.assertRaises(StrategyValidationError):
+            await self.strategies.propose(signal["signal_id"])
 
     async def test_no_portfolio_or_wallet_mutation_occurs(self) -> None:
         before = self.portfolios.detail(self.portfolio_id)

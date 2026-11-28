@@ -175,9 +175,10 @@ HORIZONS: dict[str, dict[str, Any]] = {
         "default_objective": OptimizationObjective.RISK_ADJUSTED.value,
         "default_method": AllocationMethod.MEAN_VARIANCE.value,
     },
-    # There is no native 20m bar in DataInterval.  Use five-minute bars and
-    # treat the horizon as four observation periods; never label 15m data as
-    # a 20m horizon.
+    # This profile's calibration uses five-minute bars and treats the 20m
+    # horizon as four observation periods.  A native 20m DataInterval now
+    # exists, but this mapping is intentionally left on its calibrated input;
+    # never label 15m data as a 20m horizon.
     "20m": {
         "group": "intraday",
         "interval": "5m",

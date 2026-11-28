@@ -747,6 +747,47 @@ class EngineTests(unittest.TestCase):
         with self.assertRaises(ForecastDataError):
             asyncio.run(engine.generate(ALPHA, "next_session"))
 
+    def test_intraday_bars_never_displace_the_daily_forecast_history(self) -> None:
+        class _MixedIntervalMarket(_FakeMarketData):
+            def __init__(self, daily: list[Any], intraday: list[Any]) -> None:
+                super().__init__({ALPHA: daily})
+                self.intraday = intraday
+
+            def bars(
+                self,
+                instrument_id: str,
+                *,
+                interval: Any = None,
+                limit: int = 200,
+                ascending: bool = False,
+                **_: Any,
+            ) -> Any:
+                rows = (
+                    self.intraday
+                    if str(getattr(interval, "value", interval)) == "1m"
+                    else self._bars.get(instrument_id, ())
+                )
+                rows = list(rows)[-limit:]
+                if not ascending:
+                    rows.reverse()
+                return SimpleNamespace(items=rows)
+
+        daily = _bars(260)
+        intraday = [
+            _bar(NOW - timedelta(minutes=index), 99.0) for index in range(200, 0, -1)
+        ]
+        store = ForecastStore(":memory:")
+        self.addCleanup(store.close)
+        engine = ForecastEngine(
+            store,
+            market_data=_MixedIntervalMarket(daily, intraday),
+            clock=lambda: NOW,
+        )
+        body = asyncio.run(engine.generate(ALPHA, "next_session"))
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["data_quality"], "good")
+        self.assertAlmostEqual(body["features"]["last_close"], daily[-1].close, places=6)
+
     def test_mature_history_forecasts_from_the_newest_window(self) -> None:
         class _LimitBeforeOrderMarket(_FakeMarketData):
             """Mimic the SQLite facade: LIMIT is applied before ordering."""
@@ -995,6 +1036,28 @@ class EngineEvaluationTests(unittest.TestCase):
             "novamarket.forecast.performance.updated", recorder.names()
         )
 
+    def test_two_same_model_forecasts_due_together_make_distinct_snapshots(self) -> None:
+        engine, store = _engine(bars=_bars(260))
+        self.addCleanup(store.close)
+        first = asyncio.run(
+            engine.generate(
+                ALPHA, "next_session", at=NOW - timedelta(days=1)
+            )
+        )
+        second = asyncio.run(engine.generate(ALPHA, "next_session", at=NOW))
+        target = max(
+            datetime.fromisoformat(first["target_at"]),
+            datetime.fromisoformat(second["target_at"]),
+        )
+        engine._market_data.append(  # type: ignore[union-attr]
+            ALPHA, _bar(target, 101.5)
+        )
+        result = asyncio.run(
+            engine.evaluate_due(at=target + timedelta(days=2))
+        )
+        self.assertEqual(result["evaluated"], 2)
+        self.assertEqual(len(store.performance()), 2)
+
 
 class EngineTrainingTests(unittest.TestCase):
     def test_training_persists_scores_selection_and_calibration(self) -> None:
@@ -1129,6 +1192,250 @@ class EngineTrainingTests(unittest.TestCase):
             asyncio.run(engine.promote("ewma", ALPHA, "next_session"))
         with self.assertRaises(ForecastNotFoundError):
             asyncio.run(engine.promote("missing", ALPHA, "next_session"))
+
+
+class ForecastingOptimizationRegressionTests(unittest.TestCase):
+    """Regressions for the confirmed calibration and selection defects."""
+
+    def _stored_multiclass(self) -> dict[str, Any]:
+        def mapping(value: float) -> dict[str, Any]:
+            return {
+                "method": "isotonic-pava",
+                "knots": [[0.0, value], [1.0, value]],
+            }
+
+        return {
+            "calibration_id": "fcal_multiclass",
+            "instrument_id": ALPHA,
+            "model_id": "random_walk",
+            "horizon": "next_session",
+            "created_at": NOW.isoformat(),
+            "status": "calibrated",
+            "holdout_samples": 40,
+            "calibrator": {
+                "method": "multiclass-one-vs-rest-isotonic-pava",
+                "up": mapping(0.7),
+                "down": mapping(0.2),
+                "sideways": mapping(0.1),
+            },
+        }
+
+    def test_generate_applies_a_stored_calibrator_when_policy_allows(self) -> None:
+        engine, store = _engine(policy=ForecastPolicy(apply_calibration=True))
+        self.addCleanup(store.close)
+        store.save_calibration(self._stored_multiclass())
+        body = asyncio.run(engine.generate(ALPHA, "next_session"))
+        self.assertEqual(body["probability_status"], "calibrated")
+        self.assertEqual(body["calibration_id"], "fcal_multiclass")
+        self.assertAlmostEqual(body["p_up"], 0.7, places=6)
+        self.assertAlmostEqual(body["p_down"], 0.2, places=6)
+        self.assertAlmostEqual(body["p_sideways"], 0.1, places=6)
+        self.assertIn("calibrated on a validation-only", " ".join(body["notes"]))
+
+    def test_calibration_is_not_applied_by_default(self) -> None:
+        engine, store = _engine()
+        self.addCleanup(store.close)
+        store.save_calibration(self._stored_multiclass())
+        body = asyncio.run(engine.generate(ALPHA, "next_session"))
+        self.assertEqual(body["probability_status"], "uncalibrated")
+        self.assertEqual(body["calibration_id"], "")
+        self.assertIn("report-only", " ".join(body["notes"]))
+
+    def test_a_calibrator_from_another_instrument_is_never_applied(self) -> None:
+        engine, store = _engine(policy=ForecastPolicy(apply_calibration=True))
+        self.addCleanup(store.close)
+        payload = self._stored_multiclass()
+        payload["instrument_id"] = "XNSE:BETA"
+        store.save_calibration(payload)
+        body = asyncio.run(engine.generate(ALPHA, "next_session"))
+        self.assertEqual(body["probability_status"], "uncalibrated")
+        self.assertEqual(body["calibration_id"], "")
+
+    def test_multiclass_calibration_improves_holdout_brier(self) -> None:
+        samples = tuple(
+            CalibrationSample(
+                0.9,
+                False,
+                p_down=0.05,
+                p_sideways=0.05,
+                actual_direction="down",
+            )
+            for _ in range(60)
+        )
+        report = calibrate_probability(samples, min_samples=30, holdout_fraction=0.4)
+        self.assertEqual(report.status, "calibrated")
+        self.assertIsNotNone(report.calibrator)
+        self.assertLess(report.multiclass_brier_after or 1.0, report.multiclass_brier_before or 0.0)
+
+    def test_a_harmful_calibrator_is_rejected_and_not_reported_as_calibrated(self) -> None:
+        # The earlier portion is all "up" and the later portion all "down".
+        # Any calibrator fitted on the earlier portion sharpens the wrong
+        # direction, so accepting it would make the holdout Brier worse.
+        samples = tuple(
+            CalibrationSample(
+                1.0 / 3.0,
+                index < 36,
+                p_down=1.0 / 3.0,
+                p_sideways=1.0 / 3.0,
+                actual_direction="up" if index < 36 else "down",
+            )
+            for index in range(60)
+        )
+        report = calibrate_probability(samples, min_samples=30, holdout_fraction=0.4)
+        self.assertEqual(report.status, "rejected")
+        self.assertIsNone(report.calibrator)
+        self.assertGreaterEqual(
+            report.multiclass_brier_after or 0.0,
+            report.multiclass_brier_before or 0.0,
+        )
+        self.assertTrue(report.reason)
+
+    def test_reference_brier_and_skill_are_reported(self) -> None:
+        engine, store = _engine(bars=_bars(260))
+        self.addCleanup(store.close)
+        bars = _bars(260)
+        result = evaluate_models([bar.close for bar in bars], 1, ForecastPolicy())
+        baseline = result.scores["random_walk"]
+        self.assertAlmostEqual(baseline.reference_brier or 0.0, 2.0 / 3.0, places=8)
+        self.assertAlmostEqual(
+            baseline.brier_skill_score or 0.0,
+            1.0 - (baseline.brier or 0.0) / (2.0 / 3.0),
+            places=8,
+        )
+
+    def test_no_skill_abstains_to_the_baseline(self) -> None:
+        engine, store = _engine(bars=_bars(260))
+        self.addCleanup(store.close)
+        baseline = ModelScore(
+            model_id="random_walk",
+            samples=30,
+            mae=0.01,
+            rmse=0.02,
+            median_absolute_error=0.01,
+            directional_accuracy=0.4,
+            brier=0.70,
+            log_loss=1.1,
+            interval_coverage=0.8,
+            interval_width=0.04,
+            calibration_error=0.08,
+            reference_brier=2.0 / 3.0,
+            brier_skill_score=-0.05,
+        )
+        challenger = ModelScore(
+            model_id="ewma",
+            samples=30,
+            mae=0.01,
+            rmse=0.02,
+            median_absolute_error=0.01,
+            directional_accuracy=0.4,
+            brier=0.69,
+            log_loss=1.0,
+            interval_coverage=0.8,
+            interval_width=0.04,
+            calibration_error=0.08,
+            reference_brier=2.0 / 3.0,
+            brier_skill_score=-0.035,
+        )
+        result = WalkForwardResult(
+            1, 30, {"random_walk": baseline, "ewma": challenger}
+        )
+        with mock.patch.object(
+            engine_module, "evaluate_models", side_effect=[result, result]
+        ):
+            body = asyncio.run(engine.train(ALPHA, "next_session"))
+        self.assertEqual(body["selected_model"], "random_walk")
+        self.assertTrue(body["abstained"])
+        self.assertLess(body["selected_brier_skill_score"] or 0.0, 0.0)
+
+    def test_test_slice_is_reported_but_never_selects_the_model(self) -> None:
+        engine, store = _engine(bars=_bars(260))
+        self.addCleanup(store.close)
+        baseline = ModelScore(
+            model_id="random_walk",
+            samples=30,
+            mae=0.01,
+            rmse=0.02,
+            median_absolute_error=0.01,
+            directional_accuracy=0.5,
+            brier=0.62,
+            log_loss=1.0,
+            interval_coverage=0.8,
+            interval_width=0.04,
+            calibration_error=0.05,
+            reference_brier=2.0 / 3.0,
+            brier_skill_score=0.07,
+        )
+        challenger = ModelScore(
+            model_id="ewma",
+            samples=30,
+            mae=0.01,
+            rmse=0.02,
+            median_absolute_error=0.01,
+            directional_accuracy=0.5,
+            brier=0.58,
+            log_loss=1.0,
+            interval_coverage=0.8,
+            interval_width=0.04,
+            calibration_error=0.05,
+            reference_brier=2.0 / 3.0,
+            brier_skill_score=0.13,
+        )
+        validation = WalkForwardResult(
+            1, 30, {"random_walk": baseline, "ewma": challenger}
+        )
+        # The later slice is deliberately spectacular for the baseline and
+        # terrible for the challenger.  Selection must ignore it.
+        test_baseline = ModelScore(
+            model_id="random_walk",
+            samples=10,
+            mae=0.01,
+            rmse=0.02,
+            median_absolute_error=0.01,
+            directional_accuracy=0.9,
+            brier=0.10,
+            log_loss=0.4,
+            interval_coverage=0.9,
+            interval_width=0.04,
+            calibration_error=0.01,
+        )
+        test_challenger = ModelScore(
+            model_id="ewma",
+            samples=10,
+            mae=0.01,
+            rmse=0.02,
+            median_absolute_error=0.01,
+            directional_accuracy=0.1,
+            brier=0.90,
+            log_loss=2.0,
+            interval_coverage=0.4,
+            interval_width=0.04,
+            calibration_error=0.20,
+        )
+        test = WalkForwardResult(
+            1, 10, {"random_walk": test_baseline, "ewma": test_challenger}
+        )
+        with mock.patch.object(
+            engine_module, "evaluate_models", side_effect=[validation, test]
+        ):
+            body = asyncio.run(engine.train(ALPHA, "next_session"))
+        self.assertEqual(body["selected_model"], "ewma")
+        self.assertEqual(body["test_scores"]["random_walk"]["brier"], 0.10)
+        self.assertEqual(
+            store.selection_metrics(ALPHA, "next_session")["test_origins"], 10
+        )
+
+    def test_empirical_probabilities_are_never_exactly_certain(self) -> None:
+        output = estimators.forecast(
+            "historical_mean", [0.01] * 80, 1, ForecastPolicy()
+        )
+        assert output.p_up is not None
+        assert output.p_down is not None
+        assert output.p_sideways is not None
+        self.assertLess(output.p_up, 1.0)
+        self.assertGreater(output.p_down, 0.0)
+        self.assertAlmostEqual(
+            output.p_up + output.p_down + output.p_sideways, 1.0, places=8
+        )
 
 
 if __name__ == "__main__":

@@ -38,7 +38,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from threading import RLock
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -104,6 +104,7 @@ from novacontrol.novamarket.autonomy.models import (
     LIVE_TRADING,
     MODE_TRANSITIONS,
     PAPER_ONLY,
+    RELEASE_GATE,
     TRADING_IMPLEMENTED,
 )
 from novacontrol.novamarket.contracts import (
@@ -866,6 +867,10 @@ class NovaMarketService:
         self._strategy_store: Any | None = None
         self._strategy_engine: "StrategyEngine | None" = None  # type: ignore[name-defined]
         self._strategy_error = ""
+        # Post-PI-24: 20m context / 5m setup / 1m timing analysis. Evidence only;
+        # it gates day-trading entries before NM-08 and never executes.
+        self._timeframe_analyzer: Any | None = None
+        self._timeframe_error = ""
         self._execution_engine: Any | None = None
         self._execution_store: Any | None = None
         self._execution_error = ""
@@ -886,6 +891,10 @@ class NovaMarketService:
         self._autonomy_exits_error = ""
         self._autonomy_recovery: dict[str, Any] = {}
         self._autonomy_error = ""
+        # A restart can find the previous process's unexpired lease still in
+        # the store.  It is not stolen, but auto-start retries until that lease
+        # must have expired so an unclean restart never stays disabled forever.
+        self._autonomy_auto_start_retry_until: datetime | None = None
         # NM-11: reproducible historical backtesting. It owns an isolated
         # database and never shares the paper-execution or wallet stores.
         self._backtest_service: Any | None = None
@@ -1261,6 +1270,7 @@ class NovaMarketService:
                 discovery=lambda: self._discovery_engine,
                 clock=self._clock,
                 instrument_lookup=self._autonomy_instrument_lookup,
+                universe=lambda: self._config.universe,
             )
         return self._autonomy_monitoring
 
@@ -1295,10 +1305,22 @@ class NovaMarketService:
                     operator_configured=configured,
                 )
             runtime = self._ensure_autonomy()
-        return runtime.status(
+        status = runtime.status(
             operator_authorized=operator_authorized,
             operator_configured=configured,
         )
+        retry_until = self._autonomy_auto_start_retry_until
+        status["auto_start_retry"] = {
+            "active": retry_until is not None,
+            "retry_until": retry_until.isoformat() if retry_until else None,
+            "reason": (
+                "a live foreign lease blocks application auto-start; "
+                "retrying until that lease expires (it is never stolen)"
+                if retry_until is not None
+                else ""
+            ),
+        }
+        return status
 
     def autonomy_start(
         self,
@@ -1306,31 +1328,47 @@ class NovaMarketService:
         *,
         reason: str = "",
         acknowledge_paper_only: bool = False,
+        actor: str = "system",
     ) -> dict[str, Any]:
-        return self._ensure_autonomy().start(
+        started = self._ensure_autonomy().start(
             mode,
             reason=reason,
             acknowledge_paper_only=acknowledge_paper_only,
+            actor=actor,
         )
+        self._clear_autonomy_auto_start_retry()
+        return started
 
-    def autonomy_pause(self, *, reason: str = "") -> dict[str, Any]:
-        return self._ensure_autonomy().pause(reason=reason)
+    def autonomy_pause(
+        self, *, reason: str = "", actor: str = "system"
+    ) -> dict[str, Any]:
+        return self._ensure_autonomy().pause(reason=reason, actor=actor)
 
     def autonomy_resume(
         self,
-        mode: AutonomyMode | str,
+        mode: AutonomyMode | str | None = None,
         *,
         reason: str = "",
         acknowledge_paper_only: bool = False,
+        actor: str = "system",
     ) -> dict[str, Any]:
         return self._ensure_autonomy().resume(
             mode,
             reason=reason,
             acknowledge_paper_only=acknowledge_paper_only,
+            actor=actor,
         )
 
-    def autonomy_stop(self, *, reason: str = "") -> dict[str, Any]:
-        return self._ensure_autonomy().stop(reason=reason)
+    def autonomy_stop(
+        self, *, reason: str = "", actor: str = "system"
+    ) -> dict[str, Any]:
+        """Operator/emergency stop: disable the mode and the auto-start opt-in."""
+
+        stopped = self._ensure_autonomy().stop(
+            reason=reason, disable_autostart=True, actor=actor
+        )
+        self._clear_autonomy_auto_start_retry()
+        return stopped
 
     async def autonomy_recover(self, *, reason: str = "operator recovery") -> dict[str, Any]:
         """Reconcile durable autonomy work without resuming autonomous mode.
@@ -1343,6 +1381,7 @@ class NovaMarketService:
         """
 
         runtime = self._ensure_autonomy()
+        self._clear_autonomy_auto_start_retry()
         runtime_status = runtime.recover()
         decision_pipeline = self._ensure_decision()
         interrupted_runs = int(decision_pipeline.recover() or 0)
@@ -1399,17 +1438,25 @@ class NovaMarketService:
         )
 
     def autonomy_contract(self) -> dict[str, Any]:
-        """Static AT-01 metadata; no user or financial record is included."""
+        """Integrated paper-runtime metadata; no user or financial record."""
+
+        from novacontrol.novamarket.autonomy.models import (
+            AUTOMATIC_POLICY_PROMOTION,
+            BROKER_CONNECTED,
+            EXIT_SUPERVISION_IMPLEMENTED,
+            LEARNING_PROMOTION_IMPLEMENTED,
+        )
 
         return {
-            "milestone": "AT-01",
-            "status": "runtime safety shell only",
+            "milestone": "AT-06",
+            "status": "paper-only autonomous runtime (AT-01 through AT-06)",
             "trading_implemented": TRADING_IMPLEMENTED,
             "paper_only": PAPER_ONLY,
             "live_trading": LIVE_TRADING,
-            "broker_connected": False,
-            "orders_possible": False,
-            "release_gate": "closed",
+            "broker_connected": BROKER_CONNECTED,
+            "orders_possible": TRADING_IMPLEMENTED,
+            "live_orders_possible": False,
+            "release_gate": RELEASE_GATE,
             "modes": [mode.value for mode in AutonomyMode],
             "runtime_states": [
                 "stopped",
@@ -1418,6 +1465,7 @@ class NovaMarketService:
                 "recovering",
                 "degraded",
                 "stopping",
+                "failed",
             ],
             "mode_transitions": {
                 mode.value: sorted(item.value for item in targets)
@@ -1425,13 +1473,14 @@ class NovaMarketService:
             },
             "one_cycle_at_a_time": True,
             "paused_exit_policy": "protective",
-            "exit_supervision_implemented": False,
-            "learning_promotion_implemented": False,
+            "exit_supervision_implemented": EXIT_SUPERVISION_IMPLEMENTED,
+            "learning_promotion_implemented": LEARNING_PROMOTION_IMPLEMENTED,
+            "automatic_policy_promotion": AUTOMATIC_POLICY_PROMOTION,
             "horizon_mapping": dict(HORIZON_MAPPING),
             "calendar": dict(CALENDAR_STATUS),
             "storage": {
                 "schema": "autonomy_meta",
-                "version": 3,
+                "version": 4,
                 "tables": [
                     "autonomy_config",
                     "autonomy_runtime",
@@ -1458,10 +1507,11 @@ class NovaMarketService:
                 "server_side_enforced": True,
             },
             "limitations": [
-                "AT-01 has no scan, signal, proposal, order, fill, exit or learning promotion path.",
-                "Autonomous is a persisted shell state; it does not enable trading.",
-                "AT-02 monitoring discovers and monitors instruments only; it creates no signal, proposal, order or fill.",
-                "Decision, execution and exit supervision remain AT-03 through AT-06 and are not implemented.",
+                "Paper only: no live trading, broker connection or real-money execution exists.",
+                "Every entry and exit still passes NM-08 risk approval and NM-10 execution.",
+                "Automatic policy promotion is disabled; learning remains advisory.",
+                "Market sessions, calendar coverage and data freshness fail closed.",
+                "An operator stop disables auto-start; graceful shutdown preserves it.",
             ],
         }
 
@@ -1766,6 +1816,10 @@ class NovaMarketService:
     def autonomy_prediction_outcomes(self, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
         pipeline = self._decision_or_closed()
         if pipeline is None:
+            from novacontrol.novamarket.decision.forecast_metrics import (
+                forecast_metrics,
+            )
+
             return {
                 "ok": True,
                 "outcomes": [],
@@ -1774,11 +1828,19 @@ class NovaMarketService:
                 "limit": limit,
                 "offset": offset,
                 "has_more": False,
+                "metrics": forecast_metrics(()),
             }
-        return cast(
+        body = cast(
             dict[str, Any],
             pipeline.prediction_outcomes(limit=limit, offset=offset),
         )
+        from novacontrol.novamarket.decision.forecast_metrics import forecast_metrics
+
+        all_rows = cast(
+            dict[str, Any], pipeline.prediction_outcomes(limit=500, offset=0)
+        )
+        body["metrics"] = forecast_metrics(all_rows.get("items") or ())
+        return body
 
     def track_prediction_outcomes(self, *, limit: int = 50) -> dict[str, Any]:
         """Measure due outcomes from committed records; it never mutates a book."""
@@ -1804,6 +1866,15 @@ class NovaMarketService:
             clock=self._clock,
         )
         result = tracker.track(limit=limit)
+        try:
+            from novacontrol.novamarket.decision.forecast_metrics import (
+                forecast_metrics,
+            )
+
+            rows = pipeline.prediction_outcomes(limit=500, offset=0)
+            result["metrics"] = forecast_metrics(rows.get("items") or ())
+        except Exception as exc:  # noqa: BLE001 - tracking succeeded; metrics are separate
+            result["metrics_error"] = f"{type(exc).__name__}: {exc}"
         self._prediction_outcome_last = result
         self._prediction_outcome_error = ""
         return result
@@ -2194,23 +2265,50 @@ class NovaMarketService:
             "live_trading": False,
         }
 
+    def _attach_rl_feedback(
+        self, body: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
+    ) -> dict[str, Any]:
+        from novacontrol.novamarket.learning.paper_feedback import (
+            chronological_splits,
+        )
+
+        experiences: list[Mapping[str, Any]] = []
+        for row in rows:
+            feedback = row.get("rl_feedback")
+            if isinstance(feedback, Mapping) and feedback.get("status") == "verified":
+                experiences.append(feedback)
+        splits = chronological_splits(experiences)
+        result = dict(body)
+        result["rl_feedback"] = {
+            **splits,
+            "verified_experiences": splits["total"],
+            "automatic_policy_promotion": False,
+            "training_performed": False,
+            "policy_modified": False,
+        }
+        return result
+
     def autonomy_learning_evidence(
         self, *, decision_id: str = "", limit: int = 100
     ) -> dict[str, Any]:
         if self._autonomy_exits is not None:
-            return cast(
+            body = cast(
                 dict[str, Any], self._autonomy_exits.learning(decision_id=decision_id, limit=limit)
             )
+            return self._attach_rl_feedback(body, body.get("evidence") or ())
         rows = self._execution_service().store.learning_evidence(
             decision_id=decision_id, limit=limit
         )
-        return {
-            "ok": True,
-            "evidence": list(rows),
-            "total": len(rows),
-            "advisory_only": True,
-            "auto_promoted": False,
-        }
+        return self._attach_rl_feedback(
+            {
+                "ok": True,
+                "evidence": list(rows),
+                "total": len(rows),
+                "advisory_only": True,
+                "auto_promoted": False,
+            },
+            rows,
+        )
 
     def autonomy_execution_contract(self) -> dict[str, Any]:
         pipeline = self._autonomy_execution_or_closed()
@@ -3008,11 +3106,80 @@ class NovaMarketService:
             engine = self._ensure_strategy()
         engine.set_market_data(self._market_engine)
         engine.set_forecasts(self._forecast_engine)
+        engine.set_timeframe_analyzer(self._timeframe_service())
         engine.set_radar(self._radar_engine)
         engine.set_discovery(self._discovery_engine)
         engine.set_risk(self._risk_service())
         engine.set_forwarder(self._forward_strategy_to_execution)
         return engine
+
+    def _timeframe_service(self) -> Any:
+        """The one multi-timeframe analyzer, built over the shared store."""
+        from novacontrol.novamarket.multitimeframe import MultiTimeframeAnalyzer
+
+        if self._timeframe_analyzer is None:
+            try:
+                self._timeframe_analyzer = MultiTimeframeAnalyzer(
+                    self._ensure_market_data(), clock=self._clock
+                )
+            except Exception as exc:
+                self._timeframe_error = f"{type(exc).__name__}: {exc}"
+                raise
+        return self._timeframe_analyzer
+
+    def multi_timeframe_status(self) -> dict[str, Any]:
+        try:
+            return dict(self._timeframe_service().status())
+        except Exception as exc:  # noqa: BLE001 - status must remain readable
+            return {
+                "ok": False,
+                "phase": "post-PI-24 enhancement",
+                "error": self._timeframe_error or f"{type(exc).__name__}: {exc}",
+            }
+
+    def multi_timeframe_analysis(
+        self,
+        portfolio_id: str,
+        *,
+        instrument_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Analyse the portfolio's instruments on 20m/5m/1m and return evidence."""
+        detail = self._portfolio_service().detail(portfolio_id)
+        horizon = str(detail["portfolio"]["horizon"])
+        ids = [str(item) for item in (instrument_ids or ()) if str(item).strip()]
+        if not ids:
+            ids = [
+                str(row.get("instrument_id"))
+                for row in detail.get("holdings", ()) or ()
+                if row.get("instrument_id")
+            ]
+        if not ids:
+            raise ValueError(
+                "a multi-timeframe analysis needs at least one instrument id"
+            )
+        analyzer = self._timeframe_service()
+        decisions = []
+        errors: list[dict[str, str]] = []
+        for instrument_id in list(dict.fromkeys(ids))[:20]:
+            try:
+                decisions.append(analyzer.analyse(instrument_id).to_dict())
+            except Exception as exc:  # noqa: BLE001 - one instrument cannot block the rest
+                errors.append(
+                    {
+                        "instrument_id": instrument_id,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+        return {
+            "ok": True,
+            "portfolio_id": portfolio_id,
+            "portfolio_horizon": horizon,
+            "applied": horizon == "short_term",
+            "applies_to": "short_term/day_trading entries only",
+            "decisions": decisions,
+            "errors": errors,
+            "config": analyzer.config.to_dict(),
+        }
 
     async def _forward_strategy_to_execution(
         self, proposal_id: str, actor: str = ""
@@ -8885,14 +9052,21 @@ class NovaMarketService:
         (disable) leaves the task running but idle, so the API remains able to
         accept the next enable.
 
-        AT-01 deliberately opens the autonomy store here as a recovery point.
-        Opening it never resumes a persisted mode; the shell always comes up
-        disabled until an authorized operator starts it.
+        AT-01 opens the autonomy store here, and the integrated runtime then
+        starts the persisted application-start mode.  A previous operator stop
+        has set ``auto_start=False``, so an emergency halt survives a restart;
+        a graceful application shutdown preserves ``auto_start=True``.
         """
         try:
             self._ensure_monitoring()
         except Exception as exc:  # noqa: BLE001 - a store failure must not stop NovaControl
             self._autonomy_error = f"{type(exc).__name__}: {exc}"
+        try:
+            self._auto_start_autonomy()
+        except Exception as exc:  # noqa: BLE001 - auto-start must not stop NovaControl
+            self._autonomy_error = f"auto-start: {type(exc).__name__}: {exc}"
+            if self._autonomy_runtime is not None:
+                self._autonomy_runtime.fail(self._autonomy_error)
         task = self._runtime_task
         if task is not None and not task.done():
             return self.runtime_status()
@@ -8912,7 +9086,141 @@ class NovaMarketService:
             self._forecast_scheduler_error = f"{type(exc).__name__}: {exc}"
         return self.runtime_status()
 
+    def _auto_start_autonomy(self) -> dict[str, Any]:
+        """Start the persisted paper mode after the application's dependencies.
+
+        Auto-start never runs if the operator halted the runtime, another live
+        owner holds the lease, or a critical pipeline cannot be constructed.
+        It does not submit an order: it only enables the mode whose existing
+        gates still require NM-08 approval and NM-10 execution.
+        """
+
+        runtime = self._ensure_autonomy()
+        config = runtime.config
+        snapshot = runtime.status()
+        if not self._config.enabled or self._lifecycle.state not in {
+            LifecycleState.RUNNING,
+            LifecycleState.DEGRADED,
+        }:
+            self._clear_autonomy_auto_start_retry()
+            return snapshot
+        if not config.auto_start:
+            self._clear_autonomy_auto_start_retry()
+            return snapshot
+        if str(snapshot.get("mode")) != "disabled":
+            self._clear_autonomy_auto_start_retry()
+            return snapshot
+        lease = snapshot.get("lease")
+        if isinstance(lease, dict) and lease.get("foreign"):
+            # A process that died uncleanly leaves its lease live in the store
+            # for up to ``lease_seconds``.  Do not steal it from a genuinely
+            # live foreign owner, and do not give up either: retry until the
+            # abandoned lease must have expired.
+            if self._autonomy_auto_start_retry_until is None:
+                self._autonomy_auto_start_retry_until = self._clock() + timedelta(
+                    seconds=runtime.lease_seconds
+                    + self._autonomy_auto_start_retry_grace_seconds(),
+                )
+            return snapshot
+        self._clear_autonomy_auto_start_retry()
+        # Construct the critical pipelines before the mode becomes live, so a
+        # broken dependency fails closed instead of leaving a half-started
+        # runtime that the tick could later drive.
+        try:
+            self._ensure_decision()
+            self._ensure_autonomy_execution()
+            self._ensure_autonomy_exits()
+        except Exception as exc:
+            error = f"auto-start dependency failed: {type(exc).__name__}: {exc}"
+            self._autonomy_error = error
+            self._clear_autonomy_auto_start_retry()
+            runtime.fail(error)
+            return runtime.status()
+        started = runtime.start(
+            config.auto_start_mode,
+            reason="application start",
+            acknowledge_paper_only=config.auto_start_mode == "autonomous",
+        )
+        self._autonomy_error = ""
+        self._clear_autonomy_auto_start_retry()
+        return started
+
+    def _autonomy_auto_start_retry_grace_seconds(self) -> float:
+        """How long past lease expiry to keep checking before giving up."""
+
+        runtime = self._autonomy_runtime
+        lease_seconds = runtime.lease_seconds if runtime is not None else 60
+        return max(2.0, float(lease_seconds) / 2.0)
+
+    def _clear_autonomy_auto_start_retry(self) -> None:
+        self._autonomy_auto_start_retry_until = None
+
+    def _retry_autonomy_auto_start(self) -> None:
+        """Retry a deferred application-start mode after a stale lease expires.
+
+        A conflict is acknowledged, not stolen.  While a different live owner
+        keeps renewing, the retry stops at its deadline; if that owner was an
+        earlier process that died, its lease cannot be renewed and this
+        process acquires it on the next retry.
+        """
+
+        deadline = self._autonomy_auto_start_retry_until
+        if deadline is None:
+            return
+        if self._clock() >= deadline:
+            self._clear_autonomy_auto_start_retry()
+            return
+        runtime = self._autonomy_runtime
+        if runtime is None or runtime.closed:
+            self._clear_autonomy_auto_start_retry()
+            return
+        started = self._auto_start_autonomy()
+        if str(started.get("mode")) != "disabled":
+            self._clear_autonomy_auto_start_retry()
+
+    async def _autonomy_startup_reconcile(self) -> dict[str, Any]:
+        """Reconcile durable AT-04/AT-05 work before the first trading tick.
+
+        Recovery never replays an unfinished order.  If anything remains
+        unresolved, the runtime is paused so new entries stop while protective
+        exits and reconciliation remain available.
+        """
+
+        runtime = self._autonomy_runtime
+        if runtime is None or runtime.closed:
+            return {"status": "skipped", "reason": "runtime_unavailable"}
+        snapshot = runtime.status()
+        if str(snapshot.get("mode")) not in {"monitoring", "autonomous", "paused"}:
+            return {"status": "skipped", "reason": "runtime_inactive"}
+        unresolved: list[str] = []
+        try:
+            execution = await self._ensure_autonomy_execution().recover()
+            unresolved.extend(str(item) for item in execution.get("unresolved") or ())
+        except Exception as exc:  # noqa: BLE001 - fail closed, report the reason
+            self._autonomy_execution_error = f"startup recovery: {type(exc).__name__}: {exc}"
+            unresolved.append("execution_recovery_failed")
+        try:
+            exits = await self._ensure_autonomy_exits().recover()
+            unresolved.extend(str(item) for item in exits.get("unresolved") or ())
+        except Exception as exc:  # noqa: BLE001 - fail closed, report the reason
+            self._autonomy_exits_error = f"startup recovery: {type(exc).__name__}: {exc}"
+            unresolved.append("exit_recovery_failed")
+        if unresolved and str(runtime.status().get("mode")) in {"monitoring", "autonomous"}:
+            message = (
+                "startup reconciliation left unresolved work: "
+                + ", ".join(sorted(set(unresolved)))
+            )
+            self._autonomy_error = message
+            runtime.pause(reason=message)
+        return {
+            "status": "completed" if not unresolved else "degraded",
+            "unresolved": sorted(set(unresolved)),
+            "unresolved_count": len(set(unresolved)),
+            "paused": str(runtime.status().get("mode")) == "paused",
+        }
+
     async def stop_runtime(self) -> dict[str, Any]:
+        self._clear_autonomy_auto_start_retry()
         scheduler = self._forecast_scheduler
         self._forecast_scheduler = None
         if scheduler is not None:
@@ -8930,6 +9238,8 @@ class NovaMarketService:
                 pass
         if self._autonomy_runtime is not None:
             try:
+                # Graceful shutdown preserves the next-launch auto-start opt-in;
+                # only an operator stop is the persistent kill switch.
                 self._autonomy_runtime.stop(reason="service runtime stopped")
             except Exception as exc:  # noqa: BLE001 - shutdown must finish
                 self._autonomy_error = f"{type(exc).__name__}: {exc}"
@@ -8969,6 +9279,13 @@ class NovaMarketService:
                 runtime = self._autonomy_runtime
                 if runtime is None or runtime.closed:
                     continue
+                # The heartbeat is also the one place that can retry a deferred
+                # auto-start: it wakes on a fixed cadence while the runtime is
+                # up and costs one cheap status read per lease interval.
+                try:
+                    self._retry_autonomy_auto_start()
+                except Exception as exc:  # noqa: BLE001 - retry must not stop renewal
+                    self._autonomy_error = f"auto-start retry: {type(exc).__name__}: {exc}"
                 try:
                     runtime.heartbeat()
                 except Exception as exc:  # noqa: BLE001 - report, never crash the app
@@ -8977,15 +9294,26 @@ class NovaMarketService:
             return
 
     async def _run_runtime(self) -> None:
-        # The first tick is deliberately delayed: the API and the market-data
-        # store should be ready before a network refresh is attempted, and a
-        # test process that starts and stops quickly never reaches a provider.
+        # Reconcile durable work before any new entry can be evaluated, then
+        # run the first market tick immediately: a restart must evaluate its
+        # startup state without waiting a full market interval.  Subsequent
+        # ticks keep the established cadence.
+        try:
+            await self._autonomy_startup_reconcile()
+        except Exception as exc:  # noqa: BLE001 - recovery must not stop the monitor
+            self._autonomy_error = f"startup reconciliation: {type(exc).__name__}: {exc}"
+            runtime = self._autonomy_runtime
+            if runtime is not None and not runtime.closed:
+                try:
+                    runtime.pause(reason=self._autonomy_error)
+                except Exception:
+                    runtime.fail(self._autonomy_error)
         try:
             while True:
                 plan = plan_market_refresh(self._clock())
                 self._runtime_interval_seconds = max(1, plan.interval_seconds)
-                await asyncio.sleep(self._runtime_interval_seconds)
                 await self._runtime_tick()
+                await asyncio.sleep(self._runtime_interval_seconds)
         except asyncio.CancelledError:
             return
 
@@ -9579,6 +9907,31 @@ class NovaMarketService:
             "rows": rows,
         }
 
+    def _overview_activity(self, limit: int = 40) -> list[dict[str, Any]]:
+        """Newest activity, retaining recent wallet events in the small window.
+
+        Startup radar bursts can fill the newest rows before a wallet deposit is
+        made. The overview still keeps a bounded newest-first window, but
+        reserves slots for wallet events that would otherwise be pushed out.
+        Event dictionaries are returned unchanged.
+        """
+        events: list[dict[str, Any]] = self.activity(limit=0)["events"]
+        if limit <= 0:
+            return events
+        recent = events[:limit]
+        if len(events) <= limit:
+            return recent
+        recent_ids = {str(row.get("id", "")) for row in recent}
+        retained = [
+            row
+            for row in events
+            if str(row.get("type", "")).startswith("novamarket.wallet.")
+            and str(row.get("id", "")) not in recent_ids
+        ][:limit]
+        if not retained:
+            return recent
+        return recent[: limit - len(retained)] + retained
+
     def workspace_overview(self) -> dict[str, Any]:
         """One read-only integration view for the NM-14 operational workspace.
 
@@ -9647,7 +10000,7 @@ class NovaMarketService:
             },
             "portfolios": portfolio_summary,
             "recent": recent,
-            "activity": self.activity(limit=40)["events"],
+            "activity": self._overview_activity(),
             "audit": self.audit_summary(limit=20),
             "safety": {
                 "real_money_trading": bool(

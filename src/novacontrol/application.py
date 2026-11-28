@@ -9232,6 +9232,11 @@ class NovaControlApplication:
                 permission_decisions=_audit_permission_decisions(plan_steps),
             )
         except Exception:  # pragma: no cover - auditing never fails a request
+            import logging
+
+            logging.getLogger("novacontrol.audit").exception(
+                "audit_record_failed task_id=%s", task_id
+            )
             return None
         self._announce_soon(EventType.AUDIT_RECORDED, record_id=record.id, task_id=task_id)
         return record

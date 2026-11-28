@@ -76,9 +76,9 @@ This generated reference covers the REST routes registered by the NovaControl ap
 - `GET /market/autonomy/health`: Autonomy lease/health slice; a missing or foreign lease is reported as degraded. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/autonomy/reliability`: AT-06 read-only reliability view: runtime/scheduler health, pipeline and financial counts, reconciliation pending, recovery state and failure domains. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /market/autonomy/recover`: Reconcile durable execution and exit work after a restart and return to disabled mode without auto-resume; requires the operator token. *(frontend: no web panel - API/CLI or infrastructure)*
-- `POST /market/autonomy/start`: Start/renew the autonomy shell in monitoring or non-trading autonomous mode; requires the operator token. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/autonomy/start`: Start/renew the paper-only autonomy shell in monitoring or autonomous mode; autonomous orders still require NM-08 approval and NM-10 execution; requires the operator token. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /market/autonomy/pause`: Pause autonomous work while retaining the runtime shell and lease; requires the operator token. *(frontend: no web panel - API/CLI or infrastructure)*
-- `POST /market/autonomy/resume`: Resume a paused autonomy shell in monitoring or autonomous mode; requires the operator token. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /market/autonomy/resume`: Resume a paused shell in its prior mode (or an explicitly requested monitoring/autonomous mode), subject to lease, health and paper-only checks; requires the operator token. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /market/autonomy/stop`: Disable the autonomy shell and release its lease; requires the operator token. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/autonomy/session`: Verified exchange-local session decision for an exchange (`exchange` query): open, not yet open, closed, weekend, holiday, unverified or unavailable; fail closed. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/autonomy/monitoring/contracts`: Static AT-02 capabilities, batch cap, refresh floor, cycle statuses and refusal reasons; no trading capability is claimed. *(frontend: no web panel - API/CLI or infrastructure)*
@@ -239,6 +239,8 @@ This generated reference covers the REST routes registered by the NovaControl ap
 - `POST /market/strategies`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/strategies/status`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/strategies/contracts`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/multi-timeframe/status`: 20m/5m/1m hierarchy contract and thresholds. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /market/multi-timeframe/analysis`: Cross-timeframe decision evidence for a short-term portfolio. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/strategies/proposals`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /market/strategies/proposals/{proposal_id}`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /market/strategies/proposals/{proposal_id}/forward`: NM-09 strategy operation. *(frontend: no web panel - API/CLI or infrastructure)*
@@ -797,6 +799,7 @@ This generated reference covers the REST routes registered by the NovaControl ap
 - `GET /explore/trending`: Current daily research topics from live top-story news (rotating window). *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /activity`: Recent completed actions (commands, research, learning) for the web timeline. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /events/stream`: Live activity channel: the application EventBus as SSE. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /events/session`: Open an opaque HttpOnly SSE session for EventSource clients. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /settings`: Read local user settings. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /settings`: Update local user settings. *(frontend: web panel `renderSettingsResult`)*
 - `GET /plugins`: List plugin API records. *(frontend: no web panel - API/CLI or infrastructure)*
@@ -948,10 +951,14 @@ This generated reference covers the REST routes registered by the NovaControl ap
 
 ## Authentication
 
-Set `NOVACONTROL_API_TOKEN` to require bearer-token authentication for protected routes.
+Set `NOVACONTROL_API_TOKEN` to require bearer-token authentication for protected routes. A
+production-like or non-loopback deployment **must** set it (32+ random characters) and the
+application refuses to start without it. A tokenless loopback development session requires the
+explicit `NOVACONTROL_ALLOW_ANONYMOUS_LOCAL=1` opt-in; a missing credential is never treated as an
+authenticated request.
 
 ```powershell
-$env:NOVACONTROL_API_TOKEN='change-me'
+$env:NOVACONTROL_API_TOKEN = python -c "import secrets; print(secrets.token_urlsafe(32))"
 python -m uvicorn novacontrol.api.app:create_app --factory --reload
 ```
 
@@ -961,10 +968,33 @@ Example protected request:
 Invoke-RestMethod `
   -Method Post `
   -Uri http://127.0.0.1:8000/plan `
-  -Headers @{ Authorization = 'Bearer change-me' } `
+  -Headers @{ Authorization = "Bearer $env:NOVACONTROL_API_TOKEN" } `
   -ContentType 'application/json' `
   -Body '{"goal":"research options then implement one","execute":true}'
 ```
+
+### Server-Sent Events
+
+Native `EventSource` cannot send an `Authorization` header. Exchange the bearer credential once:
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/events/session `
+  -Headers @{ Authorization = "Bearer $env:NOVACONTROL_API_TOKEN" }
+```
+
+The response sets an opaque `novacontrol_sse` cookie: `HttpOnly`, `SameSite=Strict`, `Path=/events`,
+and `Secure` when the request is HTTPS. Open `GET /events/stream` with that cookie (or an
+`Authorization` header from a non-browser client). `?token=` is rejected and the raw API token is
+never placed in a URL, history entry or proxy access log. Sessions expire after one hour; the web
+clients re-exchange before reconnecting.
+
+The cookie is `SameSite=Strict` and the browser client uses `credentials: "same-origin"`. A
+separately hosted browser frontend must therefore proxy `/events` through its own origin (the Vite
+development server already does). A cross-origin browser cannot use this cookie; non-browser
+clients may keep sending the `Authorization` header directly to `/events/stream`.
+
+Errors carry an `X-Request-ID` header. Client errors keep their detail; 5xx responses return a
+generic message and correlation id while the exception detail is redacted and logged server-side.
 
 ## CLI
 

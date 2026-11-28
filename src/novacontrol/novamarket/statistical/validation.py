@@ -40,6 +40,7 @@ _INTERVAL_SECONDS: dict[DataInterval, int] = {
     DataInterval.MINUTE_1: 60,
     DataInterval.MINUTE_5: 300,
     DataInterval.MINUTE_15: 900,
+    DataInterval.MINUTE_20: 1_200,
     DataInterval.MINUTE_30: 1800,
     DataInterval.HOUR_1: 3600,
     DataInterval.DAY_1: 86_400,
@@ -54,6 +55,12 @@ _DAILY_STEPS: dict[ForecastHorizon, int] = {
     ForecastHorizon.DAYS_30: 30,
     ForecastHorizon.DAYS_90: 90,
 }
+
+#: Pre-registered materiality hurdle: a challenger must improve validation
+#: return MAE over random_walk by at least this relative amount before it may
+#: replace the baseline.  The value is deliberately fixed in code rather than
+#: chosen per run, so the same rule is applied before test outcomes are seen.
+SELECTION_MARGIN_PCT = 5.0
 
 RegimeLookup = Callable[[datetime], str | None]
 
@@ -182,6 +189,20 @@ class ModelComparison:
 
 
 @dataclass(frozen=True, slots=True)
+class SelectionDecision:
+    """A validation-only choice and the margin calculation behind it."""
+
+    selected: ModelComparison
+    baseline: ModelComparison
+    challenger: ModelComparison | None
+    decision: str
+    margin_pct: float
+    baseline_validation_mae: float
+    challenger_validation_mae: float | None
+    required_challenger_mae: float
+
+
+@dataclass(frozen=True, slots=True)
 class EvaluationReport:
     instrument_id: str
     horizon: ForecastHorizon
@@ -197,6 +218,12 @@ class EvaluationReport:
     selected_config: ModelConfig | None
     selection_metric: str
     baseline_model: str = "random_walk"
+    selection_margin_pct: float = SELECTION_MARGIN_PCT
+    selection_decision: str = "baseline"
+    challenger_model: str | None = None
+    baseline_validation_mae: float | None = None
+    challenger_validation_mae: float | None = None
+    required_challenger_mae: float | None = None
     validation_origins: int = 0
     test_origins: int = 0
     regime_samples: Mapping[str, int] = field(default_factory=dict)
@@ -233,6 +260,24 @@ class EvaluationReport:
                 self.selected_config.to_dict() if self.selected_config else None
             ),
             "baseline_model": self.baseline_model,
+            "selection_margin_pct": self.selection_margin_pct,
+            "selection_decision": self.selection_decision,
+            "challenger_model": self.challenger_model,
+            "baseline_validation_mae": (
+                None
+                if self.baseline_validation_mae is None
+                else round(self.baseline_validation_mae, 8)
+            ),
+            "challenger_validation_mae": (
+                None
+                if self.challenger_validation_mae is None
+                else round(self.challenger_validation_mae, 8)
+            ),
+            "required_challenger_mae": (
+                None
+                if self.required_challenger_mae is None
+                else round(self.required_challenger_mae, 8)
+            ),
             "validation_origins": self.validation_origins,
             "test_origins": self.test_origins,
             "models": {key: value.to_dict() for key, value in self.models.items()},
@@ -343,6 +388,7 @@ def evaluate_models(
     min_train_bars: int | None = None,
     regime_lookup: RegimeLookup | None = None,
     minimum_validation_samples: int = 3,
+    selection_margin_pct: float = SELECTION_MARGIN_PCT,
 ) -> EvaluationReport:
     """Compare candidates chronologically, selecting on validation only."""
     try:
@@ -380,6 +426,16 @@ def evaluate_models(
     ):
         raise StatisticalValidationError(
             "minimum_validation_samples must be a positive integer"
+        )
+    try:
+        margin_pct = float(selection_margin_pct)
+    except (TypeError, ValueError) as exc:
+        raise StatisticalValidationError(
+            "selection_margin_pct must be numeric"
+        ) from exc
+    if not math.isfinite(margin_pct) or not 0.0 <= margin_pct < 100.0:
+        raise StatisticalValidationError(
+            "selection_margin_pct must be finite and within [0, 100)"
         )
     steps = horizon_steps(chosen_horizon, chosen_resolution)
     minimum = max(
@@ -425,8 +481,16 @@ def evaluate_models(
         raise StatisticalValidationError(
             "models must be a list of model ids, not a single string"
         )
-    selected_models = tuple(
+    requested_models = tuple(
         dict.fromkeys(normalise_model_id(item) for item in (models or MODEL_IDS))
+    )
+    # The margin rule is only meaningful against the named baseline.  Evaluate
+    # it even when a caller requests a narrower model list, rather than either
+    # silently skipping the gate or failing an otherwise valid forecast.
+    selected_models = (
+        requested_models
+        if "random_walk" in requested_models
+        else (*requested_models, "random_walk")
     )
     neutral_band = base.neutral_band_pct
     comparisons: dict[str, ModelComparison] = {}
@@ -530,44 +594,30 @@ def evaluate_models(
             "no statistical model could be evaluated on this history; "
             "the failure reasons are recorded in the evaluation report"
         )
-    eligible = [
-        item
-        for item in comparisons.values()
-        if item.validation.return_mae is not None
-        and item.validation.samples >= minimum_validation_samples
-    ]
-    if not eligible:
-        raise StatisticalValidationError(
-            "no statistical model has enough finite validation observations "
-            f"({minimum_validation_samples} required); no reliable baseline "
-            "forecast can be selected"
-        )
-    selected = min(
-        eligible,
-        key=lambda item: (
-            item.validation.return_mae
-            if item.validation.return_mae is not None
-            else float("inf"),
-            -(
-                item.validation.directional_accuracy
-                if item.validation.directional_accuracy is not None
-                else 0.0
-            ),
-            item.model_id,
-        ),
+    outcome = _select_with_margin(
+        comparisons,
+        minimum_samples=minimum_validation_samples,
+        margin_pct=margin_pct,
     )
-    baseline = comparisons.get("random_walk")
+    selected = outcome.selected
+    baseline = outcome.baseline
     notes: list[str] = [
         "validation selected the model/configuration; test data was not consulted",
         "origins step by the horizon so evaluation targets do not overlap",
+        "pre-registered selection margin: a challenger must improve random_walk "
+        f"validation return MAE by at least {margin_pct:g}% "
+        f"(required MAE <= {outcome.required_challenger_mae:.8f})",
     ]
-    if baseline is None:
-        notes.append("the random-walk baseline was not evaluable; no relative skill claim")
+    if outcome.decision == "challenger" and outcome.challenger is not None:
+        notes.append(
+            f"challenger {outcome.challenger.model_id} cleared the margin on "
+            f"validation (MAE {outcome.challenger_validation_mae:.8f} vs baseline "
+            f"{outcome.baseline_validation_mae:.8f})"
+        )
     else:
         notes.append(
-            "random_walk validation return MAE="
-            f"{baseline.validation.return_mae}; selected validation return MAE="
-            f"{selected.validation.return_mae}"
+            "random_walk retained: no challenger cleared the pre-registered "
+            f"margin on validation (baseline MAE {outcome.baseline_validation_mae:.8f})"
         )
     report = EvaluationReport(
         instrument_id=instrument_id,
@@ -595,6 +645,14 @@ def evaluate_models(
         selected_model=selected.model_id,
         selected_config=selected.config,
         selection_metric="validation_return_mae",
+        selection_margin_pct=margin_pct,
+        selection_decision=outcome.decision,
+        challenger_model=(
+            outcome.challenger.model_id if outcome.challenger is not None else None
+        ),
+        baseline_validation_mae=outcome.baseline_validation_mae,
+        challenger_validation_mae=outcome.challenger_validation_mae,
+        required_challenger_mae=outcome.required_challenger_mae,
         validation_origins=len(validation_origins),
         test_origins=len(test_origins),
         regime_samples=dict(sorted(all_regime_samples.items())),
@@ -619,6 +677,96 @@ def _selection_key(score: CandidateScore) -> tuple[float, float, str]:
     return (mae, -direction, score.config.digest)
 
 
+def _select_with_margin(
+    comparisons: Mapping[str, ModelComparison],
+    *,
+    minimum_samples: int,
+    margin_pct: float,
+) -> SelectionDecision:
+    """Select a challenger only when it clears the fixed baseline margin.
+
+    ``random_walk`` is kept when it is not beaten by the required relative
+    amount.  If the baseline itself lacks enough finite validation samples,
+    no honest comparison exists, so the evaluation abstains with an error
+    rather than promoting a model against an unknown reference.
+    """
+    eligible = {
+        model_id: item
+        for model_id, item in comparisons.items()
+        if item.validation.return_mae is not None
+        and item.validation.samples >= minimum_samples
+    }
+    if not eligible:
+        raise StatisticalValidationError(
+            "no statistical model has enough finite validation observations "
+            f"({minimum_samples} required); no reliable baseline forecast can "
+            "be selected"
+        )
+    baseline = eligible.get("random_walk")
+    if baseline is None:
+        raise StatisticalValidationError(
+            "the random_walk baseline is missing or lacks enough finite "
+            f"validation observations ({minimum_samples} required); no "
+            "margin comparison is possible, so selection abstains"
+        )
+    baseline_mae = baseline.validation.return_mae
+    assert baseline_mae is not None
+    baseline_mae = float(baseline_mae)
+    required_mae = baseline_mae * (1.0 - margin_pct / 100.0)
+    challengers = [item for key, item in eligible.items() if key != "random_walk"]
+    challenger = (
+        min(
+            challengers,
+            key=lambda item: (
+                item.validation.return_mae
+                if item.validation.return_mae is not None
+                else float("inf"),
+                -(
+                    item.validation.directional_accuracy
+                    if item.validation.directional_accuracy is not None
+                    else 0.0
+                ),
+                item.config.digest,
+            ),
+        )
+        if challengers
+        else None
+    )
+    challenger_mae: float | None = None
+    if challenger is not None:
+        challenger_mae = challenger.validation.return_mae
+        assert challenger_mae is not None
+        challenger_mae = float(challenger_mae)
+    tolerance = 1e-12 * max(1.0, abs(baseline_mae))
+    clears = bool(
+        challenger is not None
+        and challenger_mae is not None
+        and challenger_mae < baseline_mae
+        and challenger_mae <= required_mae + tolerance
+    )
+    if clears and challenger is not None:
+        return SelectionDecision(
+            selected=challenger,
+            baseline=baseline,
+            challenger=challenger,
+            decision="challenger",
+            margin_pct=margin_pct,
+            baseline_validation_mae=baseline_mae,
+            challenger_validation_mae=challenger_mae,
+            required_challenger_mae=required_mae,
+        )
+    return SelectionDecision(
+        selected=baseline,
+        baseline=baseline,
+        challenger=challenger,
+        decision="baseline",
+        margin_pct=margin_pct,
+        baseline_validation_mae=baseline_mae,
+        challenger_validation_mae=challenger_mae,
+        required_challenger_mae=required_mae,
+    )
+
+
 def _report_id(report: EvaluationReport) -> str:
     import hashlib
     import json
@@ -630,6 +778,10 @@ def _report_id(report: EvaluationReport) -> str:
         "dataset_id": report.dataset_id,
         "dataset_version": report.dataset_version,
         "selected_model": report.selected_model,
+        "selection_margin_pct": report.selection_margin_pct,
+        "selection_decision": report.selection_decision,
+        "challenger_model": report.challenger_model,
+        "required_challenger_mae": report.required_challenger_mae,
         "selected_config": (
             report.selected_config.digest if report.selected_config else None
         ),
@@ -649,6 +801,8 @@ __all__ = [
     "DateRange",
     "EvaluationReport",
     "ModelComparison",
+    "SELECTION_MARGIN_PCT",
+    "SelectionDecision",
     "default_resolution",
     "evaluate_models",
     "horizon_steps",

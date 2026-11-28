@@ -102,6 +102,7 @@ class DataInterval(StrEnum):
     MINUTE_1 = "1m"
     MINUTE_5 = "5m"
     MINUTE_15 = "15m"
+    MINUTE_20 = "20m"
     MINUTE_30 = "30m"
     HOUR_1 = "1h"
     DAY_1 = "1d"
@@ -114,6 +115,7 @@ class DataInterval(StrEnum):
             DataInterval.MINUTE_1,
             DataInterval.MINUTE_5,
             DataInterval.MINUTE_15,
+            DataInterval.MINUTE_20,
             DataInterval.MINUTE_30,
             DataInterval.HOUR_1,
         )

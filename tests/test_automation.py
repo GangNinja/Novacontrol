@@ -601,10 +601,21 @@ class AutomationApplicationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(stored["last_run_at"])
                 self.assertEqual(stored["run_count"], 0)
                 # The request itself was audited as a request; no row claims an
-                # automation ran, because none did.
+                # automation ran, because none did.  The trail also carries
+                # intentional NovaMarket lifecycle rows, so assert the absence
+                # of automation evidence rather than requiring every row in the
+                # whole application trail to be a request row.
                 rows = app.audit_entries()
                 self.assertTrue(rows)
-                self.assertTrue(all(row["source"] == "request" for row in rows))
+                self.assertNotIn("automation", {row["source"] for row in rows})
+                request_rows = [
+                    row
+                    for row in rows
+                    if row.get("user_request")
+                    == "Remind me at 6 PM to push my project."
+                ]
+                self.assertEqual(len(request_rows), 1)
+                self.assertEqual(request_rows[0]["source"], "request")
             finally:
                 await app.stop()
 

@@ -703,78 +703,106 @@ class MarketDataStore:
     # -- OHLCV ----------------------------------------------------------------
 
     def append_bar(self, bar: OhlcvBar) -> AppendResult:
-        self.require_instrument(bar.instrument_id)
+        return self.append_bars((bar,))[0]
+
+    def append_bars(self, bars: Sequence[OhlcvBar]) -> tuple[AppendResult, ...]:
+        """Append a page of bars in one transaction.
+
+        Per-row conflict semantics are unchanged: an existing row with the same
+        bar id is compared and recorded exactly as before.  Only the transaction
+        boundary changed - a provider page commits once instead of once per
+        bar - so ingestion no longer blocks the event loop with N synchronous
+        SQLite commits.  A failure while inserting rolls the whole page back;
+        no bar is lost or duplicated.
+        """
+
+        rows = tuple(bars)
+        if not rows:
+            return ()
+        for instrument_id in {bar.instrument_id for bar in rows}:
+            self.require_instrument(instrument_id)
         now = _iso(self._clock())
+        results: list[AppendResult | None] = [None] * len(rows)
+        pending: list[int] = []
         with self._lock, self._connection:
-            cursor = self._connection.execute(
-                """
-                INSERT OR IGNORE INTO market_bars (
-                    bar_id, instrument_id, provider, interval, open, high, low,
-                    close, volume, currency, observed_at, retrieved_at,
-                    source_timezone, quality, freshness, partial, reasons_json,
-                    provider_metadata_json, raw_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    bar.bar_id,
-                    bar.instrument_id,
-                    bar.provider,
-                    bar.interval.value,
-                    format(bar.open, "f"),
-                    format(bar.high, "f"),
-                    format(bar.low, "f"),
-                    format(bar.close, "f"),
-                    None if bar.volume is None else format(bar.volume, "f"),
-                    bar.currency,
-                    _iso(bar.observed_at),
-                    _iso(bar.retrieved_at),
-                    bar.source_timezone,
-                    bar.quality.value,
-                    bar.freshness.value,
-                    1 if bar.partial else 0,
-                    _json(list(bar.reasons)),
-                    _json(bar.provider_metadata),
-                    _json(bar.raw),
-                    now,
-                ),
-            )
-            if cursor.rowcount == 1:
-                return AppendResult(AppendStatus.INSERTED, bar.bar_id)
+            for index, bar in enumerate(rows):
+                cursor = self._connection.execute(
+                    """
+                    INSERT OR IGNORE INTO market_bars (
+                        bar_id, instrument_id, provider, interval, open, high,
+                        low, close, volume, currency, observed_at, retrieved_at,
+                        source_timezone, quality, freshness, partial,
+                        reasons_json, provider_metadata_json, raw_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        bar.bar_id,
+                        bar.instrument_id,
+                        bar.provider,
+                        bar.interval.value,
+                        format(bar.open, "f"),
+                        format(bar.high, "f"),
+                        format(bar.low, "f"),
+                        format(bar.close, "f"),
+                        None if bar.volume is None else format(bar.volume, "f"),
+                        bar.currency,
+                        _iso(bar.observed_at),
+                        _iso(bar.retrieved_at),
+                        bar.source_timezone,
+                        bar.quality.value,
+                        bar.freshness.value,
+                        1 if bar.partial else 0,
+                        _json(list(bar.reasons)),
+                        _json(bar.provider_metadata),
+                        _json(bar.raw),
+                        now,
+                    ),
+                )
+                if cursor.rowcount == 1:
+                    results[index] = AppendResult(
+                        AppendStatus.INSERTED, bar.bar_id
+                    )
+                else:
+                    pending.append(index)
+        for index in pending:
+            bar = rows[index]
             existing = self._connection.execute(
                 "SELECT * FROM market_bars WHERE bar_id=?", (bar.bar_id,)
             ).fetchone()
-        if existing is None:
-            return AppendResult(
-                AppendStatus.CONFLICT,
-                bar.bar_id,
-                "the insert was ignored but no existing bar was found",
+            if existing is None:
+                results[index] = AppendResult(
+                    AppendStatus.CONFLICT,
+                    bar.bar_id,
+                    "the insert was ignored but no existing bar was found",
+                )
+                continue
+            differs = any(
+                Decimal(existing[name]) != getattr(bar, name)
+                for name in ("open", "high", "low", "close")
+            ) or (
+                (existing["volume"] is None) != (bar.volume is None)
+                or (
+                    existing["volume"] is not None
+                    and bar.volume is not None
+                    and Decimal(existing["volume"]) != bar.volume
+                )
             )
-        differs = any(
-            Decimal(existing[name]) != getattr(bar, name)
-            for name in ("open", "high", "low", "close")
-        ) or (
-            (existing["volume"] is None) != (bar.volume is None)
-            or (
-                existing["volume"] is not None
-                and bar.volume is not None
-                and Decimal(existing["volume"]) != bar.volume
+            results[index] = self._resolve_conflict(
+                kind="bar",
+                row=existing,
+                incoming_id=bar.bar_id,
+                incoming_payload=bar.to_dict(include_raw=True),
+                previous_payload={
+                    "open": existing["open"],
+                    "high": existing["high"],
+                    "low": existing["low"],
+                    "close": existing["close"],
+                    "volume": existing["volume"],
+                    "observed_at": existing["observed_at"],
+                },
+                differs=differs,
             )
-        )
-        return self._resolve_conflict(
-            kind="bar",
-            row=existing,
-            incoming_id=bar.bar_id,
-            incoming_payload=bar.to_dict(include_raw=True),
-            previous_payload={
-                "open": existing["open"],
-                "high": existing["high"],
-                "low": existing["low"],
-                "close": existing["close"],
-                "volume": existing["volume"],
-                "observed_at": existing["observed_at"],
-            },
-            differs=differs,
-        )
+        return tuple(result for result in results if result is not None)
 
     def get_bar(self, bar_id: str) -> OhlcvBar | None:
         with self._lock:

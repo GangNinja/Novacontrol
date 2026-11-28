@@ -15,9 +15,13 @@ python -m novacontrol demo all
 ## API Deployment
 
 ```powershell
-$env:NOVACONTROL_API_TOKEN='change-me'
+$env:NOVACONTROL_API_TOKEN = python -c "import secrets; print(secrets.token_urlsafe(32))"
 python -m uvicorn novacontrol.api.app:create_app --factory --host 127.0.0.1 --port 8000
 ```
+
+The API refuses to start without `NOVACONTROL_API_TOKEN` in a production-like
+or non-loopback configuration. Tokenless loopback development requires the
+explicit `NOVACONTROL_ALLOW_ANONYMOUS_LOCAL=1` opt-in; it is never the default.
 
 Health check:
 

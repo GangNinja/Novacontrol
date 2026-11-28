@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import RLock
 from typing import Any
+from uuid import uuid4
 
 from novacontrol.novamarket.autonomy.models import (
     ACTIVE_MONITORING_STATUSES,
@@ -24,7 +25,32 @@ from novacontrol.novamarket.autonomy.models import (
     MonitoringConfig,
 )
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 5
+
+#: Additive v5 schema: the append-only operator/control audit.  Every statement
+#: uses IF NOT EXISTS, so an existing v4 store gains the table without touching
+#: its runtime, lease, cycle or configuration rows.
+_CONTROL_SCHEMA = """
+CREATE TABLE IF NOT EXISTS autonomy_control_events (
+    seq INTEGER PRIMARY KEY,
+    event_id TEXT NOT NULL UNIQUE,
+    occurred_at TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    actor TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    from_mode TEXT NOT NULL DEFAULT '',
+    requested_mode TEXT NOT NULL DEFAULT '',
+    resulting_mode TEXT NOT NULL DEFAULT '',
+    desired_mode TEXT NOT NULL DEFAULT '',
+    lease_owner TEXT NOT NULL DEFAULT '',
+    lease_valid INTEGER NOT NULL DEFAULT 0,
+    outcome TEXT NOT NULL,
+    error TEXT NOT NULL DEFAULT '',
+    details_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS ix_autonomy_control_events_occurred
+    ON autonomy_control_events(occurred_at DESC);
+"""
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS autonomy_meta (
@@ -38,6 +64,8 @@ CREATE TABLE IF NOT EXISTS autonomy_config (
     paused_exit_policy TEXT NOT NULL DEFAULT 'protective',
     lease_seconds INTEGER NOT NULL DEFAULT 60,
     max_cycle_seconds INTEGER NOT NULL DEFAULT 30,
+    auto_start INTEGER NOT NULL DEFAULT 1,
+    auto_start_mode TEXT NOT NULL DEFAULT 'autonomous',
     updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS autonomy_runtime (
@@ -154,6 +182,68 @@ def _parse(value: object) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
+_CONTROL_FIELDS = (
+    "event_id",
+    "occurred_at",
+    "operation",
+    "actor",
+    "reason",
+    "from_mode",
+    "requested_mode",
+    "resulting_mode",
+    "desired_mode",
+    "lease_owner",
+    "lease_valid",
+    "outcome",
+    "error",
+    "details_json",
+)
+
+
+def _control_values(control: dict[str, Any]) -> tuple[Any, ...]:
+    """Normalise one control event for the append-only insert."""
+
+    occurred = control.get("occurred_at")
+    if not isinstance(occurred, datetime):
+        raise ValueError("a control event needs a timezone-aware occurred_at")
+    operation = str(control.get("operation") or "").strip().lower()
+    outcome = str(control.get("outcome") or "").strip().lower()
+    if not operation or not outcome:
+        raise ValueError("a control event needs an operation and an outcome")
+    details = control.get("details")
+    return (
+        str(control.get("event_id") or uuid4().hex),
+        _iso(occurred),
+        operation,
+        str(control.get("actor") or "system"),
+        str(control.get("reason") or ""),
+        str(control.get("from_mode") or ""),
+        str(control.get("requested_mode") or ""),
+        str(control.get("resulting_mode") or ""),
+        str(control.get("desired_mode") or ""),
+        str(control.get("lease_owner") or ""),
+        1 if control.get("lease_valid") else 0,
+        outcome,
+        str(control.get("error") or ""),
+        json.dumps(
+            details if isinstance(details, dict) else {},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+
+
+def _insert_control_event(conn: sqlite3.Connection, control: dict[str, Any]) -> None:
+    """Insert one immutable control event on the caller's transaction."""
+
+    placeholders = ", ".join("?" for _ in _CONTROL_FIELDS)
+    conn.execute(
+        f"INSERT INTO autonomy_control_events ({', '.join(_CONTROL_FIELDS)}) "
+        f"VALUES ({placeholders})",
+        _control_values(control),
+    )
+
+
 class AutonomyStore:
     """A small, transactionally safe SQLite store for AT-01 state."""
 
@@ -178,6 +268,7 @@ class AutonomyStore:
         with self._lock:
             try:
                 self._conn.executescript(_SCHEMA)
+                self._conn.executescript(_CONTROL_SCHEMA)
                 # Additive v3 migration: older v2 databases gain the persisted
                 # NM-05 data-quality label without rewriting existing rows.
                 columns = {
@@ -190,6 +281,24 @@ class AutonomyStore:
                     self._conn.execute(
                         "ALTER TABLE autonomy_monitoring_candidates "
                         "ADD COLUMN data_quality TEXT NOT NULL DEFAULT ''"
+                    )
+                # Additive v4 migration: existing stores gain the application
+                # auto-start policy without changing any persisted mode or lease.
+                config_columns = {
+                    item["name"]
+                    for item in self._conn.execute(
+                        "PRAGMA table_info(autonomy_config)"
+                    )
+                }
+                if "auto_start" not in config_columns:
+                    self._conn.execute(
+                        "ALTER TABLE autonomy_config "
+                        "ADD COLUMN auto_start INTEGER NOT NULL DEFAULT 1"
+                    )
+                if "auto_start_mode" not in config_columns:
+                    self._conn.execute(
+                        "ALTER TABLE autonomy_config ADD COLUMN auto_start_mode "
+                        "TEXT NOT NULL DEFAULT 'autonomous'"
                     )
                 row = self._conn.execute(
                     "SELECT value FROM autonomy_meta WHERE key = 'schema_version'"
@@ -217,8 +326,9 @@ class AutonomyStore:
                     """
                     INSERT OR IGNORE INTO autonomy_config
                         (id, config_version, portfolio_ids_json, paused_exit_policy,
-                         lease_seconds, max_cycle_seconds, updated_at)
-                    VALUES (1, 1, '[]', 'protective', 60, 30, ?)
+                         lease_seconds, max_cycle_seconds, auto_start,
+                         auto_start_mode, updated_at)
+                    VALUES (1, 2, '[]', 'protective', 60, 30, 1, 'autonomous', ?)
                     """,
                     (now,),
                 )
@@ -295,7 +405,39 @@ class AutonomyStore:
             paused_exit_policy=str(row["paused_exit_policy"]),
             lease_seconds=int(row["lease_seconds"]),
             max_cycle_seconds=int(row["max_cycle_seconds"]),
+            auto_start=bool(row["auto_start"]),
+            auto_start_mode=str(row["auto_start_mode"]),
         )
+
+    def save_auto_start(
+        self, *, enabled: bool, mode: str, now: datetime
+    ) -> AutonomyConfig:
+        """Persist the application-start policy without touching the live mode."""
+
+        normalized = str(mode or "").strip().lower()
+        if normalized not in ("monitoring", "autonomous"):
+            raise AutonomyValidationError(
+                "auto_start_mode must be 'monitoring' or 'autonomous'"
+            )
+        with self._lock:
+            try:
+                self._conn.execute(
+                    """
+                    UPDATE autonomy_config
+                    SET auto_start = ?, auto_start_mode = ?, config_version = 2,
+                        updated_at = ?
+                    WHERE id = 1
+                    """,
+                    (1 if enabled else 0, normalized, _iso(_utc(now))),
+                )
+                self._conn.commit()
+            except sqlite3.Error as exc:
+                self._conn.rollback()
+                raise AutonomyStoreError(
+                    f"could not persist the autonomy auto-start policy: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+        return self.config()
 
     def snapshot(self, now: datetime) -> dict[str, Any]:
         """Read the runtime row, computed lease validity and active cycle."""
@@ -497,7 +639,10 @@ class AutonomyStore:
         state: str,
         reason: str,
         now: datetime,
+        desired_mode: str | None = None,
+        control: dict[str, Any] | None = None,
     ) -> None:
+        desired = mode if desired_mode is None else desired_mode
         with self._lock:
             try:
                 cursor = self._conn.execute(
@@ -509,7 +654,7 @@ class AutonomyStore:
                     """,
                     (
                         mode,
-                        mode,
+                        desired,
                         state,
                         reason,
                         _iso(now),
@@ -519,6 +664,8 @@ class AutonomyStore:
                 )
                 if cursor.rowcount != 1:
                     raise AutonomyLeaseError("the runtime lease is not owned by this instance")
+                if control is not None:
+                    _insert_control_event(self._conn, dict(control))
                 self._conn.commit()
             except AutonomyLeaseError:
                 self._conn.rollback()
@@ -529,8 +676,73 @@ class AutonomyStore:
                     f"could not persist the autonomy mode: {type(exc).__name__}: {exc}"
                 ) from exc
 
+    def append_control_event(
+        self,
+        *,
+        operation: str,
+        outcome: str,
+        actor: str = "system",
+        reason: str = "",
+        now: datetime | None = None,
+        from_mode: str = "",
+        requested_mode: str = "",
+        resulting_mode: str = "",
+        desired_mode: str = "",
+        lease_owner: str = "",
+        lease_valid: bool = False,
+        error: str = "",
+        details: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Append one control event; it never updates the runtime row.
+
+        Refused and no-op control attempts use this method so the attempt
+        is durable without pretending the mode changed.  Successful
+        transitions write their event through ``save_control`` or
+        ``release_lease`` inside the same transaction as the state change.
+        """
+
+        moment = now or datetime.now(UTC)
+        control = {
+            "operation": operation,
+            "outcome": outcome,
+            "actor": actor,
+            "reason": reason,
+            "occurred_at": moment,
+            "from_mode": from_mode,
+            "requested_mode": requested_mode,
+            "resulting_mode": resulting_mode,
+            "desired_mode": desired_mode,
+            "lease_owner": lease_owner,
+            "lease_valid": lease_valid,
+            "error": error,
+            "details": details or {},
+        }
+        with self._lock, self._conn:
+            _insert_control_event(self._conn, control)
+        stored = dict(control)
+        stored["occurred_at"] = _iso(moment)
+        stored.pop("details", None)
+        return stored
+
+    def control_events(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """The newest control events first; the history is append-only."""
+
+        bounded = max(1, min(int(limit), 200))
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM autonomy_control_events ORDER BY seq DESC LIMIT ?",
+                (bounded,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def release_lease(
-        self, owner_id: str, lease_token: str, *, reason: str, now: datetime
+        self,
+        owner_id: str,
+        lease_token: str,
+        *,
+        reason: str,
+        now: datetime,
+        control: dict[str, Any] | None = None,
     ) -> None:
         moment = _utc(now)
         with self._lock:
@@ -557,6 +769,8 @@ class AutonomyStore:
                     """,
                     (reason, _iso(moment), owner_id, lease_token),
                 )
+                if control is not None:
+                    _insert_control_event(self._conn, dict(control))
                 self._conn.commit()
             except sqlite3.Error as exc:
                 self._conn.rollback()

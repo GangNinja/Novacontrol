@@ -26,6 +26,11 @@ from novacontrol.novamarket.portfolio import (
     policy_for,
 )
 from novacontrol.novamarket.portfolio.models import ProposalStatus
+from novacontrol.novamarket.portfolio.models import (
+    PortfolioHorizon,
+    PortfolioRecord,
+    PortfolioStatus,
+)
 from novacontrol.novamarket.wallet.engine import WalletEngine
 from novacontrol.novamarket.wallet.store import WalletStore
 
@@ -767,3 +772,44 @@ class PriceProvenanceTests(Harness):
         cleared = self.engine.detail(portfolio_id)
         self.assertEqual(cleared["provenance"], {"fixture_priced": [], "note": ""})
         self.assertTrue(all(not row["fixture_priced"] for row in cleared["holdings"]))
+
+
+class PortfolioTransactionBoundaryTests(unittest.TestCase):
+    """Nested portfolio transactions use savepoints, not a second BEGIN."""
+
+    def _record(self, portfolio_id: str) -> PortfolioRecord:
+        return PortfolioRecord(
+            portfolio_id=portfolio_id,
+            name=portfolio_id,
+            horizon=PortfolioHorizon.SHORT,
+            funding_wallet_id="wal_funding",
+            wallet_id="wal_book",
+            initial_capital=Decimal("1000.00"),
+            status=PortfolioStatus.ACTIVE,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+
+    def test_nested_transactions_commit_once_without_a_second_begin(self) -> None:
+        store = PortfolioStore(":memory:")
+        try:
+            with store.transaction():
+                with store.transaction():
+                    store.create_portfolio(self._record("pf_nested_commit"))
+            self.assertIsNotNone(store.portfolio("pf_nested_commit"))
+        finally:
+            store.close()
+
+    def test_inner_failure_rolls_back_only_its_savepoint(self) -> None:
+        store = PortfolioStore(":memory:")
+        try:
+            with store.transaction():
+                store.create_portfolio(self._record("pf_outer_kept"))
+                with self.assertRaises(RuntimeError):
+                    with store.transaction():
+                        store.create_portfolio(self._record("pf_inner_rolled_back"))
+                        raise RuntimeError("inner write refused")
+            self.assertIsNotNone(store.portfolio("pf_outer_kept"))
+            self.assertIsNone(store.portfolio("pf_inner_rolled_back"))
+        finally:
+            store.close()

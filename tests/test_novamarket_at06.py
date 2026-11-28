@@ -315,6 +315,15 @@ class LifecycleAcceptanceTests(ExitHarness):
         self.assertTrue(row["exit"]["order_id"].startswith("ord_"))
         self.assertFalse(row["auto_promoted"])
         self.assertFalse(row["strategy_modified"])
+        feedback = row["rl_feedback"]
+        self.assertEqual(feedback["status"], "verified")
+        self.assertIsNotNone(feedback["reward"])
+        self.assertEqual(feedback["unrealized_pnl"], "0")
+        self.assertFalse(feedback["automatic_policy_promotion"])
+        self.assertFalse(feedback["training_performed"])
+        self.assertFalse(feedback["policy_modified"])
+        self.assertGreater(len(feedback["entry_order_id"]), 0)
+        self.assertEqual(feedback["source_evidence_id"], row["evidence_id"])
 
     # Scenario 20
     async def test_scenario_20_stop_is_the_kill_switch(self) -> None:

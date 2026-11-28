@@ -102,6 +102,7 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("POST", "/tasks/clear/undo"): "no-render",  # toast Undo button + refreshStatus
     ("GET", "/settings"): "load-settings",
     ("GET", "/events/stream"): "no-render",  # EventSource activity channel
+    ("POST", "/events/session"): "no-render",  # sets the SSE cookie before EventSource opens
     ("GET", "/"): "no-render",  # served HTML (index.html)
     ("GET", "/health"): "no-render",  # infrastructure probe
     ("POST", "/improve"): "no-render",  # raw plan API (CLI/demos only)
@@ -824,6 +825,8 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("POST", "/market/strategies"): "no-render",
     ("GET", "/market/strategies/status"): "no-render",
     ("GET", "/market/strategies/contracts"): "no-render",
+    ("GET", "/market/multi-timeframe/status"): "no-render",
+    ("GET", "/market/multi-timeframe/analysis"): "no-render",
     ("GET", "/market/strategies/proposals"): "no-render",
     ("GET", "/market/strategies/proposals/{proposal_id}"): "no-render",
     ("POST", "/market/strategies/proposals/{proposal_id}/forward"): "no-render",

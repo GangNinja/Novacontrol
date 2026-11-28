@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import { apiDelete, apiPost, apiPut, LOCAL_ADMIN_PROXY } from "../api";
 import { useApi, useDocumentTitle } from "../hooks";
-import { dateTime, timeAgo, title } from "../lib";
+import { dateTime, dateTimeInZone, timeAgo, title } from "../lib";
 import {
   Badge,
   Banner,
@@ -131,12 +131,29 @@ export function AutonomyPage() {
   const predictionRows = predictionDecisions.data?.decisions || [];
   const predictionCounts = decision.metrics?.prediction_decisions_by_type || {};
   const predictionOutcomeRows = predictionOutcomes.data?.outcomes || [];
+  const predictionMetrics = predictionOutcomes.data?.metrics || {};
+  const rlFeedback = exitLearning.data?.rl_feedback || {};
+  // The API assigns chronological splits in rl_feedback.rows.  Join them
+  // back to the evidence rows by their stable ids; do not recompute the
+  // train/validation/test boundaries in the browser.
+  const splitByEvidenceId = new Map<string, string>();
+  for (const row of rlFeedback.rows || []) {
+    if (!row?.split) continue;
+    if (row.source_evidence_id) {
+      splitByEvidenceId.set(String(row.source_evidence_id), String(row.split));
+    }
+    if (row.experience_id) {
+      splitByEvidenceId.set(String(row.experience_id), String(row.split));
+    }
+  }
   const policy = forecastPolicy.data?.policy || {};
   const session = monitor.session || {};
   const lease = data.lease || {};
+  const autoStartRetry = data.auto_start_retry || {};
   const health = data.health || {};
   const config = data.config || {};
   const mode = String(data.mode || "disabled");
+  const resumeMode = String(data.desired_mode || "") === "autonomous" ? "autonomous" : "monitoring";
   const runtimeState = String(data.runtime_state || "unknown");
   const authorized = Boolean(data.operator_authorized);
   const configured = Boolean(data.operator_authorization_configured);
@@ -494,8 +511,8 @@ export function AutonomyPage() {
                   </Button>
                 )}
                 {mode === "paused" && (
-                  <Button variant="primary" icon={<Play size={14} />} loading={busy === "resume"} disabled={!controlsEnabled} onClick={() => control("resume", { mode: "monitoring", reason: "operator resume from Autonomy page" })}>
-                    Resume monitoring
+                  <Button variant="primary" icon={<Play size={14} />} loading={busy === "resume"} disabled={!controlsEnabled} onClick={() => control("resume", { mode: resumeMode, acknowledge_paper_only: resumeMode === "autonomous", reason: `operator resume ${resumeMode} from Autonomy page` })}>
+                    Resume {resumeMode}
                   </Button>
                 )}
                 {(mode === "monitoring" || mode === "autonomous") && (
@@ -512,12 +529,14 @@ export function AutonomyPage() {
               <p className="muted">
                 {mode === "autonomous"
                   ? "Autonomous mode can forward only AT-03 entries with a valid NM-08 approval. AT-04 sends them to NM-10 one cycle at a time. AT-05 separately supervises stop-loss, target and trailing exits through the same NM-08 and NM-10 authorities; no live broker exists."
-                  : "Monitoring runs session-gated discovery (AT-02) and records NM-08 decisions (AT-03), but cannot forward orders. Autonomous mode enables AT-04 paper-order forwarding through NM-10; paused mode blocks new entries."}
+                  : mode === "paused"
+                    ? `Paused from ${title(String(data.desired_mode || "monitoring"))}. Resume restores that mode through the same lease, health, NM-08, NM-10 and duplicate-order checks; it grants no new authority.`
+                    : "Monitoring runs session-gated discovery (AT-02) and records NM-08 decisions (AT-03), but cannot forward orders. Autonomous mode enables AT-04 paper-order forwarding through NM-10; paused mode blocks new entries."}
               </p>
               <div className="contract-list">
                 <div><CheckCircle2 size={15} /><span>One active runtime lease</span></div>
                 <div><CheckCircle2 size={15} /><span>One active autonomy cycle at a time</span></div>
-                <div><CheckCircle2 size={15} /><span>Restart comes up disabled; no automatic resume</span></div>
+                <div><CheckCircle2 size={15} /><span>Restart honours the saved auto-start policy; emergency stop disables it</span></div>
               </div>
             </div>
           )}
@@ -532,6 +551,7 @@ export function AutonomyPage() {
             <KeyValue label="Expires">{lease.expires_at ? dateTime(lease.expires_at) : "—"}</KeyValue>
             <KeyValue label="Runtime owner" mono>{data.owner_id || "—"}</KeyValue>
             <KeyValue label="Recovery required"><StatusBadge value={data.recovery_required ? "required" : "no"} /></KeyValue>
+            <KeyValue label="Auto-start retry">{autoStartRetry.active ? `Until ${dateTime(autoStartRetry.retry_until)} · ${autoStartRetry.reason || "waiting for lease expiry"}` : "Not waiting"}</KeyValue>
             <KeyValue label="Active cycle" mono>{data.active_cycle?.cycle_id || "None"}</KeyValue>
             <KeyValue label="Last reason">{data.last_reason || data.last_error || "—"}</KeyValue>
           </dl>
@@ -707,7 +727,7 @@ export function AutonomyPage() {
         <div className="dashboard-grid">
           <dl className="key-value-list">
             <KeyValue label="Exchange" mono>{monitor.config?.exchange || session.exchange || "—"}</KeyValue>
-            <KeyValue label="Exchange-local time">{session.local_time ? dateTime(session.local_time) : "—"}</KeyValue>
+            <KeyValue label="Exchange-local time">{session.local_time ? dateTimeInZone(session.local_time, session.timezone) : "—"}</KeyValue>
             <KeyValue label="Trading date">{session.trading_date || "—"}</KeyValue>
             <KeyValue label="Session">
               <StatusBadge value={session.eligible ? "open" : session.verdict || "unknown"} />
@@ -717,7 +737,7 @@ export function AutonomyPage() {
                 ? `Verified · ${session.calendar_source || "exchange calendar"}`
                 : "Unverified — monitoring fails closed"}
             </KeyValue>
-            <KeyValue label="Next open">{session.next_open ? dateTime(session.next_open) : "—"}</KeyValue>
+            <KeyValue label="Next open">{session.next_open ? dateTimeInZone(session.next_open, session.timezone) : "—"}</KeyValue>
           </dl>
           <dl className="key-value-list">
             <KeyValue label="Scheduler">{monitor.scheduler?.running ? "Running" : "Idle"}</KeyValue>
@@ -905,6 +925,15 @@ export function AutonomyPage() {
           </div>
         )}
         <div className="dashboard-grid">
+          <div className="key-value-list">
+            <div className="muted">Rolling forecast accountability</div>
+            <KeyValue label="MAE">{predictionMetrics.mae != null ? String(predictionMetrics.mae) : "—"}</KeyValue>
+            <KeyValue label="RMSE">{predictionMetrics.rmse != null ? String(predictionMetrics.rmse) : "—"}</KeyValue>
+            <KeyValue label="Directional accuracy">{predictionMetrics.directional_accuracy != null ? `${(Number(predictionMetrics.directional_accuracy) * 100).toFixed(1)}%` : "—"}</KeyValue>
+            <KeyValue label="Brier score">{predictionMetrics.brier_score != null ? String(predictionMetrics.brier_score) : "—"}</KeyValue>
+            <KeyValue label="Evaluated / excluded">{`${predictionMetrics.evaluated ?? 0} / ${predictionMetrics.excluded ?? 0}`}</KeyValue>
+            <p className="muted">Only measured outcomes whose horizon has elapsed are included. No future observation or synthetic value is used.</p>
+          </div>
           <div className="key-value-list">
             <div className="muted">Outcome tracking</div>
             {predictionOutcomeRows.length === 0 ? (
@@ -1143,15 +1172,27 @@ export function AutonomyPage() {
         {learningRows.length > 0 ? (
           <div className="key-value-list">
             <div className="muted">Entry-to-exit learning evidence</div>
-            {learningRows.slice(0, 8).map((evidence: any) => (
-              <KeyValue
-                key={evidence.evidence_id}
-                label={`${evidence.instrument_id || "—"} · ${evidence.strategy_id || "strategy"} v${evidence.strategy_version || "—"} · ${title(evidence.status || "incomplete")}`}
-              >
-                entry {evidence.entry?.order_id || "missing"} → exit {evidence.exit?.order_id || "missing"} · realized {evidence.realized?.portfolio_realized_pnl || "—"} · missing {(evidence.missing_evidence || []).join(", ") || "none"}
-                {evidence.learning_service?.recorded === false ? " · learning service kept it advisory/incomplete" : ""}
-              </KeyValue>
-            ))}
+            <KeyValue label="Verified paper experiences">{String(rlFeedback.verified_experiences ?? 0)}</KeyValue>
+            <KeyValue label="Chronological train / validation / test">{`${rlFeedback.train ?? 0} / ${rlFeedback.validation ?? 0} / ${rlFeedback.test ?? 0}`}</KeyValue>
+            <KeyValue label="Mean reward">{rlFeedback.mean_reward != null ? String(rlFeedback.mean_reward) : "—"}</KeyValue>
+            <KeyValue label="Automatic policy promotion">Disabled</KeyValue>
+            {learningRows.slice(0, 8).map((evidence: any) => {
+              const feedback = evidence.rl_feedback || {};
+              const split =
+                feedback.split ??
+                splitByEvidenceId.get(String(evidence.evidence_id || "")) ??
+                splitByEvidenceId.get(String(feedback.experience_id || "")) ??
+                "unassigned";
+              return (
+                <KeyValue
+                  key={evidence.evidence_id}
+                  label={`${evidence.instrument_id || "—"} · ${evidence.strategy_id || "strategy"} v${evidence.strategy_version || "—"} · ${title(evidence.status || "incomplete")}`}
+                >
+                  entry {evidence.entry?.order_id || "missing"} → exit {evidence.exit?.order_id || "missing"} · realized {evidence.realized?.portfolio_realized_pnl || "—"} · reward {feedback.reward ?? "—"} · split {split} · missing {(evidence.missing_evidence || []).join(", ") || "none"}
+                  {evidence.learning_service?.recorded === false ? " · learning service kept it advisory/incomplete" : ""}
+                </KeyValue>
+              );
+            })}
           </div>
         ) : (
           <p className="muted">No exit evidence yet. Completed linkage is shown only when the exit fill, authoritative accounting and ledger reconciliation are all present; partial evidence is labelled partial.</p>

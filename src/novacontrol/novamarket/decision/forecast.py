@@ -29,6 +29,7 @@ FORECAST_DECISION_CONTRACT_VERSION = "pi12-forecast-decision-1.0"
 FORECAST_DECISION_PHASE = "PI-12"
 
 HORIZONS: tuple[str, ...] = (
+    "1m",
     "5m",
     "15m",
     "20m",
@@ -39,7 +40,7 @@ HORIZONS: tuple[str, ...] = (
     "30d",
     "90d",
 )
-_INTRADAY = frozenset({"5m", "15m", "20m", "1h"})
+_INTRADAY = frozenset({"1m", "5m", "15m", "20m", "1h"})
 _SWING = frozenset({"1d", "3d", "5d"})
 _LONG = frozenset({"30d", "90d"})
 
@@ -48,10 +49,35 @@ _LONG = frozenset({"30d", "90d"})
 #: incompatible intraday forecast as a swing forecast.
 RISK_HORIZON_MAP: dict[str, str] = {
     "3d": "few_sessions",
-    "5d": "few_sessions",
+    "5d": "one_week",
     "30d": "one_month",
     "90d": "three_months",
 }
+
+#: Canonical NM-06 horizon labels.  PI-12 asks in interval form (``5d``) while
+#: NM-06 registers models under label form (``one_week``).  Both sides resolve
+#: through this one mapping, so a model is found by translation, never by a
+#: prefix guess or by reinterpreting a different horizon.  Unknown values stay
+#: as given and therefore match nothing.
+HORIZON_CANONICAL: dict[str, str] = {
+    "1d": "next_session",
+    "3d": "few_sessions",
+    "5d": "one_week",
+    "30d": "one_month",
+    "90d": "three_months",
+    "next_session": "next_session",
+    "few_sessions": "few_sessions",
+    "one_week": "one_week",
+    "one_month": "one_month",
+    "three_months": "three_months",
+}
+
+
+def canonical_horizon(value: Any) -> str:
+    """The NM-06 label for a PI-12 interval label (or itself when unknown)."""
+
+    text = str(value or "").strip().lower()
+    return HORIZON_CANONICAL.get(text, text)
 
 UNCERTAINTY_RANK = {"low": 0, "medium": 1, "high": 2, "unknown": 3}
 _DECISION_TYPES = frozenset({"BUY", "SELL", "HOLD", "WAIT", "NO_ACTION"})
@@ -81,6 +107,7 @@ _DEFAULT_PRIORITY: dict[str, tuple[str, ...]] = {
     "long_term": ("90d", "30d"),
 }
 _DEFAULT_AGE_HOURS: dict[str, float] = {
+    "1m": 1.0,
     "5m": 2.0,
     "15m": 2.0,
     "20m": 2.0,
@@ -92,6 +119,7 @@ _DEFAULT_AGE_HOURS: dict[str, float] = {
     "90d": 240.0,
 }
 _DEFAULT_UNCERTAINTY: dict[str, str] = {
+    "1m": "low",
     "5m": "low",
     "15m": "medium",
     "20m": "medium",
@@ -1343,7 +1371,9 @@ class ForecastRiskAdapter:
     ) -> dict[str, Any]:
         rows: list[dict[str, Any]] = []
         try:
-            body = self._primary.models(instrument_id=instrument_id, horizon=horizon)
+            # The store filters by its own exact label, so it is queried without
+            # one and the canonical translation is applied here.
+            body = self._primary.models(instrument_id=instrument_id)
             rows.extend(
                 dict(row) for row in body.get("models") or () if isinstance(row, Mapping)
             )
@@ -1356,7 +1386,12 @@ class ForecastRiskAdapter:
             except Exception:  # noqa: BLE001
                 pass
         if horizon:
-            rows = [row for row in rows if _text(row.get("horizon")) == str(horizon)]
+            wanted = canonical_horizon(horizon)
+            rows = [
+                row
+                for row in rows
+                if canonical_horizon(row.get("horizon")) == wanted
+            ]
         deduped: dict[tuple[str, str, str], dict[str, Any]] = {}
         for row in rows:
             key = (
@@ -1377,8 +1412,10 @@ def risk_evidence_from_forecasts(
     models: list[dict[str, Any]] = []
     for row in forecasts:
         item = normalized_forecast(row)
-        label = RISK_HORIZON_MAP.get(item["horizon"])
-        if not label or not item["forecast_id"]:
+        # NM-06 stores the label form (``one_week``); PI-12 may hold either
+        # form.  Resolve canonically so both are recognised exactly once.
+        label = canonical_horizon(item["horizon"])
+        if label not in set(RISK_HORIZON_MAP.values()) or not item["forecast_id"]:
             continue
         stage = item["lifecycle_stage"]
         validity = item["validity"]
@@ -1436,7 +1473,9 @@ __all__ = [
     "ForecastEvidenceUnavailable",
     "ForecastRiskAdapter",
     "HORIZONS",
+    "HORIZON_CANONICAL",
     "RISK_HORIZON_MAP",
+    "canonical_horizon",
     "UNCERTAINTY_RANK",
     "decision_digest",
     "normalized_forecast",

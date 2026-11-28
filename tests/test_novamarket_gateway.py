@@ -526,6 +526,12 @@ class GatewaySettingsTests(unittest.TestCase):
         with self.assertRaises(ConfigurationError):
             GatewaySettings(intervals=("1d",))
 
+    def test_20m_is_an_advertised_and_accepted_intraday_interval(self) -> None:
+        allowed = GatewaySettings.schema()["fields"]["intervals"]["allowed"]
+        self.assertIn(DataInterval.MINUTE_20.value, allowed)
+        settings = GatewaySettings(intervals=(DataInterval.MINUTE_20.value,))
+        self.assertEqual(settings.intervals, (DataInterval.MINUTE_20.value,))
+
     def test_configuration_round_trip_keeps_gateway_disabled_by_default(self) -> None:
         config = NovaMarketConfig(gateway=GatewaySettings(enabled=True, interval_seconds=45))
         restored = NovaMarketConfig.from_mapping(config.to_dict())

@@ -1,12 +1,17 @@
 """PI-14 reward calculation and policy evaluation, isolated from production."""
 
+from .components import EXPERIMENTAL_COMPONENT_REGISTRY
 from .engine import RewardEngine
 from .models import (
+    ALL_COMPONENTS,
     DEFAULT_COMPONENTS,
     DEFAULT_PENALTIES,
     DEFAULT_SCALES,
     DEFAULT_THRESHOLDS,
     DEFAULT_WEIGHTS,
+    EXPERIMENTAL_CASH_DRAG_SCALES,
+    EXPERIMENTAL_CASH_DRAG_WEIGHTS,
+    EXPERIMENTAL_COMPONENTS,
     ComponentResult,
     EvaluationConfig,
     PolicyEvaluationError,
@@ -19,6 +24,7 @@ from .models import (
     SplitDefinition,
     TransitionView,
     default_reward_config,
+    experimental_cash_drag_reward_config,
 )
 from .policies import (
     BASELINE_POLICIES,
@@ -35,6 +41,7 @@ from .service import RewardService
 from .store import RewardStore, RewardStoreError
 
 __all__ = [
+    "ALL_COMPONENTS",
     "BASELINE_POLICIES",
     "ComponentResult",
     "DEFAULT_COMPONENTS",
@@ -42,6 +49,10 @@ __all__ = [
     "DEFAULT_SCALES",
     "DEFAULT_THRESHOLDS",
     "DEFAULT_WEIGHTS",
+    "EXPERIMENTAL_CASH_DRAG_SCALES",
+    "EXPERIMENTAL_CASH_DRAG_WEIGHTS",
+    "EXPERIMENTAL_COMPONENTS",
+    "EXPERIMENTAL_COMPONENT_REGISTRY",
     "EvaluationConfig",
     "ExperimentalRLPolicy",
     "NoActionPolicy",
@@ -63,6 +74,7 @@ __all__ = [
     "SplitDefinition",
     "TransitionView",
     "default_reward_config",
+    "experimental_cash_drag_reward_config",
     "policy_catalogue",
     "policy_for",
 ]

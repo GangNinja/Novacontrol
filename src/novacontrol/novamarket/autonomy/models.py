@@ -29,6 +29,7 @@ class RuntimeState(StrEnum):
     RECOVERING = "recovering"
     DEGRADED = "degraded"
     STOPPING = "stopping"
+    FAILED = "failed"
 
 
 class CycleStatus(StrEnum):
@@ -99,17 +100,20 @@ MODE_TRANSITIONS: dict[AutonomyMode, frozenset[AutonomyMode]] = {
     ),
 }
 
-#: Safety constants.  AT-01 has no order, fill, cash, position or ledger path;
-#: these are also exposed by status/contracts so a UI cannot imply otherwise.
+#: Safety constants for the integrated runtime.  AT-04 paper execution and AT-05
+#: exit supervision are implemented, so the release gate is open for **paper**
+#: orders only.  Live trading, broker connectivity and automatic policy
+#: promotion remain permanently false in this build.
 PAPER_ONLY = True
 LIVE_TRADING = False
 BROKER_CONNECTED = False
-TRADING_IMPLEMENTED = False
-RELEASE_GATE = "closed"
+TRADING_IMPLEMENTED = True
+RELEASE_GATE = "open"
 ONE_CYCLE_AT_A_TIME = True
 PAUSED_EXIT_POLICY = "protective"
-EXIT_SUPERVISION_IMPLEMENTED = False
+EXIT_SUPERVISION_IMPLEMENTED = True
 LEARNING_PROMOTION_IMPLEMENTED = False
+AUTOMATIC_POLICY_PROMOTION = False
 
 
 def coerce_mode(value: object) -> AutonomyMode:
@@ -129,11 +133,16 @@ def coerce_mode(value: object) -> AutonomyMode:
 class AutonomyConfig:
     """The small configuration AT-01 persists; no strategy or order fields."""
 
-    config_version: int = 1
+    config_version: int = 2
     portfolio_ids: tuple[str, ...] = ()
     paused_exit_policy: str = PAUSED_EXIT_POLICY
     lease_seconds: int = 60
     max_cycle_seconds: int = 30
+    #: Application-start policy.  A fresh store opts in to autonomous paper
+    #: trading; an operator stop/emergency halt persists ``auto_start=False`` so
+    #: a restart cannot silently undo the halt.  An explicit start re-enables it.
+    auto_start: bool = True
+    auto_start_mode: str = "autonomous"
 
     def __post_init__(self) -> None:
         if self.config_version < 1:
@@ -143,6 +152,14 @@ class AutonomyConfig:
                 "paused_exit_policy is owner-approved as 'protective'; "
                 "monitor-only paused exits are not an AT-01 option"
             )
+        if not isinstance(self.auto_start, bool):
+            raise AutonomyValidationError("auto_start must be a boolean")
+        mode = str(self.auto_start_mode or "").strip().lower()
+        if mode not in (AutonomyMode.MONITORING.value, AutonomyMode.AUTONOMOUS.value):
+            raise AutonomyValidationError(
+                "auto_start_mode must be 'monitoring' or 'autonomous'"
+            )
+        object.__setattr__(self, "auto_start_mode", mode)
         if not 10 <= self.lease_seconds <= 3600:
             raise AutonomyValidationError("lease_seconds must be between 10 and 3600")
         if not 5 <= self.max_cycle_seconds <= 600:
@@ -159,6 +176,8 @@ class AutonomyConfig:
             "paused_exit_policy": self.paused_exit_policy,
             "lease_seconds": self.lease_seconds,
             "max_cycle_seconds": self.max_cycle_seconds,
+            "auto_start": self.auto_start,
+            "auto_start_mode": self.auto_start_mode,
         }
 
 
@@ -235,7 +254,9 @@ class MonitoringConfig:
     cycle_timeout_seconds: int = 120
 
     def __post_init__(self) -> None:
-        exchange = str(self.exchange or "").strip().upper()
+        from novacontrol.novamarket.autonomy.session import canonical_mic
+
+        exchange = canonical_mic(str(self.exchange or ""))
         object.__setattr__(self, "exchange", exchange)
         if not exchange:
             raise AutonomyValidationError("monitoring.exchange must not be blank")
@@ -283,6 +304,7 @@ __all__ = [
     "AutonomyStoreError",
     "ACTIVE_MONITORING_STATUSES",
     "AutonomyValidationError",
+    "AUTOMATIC_POLICY_PROMOTION",
     "BROKER_CONNECTED",
     "CALENDAR_STATUS",
     "MonitoringConfig",

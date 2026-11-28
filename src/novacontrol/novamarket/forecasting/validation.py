@@ -8,7 +8,7 @@ least ``min_validation_samples`` origins is not compared at all.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Sequence
 
 from novacontrol.novamarket.forecasting import estimators
@@ -66,23 +66,35 @@ def evaluate_models(
     *,
     step: int | None = None,
     models: Sequence[str] = estimators.MODEL_IDS,
+    origins: Sequence[tuple[int, int]] | None = None,
+    min_samples: int | None = None,
 ) -> WalkForwardResult:
-    """Score every model on the same chronological origins."""
-    origins = walk_forward_origins(
-        len(closes), policy.min_training_bars, horizon, step=step
+    """Score every model on the same chronological origins.
+
+    ``origins`` lets a caller isolate a validation slice from a later test
+    slice.  Without it every available walk-forward origin is scored.
+    """
+    pairs = (
+        list(origins)
+        if origins is not None
+        else walk_forward_origins(
+            len(closes), policy.min_training_bars, horizon, step=step
+        )
     )
     threshold = policy.directional_threshold_pct / 100.0
     scores: dict[str, ModelScore] = {}
     calibration: dict[str, tuple[CalibrationSample, ...]] = {}
-    if len(origins) < policy.min_validation_samples:
-        return WalkForwardResult(horizon, len(origins), scores, calibration)
+    required = policy.min_validation_samples if min_samples is None else max(1, min_samples)
+    if len(pairs) < required:
+        return WalkForwardResult(horizon, len(pairs), scores, calibration)
 
     for model_id in models:
         point_rows: list[tuple[float, float]] = []
+        point_forecasts: list[float] = []
         direction_rows: list[DirectionRow] = []
         interval_rows: list[tuple[float, float, float]] = []
         calibration_rows: list[CalibrationSample] = []
-        for origin, target in origins:
+        for origin, target in pairs:
             actual = (closes[target] / closes[origin - 1]) - 1.0
             try:
                 output = estimators.forecast(
@@ -91,6 +103,7 @@ def evaluate_models(
             except ValueError:
                 continue
             point_rows.append((actual, output.predicted_return))
+            point_forecasts.append(output.predicted_return)
             if output.p_up is None or output.lower_return is None:
                 continue
             assert output.p_down is not None
@@ -105,10 +118,14 @@ def evaluate_models(
                 )
             )
             interval_rows.append((actual, output.lower_return, output.upper_return))
+            actual_direction = direction_of(actual, threshold)
             calibration_rows.append(
                 CalibrationSample(
                     raw_probability=output.p_up,
-                    outcome=direction_of(actual, threshold) == "up",
+                    outcome=actual_direction == "up",
+                    p_down=output.p_down,
+                    p_sideways=output.p_sideways,
+                    actual_direction=actual_direction,
                 )
             )
         if not point_rows:
@@ -142,6 +159,22 @@ def evaluate_models(
                 if probabilistic
                 else None
             ),
+            reference_brier=(
+                brier_score(
+                    [
+                        DirectionRow(
+                            actual_return=row.actual_return,
+                            p_up=1.0 / 3.0,
+                            p_down=1.0 / 3.0,
+                            p_sideways=1.0 / 3.0,
+                        )
+                        for row in direction_rows
+                    ],
+                    threshold,
+                )
+                if probabilistic
+                else None
+            ),
             confusion=(
                 confusion_matrix(direction_rows, threshold) if probabilistic else {}
             ),
@@ -150,10 +183,28 @@ def evaluate_models(
                 if probabilistic
                 else ("point baseline: no distribution or probability is claimed",)
             ),
+            mean_forecast_change=(
+                sum(
+                    abs(point_forecasts[index] - point_forecasts[index - 1])
+                    for index in range(1, len(point_forecasts))
+                )
+                / (len(point_forecasts) - 1)
+                if len(point_forecasts) > 1
+                else None
+            ),
         )
         if probabilistic:
+            score = scores[model_id]
+            scores[model_id] = replace(
+                score,
+                brier_skill_score=(
+                    None
+                    if not score.brier or not score.reference_brier
+                    else 1.0 - score.brier / score.reference_brier
+                ),
+            )
             calibration[model_id] = tuple(calibration_rows)
-    return WalkForwardResult(horizon, len(origins), scores, calibration)
+    return WalkForwardResult(horizon, len(pairs), scores, calibration)
 
 
 def best_model(

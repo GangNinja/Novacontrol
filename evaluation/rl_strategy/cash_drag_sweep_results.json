@@ -1,0 +1,3093 @@
+{
+  "any_genuine_variant": false,
+  "automatic_policy_promotion": false,
+  "baseline": {
+    "scale": 0.02,
+    "source": "evaluation/rl_strategy/cash_drag_results_compact.json",
+    "weight": 0.3
+  },
+  "classification": "SIMULATION \u2014 experimental cash-drag weight/scale sweep",
+  "default_reward_modified": false,
+  "generated_at": "2026-11-22T15:20:20.155758+00:00",
+  "genuine_definition": "at least one executed out-of-sample trade and non-zero Q-value spread (max Q spread > 1e-9); zero-Q tie BUYs do not count",
+  "production_authority": false,
+  "selection": "TrainedPolicy.select masked argmax on the test split",
+  "simulation_only": true,
+  "variants": {
+    "w0.10_s0.01": {
+      "config": {
+        "advisory_only": true,
+        "bounds": [
+          -1.0,
+          1.0
+        ],
+        "components": {
+          "cash_drag": 0.1,
+          "discipline": 0.05,
+          "execution_quality": 0.05,
+          "portfolio_management": 0.05,
+          "profitability": 0.35,
+          "risk": 0.1,
+          "transaction_cost": 0.1
+        },
+        "config_hash": "157d0fb14a92619869f34526b9c719eb5f2768a00aff4c119c7deb8513e28471",
+        "config_id": "rwc_157d0fb14a92619869f3",
+        "description": "Isolated cash-drag weight/scale sweep; default reward unchanged, experimental and never promoted.",
+        "enabled": [
+          "profitability",
+          "risk",
+          "transaction_cost",
+          "discipline",
+          "portfolio_management",
+          "execution_quality",
+          "cash_drag"
+        ],
+        "experimental": true,
+        "experimental_status": "experimental",
+        "missing_policy": "renormalize",
+        "name": "PI-14 cash-drag sweep w0.10_s0.01",
+        "normalization": "bounded",
+        "penalties": {
+          "constraint_violation": 0.25,
+          "repeated_trade": 0.05,
+          "unfilled_trade": 0.1
+        },
+        "production_authority": false,
+        "scales": {
+          "cash_drag": 0.01,
+          "decision_quality": 1.0,
+          "discipline": 1.0,
+          "execution_quality": 1.0,
+          "forecast_utilization": 1.0,
+          "portfolio_management": 1.0,
+          "profitability": 0.02,
+          "risk": 0.2,
+          "transaction_cost": 0.01
+        },
+        "schema_version": "pi14-reward-config-v1",
+        "simulated": true,
+        "thresholds": {
+          "decision_full_exposure": 0.9,
+          "decision_weak_forecast": 0.4,
+          "discipline_lookback_trades": 3.0,
+          "discipline_repeated_penalty": 0.5,
+          "portfolio_concentration_high": 0.25,
+          "portfolio_drawdown_high": 0.1,
+          "portfolio_exposure_change_high": 0.5,
+          "risk_concentration_high": 0.25,
+          "risk_drawdown_high": 0.1,
+          "risk_exposure_high": 0.9,
+          "risk_volatility_high_pct": 25.0
+        },
+        "version": "cash-drag-sweep-w0.10_s0.01"
+      },
+      "constraint_violations": 433,
+      "elapsed_seconds": 201.4528,
+      "genuine_policies": 0,
+      "genuine_variant": false,
+      "instruments": {
+        "XNSE:HDFCBANK": {
+          "action_count": 87,
+          "action_distribution": {
+            "buy": 87,
+            "hold": 0,
+            "no_action": 0,
+            "sell": 0,
+            "wait": 0
+          },
+          "actions": null,
+          "actions_seen": [
+            "buy"
+          ],
+          "artifact": "tmp\\rl_evaluation\\cash_drag_sweep\\w0.10_s0.01\\policies\\XNSE_HDFCBANK.json",
+          "average_holding_days": null,
+          "average_reward": -0.5064796158,
+          "calmar": -1.13437417,
+          "constraint_violations": 86,
+          "fees_paid": 7.82,
+          "final_value": "98519.59",
+          "inputs": null,
+          "instrument": "XNSE:HDFCBANK",
+          "invalid_actions": 0,
+          "loss_mean": null,
+          "max_drawdown": null,
+          "model": "PI-14 cash-drag sweep w0.10_s0.01",
+          "profit_factor": null,
+          "q_value_diagnostics": {
+            "all_equal_observations": 87,
+            "max_q": 0.0,
+            "max_spread": 0.0,
+            "mean_spread": 0.0,
+            "min_q": 0.0,
+            "observations": 87,
+            "zero_q_observations": 87
+          },
+          "realized_pnl": 0.0,
+          "regimes": {
+            "advisory_only": true,
+            "available": true,
+            "classifier": "pi04-regime-1.0",
+            "cross_split_inference": false,
+            "fallback": {
+              "thresholds": {
+                "high_volatility_20": 0.02,
+                "low_volatility_20": 0.005,
+                "trend_return_20": 0.02
+              },
+              "used_when": "the observation carries no feature snapshot"
+            },
+            "insufficient": [
+              "low_volatility"
+            ],
+            "label_basis": "one label per observation from that observation's own point-in-time evidence; nothing is aggregated across observations to decide a label",
+            "label_sources": {
+              "market": 87
+            },
+            "min_samples": 3,
+            "production_authority": false,
+            "rows": [
+              {
+                "conclusion": "insufficient samples; no regime conclusion is drawn",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 1
+                },
+                "losses": 0,
+                "mean_return": 0.007224965377128758,
+                "mean_reward": -0.2516413824,
+                "positive_ratio": 1.0,
+                "regime": "low_volatility",
+                "samples": 1,
+                "share": 0.011494,
+                "sufficient": false
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 31
+                },
+                "losses": 14,
+                "mean_return": 0.0001612864173768818,
+                "mean_reward": -0.5035452508129032,
+                "positive_ratio": 0.5483870967741935,
+                "regime": "sideways",
+                "samples": 31,
+                "share": 0.356322,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 48
+                },
+                "losses": 27,
+                "mean_return": -0.00023953393707686296,
+                "mean_reward": -0.5057242463666665,
+                "positive_ratio": 0.3958333333333333,
+                "regime": "weak_down",
+                "samples": 48,
+                "share": 0.551724,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 7
+                },
+                "losses": 6,
+                "mean_return": -0.002190588100440935,
+                "mean_reward": -0.5610597983857143,
+                "positive_ratio": 0.14285714285714285,
+                "regime": "weak_up",
+                "samples": 7,
+                "share": 0.08046,
+                "sufficient": true
+              }
+            ],
+            "samples": 87,
+            "simulated": true,
+            "source": "PI-04 RegimeDetector over each PI-13 observation's own feature snapshot; PI-13 observation evidence (market.return_20, market.volatility_20) only where no features exist",
+            "thresholds": {
+              "high_bollinger_width": 0.1,
+              "high_volatility_range_expansion": 1.25,
+              "low_bollinger_width": 0.025,
+              "low_volatility_range_expansion": 0.75,
+              "strong_adx": 25.0,
+              "strong_trend_score": 4.0,
+              "trend_adx": 20.0,
+              "weak_trend_score": 2.0
+            },
+            "warnings": [
+              "regime slices below the minimum sample count are reported as insufficient, never as evidence of regime-specific performance"
+            ]
+          },
+          "reward_stability": 0.0981500857,
+          "risk": {
+            "annualized_volatility": "4.212917",
+            "max_drawdown": "3.7273",
+            "sharpe": "-1.004284",
+            "sortino": "-0.976213"
+          },
+          "selection": "TrainedPolicy.select masked argmax",
+          "sharpe": -1.004284,
+          "sortino": -0.976213,
+          "test_bars": 88,
+          "total_costs": "15.859992366488",
+          "total_return": -0.0148041,
+          "total_reward": -44.0637265719,
+          "trades": 1,
+          "training": {
+            "best_validation_score": 0.0,
+            "episodes": 20,
+            "training_action_distribution": {
+              "buy": 20,
+              "hold": 1953,
+              "no_action": 127,
+              "sell": 135,
+              "wait": 125
+            },
+            "training_q_value_diagnostics": {
+              "all_equal_observations": 2078,
+              "max_q": 0.8890960651522912,
+              "max_spread": 0.8890960651522912,
+              "mean_spread": 0.009969230371,
+              "min_q": 0.0,
+              "observations": 2360,
+              "zero_q_observations": 2078
+            }
+          },
+          "turnover": 0.19979149,
+          "unrealized_pnl": -1472.59,
+          "win_rate": null
+        },
+        "XNSE:ITC": {
+          "action_count": 87,
+          "action_distribution": {
+            "buy": 87,
+            "hold": 0,
+            "no_action": 0,
+            "sell": 0,
+            "wait": 0
+          },
+          "actions": null,
+          "actions_seen": [
+            "buy"
+          ],
+          "artifact": "tmp\\rl_evaluation\\cash_drag_sweep\\w0.10_s0.01\\policies\\XNSE_ITC.json",
+          "average_holding_days": null,
+          "average_reward": -0.4903074299,
+          "calmar": -0.87507222,
+          "constraint_violations": 86,
+          "fees_paid": 7.85,
+          "final_value": "99246.72",
+          "inputs": null,
+          "instrument": "XNSE:ITC",
+          "invalid_actions": 0,
+          "loss_mean": null,
+          "max_drawdown": null,
+          "model": "PI-14 cash-drag sweep w0.10_s0.01",
+          "profit_factor": null,
+          "q_value_diagnostics": {
+            "all_equal_observations": 87,
+            "max_q": 0.0,
+            "max_spread": 0.0,
+            "mean_spread": 0.0,
+            "min_q": 0.0,
+            "observations": 87,
+            "zero_q_observations": 87
+          },
+          "realized_pnl": 0.0,
+          "regimes": {
+            "advisory_only": true,
+            "available": true,
+            "classifier": "pi04-regime-1.0",
+            "cross_split_inference": false,
+            "fallback": {
+              "thresholds": {
+                "high_volatility_20": 0.02,
+                "low_volatility_20": 0.005,
+                "trend_return_20": 0.02
+              },
+              "used_when": "the observation carries no feature snapshot"
+            },
+            "insufficient": [],
+            "label_basis": "one label per observation from that observation's own point-in-time evidence; nothing is aggregated across observations to decide a label",
+            "label_sources": {
+              "market": 87
+            },
+            "min_samples": 3,
+            "production_authority": false,
+            "rows": [
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 16
+                },
+                "losses": 7,
+                "mean_return": 0.0003481633251389132,
+                "mean_reward": -0.5079161823374999,
+                "positive_ratio": 0.5625,
+                "regime": "high_volatility",
+                "samples": 16,
+                "share": 0.183908,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 3
+                },
+                "losses": 2,
+                "mean_return": -0.002138588441492333,
+                "mean_reward": -0.4738649555,
+                "positive_ratio": 0.3333333333333333,
+                "regime": "low_volatility",
+                "samples": 3,
+                "share": 0.034483,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 35
+                },
+                "losses": 22,
+                "mean_return": -0.0006555797002029732,
+                "mean_reward": -0.5101316304857143,
+                "positive_ratio": 0.37142857142857144,
+                "regime": "sideways",
+                "samples": 35,
+                "share": 0.402299,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 30
+                },
+                "losses": 14,
+                "mean_return": 0.000682749301786777,
+                "mean_reward": -0.4594069766833334,
+                "positive_ratio": 0.5,
+                "regime": "weak_down",
+                "samples": 30,
+                "share": 0.344828,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 3
+                },
+                "losses": 3,
+                "mean_return": -0.0013041965226126924,
+                "mean_reward": -0.49055875066666665,
+                "positive_ratio": 0.0,
+                "regime": "weak_up",
+                "samples": 3,
+                "share": 0.034483,
+                "sufficient": true
+              }
+            ],
+            "samples": 87,
+            "simulated": true,
+            "source": "PI-04 RegimeDetector over each PI-13 observation's own feature snapshot; PI-13 observation evidence (market.return_20, market.volatility_20) only where no features exist",
+            "thresholds": {
+              "high_bollinger_width": 0.1,
+              "high_volatility_range_expansion": 1.25,
+              "low_bollinger_width": 0.025,
+              "low_volatility_range_expansion": 0.75,
+              "strong_adx": 25.0,
+              "strong_trend_score": 4.0,
+              "trend_adx": 20.0,
+              "weak_trend_score": 2.0
+            },
+            "warnings": []
+          },
+          "reward_stability": 0.1018276992,
+          "risk": {
+            "annualized_volatility": "4.442704",
+            "max_drawdown": "2.47564",
+            "sharpe": "-0.470765",
+            "sortino": "-0.51632"
+          },
+          "selection": "TrainedPolicy.select masked argmax",
+          "sharpe": -0.470765,
+          "sortino": -0.51632,
+          "test_bars": 88,
+          "total_costs": "16.119996515633",
+          "total_return": -0.0075328,
+          "total_reward": -42.6567464034,
+          "trades": 1,
+          "training": {
+            "best_validation_score": 0.0,
+            "episodes": 20,
+            "training_action_distribution": {
+              "buy": 20,
+              "hold": 2006,
+              "no_action": 107,
+              "sell": 103,
+              "wait": 124
+            },
+            "training_q_value_diagnostics": {
+              "all_equal_observations": 2294,
+              "max_q": 1.3328838370802354e+163,
+              "max_spread": 1.3328838370802354e+163,
+              "mean_spread": 5.6478128689841295e+159,
+              "min_q": 0.0,
+              "observations": 2360,
+              "zero_q_observations": 2294
+            }
+          },
+          "turnover": 0.20035825,
+          "unrealized_pnl": -745.44,
+          "win_rate": null
+        },
+        "XNSE:RELIANCE": {
+          "action_count": 90,
+          "action_distribution": {
+            "buy": 90,
+            "hold": 0,
+            "no_action": 0,
+            "sell": 0,
+            "wait": 0
+          },
+          "actions": null,
+          "actions_seen": [
+            "buy"
+          ],
+          "artifact": "tmp\\rl_evaluation\\cash_drag_sweep\\w0.10_s0.01\\policies\\XNSE_RELIANCE.json",
+          "average_holding_days": null,
+          "average_reward": -0.4820303451,
+          "calmar": 0.2126784,
+          "constraint_violations": 89,
+          "fees_paid": 7.85,
+          "final_value": "100204.22",
+          "inputs": null,
+          "instrument": "XNSE:RELIANCE",
+          "invalid_actions": 0,
+          "loss_mean": null,
+          "max_drawdown": null,
+          "model": "PI-14 cash-drag sweep w0.10_s0.01",
+          "profit_factor": null,
+          "q_value_diagnostics": {
+            "all_equal_observations": 90,
+            "max_q": 0.0,
+            "max_spread": 0.0,
+            "mean_spread": 0.0,
+            "min_q": 0.0,
+            "observations": 90,
+            "zero_q_observations": 90
+          },
+          "realized_pnl": 0.0,
+          "regimes": {
+            "advisory_only": true,
+            "available": true,
+            "classifier": "pi04-regime-1.0",
+            "cross_split_inference": false,
+            "fallback": {
+              "thresholds": {
+                "high_volatility_20": 0.02,
+                "low_volatility_20": 0.005,
+                "trend_return_20": 0.02
+              },
+              "used_when": "the observation carries no feature snapshot"
+            },
+            "insufficient": [
+              "low_volatility"
+            ],
+            "label_basis": "one label per observation from that observation's own point-in-time evidence; nothing is aggregated across observations to decide a label",
+            "label_sources": {
+              "market": 90
+            },
+            "min_samples": 3,
+            "production_authority": false,
+            "rows": [
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 5
+                },
+                "losses": 0,
+                "mean_return": 0.0007463580087459767,
+                "mean_reward": -0.53367341856,
+                "positive_ratio": 1.0,
+                "regime": "high_volatility",
+                "samples": 5,
+                "share": 0.055556,
+                "sufficient": true
+              },
+              {
+                "conclusion": "insufficient samples; no regime conclusion is drawn",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 1
+                },
+                "losses": 0,
+                "mean_return": 0.0026480519519522933,
+                "mean_reward": -0.3514488636,
+                "positive_ratio": 1.0,
+                "regime": "low_volatility",
+                "samples": 1,
+                "share": 0.011111,
+                "sufficient": false
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 37
+                },
+                "losses": 20,
+                "mean_return": 0.00029308966556565105,
+                "mean_reward": -0.4608927971432432,
+                "positive_ratio": 0.4594594594594595,
+                "regime": "sideways",
+                "samples": 37,
+                "share": 0.411111,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 37
+                },
+                "losses": 18,
+                "mean_return": -0.000257717949772046,
+                "mean_reward": -0.4919055959567568,
+                "positive_ratio": 0.5135135135135135,
+                "regime": "weak_down",
+                "samples": 37,
+                "share": 0.411111,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 10
+                },
+                "losses": 6,
+                "mean_return": -0.0005158618059660725,
+                "mean_reward": -0.5109374555899999,
+                "positive_ratio": 0.4,
+                "regime": "weak_up",
+                "samples": 10,
+                "share": 0.111111,
+                "sufficient": true
+              }
+            ],
+            "samples": 90,
+            "simulated": true,
+            "source": "PI-04 RegimeDetector over each PI-13 observation's own feature snapshot; PI-13 observation evidence (market.return_20, market.volatility_20) only where no features exist",
+            "thresholds": {
+              "high_bollinger_width": 0.1,
+              "high_volatility_range_expansion": 1.25,
+              "low_bollinger_width": 0.025,
+              "low_volatility_range_expansion": 0.75,
+              "strong_adx": 25.0,
+              "strong_trend_score": 4.0,
+              "trend_adx": 20.0,
+              "weak_trend_score": 2.0
+            },
+            "warnings": [
+              "regime slices below the minimum sample count are reported as insufficient, never as evidence of regime-specific performance"
+            ]
+          },
+          "reward_stability": 0.1114883648,
+          "risk": {
+            "annualized_volatility": "5.254118",
+            "max_drawdown": "2.693586",
+            "sharpe": "0.134826",
+            "sortino": "0.175285"
+          },
+          "selection": "TrainedPolicy.select masked argmax",
+          "sharpe": 0.134826,
+          "sortino": 0.175285,
+          "test_bars": 91,
+          "total_costs": "15.95000006480",
+          "total_return": 0.0020422,
+          "total_reward": -43.382731057,
+          "trades": 1,
+          "training": {
+            "best_validation_score": 0.0,
+            "episodes": 20,
+            "training_action_distribution": {
+              "buy": 20,
+              "hold": 1984,
+              "no_action": 135,
+              "sell": 99,
+              "wait": 122
+            },
+            "training_q_value_diagnostics": {
+              "all_equal_observations": 2145,
+              "max_q": 0.8380744118647439,
+              "max_spread": 0.8380744118647439,
+              "mean_spread": 0.008931113174,
+              "min_q": 0.0,
+              "observations": 2360,
+              "zero_q_observations": 2145
+            }
+          },
+          "turnover": 0.20038685,
+          "unrealized_pnl": 212.08,
+          "win_rate": null
+        },
+        "XNSE:TATASTEEL": {
+          "action_count": 87,
+          "action_distribution": {
+            "buy": 87,
+            "hold": 0,
+            "no_action": 0,
+            "sell": 0,
+            "wait": 0
+          },
+          "actions": null,
+          "actions_seen": [
+            "buy"
+          ],
+          "artifact": "tmp\\rl_evaluation\\cash_drag_sweep\\w0.10_s0.01\\policies\\XNSE_TATASTEEL.json",
+          "average_holding_days": null,
+          "average_reward": -0.4800997786,
+          "calmar": -0.71062774,
+          "constraint_violations": 86,
+          "fees_paid": 7.88,
+          "final_value": "99327.86",
+          "inputs": null,
+          "instrument": "XNSE:TATASTEEL",
+          "invalid_actions": 0,
+          "loss_mean": null,
+          "max_drawdown": null,
+          "model": "PI-14 cash-drag sweep w0.10_s0.01",
+          "profit_factor": null,
+          "q_value_diagnostics": {
+            "all_equal_observations": 87,
+            "max_q": 0.0,
+            "max_spread": 0.0,
+            "mean_spread": 0.0,
+            "min_q": 0.0,
+            "observations": 87,
+            "zero_q_observations": 87
+          },
+          "realized_pnl": 0.0,
+          "regimes": {
+            "advisory_only": true,
+            "available": true,
+            "classifier": "pi04-regime-1.0",
+            "cross_split_inference": false,
+            "fallback": {
+              "thresholds": {
+                "high_volatility_20": 0.02,
+                "low_volatility_20": 0.005,
+                "trend_return_20": 0.02
+              },
+              "used_when": "the observation carries no feature snapshot"
+            },
+            "insufficient": [
+              "low_volatility"
+            ],
+            "label_basis": "one label per observation from that observation's own point-in-time evidence; nothing is aggregated across observations to decide a label",
+            "label_sources": {
+              "market": 87
+            },
+            "min_samples": 3,
+            "production_authority": false,
+            "rows": [
+              {
+                "conclusion": "insufficient samples; no regime conclusion is drawn",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 2
+                },
+                "losses": 1,
+                "mean_return": -4.71079847202331e-06,
+                "mean_reward": -0.4176030487,
+                "positive_ratio": 0.5,
+                "regime": "low_volatility",
+                "samples": 2,
+                "share": 0.022989,
+                "sufficient": false
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 54
+                },
+                "losses": 33,
+                "mean_return": -0.00027717041110681605,
+                "mean_reward": -0.48359571536851853,
+                "positive_ratio": 0.3888888888888889,
+                "regime": "sideways",
+                "samples": 54,
+                "share": 0.62069,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 28
+                },
+                "losses": 14,
+                "mean_return": 0.0005132737600698493,
+                "mean_reward": -0.4659314056464286,
+                "positive_ratio": 0.5,
+                "regime": "weak_down",
+                "samples": 28,
+                "share": 0.321839,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 3
+                },
+                "losses": 2,
+                "mean_return": -0.0019368660397607667,
+                "mean_reward": -0.5910755518999999,
+                "positive_ratio": 0.3333333333333333,
+                "regime": "weak_up",
+                "samples": 3,
+                "share": 0.034483,
+                "sufficient": true
+              }
+            ],
+            "samples": 87,
+            "simulated": true,
+            "source": "PI-04 RegimeDetector over each PI-13 observation's own feature snapshot; PI-13 observation evidence (market.return_20, market.volatility_20) only where no features exist",
+            "thresholds": {
+              "high_bollinger_width": 0.1,
+              "high_volatility_range_expansion": 1.25,
+              "low_bollinger_width": 0.025,
+              "low_volatility_range_expansion": 0.75,
+              "strong_adx": 25.0,
+              "strong_trend_score": 4.0,
+              "trend_adx": 20.0,
+              "weak_trend_score": 2.0
+            },
+            "warnings": [
+              "regime slices below the minimum sample count are reported as insufficient, never as evidence of regime-specific performance"
+            ]
+          },
+          "reward_stability": 0.109212277,
+          "risk": {
+            "annualized_volatility": "4.363679",
+            "max_drawdown": "2.722247",
+            "sharpe": "-0.425856",
+            "sortino": "-0.491268"
+          },
+          "selection": "TrainedPolicy.select masked argmax",
+          "sharpe": -0.425856,
+          "sortino": -0.491268,
+          "test_bars": 88,
+          "total_costs": "16.519952498001",
+          "total_return": -0.0067214,
+          "total_reward": -41.7686807411,
+          "trades": 1,
+          "training": {
+            "best_validation_score": 0.0,
+            "episodes": 20,
+            "training_action_distribution": {
+              "buy": 20,
+              "hold": 2002,
+              "no_action": 104,
+              "sell": 108,
+              "wait": 126
+            },
+            "training_q_value_diagnostics": {
+              "all_equal_observations": 2295,
+              "max_q": 3.4576338306455158e+180,
+              "max_spread": 3.4576338306455158e+180,
+              "mean_spread": 1.4650990807819985e+177,
+              "min_q": 0.0,
+              "observations": 2360,
+              "zero_q_observations": 2295
+            }
+          },
+          "turnover": 0.20098288,
+          "unrealized_pnl": -664.25,
+          "win_rate": null
+        },
+        "XNSE:TCS": {
+          "action_count": 87,
+          "action_distribution": {
+            "buy": 87,
+            "hold": 0,
+            "no_action": 0,
+            "sell": 0,
+            "wait": 0
+          },
+          "actions": null,
+          "actions_seen": [
+            "buy"
+          ],
+          "artifact": "tmp\\rl_evaluation\\cash_drag_sweep\\w0.10_s0.01\\policies\\XNSE_TCS.json",
+          "average_holding_days": null,
+          "average_reward": -0.4934274778,
+          "calmar": 3.05084268,
+          "constraint_violations": 86,
+          "fees_paid": 7.94,
+          "final_value": "104301.45",
+          "inputs": null,
+          "instrument": "XNSE:TCS",
+          "invalid_actions": 0,
+          "loss_mean": null,
+          "max_drawdown": null,
+          "model": "PI-14 cash-drag sweep w0.10_s0.01",
+          "profit_factor": null,
+          "q_value_diagnostics": {
+            "all_equal_observations": 87,
+            "max_q": 0.0,
+            "max_spread": 0.0,
+            "mean_spread": 0.0,
+            "min_q": 0.0,
+            "observations": 87,
+            "zero_q_observations": 87
+          },
+          "realized_pnl": 0.0,
+          "regimes": {
+            "advisory_only": true,
+            "available": true,
+            "classifier": "pi04-regime-1.0",
+            "cross_split_inference": false,
+            "fallback": {
+              "thresholds": {
+                "high_volatility_20": 0.02,
+                "low_volatility_20": 0.005,
+                "trend_return_20": 0.02
+              },
+              "used_when": "the observation carries no feature snapshot"
+            },
+            "insufficient": [
+              "sideways"
+            ],
+            "label_basis": "one label per observation from that observation's own point-in-time evidence; nothing is aggregated across observations to decide a label",
+            "label_sources": {
+              "market": 87
+            },
+            "min_samples": 3,
+            "production_authority": false,
+            "rows": [
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 49
+                },
+                "losses": 23,
+                "mean_return": 0.0007825168921186159,
+                "mean_reward": -0.48755710183061185,
+                "positive_ratio": 0.5306122448979592,
+                "regime": "high_volatility",
+                "samples": 49,
+                "share": 0.563218,
+                "sufficient": true
+              },
+              {
+                "conclusion": "insufficient samples; no regime conclusion is drawn",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 1
+                },
+                "losses": 0,
+                "mean_return": 0.005901600000000035,
+                "mean_reward": 0.1865453125,
+                "positive_ratio": 1.0,
+                "regime": "sideways",
+                "samples": 1,
+                "share": 0.011494,
+                "sufficient": false
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 32
+                },
+                "losses": 23,
+                "mean_return": -0.0002470189751466033,
+                "mean_reward": -0.5318670538031249,
+                "positive_ratio": 0.28125,
+                "regime": "weak_down",
+                "samples": 32,
+                "share": 0.367816,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 5
+                },
+                "losses": 2,
+                "mean_return": 0.0013313858521948152,
+                "mean_reward": -0.4409384344999999,
+                "positive_ratio": 0.6,
+                "regime": "weak_up",
+                "samples": 5,
+                "share": 0.057471,
+                "sufficient": true
+              }
+            ],
+            "samples": 87,
+            "simulated": true,
+            "source": "PI-04 RegimeDetector over each PI-13 observation's own feature snapshot; PI-13 observation evidence (market.return_20, market.volatility_20) only where no features exist",
+            "thresholds": {
+              "high_bollinger_width": 0.1,
+              "high_volatility_range_expansion": 1.25,
+              "low_bollinger_width": 0.025,
+              "low_volatility_range_expansion": 0.75,
+              "strong_adx": 25.0,
+              "strong_trend_score": 4.0,
+              "trend_adx": 20.0,
+              "weak_trend_score": 2.0
+            },
+            "warnings": [
+              "regime slices below the minimum sample count are reported as insufficient, never as evidence of regime-specific performance"
+            ]
+          },
+          "reward_stability": 0.1360827011,
+          "risk": {
+            "annualized_volatility": "7.116909",
+            "max_drawdown": "4.252632",
+            "sharpe": "1.74997",
+            "sortino": "2.342508"
+          },
+          "selection": "TrainedPolicy.select masked argmax",
+          "sharpe": 1.74997,
+          "sortino": 2.342508,
+          "test_bars": 88,
+          "total_costs": "16.109999361488",
+          "total_return": 0.0430145,
+          "total_reward": -42.9281905714,
+          "trades": 1,
+          "training": {
+            "best_validation_score": 0.0,
+            "episodes": 20,
+            "training_action_distribution": {
+              "buy": 20,
+              "hold": 1971,
+              "no_action": 123,
+              "sell": 132,
+              "wait": 114
+            },
+            "training_q_value_diagnostics": {
+              "all_equal_observations": 2133,
+              "max_q": 0.852886071581714,
+              "max_spread": 0.852886071581714,
+              "mean_spread": 0.008325803683,
+              "min_q": 0.0,
+              "observations": 2360,
+              "zero_q_observations": 2133
+            }
+          },
+          "turnover": 0.20264401,
+          "unrealized_pnl": 4309.39,
+          "win_rate": null
+        }
+      },
+      "policies": 5,
+      "policies_with_trades": 5,
+      "scale": 0.01,
+      "test_max_spread": 0.0,
+      "test_q_observations": 438,
+      "test_zero_q_observations": 438,
+      "trades": 5,
+      "training_action_distribution": {
+        "buy": 100,
+        "hold": 9916,
+        "no_action": 596,
+        "sell": 577,
+        "wait": 611
+      },
+      "training_q_observations": 11800,
+      "training_zero_q_observations": 10945,
+      "variant": "w0.10_s0.01",
+      "weight": 0.1
+    },
+    "w0.30_s0.10": {
+      "config": {
+        "advisory_only": true,
+        "bounds": [
+          -1.0,
+          1.0
+        ],
+        "components": {
+          "cash_drag": 0.3,
+          "discipline": 0.05,
+          "execution_quality": 0.05,
+          "portfolio_management": 0.05,
+          "profitability": 0.35,
+          "risk": 0.1,
+          "transaction_cost": 0.1
+        },
+        "config_hash": "4a77b51406a7e2b55320a6f9b4145ef3fac138011875c87eb6d27cb84f29131d",
+        "config_id": "rwc_4a77b51406a7e2b55320",
+        "description": "Isolated cash-drag weight/scale sweep; default reward unchanged, experimental and never promoted.",
+        "enabled": [
+          "profitability",
+          "risk",
+          "transaction_cost",
+          "discipline",
+          "portfolio_management",
+          "execution_quality",
+          "cash_drag"
+        ],
+        "experimental": true,
+        "experimental_status": "experimental",
+        "missing_policy": "renormalize",
+        "name": "PI-14 cash-drag sweep w0.30_s0.10",
+        "normalization": "bounded",
+        "penalties": {
+          "constraint_violation": 0.25,
+          "repeated_trade": 0.05,
+          "unfilled_trade": 0.1
+        },
+        "production_authority": false,
+        "scales": {
+          "cash_drag": 0.1,
+          "decision_quality": 1.0,
+          "discipline": 1.0,
+          "execution_quality": 1.0,
+          "forecast_utilization": 1.0,
+          "portfolio_management": 1.0,
+          "profitability": 0.02,
+          "risk": 0.2,
+          "transaction_cost": 0.01
+        },
+        "schema_version": "pi14-reward-config-v1",
+        "simulated": true,
+        "thresholds": {
+          "decision_full_exposure": 0.9,
+          "decision_weak_forecast": 0.4,
+          "discipline_lookback_trades": 3.0,
+          "discipline_repeated_penalty": 0.5,
+          "portfolio_concentration_high": 0.25,
+          "portfolio_drawdown_high": 0.1,
+          "portfolio_exposure_change_high": 0.5,
+          "risk_concentration_high": 0.25,
+          "risk_drawdown_high": 0.1,
+          "risk_exposure_high": 0.9,
+          "risk_volatility_high_pct": 25.0
+        },
+        "version": "cash-drag-sweep-w0.30_s0.10"
+      },
+      "constraint_violations": 433,
+      "elapsed_seconds": 140.8856,
+      "genuine_policies": 0,
+      "genuine_variant": false,
+      "instruments": {
+        "XNSE:HDFCBANK": {
+          "action_count": 87,
+          "action_distribution": {
+            "buy": 87,
+            "hold": 0,
+            "no_action": 0,
+            "sell": 0,
+            "wait": 0
+          },
+          "actions": null,
+          "actions_seen": [
+            "buy"
+          ],
+          "artifact": "tmp\\rl_evaluation\\cash_drag_sweep\\w0.30_s0.10\\policies\\XNSE_HDFCBANK.json",
+          "average_holding_days": null,
+          "average_reward": -0.4551839652,
+          "calmar": -1.13437417,
+          "constraint_violations": 86,
+          "fees_paid": 7.82,
+          "final_value": "98519.59",
+          "inputs": null,
+          "instrument": "XNSE:HDFCBANK",
+          "invalid_actions": 0,
+          "loss_mean": null,
+          "max_drawdown": null,
+          "model": "PI-14 cash-drag sweep w0.30_s0.10",
+          "profit_factor": null,
+          "q_value_diagnostics": {
+            "all_equal_observations": 87,
+            "max_q": 0.0,
+            "max_spread": 0.0,
+            "mean_spread": 0.0,
+            "min_q": 0.0,
+            "observations": 87,
+            "zero_q_observations": 87
+          },
+          "realized_pnl": 0.0,
+          "regimes": {
+            "advisory_only": true,
+            "available": true,
+            "classifier": "pi04-regime-1.0",
+            "cross_split_inference": false,
+            "fallback": {
+              "thresholds": {
+                "high_volatility_20": 0.02,
+                "low_volatility_20": 0.005,
+                "trend_return_20": 0.02
+              },
+              "used_when": "the observation carries no feature snapshot"
+            },
+            "insufficient": [
+              "low_volatility"
+            ],
+            "label_basis": "one label per observation from that observation's own point-in-time evidence; nothing is aggregated across observations to decide a label",
+            "label_sources": {
+              "market": 87
+            },
+            "min_samples": 3,
+            "production_authority": false,
+            "rows": [
+              {
+                "conclusion": "insufficient samples; no regime conclusion is drawn",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 1
+                },
+                "losses": 0,
+                "mean_return": 0.007224965377128758,
+                "mean_reward": -0.2613131059,
+                "positive_ratio": 1.0,
+                "regime": "low_volatility",
+                "samples": 1,
+                "share": 0.011494,
+                "sufficient": false
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 31
+                },
+                "losses": 14,
+                "mean_return": 0.0001612864173768818,
+                "mean_reward": -0.44710140683548394,
+                "positive_ratio": 0.5483870967741935,
+                "regime": "sideways",
+                "samples": 31,
+                "share": 0.356322,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 48
+                },
+                "losses": 27,
+                "mean_return": -0.00023953393707686296,
+                "mean_reward": -0.4565917330416666,
+                "positive_ratio": 0.3958333333333333,
+                "regime": "weak_down",
+                "samples": 48,
+                "share": 0.551724,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 7
+                },
+                "losses": 6,
+                "mean_return": -0.002190588100440935,
+                "mean_reward": -0.5090207240428571,
+                "positive_ratio": 0.14285714285714285,
+                "regime": "weak_up",
+                "samples": 7,
+                "share": 0.08046,
+                "sufficient": true
+              }
+            ],
+            "samples": 87,
+            "simulated": true,
+            "source": "PI-04 RegimeDetector over each PI-13 observation's own feature snapshot; PI-13 observation evidence (market.return_20, market.volatility_20) only where no features exist",
+            "thresholds": {
+              "high_bollinger_width": 0.1,
+              "high_volatility_range_expansion": 1.25,
+              "low_bollinger_width": 0.025,
+              "low_volatility_range_expansion": 0.75,
+              "strong_adx": 25.0,
+              "strong_trend_score": 4.0,
+              "trend_adx": 20.0,
+              "weak_trend_score": 2.0
+            },
+            "warnings": [
+              "regime slices below the minimum sample count are reported as insufficient, never as evidence of regime-specific performance"
+            ]
+          },
+          "reward_stability": 0.078182307,
+          "risk": {
+            "annualized_volatility": "4.212917",
+            "max_drawdown": "3.7273",
+            "sharpe": "-1.004284",
+            "sortino": "-0.976213"
+          },
+          "selection": "TrainedPolicy.select masked argmax",
+          "sharpe": -1.004284,
+          "sortino": -0.976213,
+          "test_bars": 88,
+          "total_costs": "15.859992366488",
+          "total_return": -0.0148041,
+          "total_reward": -39.6010049721,
+          "trades": 1,
+          "training": {
+            "best_validation_score": 0.0,
+            "episodes": 20,
+            "training_action_distribution": {
+              "buy": 20,
+              "hold": 2007,
+              "no_action": 108,
+              "sell": 106,
+              "wait": 119
+            },
+            "training_q_value_diagnostics": {
+              "all_equal_observations": 2289,
+              "max_q": 3.752969499439217e+171,
+              "max_spread": 3.752969499439217e+171,
+              "mean_spread": 1.5902413133217046e+168,
+              "min_q": 0.0,
+              "observations": 2360,
+              "zero_q_observations": 2289
+            }
+          },
+          "turnover": 0.19979149,
+          "unrealized_pnl": -1472.59,
+          "win_rate": null
+        },
+        "XNSE:ITC": {
+          "action_count": 87,
+          "action_distribution": {
+            "buy": 87,
+            "hold": 0,
+            "no_action": 0,
+            "sell": 0,
+            "wait": 0
+          },
+          "actions": null,
+          "actions_seen": [
+            "buy"
+          ],
+          "artifact": "tmp\\rl_evaluation\\cash_drag_sweep\\w0.30_s0.10\\policies\\XNSE_ITC.json",
+          "average_holding_days": null,
+          "average_reward": -0.435907684,
+          "calmar": -0.87507222,
+          "constraint_violations": 86,
+          "fees_paid": 7.85,
+          "final_value": "99246.72",
+          "inputs": null,
+          "instrument": "XNSE:ITC",
+          "invalid_actions": 0,
+          "loss_mean": null,
+          "max_drawdown": null,
+          "model": "PI-14 cash-drag sweep w0.30_s0.10",
+          "profit_factor": null,
+          "q_value_diagnostics": {
+            "all_equal_observations": 87,
+            "max_q": 0.0,
+            "max_spread": 0.0,
+            "mean_spread": 0.0,
+            "min_q": 0.0,
+            "observations": 87,
+            "zero_q_observations": 87
+          },
+          "realized_pnl": 0.0,
+          "regimes": {
+            "advisory_only": true,
+            "available": true,
+            "classifier": "pi04-regime-1.0",
+            "cross_split_inference": false,
+            "fallback": {
+              "thresholds": {
+                "high_volatility_20": 0.02,
+                "low_volatility_20": 0.005,
+                "trend_return_20": 0.02
+              },
+              "used_when": "the observation carries no feature snapshot"
+            },
+            "insufficient": [],
+            "label_basis": "one label per observation from that observation's own point-in-time evidence; nothing is aggregated across observations to decide a label",
+            "label_sources": {
+              "market": 87
+            },
+            "min_samples": 3,
+            "production_authority": false,
+            "rows": [
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 16
+                },
+                "losses": 7,
+                "mean_return": 0.0003481633251389132,
+                "mean_reward": -0.45267080038124996,
+                "positive_ratio": 0.5625,
+                "regime": "high_volatility",
+                "samples": 16,
+                "share": 0.183908,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 3
+                },
+                "losses": 2,
+                "mean_return": -0.002138588441492333,
+                "mean_reward": -0.4390919643666667,
+                "positive_ratio": 0.3333333333333333,
+                "regime": "low_volatility",
+                "samples": 3,
+                "share": 0.034483,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 35
+                },
+                "losses": 22,
+                "mean_return": -0.0006555797002029732,
+                "mean_reward": -0.4398701656914286,
+                "positive_ratio": 0.37142857142857144,
+                "regime": "sideways",
+                "samples": 35,
+                "share": 0.402299,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 30
+                },
+                "losses": 14,
+                "mean_return": 0.000682749301786777,
+                "mean_reward": -0.42082991630666666,
+                "positive_ratio": 0.5,
+                "regime": "weak_down",
+                "samples": 30,
+                "share": 0.344828,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 3
+                },
+                "losses": 3,
+                "mean_return": -0.0013041965226126924,
+                "mean_reward": -0.4478688409,
+                "positive_ratio": 0.0,
+                "regime": "weak_up",
+                "samples": 3,
+                "share": 0.034483,
+                "sufficient": true
+              }
+            ],
+            "samples": 87,
+            "simulated": true,
+            "source": "PI-04 RegimeDetector over each PI-13 observation's own feature snapshot; PI-13 observation evidence (market.return_20, market.volatility_20) only where no features exist",
+            "thresholds": {
+              "high_bollinger_width": 0.1,
+              "high_volatility_range_expansion": 1.25,
+              "low_bollinger_width": 0.025,
+              "low_volatility_range_expansion": 0.75,
+              "strong_adx": 25.0,
+              "strong_trend_score": 4.0,
+              "trend_adx": 20.0,
+              "weak_trend_score": 2.0
+            },
+            "warnings": []
+          },
+          "reward_stability": 0.0771064548,
+          "risk": {
+            "annualized_volatility": "4.442704",
+            "max_drawdown": "2.47564",
+            "sharpe": "-0.470765",
+            "sortino": "-0.51632"
+          },
+          "selection": "TrainedPolicy.select masked argmax",
+          "sharpe": -0.470765,
+          "sortino": -0.51632,
+          "test_bars": 88,
+          "total_costs": "16.119996515633",
+          "total_return": -0.0075328,
+          "total_reward": -37.9239685103,
+          "trades": 1,
+          "training": {
+            "best_validation_score": 0.0,
+            "episodes": 20,
+            "training_action_distribution": {
+              "buy": 20,
+              "hold": 2005,
+              "no_action": 108,
+              "sell": 102,
+              "wait": 125
+            },
+            "training_q_value_diagnostics": {
+              "all_equal_observations": 2294,
+              "max_q": 1.052200859243034e+173,
+              "max_spread": 1.052200859243034e+173,
+              "mean_spread": 4.458478217131546e+169,
+              "min_q": 0.0,
+              "observations": 2360,
+              "zero_q_observations": 2294
+            }
+          },
+          "turnover": 0.20035825,
+          "unrealized_pnl": -745.44,
+          "win_rate": null
+        },
+        "XNSE:RELIANCE": {
+          "action_count": 90,
+          "action_distribution": {
+            "buy": 90,
+            "hold": 0,
+            "no_action": 0,
+            "sell": 0,
+            "wait": 0
+          },
+          "actions": null,
+          "actions_seen": [
+            "buy"
+          ],
+          "artifact": "tmp\\rl_evaluation\\cash_drag_sweep\\w0.30_s0.10\\policies\\XNSE_RELIANCE.json",
+          "average_holding_days": null,
+          "average_reward": -0.4407196074,
+          "calmar": 0.2126784,
+          "constraint_violations": 89,
+          "fees_paid": 7.85,
+          "final_value": "100204.22",
+          "inputs": null,
+          "instrument": "XNSE:RELIANCE",
+          "invalid_actions": 0,
+          "loss_mean": null,
+          "max_drawdown": null,
+          "model": "PI-14 cash-drag sweep w0.30_s0.10",
+          "profit_factor": null,
+          "q_value_diagnostics": {
+            "all_equal_observations": 90,
+            "max_q": 0.0,
+            "max_spread": 0.0,
+            "mean_spread": 0.0,
+            "min_q": 0.0,
+            "observations": 90,
+            "zero_q_observations": 90
+          },
+          "realized_pnl": 0.0,
+          "regimes": {
+            "advisory_only": true,
+            "available": true,
+            "classifier": "pi04-regime-1.0",
+            "cross_split_inference": false,
+            "fallback": {
+              "thresholds": {
+                "high_volatility_20": 0.02,
+                "low_volatility_20": 0.005,
+                "trend_return_20": 0.02
+              },
+              "used_when": "the observation carries no feature snapshot"
+            },
+            "insufficient": [
+              "low_volatility"
+            ],
+            "label_basis": "one label per observation from that observation's own point-in-time evidence; nothing is aggregated across observations to decide a label",
+            "label_sources": {
+              "market": 90
+            },
+            "min_samples": 3,
+            "production_authority": false,
+            "rows": [
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 5
+                },
+                "losses": 0,
+                "mean_return": 0.0007463580087459767,
+                "mean_reward": -0.6508659617799999,
+                "positive_ratio": 1.0,
+                "regime": "high_volatility",
+                "samples": 5,
+                "share": 0.055556,
+                "sufficient": true
+              },
+              {
+                "conclusion": "insufficient samples; no regime conclusion is drawn",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 1
+                },
+                "losses": 0,
+                "mean_return": 0.0026480519519522933,
+                "mean_reward": -0.3411590908,
+                "positive_ratio": 1.0,
+                "regime": "low_volatility",
+                "samples": 1,
+                "share": 0.011111,
+                "sufficient": false
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 37
+                },
+                "losses": 20,
+                "mean_return": 0.00029308966556565105,
+                "mean_reward": -0.4092248799945946,
+                "positive_ratio": 0.4594594594594595,
+                "regime": "sideways",
+                "samples": 37,
+                "share": 0.411111,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 37
+                },
+                "losses": 18,
+                "mean_return": -0.000257717949772046,
+                "mean_reward": -0.446076114954054,
+                "positive_ratio": 0.5135135135135135,
+                "regime": "weak_down",
+                "samples": 37,
+                "share": 0.411111,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 10
+                },
+                "losses": 6,
+                "mean_return": -0.0005158618059660725,
+                "mean_reward": -0.44231389513,
+                "positive_ratio": 0.4,
+                "regime": "weak_up",
+                "samples": 10,
+                "share": 0.111111,
+                "sufficient": true
+              }
+            ],
+            "samples": 90,
+            "simulated": true,
+            "source": "PI-04 RegimeDetector over each PI-13 observation's own feature snapshot; PI-13 observation evidence (market.return_20, market.volatility_20) only where no features exist",
+            "thresholds": {
+              "high_bollinger_width": 0.1,
+              "high_volatility_range_expansion": 1.25,
+              "low_bollinger_width": 0.025,
+              "low_volatility_range_expansion": 0.75,
+              "strong_adx": 25.0,
+              "strong_trend_score": 4.0,
+              "trend_adx": 20.0,
+              "weak_trend_score": 2.0
+            },
+            "warnings": [
+              "regime slices below the minimum sample count are reported as insufficient, never as evidence of regime-specific performance"
+            ]
+          },
+          "reward_stability": 0.0996121235,
+          "risk": {
+            "annualized_volatility": "5.254118",
+            "max_drawdown": "2.693586",
+            "sharpe": "0.134826",
+            "sortino": "0.175285"
+          },
+          "selection": "TrainedPolicy.select masked argmax",
+          "sharpe": 0.134826,
+          "sortino": 0.175285,
+          "test_bars": 91,
+          "total_costs": "15.95000006480",
+          "total_return": 0.0020422,
+          "total_reward": -39.6647646641,
+          "trades": 1,
+          "training": {
+            "best_validation_score": 0.0,
+            "episodes": 20,
+            "training_action_distribution": {
+              "buy": 20,
+              "hold": 1937,
+              "no_action": 152,
+              "sell": 128,
+              "wait": 123
+            },
+            "training_q_value_diagnostics": {
+              "all_equal_observations": 2058,
+              "max_q": 0.8380744118647439,
+              "max_spread": 0.8380744118647439,
+              "mean_spread": 0.009003189246,
+              "min_q": 0.0,
+              "observations": 2360,
+              "zero_q_observations": 2058
+            }
+          },
+          "turnover": 0.20038685,
+          "unrealized_pnl": 212.08,
+          "win_rate": null
+        },
+        "XNSE:TATASTEEL": {
+          "action_count": 87,
+          "action_distribution": {
+            "buy": 87,
+            "hold": 0,
+            "no_action": 0,
+            "sell": 0,
+            "wait": 0
+          },
+          "actions": null,
+          "actions_seen": [
+            "buy"
+          ],
+          "artifact": "tmp\\rl_evaluation\\cash_drag_sweep\\w0.30_s0.10\\policies\\XNSE_TATASTEEL.json",
+          "average_holding_days": null,
+          "average_reward": -0.4295418369,
+          "calmar": -0.71062774,
+          "constraint_violations": 86,
+          "fees_paid": 7.88,
+          "final_value": "99327.86",
+          "inputs": null,
+          "instrument": "XNSE:TATASTEEL",
+          "invalid_actions": 0,
+          "loss_mean": null,
+          "max_drawdown": null,
+          "model": "PI-14 cash-drag sweep w0.30_s0.10",
+          "profit_factor": null,
+          "q_value_diagnostics": {
+            "all_equal_observations": 87,
+            "max_q": 0.0,
+            "max_spread": 0.0,
+            "mean_spread": 0.0,
+            "min_q": 0.0,
+            "observations": 87,
+            "zero_q_observations": 87
+          },
+          "realized_pnl": 0.0,
+          "regimes": {
+            "advisory_only": true,
+            "available": true,
+            "classifier": "pi04-regime-1.0",
+            "cross_split_inference": false,
+            "fallback": {
+              "thresholds": {
+                "high_volatility_20": 0.02,
+                "low_volatility_20": 0.005,
+                "trend_return_20": 0.02
+              },
+              "used_when": "the observation carries no feature snapshot"
+            },
+            "insufficient": [
+              "low_volatility"
+            ],
+            "label_basis": "one label per observation from that observation's own point-in-time evidence; nothing is aggregated across observations to decide a label",
+            "label_sources": {
+              "market": 87
+            },
+            "min_samples": 3,
+            "production_authority": false,
+            "rows": [
+              {
+                "conclusion": "insufficient samples; no regime conclusion is drawn",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 2
+                },
+                "losses": 1,
+                "mean_return": -4.71079847202331e-06,
+                "mean_reward": -0.39408243895,
+                "positive_ratio": 0.5,
+                "regime": "low_volatility",
+                "samples": 2,
+                "share": 0.022989,
+                "sufficient": false
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 54
+                },
+                "losses": 33,
+                "mean_return": -0.00027717041110681605,
+                "mean_reward": -0.428288106788889,
+                "positive_ratio": 0.3888888888888889,
+                "regime": "sideways",
+                "samples": 54,
+                "share": 0.62069,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 28
+                },
+                "losses": 14,
+                "mean_return": 0.0005132737600698493,
+                "mean_reward": -0.42585668442499996,
+                "positive_ratio": 0.5,
+                "regime": "weak_down",
+                "samples": 28,
+                "share": 0.321839,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 3
+                },
+                "losses": 2,
+                "mean_return": -0.0019368660397607667,
+                "mean_reward": -0.5101433344,
+                "positive_ratio": 0.3333333333333333,
+                "regime": "weak_up",
+                "samples": 3,
+                "share": 0.034483,
+                "sufficient": true
+              }
+            ],
+            "samples": 87,
+            "simulated": true,
+            "source": "PI-04 RegimeDetector over each PI-13 observation's own feature snapshot; PI-13 observation evidence (market.return_20, market.volatility_20) only where no features exist",
+            "thresholds": {
+              "high_bollinger_width": 0.1,
+              "high_volatility_range_expansion": 1.25,
+              "low_bollinger_width": 0.025,
+              "low_volatility_range_expansion": 0.75,
+              "strong_adx": 25.0,
+              "strong_trend_score": 4.0,
+              "trend_adx": 20.0,
+              "weak_trend_score": 2.0
+            },
+            "warnings": [
+              "regime slices below the minimum sample count are reported as insufficient, never as evidence of regime-specific performance"
+            ]
+          },
+          "reward_stability": 0.0821143232,
+          "risk": {
+            "annualized_volatility": "4.363679",
+            "max_drawdown": "2.722247",
+            "sharpe": "-0.425856",
+            "sortino": "-0.491268"
+          },
+          "selection": "TrainedPolicy.select masked argmax",
+          "sharpe": -0.425856,
+          "sortino": -0.491268,
+          "test_bars": 88,
+          "total_costs": "16.519952498001",
+          "total_return": -0.0067214,
+          "total_reward": -37.3701398116,
+          "trades": 1,
+          "training": {
+            "best_validation_score": 0.0,
+            "episodes": 20,
+            "training_action_distribution": {
+              "buy": 20,
+              "hold": 2002,
+              "no_action": 104,
+              "sell": 108,
+              "wait": 126
+            },
+            "training_q_value_diagnostics": {
+              "all_equal_observations": 2295,
+              "max_q": 3.1428694932859116e+182,
+              "max_spread": 3.1428694932859116e+182,
+              "mean_spread": 1.3317243615618275e+179,
+              "min_q": 0.0,
+              "observations": 2360,
+              "zero_q_observations": 2295
+            }
+          },
+          "turnover": 0.20098288,
+          "unrealized_pnl": -664.25,
+          "win_rate": null
+        },
+        "XNSE:TCS": {
+          "action_count": 87,
+          "action_distribution": {
+            "buy": 87,
+            "hold": 0,
+            "no_action": 0,
+            "sell": 0,
+            "wait": 0
+          },
+          "actions": null,
+          "actions_seen": [
+            "buy"
+          ],
+          "artifact": "tmp\\rl_evaluation\\cash_drag_sweep\\w0.30_s0.10\\policies\\XNSE_TCS.json",
+          "average_holding_days": null,
+          "average_reward": -0.4661139837,
+          "calmar": 3.05084268,
+          "constraint_violations": 86,
+          "fees_paid": 7.94,
+          "final_value": "104301.45",
+          "inputs": null,
+          "instrument": "XNSE:TCS",
+          "invalid_actions": 0,
+          "loss_mean": null,
+          "max_drawdown": null,
+          "model": "PI-14 cash-drag sweep w0.30_s0.10",
+          "profit_factor": null,
+          "q_value_diagnostics": {
+            "all_equal_observations": 87,
+            "max_q": 0.0,
+            "max_spread": 0.0,
+            "mean_spread": 0.0,
+            "min_q": 0.0,
+            "observations": 87,
+            "zero_q_observations": 87
+          },
+          "realized_pnl": 0.0,
+          "regimes": {
+            "advisory_only": true,
+            "available": true,
+            "classifier": "pi04-regime-1.0",
+            "cross_split_inference": false,
+            "fallback": {
+              "thresholds": {
+                "high_volatility_20": 0.02,
+                "low_volatility_20": 0.005,
+                "trend_return_20": 0.02
+              },
+              "used_when": "the observation carries no feature snapshot"
+            },
+            "insufficient": [
+              "sideways"
+            ],
+            "label_basis": "one label per observation from that observation's own point-in-time evidence; nothing is aggregated across observations to decide a label",
+            "label_sources": {
+              "market": 87
+            },
+            "min_samples": 3,
+            "production_authority": false,
+            "rows": [
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 49
+                },
+                "losses": 23,
+                "mean_return": 0.0007825168921186159,
+                "mean_reward": -0.47823235896122446,
+                "positive_ratio": 0.5306122448979592,
+                "regime": "high_volatility",
+                "samples": 49,
+                "share": 0.563218,
+                "sufficient": true
+              },
+              {
+                "conclusion": "insufficient samples; no regime conclusion is drawn",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 1
+                },
+                "losses": 0,
+                "mean_return": 0.005901600000000035,
+                "mean_reward": 0.14923625,
+                "positive_ratio": 1.0,
+                "regime": "sideways",
+                "samples": 1,
+                "share": 0.011494,
+                "sufficient": false
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 32
+                },
+                "losses": 23,
+                "mean_return": -0.0002470189751466033,
+                "mean_reward": -0.47387671129999986,
+                "positive_ratio": 0.28125,
+                "regime": "weak_down",
+                "samples": 32,
+                "share": 0.367816,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 5
+                },
+                "losses": 2,
+                "mean_return": 0.0013313858521948152,
+                "mean_reward": -0.42074249686,
+                "positive_ratio": 0.6,
+                "regime": "weak_up",
+                "samples": 5,
+                "share": 0.057471,
+                "sufficient": true
+              }
+            ],
+            "samples": 87,
+            "simulated": true,
+            "source": "PI-04 RegimeDetector over each PI-13 observation's own feature snapshot; PI-13 observation evidence (market.return_20, market.volatility_20) only where no features exist",
+            "thresholds": {
+              "high_bollinger_width": 0.1,
+              "high_volatility_range_expansion": 1.25,
+              "low_bollinger_width": 0.025,
+              "low_volatility_range_expansion": 0.75,
+              "strong_adx": 25.0,
+              "strong_trend_score": 4.0,
+              "trend_adx": 20.0,
+              "weak_trend_score": 2.0
+            },
+            "warnings": [
+              "regime slices below the minimum sample count are reported as insufficient, never as evidence of regime-specific performance"
+            ]
+          },
+          "reward_stability": 0.1243229767,
+          "risk": {
+            "annualized_volatility": "7.116909",
+            "max_drawdown": "4.252632",
+            "sharpe": "1.74997",
+            "sortino": "2.342508"
+          },
+          "selection": "TrainedPolicy.select masked argmax",
+          "sharpe": 1.74997,
+          "sortino": 2.342508,
+          "test_bars": 88,
+          "total_costs": "16.109999361488",
+          "total_return": 0.0430145,
+          "total_reward": -40.551916585,
+          "trades": 1,
+          "training": {
+            "best_validation_score": 0.0,
+            "episodes": 20,
+            "training_action_distribution": {
+              "buy": 20,
+              "hold": 1956,
+              "no_action": 121,
+              "sell": 143,
+              "wait": 120
+            },
+            "training_q_value_diagnostics": {
+              "all_equal_observations": 2073,
+              "max_q": 0.852886071581714,
+              "max_spread": 0.852886071581714,
+              "mean_spread": 0.008404732821,
+              "min_q": 0.0,
+              "observations": 2360,
+              "zero_q_observations": 2073
+            }
+          },
+          "turnover": 0.20264401,
+          "unrealized_pnl": 4309.39,
+          "win_rate": null
+        }
+      },
+      "policies": 5,
+      "policies_with_trades": 5,
+      "scale": 0.1,
+      "test_max_spread": 0.0,
+      "test_q_observations": 438,
+      "test_zero_q_observations": 438,
+      "trades": 5,
+      "training_action_distribution": {
+        "buy": 100,
+        "hold": 9907,
+        "no_action": 593,
+        "sell": 587,
+        "wait": 613
+      },
+      "training_q_observations": 11800,
+      "training_zero_q_observations": 11009,
+      "variant": "w0.30_s0.10",
+      "weight": 0.3
+    },
+    "w0.60_s0.02": {
+      "config": {
+        "advisory_only": true,
+        "bounds": [
+          -1.0,
+          1.0
+        ],
+        "components": {
+          "cash_drag": 0.6,
+          "discipline": 0.05,
+          "execution_quality": 0.05,
+          "portfolio_management": 0.05,
+          "profitability": 0.35,
+          "risk": 0.1,
+          "transaction_cost": 0.1
+        },
+        "config_hash": "153d4f44e2816630fa41404fb7dce87408ee74a75b0cdf30846f89077507ba73",
+        "config_id": "rwc_153d4f44e2816630fa41",
+        "description": "Isolated cash-drag weight/scale sweep; default reward unchanged, experimental and never promoted.",
+        "enabled": [
+          "profitability",
+          "risk",
+          "transaction_cost",
+          "discipline",
+          "portfolio_management",
+          "execution_quality",
+          "cash_drag"
+        ],
+        "experimental": true,
+        "experimental_status": "experimental",
+        "missing_policy": "renormalize",
+        "name": "PI-14 cash-drag sweep w0.60_s0.02",
+        "normalization": "bounded",
+        "penalties": {
+          "constraint_violation": 0.25,
+          "repeated_trade": 0.05,
+          "unfilled_trade": 0.1
+        },
+        "production_authority": false,
+        "scales": {
+          "cash_drag": 0.02,
+          "decision_quality": 1.0,
+          "discipline": 1.0,
+          "execution_quality": 1.0,
+          "forecast_utilization": 1.0,
+          "portfolio_management": 1.0,
+          "profitability": 0.02,
+          "risk": 0.2,
+          "transaction_cost": 0.01
+        },
+        "schema_version": "pi14-reward-config-v1",
+        "simulated": true,
+        "thresholds": {
+          "decision_full_exposure": 0.9,
+          "decision_weak_forecast": 0.4,
+          "discipline_lookback_trades": 3.0,
+          "discipline_repeated_penalty": 0.5,
+          "portfolio_concentration_high": 0.25,
+          "portfolio_drawdown_high": 0.1,
+          "portfolio_exposure_change_high": 0.5,
+          "risk_concentration_high": 0.25,
+          "risk_drawdown_high": 0.1,
+          "risk_exposure_high": 0.9,
+          "risk_volatility_high_pct": 25.0
+        },
+        "version": "cash-drag-sweep-w0.60_s0.02"
+      },
+      "constraint_violations": 433,
+      "elapsed_seconds": 190.0445,
+      "genuine_policies": 0,
+      "genuine_variant": false,
+      "instruments": {
+        "XNSE:HDFCBANK": {
+          "action_count": 87,
+          "action_distribution": {
+            "buy": 87,
+            "hold": 0,
+            "no_action": 0,
+            "sell": 0,
+            "wait": 0
+          },
+          "actions": null,
+          "actions_seen": [
+            "buy"
+          ],
+          "artifact": "tmp\\rl_evaluation\\cash_drag_sweep\\w0.60_s0.02\\policies\\XNSE_HDFCBANK.json",
+          "average_holding_days": null,
+          "average_reward": -0.4993781656,
+          "calmar": -1.13437417,
+          "constraint_violations": 86,
+          "fees_paid": 7.82,
+          "final_value": "98519.59",
+          "inputs": null,
+          "instrument": "XNSE:HDFCBANK",
+          "invalid_actions": 0,
+          "loss_mean": null,
+          "max_drawdown": null,
+          "model": "PI-14 cash-drag sweep w0.60_s0.02",
+          "profit_factor": null,
+          "q_value_diagnostics": {
+            "all_equal_observations": 87,
+            "max_q": 0.0,
+            "max_spread": 0.0,
+            "mean_spread": 0.0,
+            "min_q": 0.0,
+            "observations": 87,
+            "zero_q_observations": 87
+          },
+          "realized_pnl": 0.0,
+          "regimes": {
+            "advisory_only": true,
+            "available": true,
+            "classifier": "pi04-regime-1.0",
+            "cross_split_inference": false,
+            "fallback": {
+              "thresholds": {
+                "high_volatility_20": 0.02,
+                "low_volatility_20": 0.005,
+                "trend_return_20": 0.02
+              },
+              "used_when": "the observation carries no feature snapshot"
+            },
+            "insufficient": [
+              "low_volatility"
+            ],
+            "label_basis": "one label per observation from that observation's own point-in-time evidence; nothing is aggregated across observations to decide a label",
+            "label_sources": {
+              "market": 87
+            },
+            "min_samples": 3,
+            "production_authority": false,
+            "rows": [
+              {
+                "conclusion": "insufficient samples; no regime conclusion is drawn",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 1
+                },
+                "losses": 0,
+                "mean_return": 0.007224965377128758,
+                "mean_reward": -0.2702408507,
+                "positive_ratio": 1.0,
+                "regime": "low_volatility",
+                "samples": 1,
+                "share": 0.011494,
+                "sufficient": false
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 31
+                },
+                "losses": 14,
+                "mean_return": 0.0001612864173768818,
+                "mean_reward": -0.5651449528,
+                "positive_ratio": 0.5483870967741935,
+                "regime": "sideways",
+                "samples": 31,
+                "share": 0.356322,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 48
+                },
+                "losses": 27,
+                "mean_return": -0.00023953393707686296,
+                "mean_reward": -0.4496539309979166,
+                "positive_ratio": 0.3958333333333333,
+                "regime": "weak_down",
+                "samples": 48,
+                "share": 0.551724,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 7
+                },
+                "losses": 6,
+                "mean_return": -0.002190588100440935,
+                "mean_reward": -0.5818253328,
+                "positive_ratio": 0.14285714285714285,
+                "regime": "weak_up",
+                "samples": 7,
+                "share": 0.08046,
+                "sufficient": true
+              }
+            ],
+            "samples": 87,
+            "simulated": true,
+            "source": "PI-04 RegimeDetector over each PI-13 observation's own feature snapshot; PI-13 observation evidence (market.return_20, market.volatility_20) only where no features exist",
+            "thresholds": {
+              "high_bollinger_width": 0.1,
+              "high_volatility_range_expansion": 1.25,
+              "low_bollinger_width": 0.025,
+              "low_volatility_range_expansion": 0.75,
+              "strong_adx": 25.0,
+              "strong_trend_score": 4.0,
+              "trend_adx": 20.0,
+              "weak_trend_score": 2.0
+            },
+            "warnings": [
+              "regime slices below the minimum sample count are reported as insufficient, never as evidence of regime-specific performance"
+            ]
+          },
+          "reward_stability": 0.1717707935,
+          "risk": {
+            "annualized_volatility": "4.212917",
+            "max_drawdown": "3.7273",
+            "sharpe": "-1.004284",
+            "sortino": "-0.976213"
+          },
+          "selection": "TrainedPolicy.select masked argmax",
+          "sharpe": -1.004284,
+          "sortino": -0.976213,
+          "test_bars": 88,
+          "total_costs": "15.859992366488",
+          "total_return": -0.0148041,
+          "total_reward": -43.445900405,
+          "trades": 1,
+          "training": {
+            "best_validation_score": 0.0,
+            "episodes": 20,
+            "training_action_distribution": {
+              "buy": 20,
+              "hold": 1984,
+              "no_action": 122,
+              "sell": 100,
+              "wait": 134
+            },
+            "training_q_value_diagnostics": {
+              "all_equal_observations": 2173,
+              "max_q": 0.8890960651522912,
+              "max_spread": 0.8890960651522912,
+              "mean_spread": 0.009534474337,
+              "min_q": 0.0,
+              "observations": 2360,
+              "zero_q_observations": 2173
+            }
+          },
+          "turnover": 0.19979149,
+          "unrealized_pnl": -1472.59,
+          "win_rate": null
+        },
+        "XNSE:ITC": {
+          "action_count": 87,
+          "action_distribution": {
+            "buy": 87,
+            "hold": 0,
+            "no_action": 0,
+            "sell": 0,
+            "wait": 0
+          },
+          "actions": null,
+          "actions_seen": [
+            "buy"
+          ],
+          "artifact": "tmp\\rl_evaluation\\cash_drag_sweep\\w0.60_s0.02\\policies\\XNSE_ITC.json",
+          "average_holding_days": null,
+          "average_reward": -0.5006674405,
+          "calmar": -0.87507222,
+          "constraint_violations": 86,
+          "fees_paid": 7.85,
+          "final_value": "99246.72",
+          "inputs": null,
+          "instrument": "XNSE:ITC",
+          "invalid_actions": 0,
+          "loss_mean": null,
+          "max_drawdown": null,
+          "model": "PI-14 cash-drag sweep w0.60_s0.02",
+          "profit_factor": null,
+          "q_value_diagnostics": {
+            "all_equal_observations": 87,
+            "max_q": 0.0,
+            "max_spread": 0.0,
+            "mean_spread": 0.0,
+            "min_q": 0.0,
+            "observations": 87,
+            "zero_q_observations": 87
+          },
+          "realized_pnl": 0.0,
+          "regimes": {
+            "advisory_only": true,
+            "available": true,
+            "classifier": "pi04-regime-1.0",
+            "cross_split_inference": false,
+            "fallback": {
+              "thresholds": {
+                "high_volatility_20": 0.02,
+                "low_volatility_20": 0.005,
+                "trend_return_20": 0.02
+              },
+              "used_when": "the observation carries no feature snapshot"
+            },
+            "insufficient": [],
+            "label_basis": "one label per observation from that observation's own point-in-time evidence; nothing is aggregated across observations to decide a label",
+            "label_sources": {
+              "market": 87
+            },
+            "min_samples": 3,
+            "production_authority": false,
+            "rows": [
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 16
+                },
+                "losses": 7,
+                "mean_return": 0.0003481633251389132,
+                "mean_reward": -0.55636429639375,
+                "positive_ratio": 0.5625,
+                "regime": "high_volatility",
+                "samples": 16,
+                "share": 0.183908,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 3
+                },
+                "losses": 2,
+                "mean_return": -0.002138588441492333,
+                "mean_reward": -0.40699381873333335,
+                "positive_ratio": 0.3333333333333333,
+                "regime": "low_volatility",
+                "samples": 3,
+                "share": 0.034483,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 35
+                },
+                "losses": 22,
+                "mean_return": -0.0006555797002029732,
+                "mean_reward": -0.5553090725314285,
+                "positive_ratio": 0.37142857142857144,
+                "regime": "sideways",
+                "samples": 35,
+                "share": 0.402299,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 30
+                },
+                "losses": 14,
+                "mean_return": 0.000682749301786777,
+                "mean_reward": -0.42391510483,
+                "positive_ratio": 0.5,
+                "regime": "weak_down",
+                "samples": 30,
+                "share": 0.344828,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 3
+                },
+                "losses": 3,
+                "mean_return": -0.0013041965226126924,
+                "mean_reward": -0.42732881280000007,
+                "positive_ratio": 0.0,
+                "regime": "weak_up",
+                "samples": 3,
+                "share": 0.034483,
+                "sufficient": true
+              }
+            ],
+            "samples": 87,
+            "simulated": true,
+            "source": "PI-04 RegimeDetector over each PI-13 observation's own feature snapshot; PI-13 observation evidence (market.return_20, market.volatility_20) only where no features exist",
+            "thresholds": {
+              "high_bollinger_width": 0.1,
+              "high_volatility_range_expansion": 1.25,
+              "low_bollinger_width": 0.025,
+              "low_volatility_range_expansion": 0.75,
+              "strong_adx": 25.0,
+              "strong_trend_score": 4.0,
+              "trend_adx": 20.0,
+              "weak_trend_score": 2.0
+            },
+            "warnings": []
+          },
+          "reward_stability": 0.17898126,
+          "risk": {
+            "annualized_volatility": "4.442704",
+            "max_drawdown": "2.47564",
+            "sharpe": "-0.470765",
+            "sortino": "-0.51632"
+          },
+          "selection": "TrainedPolicy.select masked argmax",
+          "sharpe": -0.470765,
+          "sortino": -0.51632,
+          "test_bars": 88,
+          "total_costs": "16.119996515633",
+          "total_return": -0.0075328,
+          "total_reward": -43.5580673204,
+          "trades": 1,
+          "training": {
+            "best_validation_score": 0.0,
+            "episodes": 20,
+            "training_action_distribution": {
+              "buy": 20,
+              "hold": 2003,
+              "no_action": 107,
+              "sell": 103,
+              "wait": 127
+            },
+            "training_q_value_diagnostics": {
+              "all_equal_observations": 2292,
+              "max_q": 1.2269445420404675e+161,
+              "max_spread": 1.2269445420404675e+161,
+              "mean_spread": 5.1989175510190044e+157,
+              "min_q": 0.0,
+              "observations": 2360,
+              "zero_q_observations": 2292
+            }
+          },
+          "turnover": 0.20035825,
+          "unrealized_pnl": -745.44,
+          "win_rate": null
+        },
+        "XNSE:RELIANCE": {
+          "action_count": 90,
+          "action_distribution": {
+            "buy": 90,
+            "hold": 0,
+            "no_action": 0,
+            "sell": 0,
+            "wait": 0
+          },
+          "actions": null,
+          "actions_seen": [
+            "buy"
+          ],
+          "artifact": "tmp\\rl_evaluation\\cash_drag_sweep\\w0.60_s0.02\\policies\\XNSE_RELIANCE.json",
+          "average_holding_days": null,
+          "average_reward": -0.5138435499,
+          "calmar": 0.2126784,
+          "constraint_violations": 89,
+          "fees_paid": 7.85,
+          "final_value": "100204.22",
+          "inputs": null,
+          "instrument": "XNSE:RELIANCE",
+          "invalid_actions": 0,
+          "loss_mean": null,
+          "max_drawdown": null,
+          "model": "PI-14 cash-drag sweep w0.60_s0.02",
+          "profit_factor": null,
+          "q_value_diagnostics": {
+            "all_equal_observations": 90,
+            "max_q": 0.0,
+            "max_spread": 0.0,
+            "mean_spread": 0.0,
+            "min_q": 0.0,
+            "observations": 90,
+            "zero_q_observations": 90
+          },
+          "realized_pnl": 0.0,
+          "regimes": {
+            "advisory_only": true,
+            "available": true,
+            "classifier": "pi04-regime-1.0",
+            "cross_split_inference": false,
+            "fallback": {
+              "thresholds": {
+                "high_volatility_20": 0.02,
+                "low_volatility_20": 0.005,
+                "trend_return_20": 0.02
+              },
+              "used_when": "the observation carries no feature snapshot"
+            },
+            "insufficient": [
+              "low_volatility"
+            ],
+            "label_basis": "one label per observation from that observation's own point-in-time evidence; nothing is aggregated across observations to decide a label",
+            "label_sources": {
+              "market": 90
+            },
+            "min_samples": 3,
+            "production_authority": false,
+            "rows": [
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 5
+                },
+                "losses": 0,
+                "mean_return": 0.0007463580087459767,
+                "mean_reward": -0.82841441142,
+                "positive_ratio": 1.0,
+                "regime": "high_volatility",
+                "samples": 5,
+                "share": 0.055556,
+                "sufficient": true
+              },
+              {
+                "conclusion": "insufficient samples; no regime conclusion is drawn",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 1
+                },
+                "losses": 0,
+                "mean_return": 0.0026480519519522933,
+                "mean_reward": -0.3316608391,
+                "positive_ratio": 1.0,
+                "regime": "low_volatility",
+                "samples": 1,
+                "share": 0.011111,
+                "sufficient": false
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 37
+                },
+                "losses": 20,
+                "mean_return": 0.00029308966556565105,
+                "mean_reward": -0.4940974967135136,
+                "positive_ratio": 0.4594594594594595,
+                "regime": "sideways",
+                "samples": 37,
+                "share": 0.411111,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 37
+                },
+                "losses": 18,
+                "mean_return": -0.000257717949772046,
+                "mean_reward": -0.47199512467297305,
+                "positive_ratio": 0.5135135135135135,
+                "regime": "weak_down",
+                "samples": 37,
+                "share": 0.411111,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 10
+                },
+                "losses": 6,
+                "mean_return": -0.0005158618059660725,
+                "mean_reward": -0.60267596048,
+                "positive_ratio": 0.4,
+                "regime": "weak_up",
+                "samples": 10,
+                "share": 0.111111,
+                "sufficient": true
+              }
+            ],
+            "samples": 90,
+            "simulated": true,
+            "source": "PI-04 RegimeDetector over each PI-13 observation's own feature snapshot; PI-13 observation evidence (market.return_20, market.volatility_20) only where no features exist",
+            "thresholds": {
+              "high_bollinger_width": 0.1,
+              "high_volatility_range_expansion": 1.25,
+              "low_bollinger_width": 0.025,
+              "low_volatility_range_expansion": 0.75,
+              "strong_adx": 25.0,
+              "strong_trend_score": 4.0,
+              "trend_adx": 20.0,
+              "weak_trend_score": 2.0
+            },
+            "warnings": [
+              "regime slices below the minimum sample count are reported as insufficient, never as evidence of regime-specific performance"
+            ]
+          },
+          "reward_stability": 0.2007976188,
+          "risk": {
+            "annualized_volatility": "5.254118",
+            "max_drawdown": "2.693586",
+            "sharpe": "0.134826",
+            "sortino": "0.175285"
+          },
+          "selection": "TrainedPolicy.select masked argmax",
+          "sharpe": 0.134826,
+          "sortino": 0.175285,
+          "test_bars": 91,
+          "total_costs": "15.95000006480",
+          "total_return": 0.0020422,
+          "total_reward": -46.2459194923,
+          "trades": 1,
+          "training": {
+            "best_validation_score": 0.0,
+            "episodes": 20,
+            "training_action_distribution": {
+              "buy": 20,
+              "hold": 2001,
+              "no_action": 113,
+              "sell": 101,
+              "wait": 125
+            },
+            "training_q_value_diagnostics": {
+              "all_equal_observations": 2229,
+              "max_q": 0.8380744118647439,
+              "max_spread": 0.8380744118647439,
+              "mean_spread": 0.008887926547,
+              "min_q": 0.0,
+              "observations": 2360,
+              "zero_q_observations": 2229
+            }
+          },
+          "turnover": 0.20038685,
+          "unrealized_pnl": 212.08,
+          "win_rate": null
+        },
+        "XNSE:TATASTEEL": {
+          "action_count": 87,
+          "action_distribution": {
+            "buy": 87,
+            "hold": 0,
+            "no_action": 0,
+            "sell": 0,
+            "wait": 0
+          },
+          "actions": null,
+          "actions_seen": [
+            "buy"
+          ],
+          "artifact": "tmp\\rl_evaluation\\cash_drag_sweep\\w0.60_s0.02\\policies\\XNSE_TATASTEEL.json",
+          "average_holding_days": null,
+          "average_reward": -0.4863492862,
+          "calmar": -0.71062774,
+          "constraint_violations": 86,
+          "fees_paid": 7.88,
+          "final_value": "99327.86",
+          "inputs": null,
+          "instrument": "XNSE:TATASTEEL",
+          "invalid_actions": 0,
+          "loss_mean": null,
+          "max_drawdown": null,
+          "model": "PI-14 cash-drag sweep w0.60_s0.02",
+          "profit_factor": null,
+          "q_value_diagnostics": {
+            "all_equal_observations": 87,
+            "max_q": 0.0,
+            "max_spread": 0.0,
+            "mean_spread": 0.0,
+            "min_q": 0.0,
+            "observations": 87,
+            "zero_q_observations": 87
+          },
+          "realized_pnl": 0.0,
+          "regimes": {
+            "advisory_only": true,
+            "available": true,
+            "classifier": "pi04-regime-1.0",
+            "cross_split_inference": false,
+            "fallback": {
+              "thresholds": {
+                "high_volatility_20": 0.02,
+                "low_volatility_20": 0.005,
+                "trend_return_20": 0.02
+              },
+              "used_when": "the observation carries no feature snapshot"
+            },
+            "insufficient": [
+              "low_volatility"
+            ],
+            "label_basis": "one label per observation from that observation's own point-in-time evidence; nothing is aggregated across observations to decide a label",
+            "label_sources": {
+              "market": 87
+            },
+            "min_samples": 3,
+            "production_authority": false,
+            "rows": [
+              {
+                "conclusion": "insufficient samples; no regime conclusion is drawn",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 2
+                },
+                "losses": 1,
+                "mean_return": -4.71079847202331e-06,
+                "mean_reward": -0.37237110689999997,
+                "positive_ratio": 0.5,
+                "regime": "low_volatility",
+                "samples": 2,
+                "share": 0.022989,
+                "sufficient": false
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 54
+                },
+                "losses": 33,
+                "mean_return": -0.00027717041110681605,
+                "mean_reward": -0.5051918463388889,
+                "positive_ratio": 0.3888888888888889,
+                "regime": "sideways",
+                "samples": 54,
+                "share": 0.62069,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 28
+                },
+                "losses": 14,
+                "mean_return": 0.0005132737600698493,
+                "mean_reward": -0.4280521632857143,
+                "positive_ratio": 0.5,
+                "regime": "weak_down",
+                "samples": 28,
+                "share": 0.321839,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 3
+                },
+                "losses": 2,
+                "mean_return": -0.0019368660397607667,
+                "mean_reward": -0.7672751383666666,
+                "positive_ratio": 0.3333333333333333,
+                "regime": "weak_up",
+                "samples": 3,
+                "share": 0.034483,
+                "sufficient": true
+              }
+            ],
+            "samples": 87,
+            "simulated": true,
+            "source": "PI-04 RegimeDetector over each PI-13 observation's own feature snapshot; PI-13 observation evidence (market.return_20, market.volatility_20) only where no features exist",
+            "thresholds": {
+              "high_bollinger_width": 0.1,
+              "high_volatility_range_expansion": 1.25,
+              "low_bollinger_width": 0.025,
+              "low_volatility_range_expansion": 0.75,
+              "strong_adx": 25.0,
+              "strong_trend_score": 4.0,
+              "trend_adx": 20.0,
+              "weak_trend_score": 2.0
+            },
+            "warnings": [
+              "regime slices below the minimum sample count are reported as insufficient, never as evidence of regime-specific performance"
+            ]
+          },
+          "reward_stability": 0.1772699496,
+          "risk": {
+            "annualized_volatility": "4.363679",
+            "max_drawdown": "2.722247",
+            "sharpe": "-0.425856",
+            "sortino": "-0.491268"
+          },
+          "selection": "TrainedPolicy.select masked argmax",
+          "sharpe": -0.425856,
+          "sortino": -0.491268,
+          "test_bars": 88,
+          "total_costs": "16.519952498001",
+          "total_return": -0.0067214,
+          "total_reward": -42.3123879032,
+          "trades": 1,
+          "training": {
+            "best_validation_score": 0.0,
+            "episodes": 20,
+            "training_action_distribution": {
+              "buy": 20,
+              "hold": 2000,
+              "no_action": 106,
+              "sell": 111,
+              "wait": 123
+            },
+            "training_q_value_diagnostics": {
+              "all_equal_observations": 2237,
+              "max_q": 1535805.2200031078,
+              "max_spread": 1535805.2200031078,
+              "mean_spread": 1007.076209135271,
+              "min_q": 0.0,
+              "observations": 2360,
+              "zero_q_observations": 2237
+            }
+          },
+          "turnover": 0.20098288,
+          "unrealized_pnl": -664.25,
+          "win_rate": null
+        },
+        "XNSE:TCS": {
+          "action_count": 87,
+          "action_distribution": {
+            "buy": 87,
+            "hold": 0,
+            "no_action": 0,
+            "sell": 0,
+            "wait": 0
+          },
+          "actions": null,
+          "actions_seen": [
+            "buy"
+          ],
+          "artifact": "tmp\\rl_evaluation\\cash_drag_sweep\\w0.60_s0.02\\policies\\XNSE_TCS.json",
+          "average_holding_days": null,
+          "average_reward": -0.5669892493,
+          "calmar": 3.05084268,
+          "constraint_violations": 86,
+          "fees_paid": 7.94,
+          "final_value": "104301.45",
+          "inputs": null,
+          "instrument": "XNSE:TCS",
+          "invalid_actions": 0,
+          "loss_mean": null,
+          "max_drawdown": null,
+          "model": "PI-14 cash-drag sweep w0.60_s0.02",
+          "profit_factor": null,
+          "q_value_diagnostics": {
+            "all_equal_observations": 87,
+            "max_q": 0.0,
+            "max_spread": 0.0,
+            "mean_spread": 0.0,
+            "min_q": 0.0,
+            "observations": 87,
+            "zero_q_observations": 87
+          },
+          "realized_pnl": 0.0,
+          "regimes": {
+            "advisory_only": true,
+            "available": true,
+            "classifier": "pi04-regime-1.0",
+            "cross_split_inference": false,
+            "fallback": {
+              "thresholds": {
+                "high_volatility_20": 0.02,
+                "low_volatility_20": 0.005,
+                "trend_return_20": 0.02
+              },
+              "used_when": "the observation carries no feature snapshot"
+            },
+            "insufficient": [
+              "sideways"
+            ],
+            "label_basis": "one label per observation from that observation's own point-in-time evidence; nothing is aggregated across observations to decide a label",
+            "label_sources": {
+              "market": 87
+            },
+            "min_samples": 3,
+            "production_authority": false,
+            "rows": [
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 49
+                },
+                "losses": 23,
+                "mean_return": 0.0007825168921186159,
+                "mean_reward": -0.6066466440714285,
+                "positive_ratio": 0.5306122448979592,
+                "regime": "high_volatility",
+                "samples": 49,
+                "share": 0.563218,
+                "sufficient": true
+              },
+              {
+                "conclusion": "insufficient samples; no regime conclusion is drawn",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 1
+                },
+                "losses": 0,
+                "mean_return": 0.005901600000000035,
+                "mean_reward": 0.1147971154,
+                "positive_ratio": 1.0,
+                "regime": "sideways",
+                "samples": 1,
+                "share": 0.011494,
+                "sufficient": false
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 32
+                },
+                "losses": 23,
+                "mean_return": -0.0002470189751466033,
+                "mean_reward": -0.5351822813624999,
+                "positive_ratio": 0.28125,
+                "regime": "weak_down",
+                "samples": 32,
+                "share": 0.367816,
+                "sufficient": true
+              },
+              {
+                "conclusion": "",
+                "invalid_actions": 0,
+                "label_source": "market",
+                "label_sources": {
+                  "market": 5
+                },
+                "losses": 2,
+                "mean_return": 0.0013313858521948152,
+                "mean_reward": -0.51826864818,
+                "positive_ratio": 0.6,
+                "regime": "weak_up",
+                "samples": 5,
+                "share": 0.057471,
+                "sufficient": true
+              }
+            ],
+            "samples": 87,
+            "simulated": true,
+            "source": "PI-04 RegimeDetector over each PI-13 observation's own feature snapshot; PI-13 observation evidence (market.return_20, market.volatility_20) only where no features exist",
+            "thresholds": {
+              "high_bollinger_width": 0.1,
+              "high_volatility_range_expansion": 1.25,
+              "low_bollinger_width": 0.025,
+              "low_volatility_range_expansion": 0.75,
+              "strong_adx": 25.0,
+              "strong_trend_score": 4.0,
+              "trend_adx": 20.0,
+              "weak_trend_score": 2.0
+            },
+            "warnings": [
+              "regime slices below the minimum sample count are reported as insufficient, never as evidence of regime-specific performance"
+            ]
+          },
+          "reward_stability": 0.2226508153,
+          "risk": {
+            "annualized_volatility": "7.116909",
+            "max_drawdown": "4.252632",
+            "sharpe": "1.74997",
+            "sortino": "2.342508"
+          },
+          "selection": "TrainedPolicy.select masked argmax",
+          "sharpe": 1.74997,
+          "sortino": 2.342508,
+          "test_bars": 88,
+          "total_costs": "16.109999361488",
+          "total_return": 0.0430145,
+          "total_reward": -49.3280646886,
+          "trades": 1,
+          "training": {
+            "best_validation_score": 0.0,
+            "episodes": 20,
+            "training_action_distribution": {
+              "buy": 20,
+              "hold": 2003,
+              "no_action": 119,
+              "sell": 99,
+              "wait": 119
+            },
+            "training_q_value_diagnostics": {
+              "all_equal_observations": 2235,
+              "max_q": 0.852886071581714,
+              "max_spread": 0.852886071581714,
+              "mean_spread": 0.008229270866,
+              "min_q": 0.0,
+              "observations": 2360,
+              "zero_q_observations": 2235
+            }
+          },
+          "turnover": 0.20264401,
+          "unrealized_pnl": 4309.39,
+          "win_rate": null
+        }
+      },
+      "policies": 5,
+      "policies_with_trades": 5,
+      "scale": 0.02,
+      "test_max_spread": 0.0,
+      "test_q_observations": 438,
+      "test_zero_q_observations": 438,
+      "trades": 5,
+      "training_action_distribution": {
+        "buy": 100,
+        "hold": 9991,
+        "no_action": 567,
+        "sell": 514,
+        "wait": 628
+      },
+      "training_q_observations": 11800,
+      "training_zero_q_observations": 11166,
+      "variant": "w0.60_s0.02",
+      "weight": 0.6
+    }
+  }
+}

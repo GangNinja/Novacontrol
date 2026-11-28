@@ -188,6 +188,7 @@ FORBIDDEN_CAPABILITY_MARKERS = (
 
 HORIZON_ALIASES = {"1h": "60m", "one_day": "1d", "one_week": "5d"}
 HORIZON_GROUPS: dict[str, str] = {
+    "1m": "intraday",
     "5m": "intraday",
     "15m": "intraday",
     "20m": "intraday",

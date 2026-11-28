@@ -143,6 +143,13 @@ def _from_samples(
     p_up = sum(1 for value in samples if value > threshold) / len(samples)
     p_down = sum(1 for value in samples if value < -threshold) / len(samples)
     p_sideways = max(0.0, 1.0 - p_up - p_down)
+    # A finite sample must not claim literal certainty: a zero probability
+    # makes log loss infinite.  The floor changes no observed class frequency
+    # materially and is not a calibration claim.
+    floor = 1e-6
+    p_up = max(floor, p_up)
+    p_down = max(floor, p_down)
+    p_sideways = max(floor, p_sideways)
     total = p_up + p_down + p_sideways
     # A model that predicts a mean or a drift says so; only models whose point
     # forecast is the distribution's centre leave this as the median.
@@ -176,6 +183,11 @@ def _from_normal(
     p_up = 1.0 - distribution.cdf(threshold)
     p_down = distribution.cdf(-threshold)
     p_sideways = max(0.0, 1.0 - p_up - p_down)
+    # Keep the continuous model from reporting impossible certainty at a
+    # numerically extreme threshold.
+    p_up = max(p_up, 1e-9)
+    p_down = max(p_down, 1e-9)
+    p_sideways = max(p_sideways, 1e-9)
     total = p_up + p_down + p_sideways
     return ForecastOutput(
         model_id=model_id,

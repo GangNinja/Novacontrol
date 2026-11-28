@@ -243,13 +243,27 @@ and no feature.
 | Area | Verdict |
 |---|---|
 | Software integration | PASS |
-| Forecasting/strategy intelligence | PARTIAL (weak measured skill; no 1m horizon) |
+| Forecasting/strategy intelligence | PARTIAL (weak measured skill; 1m horizon added post-closure in §13) |
 | Paper trading | PASS (controlled, simulated; no sustained live session) |
 | Live market | BLOCKED (no live data or broker) |
 
-**Still open:** the 20m → 5m → 1m decision hierarchy is not implemented (1m is
-only the T−1m checkpoint and a data interval); the PI-23 portfolio-horizon to
-forecast-horizon mapping and the AT-03 venue/instrument identifier mismatch
-recorded in the README remain open; no live-market validation is claimed.
+**Still open:** the PI-23 portfolio-horizon to forecast-horizon mapping and the
+AT-03 venue/instrument identifier mismatch recorded in the README remain open;
+no live-market validation is claimed. The 20m → 5m → 1m hierarchy and 1m cycle
+are implemented in the post-closure enhancement described in §13.
 
 See `docs/FINAL_PI01_PI24_CLOSURE_AND_READINESS_REPORT.md` for the full evidence.
+
+## 13. Post-PI-24 multi-timeframe enhancement (21 November 2026)
+
+A post-closure enhancement adds the missing 20-minute context → 5-minute setup →
+1-minute timing hierarchy, a genuine one-minute forecast cycle and cross-
+timeframe conflict resolution. The layer is analysis-only: BUY/SELL candidates
+gate new day-trading proposals before NM-08, while risk and NM-10 paper
+execution remain mandatory. Swing and long-term strategy logic is unchanged.
+
+New routes: `GET /market/multi-timeframe/status` and
+`GET /market/multi-timeframe/analysis` (API reference at 935 routes). The
+real-data chronological comparison covers two stored one-minute sessions and
+two enhanced simulated trades; it does not establish improved accuracy or
+profitability. See `docs/MULTITIMEFRAME_TRADING_INTELLIGENCE.md`.

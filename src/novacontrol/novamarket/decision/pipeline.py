@@ -24,6 +24,7 @@ from uuid import uuid4
 
 from novacontrol.novamarket.autonomy.models import HORIZON_MAPPING
 from novacontrol.novamarket.autonomy.runtime import AutonomyRuntime
+from novacontrol.novamarket.autonomy.session import canonical_mic
 from novacontrol.novamarket.decision.models import (
     DECISION_CONTRACT_VERSION,
     DecisionError,
@@ -941,17 +942,30 @@ class AutonomyDecisionPipeline:
             instrument_id = _text(row.get("instrument_id"))
             if not instrument_id or instrument_id in seen:
                 continue
-            exchange = _text(row.get("exchange"))
-            if not exchange:
-                exchange = instrument_id.split(":", 1)[0] if ":" in instrument_id else ""
-            if ":" not in instrument_id or not exchange:
+            if ":" not in instrument_id:
                 continue
-            if instrument_id.split(":", 1)[0] != exchange:
+            prefix = instrument_id.split(":", 1)[0]
+            prefix_mic = canonical_mic(prefix)
+            exchange = canonical_mic(_text(row.get("exchange")) or prefix)
+            if not prefix_mic or exchange != prefix_mic:
+                # The candidate's configured exchange and its MIC:SYMBOL prefix
+                # must name the same venue; a legacy venue name is canonicalised
+                # but a genuine cross-exchange candidate is refused.
                 continue
-            if not self._instrument_supported(instrument_id):
+            instrument = self._candidate_instrument(instrument_id)
+            if self._has_instrument_lookup() and instrument is None:
+                continue
+            instrument_mic = canonical_mic(_text((instrument or {}).get("mic")))
+            venue_mic = canonical_mic(_text((instrument or {}).get("exchange")))
+            # An identity-only seam has no MIC to contradict, so the prefix is
+            # its MIC.  When the lookup does report a MIC or venue, both must
+            # agree with the prefix and therefore with the configured exchange.
+            if (instrument_mic or prefix_mic) != prefix_mic:
+                continue
+            if venue_mic and venue_mic != prefix_mic:
                 continue
             body = dict(row)
-            body["exchange"] = exchange
+            body["exchange"] = prefix_mic
             body["instrument_id"] = instrument_id
             selected.append(body)
             seen.add(instrument_id)
@@ -959,17 +973,62 @@ class AutonomyDecisionPipeline:
                 break
         return selected
 
-    def _instrument_supported(self, instrument_id: str) -> bool:
-        if self._market_data is None:
-            return True
-        lookup = getattr(self._market_data, "get_instrument", None)
-        if lookup is None:
-            return True
+    def _has_instrument_lookup(self) -> bool:
+        return self._market_data is not None and callable(
+            getattr(self._market_data, "get_instrument", None)
+        )
+
+    def _candidate_instrument(self, instrument_id: str) -> dict[str, Any] | None:
+        if not self._has_instrument_lookup():
+            return None
+        assert self._market_data is not None
         try:
-            found = lookup(instrument_id)
+            found = self._market_data.get_instrument(instrument_id)
         except Exception:  # noqa: BLE001 - an unavailable instrument fails closed
-            return False
-        return found is not None
+            return None
+        if found is None:
+            return None
+        if isinstance(found, Mapping):
+            body: dict[str, Any] | None = dict(found)
+        else:
+            to_dict = getattr(found, "to_dict", None)
+            if callable(to_dict):
+                converted = to_dict()
+                body = dict(converted) if isinstance(converted, Mapping) else None
+            else:
+                # Market-data seams may expose a read-only instrument record
+                # rather than a mapping.  Read only the identity contract's
+                # fields; never stringify an arbitrary object into an
+                # instrument.
+                fields = (
+                    "instrument_id",
+                    "symbol",
+                    "mic",
+                    "exchange",
+                    "currency",
+                    "asset_class",
+                    "trading_status",
+                    "timezone",
+                    "metadata",
+                )
+                body = {
+                    field: value
+                    for field in fields
+                    if (value := getattr(found, field, None)) is not None
+                } or None
+        if not body:
+            return None
+        identity = _text(body.get("instrument_id"))
+        if identity and identity != instrument_id:
+            # A lookup that answers with another instrument is ambiguous and
+            # fails closed; a symbol alone is never accepted as identity.
+            return None
+        return body
+
+    def _instrument_supported(self, instrument_id: str) -> bool:
+        if not self._has_instrument_lookup():
+            return True
+        return self._candidate_instrument(instrument_id) is not None
 
     def _eligible_portfolios(
         self, portfolio_ids: Sequence[str]
@@ -1094,7 +1153,10 @@ class AutonomyDecisionPipeline:
                         "automatic_promotion": False,
                     }
                 try:
-                    bars = self._forecast_bars(instrument_id)
+                    bars = self._forecast_bars(
+                        instrument_id,
+                        portfolio_horizon=str(portfolio.get("horizon") or ""),
+                    )
                     regime = self._forecast_regime(instrument_id)
                     events = self._forecast_events(instrument_id)
                     draft = evaluator.evaluate(
@@ -1163,31 +1225,108 @@ class AutonomyDecisionPipeline:
             }
         return {"available": False, "automatic_promotion": False}
 
-    def _forecast_bars(self, instrument_id: str) -> list[Any]:
+    #: One decision interval per portfolio horizon.  A short-term decision is
+    #: confirmed against the 5m series its forecast horizons are expressed in;
+    #: swing and position decisions are confirmed against the exchange's daily
+    #: series.  Mixing intervals is never a fallback.
+    _TECHNICAL_INTERVAL = {
+        "short_term": "5m",
+        "medium_term": "1d",
+        "long_term": "1d",
+    }
+    #: SMA20 needs twenty observations; a partial window is not a confirmation.
+    _TECHNICAL_MIN_BARS = 21
+
+    @staticmethod
+    def _bar_value(row: Any, name: str) -> Any:
+        if isinstance(row, Mapping):
+            return row.get(name)
+        return getattr(row, name, None)
+
+    def _forecast_bars(
+        self, instrument_id: str, *, portfolio_horizon: str = ""
+    ) -> list[Any]:
+        """One complete, chronological series for the decision's interval.
+
+        PI-12 used to call ``bars(limit=60, ascending=True)`` with no interval.
+        That is the *oldest* sixty rows in the store, mixed across every stored
+        interval, so the technical context described a stale, non-contiguous
+        series.  The read is now interval-scoped and newest-first, duplicate
+        observation instants are collapsed, and the result is returned
+        oldest-to-newest for indicator arithmetic.  Fewer than the minimum
+        number of complete bars fails closed with no context at all.
+        """
+
         if self._market_data is None:
             return []
+        from novacontrol.novamarket.marketdata.models import DataInterval
+
+        interval = DataInterval(
+            self._TECHNICAL_INTERVAL.get(
+                str(portfolio_horizon or "").strip().lower(), "1d"
+            )
+        )
         try:
             page = self._market_data.bars(
-                instrument_id, limit=60, ascending=True
+                instrument_id,
+                interval=interval,
+                limit=60,
+                ascending=False,
             )
+        except (TypeError, ValueError):
+            # An adapter that cannot scope the read must not silently return a
+            # mixed or stale series; the context is unavailable instead.
+            _LOGGER.warning(
+                "novamarket.decision.technical_context_unsupported interval=%s "
+                "instrument=%s",
+                interval.value,
+                instrument_id,
+            )
+            return []
         except Exception:  # noqa: BLE001 - an empty context is explicit
             return []
         if isinstance(page, Mapping):
             rows = page.get("bars") or page.get("items") or ()
         else:
             rows = getattr(page, "items", ()) or ()
-        # A partial session bar is not a completed observation.  It may be
-        # useful to an intraday forecast, but it must not become the technical
-        # confirmation for a swing/long-term decision.
-        return [
-            row
-            for row in rows
-            if not (
-                bool(row.get("partial"))
-                if isinstance(row, Mapping)
-                else bool(getattr(row, "partial", False))
+        newest_first: list[Any] = []
+        seen: set[str] = set()
+        for row in rows:
+            # A partial session bar is not a completed observation.  It may be
+            # useful to an intraday forecast, but it must not become the
+            # technical confirmation for a swing/long-term decision.
+            if bool(self._bar_value(row, "partial")):
+                continue
+            observed = self._bar_value(row, "observed_at")
+            stamp = (
+                observed.isoformat()
+                if hasattr(observed, "isoformat")
+                else str(observed or "")
             )
-        ]
+            if stamp and stamp in seen:
+                continue
+            seen.add(stamp)
+            newest_first.append(row)
+        if interval is DataInterval.DAY_1:
+            from novacontrol.novamarket.marketdata.dedupe import (
+                one_close_per_session,
+            )
+
+            # A daily SMA must see one close per exchange session even
+            # when an official bhavcopy and a quote provider both stored it.
+            newest_first = list(reversed(one_close_per_session(newest_first)))
+        if len(newest_first) < self._TECHNICAL_MIN_BARS:
+            _LOGGER.warning(
+                "novamarket.decision.technical_context_insufficient instrument=%s "
+                "interval=%s bars=%d required=%d",
+                instrument_id,
+                interval.value,
+                len(newest_first),
+                self._TECHNICAL_MIN_BARS,
+            )
+            return []
+        newest_first.reverse()
+        return newest_first
 
     def _forecast_regime(self, instrument_id: str) -> Any:
         if self._features is None:

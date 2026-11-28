@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
@@ -15,13 +16,22 @@ from typing import Any
 from uuid import uuid4
 
 from starlette.requests import Request
+from starlette.responses import Response
 
-from novacontrol.api.auth import ApiTokenAuthenticator
+from novacontrol.api.auth import (
+    SSE_SESSION_COOKIE,
+    ApiTokenAuthenticator,
+    SseSessionStore,
+    load_security_policy,
+)
+from novacontrol.api.errors import install_error_handlers
 from novacontrol.api.middleware import (
     OriginGuardMiddleware,
     RateLimitMiddleware,
+    RequestContextMiddleware,
     RequestLoggingMiddleware,
     SecurityHeadersMiddleware,
+    SensitivePathAuthMiddleware,
 )
 from novacontrol.api.models import (
     ApiSurface,
@@ -32,6 +42,7 @@ from novacontrol.api.models import (
 )
 from novacontrol.application import NovaControlApplication
 from novacontrol.core.events import Event
+from novacontrol.envloader import load_dotenv
 from novacontrol.explore import ExploreRequest
 from novacontrol.explore.trending import TrendingTopicsProvider
 from novacontrol.novaforge.knowledge import (
@@ -102,6 +113,7 @@ def _market_http_error(exc: Exception) -> Any:
         ProviderError,
         ProviderSymbolNotFoundError,
         ProviderUnsupportedIntervalError,
+        UnsupportedIntervalError,
     )
 
     if isinstance(exc, ProviderSymbolNotFoundError):
@@ -110,7 +122,7 @@ def _market_http_error(exc: Exception) -> Any:
         status = 422
     elif isinstance(exc, NotOperationalError):
         status = 409
-    elif isinstance(exc, ConfigurationError):
+    elif isinstance(exc, (ConfigurationError, UnsupportedIntervalError)):
         status = 422
     elif isinstance(exc, InstrumentNotFoundError):
         status = 404
@@ -284,6 +296,12 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
     the application's stores somewhere other than the process working
     directory's ``data`` folder. The default preserves the existing layout.
     """
+    # A project ``.env`` is the documented home for the API/admin/SMTP settings,
+    # but nothing on the Python side used to read it: every value had to be
+    # exported by the launcher.  Import it before any policy or transport reads
+    # the environment.  Real process variables always win, and the loader is a
+    # no-op under pytest.  Names only are applied; values are never logged.
+    load_dotenv()
     # Daily-updates provider for the Explore panel's topic suggestions: one
     # per app (cached + rotating), edition defaults to India.
     # Phase 14.3: headline topics come from outside the machine, so the pool
@@ -293,7 +311,14 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         external_allowed=lambda: nova.privacy.allows(PrivacyAction.EXTERNAL_SEARCH)
     )
     try:
-        from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
+        from fastapi import (
+            Depends,
+            FastAPI,
+            Header,
+            HTTPException,
+            WebSocket,
+            WebSocketDisconnect,
+        )
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.middleware.gzip import GZipMiddleware
         from fastapi.responses import FileResponse, HTMLResponse
@@ -355,29 +380,38 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             response.headers.update(_never_cache_headers())
             return response
 
-    api_token = os.getenv("NOVACONTROL_API_TOKEN")
+    # Validate credentials BEFORE any store is opened.  The full middleware
+    # lists are built below; these two values are the only inputs the policy
+    # needs, and reading them twice is cheaper than constructing the application
+    # with an unsafe configuration.
+    _cors_for_security = [
+        item.strip() for item in os.getenv("NOVAMARKET_CORS_ORIGINS", "").split(",") if item.strip()
+    ]
+    _trusted_for_security = [
+        item.strip()
+        for item in os.getenv(
+            "NOVACONTROL_TRUSTED_HOSTS", "127.0.0.1,localhost,::1,testserver"
+        ).split(",")
+        if item.strip()
+    ]
+    security_policy = load_security_policy(
+        trusted_hosts=_trusted_for_security, cors_origins=_cors_for_security
+    )
+    api_token = security_policy.api_token
+    operator_token = security_policy.operator_token
+    admin_token = security_policy.admin_token
     authenticator = ApiTokenAuthenticator(api_token)
-    # AT-01: autonomy controls use a SEPARATE credential.  The ordinary API
-    # bearer token authorizes the rest of NovaMarket; it must not authorize a
-    # runtime start/stop merely because the caller can read the market API.  A
-    # deployment that reuses the same value for both is refused closed rather
-    # than pretending the permission is separate.
-    operator_token = os.getenv("NOVACONTROL_AUTONOMY_OPERATOR_TOKEN")
-    if operator_token and operator_token == api_token:
-        operator_token = ""
     operator_authenticator = ApiTokenAuthenticator(operator_token)
-    # The local admin token is accepted only from loopback clients.  It lets the
-    # local Vite proxy open the desk without a per-tab prompt and acts as both
-    # the ordinary API credential and the autonomy-operator credential.  Never
-    # accept it from a remote address: a remote deployment still needs the
-    # configured bearer/operator tokens.
-    # The predictable local key is opt-in, never a built-in default: a
-    # deployed backend reached through a loopback reverse proxy would
-    # otherwise inherit a guessable admin credential.  The local launchers
-    # (start.ps1) export NOVACONTROL_ADMIN_TOKEN so the Vite proxy keeps
-    # auto-connecting; an unset value disables this credential entirely.
-    admin_token = (os.getenv("NOVACONTROL_ADMIN_TOKEN") or "").strip()
     admin_authenticator = ApiTokenAuthenticator(admin_token)
+    # Owner opt-in (development only): the retired launcher literal is an EXTRA
+    # admin credential.  It is only ever consulted for loopback requests, in the
+    # same checks that already gate the configured admin token.
+    legacy_admin_authenticator = ApiTokenAuthenticator(
+        security_policy.legacy_admin_token
+    )
+    anonymous_local = security_policy.anonymous_local
+    sse_sessions = SseSessionStore()
+
     api_surface = ApiSurface.default()
     nova = NovaControlApplication(data_dir=Path(data_dir) if data_dir is not None else Path("data"))
     app = FastAPI(title="NovaControl", version="0.1.0")
@@ -431,6 +465,14 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         )
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted_hosts)
 
+    app.add_middleware(
+        SensitivePathAuthMiddleware,
+        authenticator=authenticator,
+        admin_authenticator=admin_authenticator,
+        legacy_admin_authenticator=legacy_admin_authenticator,
+        anonymous_local=anonymous_local,
+    )
+
     static_dir = Path(__file__).resolve().parents[1] / "web" / "static"
     if static_dir.exists():
         app.mount("/static", NoCacheStaticFiles(directory=static_dir), name="static")
@@ -461,12 +503,20 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
 
     def _is_loopback_request(request: Request) -> bool:
         host = (request.client.host if request.client else "").strip().lower()
-        return host in {"127.0.0.1", "::1", "localhost"} or host.startswith("127.")
+        # ``testclient`` is the in-process TestClient peer, never a socket peer.
+        return (
+            host in {"127.0.0.1", "::1", "localhost", "testclient"}
+            or host.startswith("127.")
+        )
 
     def _admin_token_authorized(value: str | None) -> bool:
-        if not admin_authenticator.enabled or not value:
+        if not value:
             return False
-        return admin_authenticator.authenticate(f"Bearer {value.strip()}").authenticated
+        credential = f"Bearer {value.strip()}"
+        return (
+            admin_authenticator.authenticate(credential).authenticated
+            or legacy_admin_authenticator.authenticate(credential).authenticated
+        )
 
     def _bearer_credential(authorization: str | None) -> str | None:
         if not authorization:
@@ -493,9 +543,14 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         request: Request, authorization: str | None = Header(default=None)
     ) -> str:
         result = authenticator.authenticate(authorization)
-        if not result.authenticated and _is_loopback_request(request):
-            if _admin_token_authorized(_bearer_credential(authorization)):
-                return "local-admin"
+        if (
+            not result.authenticated
+            and _is_loopback_request(request)
+            and _admin_token_authorized(_bearer_credential(authorization))
+        ):
+            return "local-admin"
+        if not result.authenticated and anonymous_local and _is_loopback_request(request):
+            return "local-development"
         if not result.authenticated:
             raise HTTPException(status_code=401, detail=result.reason)
         return result.principal
@@ -599,7 +654,16 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             "name": "NovaControl",
             "status": "ok",
             "api": api_surface.to_dict(),
-            "auth_enabled": authenticator.enabled,
+            "auth_enabled": authenticator.enabled or admin_authenticator.enabled,
+            "auth_mode": (
+                "api_token"
+                if authenticator.enabled
+                else "local_admin"
+                if admin_authenticator.enabled
+                else "anonymous_local"
+            ),
+            "security_environment": security_policy.environment,
+            "anonymous_local": anonymous_local,
             "app": nova.status(),
         }
 
@@ -1495,7 +1559,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             return nova.novamarket.autonomy_status(
                 operator_authorized=operator_ok,
                 operator_configured=(
-                    operator_authenticator.enabled or _is_loopback_request(request)
+                    operator_authenticator.enabled or admin_authenticator.enabled
                 ),
             )
         except Exception as exc:  # noqa: BLE001 - refused with a truthful HTTP status
@@ -1513,7 +1577,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             status = nova.novamarket.autonomy_status(
                 operator_authorized=operator_ok,
                 operator_configured=(
-                    operator_authenticator.enabled or _is_loopback_request(request)
+                    operator_authenticator.enabled or admin_authenticator.enabled
                 ),
             )
         except Exception as exc:  # noqa: BLE001
@@ -1569,6 +1633,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
                     str(body.get("mode") or "monitoring"),
                     reason=str(body.get("reason") or "operator start"),
                     acknowledge_paper_only=bool(body.get("acknowledge_paper_only", False)),
+                    actor=_operator,
                 )
             )
         except Exception as exc:  # noqa: BLE001
@@ -1585,7 +1650,8 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         try:
             return _autonomy_control_response(
                 nova.novamarket.autonomy_pause(
-                    reason=str((payload or {}).get("reason") or "operator pause")
+                    reason=str((payload or {}).get("reason") or "operator pause"),
+                    actor=_operator,
                 )
             )
         except Exception as exc:  # noqa: BLE001
@@ -1597,15 +1663,17 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         _principal: str = Depends(require_auth),
         _operator: str = Depends(require_autonomy_operator),
     ) -> dict[str, Any]:
-        """Resume a paused shell into monitoring or autonomous state."""
+        """Resume a paused shell into its prior mode, or an explicitly requested one."""
 
         body = payload or {}
+        explicit_mode = body.get("mode")
         try:
             return _autonomy_control_response(
                 nova.novamarket.autonomy_resume(
-                    str(body.get("mode") or "monitoring"),
+                    str(explicit_mode) if explicit_mode else None,
                     reason=str(body.get("reason") or "operator resume"),
                     acknowledge_paper_only=bool(body.get("acknowledge_paper_only", False)),
+                    actor=_operator,
                 )
             )
         except Exception as exc:  # noqa: BLE001
@@ -1622,7 +1690,8 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         try:
             return _autonomy_control_response(
                 nova.novamarket.autonomy_stop(
-                    reason=str((payload or {}).get("reason") or "operator stop")
+                    reason=str((payload or {}).get("reason") or "operator stop"),
+                    actor=_operator,
                 )
             )
         except Exception as exc:  # noqa: BLE001
@@ -3990,6 +4059,38 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
     async def market_strategy_contracts(_principal: str = Depends(require_auth)) -> dict[str, Any]:
         """The versioned NM-09 contract."""
         return nova.novamarket.strategy_contract()
+
+    @app.get("/market/multi-timeframe/status")
+    async def market_multi_timeframe_status(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """The 20m/5m/1m hierarchy contract, thresholds and authority boundary."""
+        return nova.novamarket.multi_timeframe_status()
+
+    @app.get("/market/multi-timeframe/analysis")
+    async def market_multi_timeframe_analysis(
+        portfolio_id: str,
+        instrument_ids: str = "",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Analyse a short-term portfolio's instruments across three timeframes."""
+        requested = [
+            item.strip() for item in str(instrument_ids or "").split(",") if item.strip()
+        ]
+        from fastapi import HTTPException
+
+        from novacontrol.novamarket.contracts import PortfolioNotFoundError
+
+        try:
+            return nova.novamarket.multi_timeframe_analysis(
+                portfolio_id, instrument_ids=requested or None
+            )
+        except PortfolioNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001 - one mapped refusal
+            raise _market_http_error(exc) from exc
 
     @app.get("/market/strategies")
     async def market_strategies(
@@ -8597,48 +8698,85 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         """Recent completed actions, newest first — seeds the web timeline."""
         return {"activity": nova.activity.recent()}
 
+    @app.post("/events/session")
+    async def events_session(
+        request: Request,
+        response: Response,
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Mint an opaque server-side SSE session and set it as an HttpOnly cookie.
+
+        Native EventSource cannot send an Authorization header.  It CAN send a
+        same-site cookie, so the browser exchanges its bearer credential here
+        once and the raw API token never enters a URL, history entry or proxy
+        access log.  The cookie is not accepted by REST routes.
+        """
+        session_token = sse_sessions.issue(principal)
+        response.set_cookie(
+            key=SSE_SESSION_COOKIE,
+            value=session_token,
+            max_age=sse_sessions.ttl_seconds,
+            httponly=True,
+            secure=request.url.scheme == "https",
+            samesite="strict",
+            path="/events",
+        )
+        return {
+            "status": "ok",
+            "expires_in": sse_sessions.ttl_seconds,
+            "cookie": SSE_SESSION_COOKIE,
+        }
+
     @app.get("/events/stream")
     async def events_stream(
         request: Request,
-        token: str | None = None,
         authorization: str | None = Header(default=None),
     ) -> Any:
         """Single live activity channel: relay the application EventBus as SSE.
 
         The web UI keeps ONE EventSource open here and receives every bus event
         (explore.progress research steps, command.progress action lines, ...)
-        while an operation is running. Browser EventSource cannot set an
-        Authorization header, so when token auth is enabled the token is accepted
-        as a query parameter (`?token=`) as well as via the header for non-browser
-        clients.
+        while an operation is running. Authentication is either an Authorization
+        header (scripts, fetch-based clients) or the opaque HttpOnly session
+        cookie minted by ``POST /events/session``. The API bearer token is never
+        accepted in the query string.
         """
         from fastapi.responses import StreamingResponse
-        import asyncio
-        import json
 
         result = authenticator.authenticate(authorization)
-        if not result.authenticated and token:
-            result = authenticator.authenticate(f"Bearer {token}")
-        if not result.authenticated and not _local_admin_authorized(
-            request, token, authorization
-        ):
-            raise HTTPException(status_code=401, detail=result.reason)
+        principal = result.principal if result.authenticated else ""
+        if not principal and _local_admin_authorized(request, None, authorization):
+            principal = "local-admin"
+        if not principal:
+            principal = sse_sessions.principal(request.cookies.get(SSE_SESSION_COOKIE)) or ""
+        if not principal and anonymous_local and _is_loopback_request(request):
+            principal = "local-development"
+        if not principal:
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": "sse_authentication_required",
+                    "message": (
+                        "Open an SSE session with POST /events/session, or send "
+                        "an Authorization header. Query-string tokens are refused."
+                    ),
+                },
+            )
 
         queue: asyncio.Queue[Event] = asyncio.Queue(maxsize=256)
 
         async def forward(event: Event) -> None:
-            try:
+            with contextlib.suppress(asyncio.QueueFull):
                 queue.put_nowait(event)
-            except asyncio.QueueFull:
-                pass  # slow client: drop the event rather than stall the bus
 
         async def stream() -> Any:
             await nova.event_bus.subscribe("*", forward)
             try:
+                yield ": connected\n\n"
                 while True:
                     try:
                         event = await asyncio.wait_for(queue.get(), timeout=15.0)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         yield ": keep-alive\n\n"  # comment frame; ignored by EventSource
                         continue
                     yield sse_frame(event)
@@ -8651,6 +8789,7 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
+                "Vary": "Cookie",
                 "X-Accel-Buffering": "no",
             },
         )
@@ -12994,6 +13133,10 @@ def create_app(*, data_dir: str | Path | None = None) -> Any:
         except WebSocketDisconnect:
             return
 
+    install_error_handlers(app)
+    # Outermost of the HTTP stack: every inner middleware, handler and error
+    # response shares one request id.
+    app.add_middleware(RequestContextMiddleware)
     return app
 
 

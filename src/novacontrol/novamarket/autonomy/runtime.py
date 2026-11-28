@@ -7,6 +7,7 @@ order, and nothing in this package imports an execution or financial engine.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,6 +19,8 @@ from novacontrol.novamarket.autonomy.models import (
     AutonomyMode,
     AutonomyStateError,
     AutonomyValidationError,
+    AUTOMATIC_POLICY_PROMOTION,
+    BROKER_CONNECTED,
     CALENDAR_STATUS,
     CycleStatus,
     EXIT_SUPERVISION_IMPLEMENTED,
@@ -34,6 +37,9 @@ from novacontrol.novamarket.autonomy.models import (
     transition_allowed,
 )
 from novacontrol.novamarket.autonomy.store import AutonomyStore
+
+
+_LOGGER = logging.getLogger("novacontrol.novamarket.autonomy")
 
 
 def _clock_utc(value: datetime) -> datetime:
@@ -56,11 +62,12 @@ def closed_status(
         "runtime_state": RuntimeState.STOPPED.value,
         "desired_mode": AutonomyMode.DISABLED.value,
         "trading_implemented": TRADING_IMPLEMENTED,
-        "orders_possible": False,
+        "orders_possible": TRADING_IMPLEMENTED,
         "release_gate": RELEASE_GATE,
         "paper_only": PAPER_ONLY,
         "live_trading": LIVE_TRADING,
-        "broker_connected": False,
+        "live_orders_possible": False,
+        "broker_connected": BROKER_CONNECTED,
         "operator_authorization_required": True,
         "operator_authorization_configured": bool(operator_configured),
         "operator_authorized": bool(operator_authorized),
@@ -81,6 +88,7 @@ def closed_status(
         "paused_exit_policy": PAUSED_EXIT_POLICY,
         "exit_supervision_implemented": EXIT_SUPERVISION_IMPLEMENTED,
         "learning_promotion_implemented": LEARNING_PROMOTION_IMPLEMENTED,
+        "automatic_policy_promotion": AUTOMATIC_POLICY_PROMOTION,
         "one_cycle_at_a_time": ONE_CYCLE_AT_A_TIME,
         "horizon_mapping": dict(HORIZON_MAPPING),
         "calendar": dict(CALENDAR_STATUS),
@@ -117,6 +125,7 @@ class AutonomyRuntime:
         self._last_error = ""
         self._started_at: datetime | None = None
         self._closed = False
+        self._failed = False
         # Opening the store is a recovery point, never an auto-resume point.
         self._store.recover(self._now())
 
@@ -131,6 +140,12 @@ class AutonomyRuntime:
         """The durable store this runtime owns; AT-02 persists monitoring here."""
 
         return self._store
+
+    @property
+    def config(self) -> AutonomyConfig:
+        """The persisted runtime configuration, including auto-start policy."""
+
+        return self._config()
 
     def _require_open(self) -> None:
         if self._closed:
@@ -184,15 +199,87 @@ class AutonomyRuntime:
                 "the runtime lease is missing, expired or owned by another process"
             )
 
-    def _set_mode(self, mode: AutonomyMode, *, reason: str) -> None:
+    def _record_control(
+        self,
+        operation: str,
+        *,
+        actor: str,
+        reason: str,
+        outcome: str,
+        requested_mode: str = "",
+        resulting_mode: str | None = None,
+        error: str = "",
+    ) -> None:
+        """Append a refusal or no-op control event without changing state.
+
+        The runtime's own state is authoritative: a failed audit write must
+        never turn a refusal into a state change, nor mask the operator-facing
+        error.
+        """
+
+        try:
+            snapshot = self._store.snapshot(self._now())
+            lease = snapshot.get("lease")
+            lease_body = lease if isinstance(lease, dict) else {}
+            self._store.append_control_event(
+                operation=operation,
+                outcome=outcome,
+                actor=actor,
+                reason=reason,
+                now=self._now(),
+                from_mode=self._mode.value,
+                requested_mode=requested_mode,
+                resulting_mode=(
+                    self._mode.value if resulting_mode is None else resulting_mode
+                ),
+                desired_mode=str(snapshot.get("desired_mode") or ""),
+                lease_owner=str(lease_body.get("owner") or ""),
+                lease_valid=bool(lease_body.get("valid")),
+                error=error,
+            )
+        except Exception as exc:  # noqa: BLE001 - audited state stays authoritative
+            _LOGGER.warning(
+                "novamarket.autonomy.control_audit_unavailable op=%s: %s",
+                operation,
+                exc,
+            )
+
+    def _set_mode(
+        self,
+        mode: AutonomyMode,
+        *,
+        operation: str,
+        actor: str,
+        reason: str,
+        desired_mode: AutonomyMode | None = None,
+    ) -> None:
         self._require_lease()
+        now = self._now()
+        wanted_desired = desired_mode or mode
+        # The mode row and its audit event commit together: a reader can never
+        # observe a transition without the event that explains it, and a
+        # rollback leaves neither.
         self._store.save_control(
             self.owner_id,
             self._lease_token,
             mode=mode.value,
+            desired_mode=wanted_desired.value,
             state=RuntimeState.RUNNING.value,
             reason=reason,
-            now=self._now(),
+            now=now,
+            control={
+                "operation": operation,
+                "actor": actor,
+                "reason": reason,
+                "occurred_at": now,
+                "from_mode": self._mode.value,
+                "requested_mode": mode.value,
+                "resulting_mode": mode.value,
+                "desired_mode": wanted_desired.value,
+                "lease_owner": self.owner_id,
+                "lease_valid": True,
+                "outcome": "applied",
+            },
         )
         self._mode = mode
         self._state = RuntimeState.RUNNING
@@ -219,7 +306,10 @@ class AutonomyRuntime:
         active = snapshot.get("active_cycle")
         reasons: list[str] = []
 
-        if foreign:
+        if self._failed:
+            state = RuntimeState.FAILED
+            reasons.append(self._last_error or "the runtime failed to start")
+        elif foreign:
             state = RuntimeState.DEGRADED
             reasons.append("a different live runtime owner holds the autonomy lease")
         elif self._mode is not AutonomyMode.DISABLED and not local_lease:
@@ -240,11 +330,12 @@ class AutonomyRuntime:
             "runtime_state": state.value,
             "desired_mode": snapshot.get("desired_mode", "disabled"),
             "trading_implemented": TRADING_IMPLEMENTED,
-            "orders_possible": False,
+            "orders_possible": TRADING_IMPLEMENTED,
             "release_gate": RELEASE_GATE,
             "paper_only": PAPER_ONLY,
             "live_trading": LIVE_TRADING,
-            "broker_connected": False,
+            "live_orders_possible": False,
+            "broker_connected": BROKER_CONNECTED,
             "operator_authorization_required": True,
             "operator_authorization_configured": bool(operator_configured),
             "operator_authorized": bool(operator_authorized),
@@ -267,11 +358,13 @@ class AutonomyRuntime:
             "paused_exit_policy": PAUSED_EXIT_POLICY,
             "exit_supervision_implemented": EXIT_SUPERVISION_IMPLEMENTED,
             "learning_promotion_implemented": LEARNING_PROMOTION_IMPLEMENTED,
+            "automatic_policy_promotion": AUTOMATIC_POLICY_PROMOTION,
             "one_cycle_at_a_time": ONE_CYCLE_AT_A_TIME,
             "horizon_mapping": dict(HORIZON_MAPPING),
             "calendar": dict(CALENDAR_STATUS),
             "config": self._config().to_dict(),
             "controls": ["start", "pause", "resume", "stop"],
+            "control_events": self._store.control_events(limit=20),
             "health": {
                 "state": "ok" if not reasons else "degraded",
                 "reasons": reasons,
@@ -310,12 +403,14 @@ class AutonomyRuntime:
         if (
             not PAPER_ONLY
             or LIVE_TRADING
-            or TRADING_IMPLEMENTED
-            or RELEASE_GATE != "closed"
+            or BROKER_CONNECTED
+            or not TRADING_IMPLEMENTED
+            or RELEASE_GATE != "open"
         ):
             raise AutonomyStateError(
-                "refusing to start: paper-only/live-trading/release-gate invariants "
-                "are not the approved AT-01 values"
+                "refusing to start: the runtime is not in the approved integrated "
+                "paper-only state (paper_only, no live trading/broker, paper "
+                "execution implemented, release gate open)"
             )
 
     def start(
@@ -324,95 +419,342 @@ class AutonomyRuntime:
         *,
         reason: str = "",
         acknowledge_paper_only: bool = False,
+        actor: str = "system",
     ) -> dict[str, object]:
-        """Start/renew the shell in monitoring or autonomous mode.
+        """Start/renew the integrated paper runtime.
 
-        ``autonomous`` is a state-only shell at AT-01.  It cannot produce an
-        order; the release gate stays closed.  The acknowledgement is still
-        required so the mode cannot be entered by an accidental request.
+        ``autonomous`` enables the AT-03/AT-04 paper path.  Every order still
+        requires NM-08 approval and NM-10 execution; the acknowledgement
+        prevents an accidental transition into that mode.  Every accepted,
+        no-op or refused attempt is appended to the durable control audit.
         """
 
         self._require_open()
-        wanted = coerce_mode(mode)
-        if wanted not in (AutonomyMode.MONITORING, AutonomyMode.AUTONOMOUS):
-            raise AutonomyStateError("start requires monitoring or autonomous mode")
-        self._assert_paper_only_invariants()
-        if wanted is AutonomyMode.AUTONOMOUS and not acknowledge_paper_only:
-            raise AutonomyValidationError(
-                "autonomous mode requires acknowledge_paper_only=true; no order path exists"
+        try:
+            wanted = coerce_mode(mode)
+        except (TypeError, ValueError) as exc:
+            self._record_control(
+                "start",
+                actor=actor,
+                reason=reason,
+                outcome="refused",
+                requested_mode=str(mode),
+                error=f"{type(exc).__name__}: {exc}",
             )
+            raise
+        if wanted not in (AutonomyMode.MONITORING, AutonomyMode.AUTONOMOUS):
+            error = "start requires monitoring or autonomous mode"
+            self._record_control(
+                "start",
+                actor=actor,
+                reason=reason,
+                outcome="refused",
+                requested_mode=wanted.value,
+                error=error,
+            )
+            raise AutonomyStateError(error)
+        try:
+            self._assert_paper_only_invariants()
+        except AutonomyStateError as exc:
+            self._record_control(
+                "start",
+                actor=actor,
+                reason=reason,
+                outcome="refused",
+                requested_mode=wanted.value,
+                error=str(exc),
+            )
+            raise
+        self._failed = False
+        if wanted is AutonomyMode.AUTONOMOUS and not acknowledge_paper_only:
+            error = (
+                "autonomous mode requires acknowledge_paper_only=true; paper "
+                "orders remain subject to NM-08 and NM-10"
+            )
+            self._record_control(
+                "start",
+                actor=actor,
+                reason=reason,
+                outcome="refused",
+                requested_mode=wanted.value,
+                error=error,
+            )
+            raise AutonomyValidationError(error)
         if self._mode is AutonomyMode.PAUSED:
-            raise AutonomyStateError("resume is required from paused mode")
+            error = "resume is required from paused mode"
+            self._record_control(
+                "start",
+                actor=actor,
+                reason=reason,
+                outcome="refused",
+                requested_mode=wanted.value,
+                error=error,
+            )
+            raise AutonomyStateError(error)
         if self._mode == wanted and self._lease_valid():
+            self._record_control(
+                "start",
+                actor=actor,
+                reason=reason,
+                outcome="noop",
+                requested_mode=wanted.value,
+            )
             return self.status()
 
         if self._mode is not AutonomyMode.DISABLED and not transition_allowed(
             self._mode, wanted
         ):
-            raise AutonomyStateError(
-                f"cannot transition from {self._mode.value} to {wanted.value}"
+            error = f"cannot transition from {self._mode.value} to {wanted.value}"
+            self._record_control(
+                "start",
+                actor=actor,
+                reason=reason,
+                outcome="refused",
+                requested_mode=wanted.value,
+                error=error,
             )
-        self._acquire()
+            raise AutonomyStateError(error)
+        self._state = RuntimeState.STARTING
         try:
-            self._set_mode(wanted, reason=reason or "operator start")
-        except Exception:
-            # A failed persistence must not leave the process believing it owns
-            # a mode that was never written.  The lease is released on the safe
-            # path only; an unexpired lease is the durable evidence.
-            self._mode = AutonomyMode.DISABLED
+            self._acquire()
+        except AutonomyLeaseError as exc:
             self._state = RuntimeState.DEGRADED
+            self._record_control(
+                "start",
+                actor=actor,
+                reason=reason,
+                outcome="refused",
+                requested_mode=wanted.value,
+                error=str(exc),
+            )
+            raise
+        try:
+            self._set_mode(
+                wanted,
+                operation="start",
+                actor=actor,
+                reason=reason or "operator start",
+            )
+            # An explicit start is an opt-in to application-start autonomy.
+            self._store.save_auto_start(
+                enabled=True, mode=wanted.value, now=self._now()
+            )
+        except Exception as exc:
+            # A failed persistence must not leave the process believing it owns
+            # a mode that was never written.  Fail closed and require recovery.
+            self._mode = AutonomyMode.DISABLED
+            self._state = RuntimeState.FAILED
+            self._failed = True
+            self._last_error = f"{type(exc).__name__}: {exc}"
             raise
         self._started_at = self._now()
         return self.status()
 
-    def pause(self, *, reason: str = "") -> dict[str, object]:
+    def pause(self, *, reason: str = "", actor: str = "system") -> dict[str, object]:
         self._require_open()
         if self._mode is AutonomyMode.DISABLED:
-            raise AutonomyStateError("a disabled runtime cannot be paused")
+            error = "a disabled runtime cannot be paused"
+            self._record_control(
+                "pause",
+                actor=actor,
+                reason=reason,
+                outcome="refused",
+                requested_mode=AutonomyMode.PAUSED.value,
+                error=error,
+            )
+            raise AutonomyStateError(error)
         if self._mode is AutonomyMode.PAUSED:
+            self._record_control(
+                "pause",
+                actor=actor,
+                reason=reason,
+                outcome="noop",
+                requested_mode=AutonomyMode.PAUSED.value,
+            )
             return self.status()
         if not self._lease_valid():
             self._state = RuntimeState.DEGRADED
-            raise AutonomyLeaseError("the runtime lease is not valid")
-        self._set_mode(AutonomyMode.PAUSED, reason=reason or "operator pause")
+            error = "the runtime lease is not valid"
+            self._record_control(
+                "pause",
+                actor=actor,
+                reason=reason,
+                outcome="refused",
+                requested_mode=AutonomyMode.PAUSED.value,
+                error=error,
+            )
+            raise AutonomyLeaseError(error)
+        paused_from = self._mode
+        self._set_mode(
+            AutonomyMode.PAUSED,
+            operation="pause",
+            actor=actor,
+            reason=reason or "operator pause",
+            desired_mode=paused_from,
+        )
         return self.status()
 
     def resume(
         self,
-        mode: AutonomyMode | str,
+        mode: AutonomyMode | str | None = None,
         *,
         reason: str = "",
         acknowledge_paper_only: bool = False,
+        actor: str = "system",
     ) -> dict[str, object]:
         self._require_open()
         if self._mode is not AutonomyMode.PAUSED:
-            raise AutonomyStateError("resume requires paused mode")
-        wanted = coerce_mode(mode)
-        if wanted not in (AutonomyMode.MONITORING, AutonomyMode.AUTONOMOUS):
-            raise AutonomyStateError("resume requires monitoring or autonomous mode")
-        if wanted is AutonomyMode.AUTONOMOUS and not acknowledge_paper_only:
-            raise AutonomyValidationError(
-                "autonomous mode requires acknowledge_paper_only=true; no order path exists"
+            error = "resume requires paused mode"
+            self._record_control(
+                "resume",
+                actor=actor,
+                reason=reason,
+                outcome="refused",
+                requested_mode=str(mode or ""),
+                error=error,
             )
+            raise AutonomyStateError(error)
+        if mode is None:
+            snapshot = self._store.snapshot(self._now())
+            try:
+                wanted = coerce_mode(str(snapshot.get("desired_mode") or ""))
+            except (ValueError, TypeError):
+                wanted = AutonomyMode.MONITORING
+            if wanted not in (AutonomyMode.MONITORING, AutonomyMode.AUTONOMOUS):
+                # Older paused rows recorded ``paused`` as their desired mode;
+                # resuming into the safe monitoring shell is the only fallback.
+                wanted = AutonomyMode.MONITORING
+        else:
+            try:
+                wanted = coerce_mode(mode)
+            except (TypeError, ValueError) as exc:
+                self._record_control(
+                    "resume",
+                    actor=actor,
+                    reason=reason,
+                    outcome="refused",
+                    requested_mode=str(mode),
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                raise
+        if wanted not in (AutonomyMode.MONITORING, AutonomyMode.AUTONOMOUS):
+            error = "resume requires monitoring or autonomous mode"
+            self._record_control(
+                "resume",
+                actor=actor,
+                reason=reason,
+                outcome="refused",
+                requested_mode=wanted.value,
+                error=error,
+            )
+            raise AutonomyStateError(error)
+        if wanted is AutonomyMode.AUTONOMOUS and not acknowledge_paper_only:
+            error = (
+                "autonomous mode requires acknowledge_paper_only=true; paper "
+                "orders remain subject to NM-08 and NM-10"
+            )
+            self._record_control(
+                "resume",
+                actor=actor,
+                reason=reason,
+                outcome="refused",
+                requested_mode=wanted.value,
+                error=error,
+            )
+            raise AutonomyValidationError(error)
         if not self._lease_valid():
             self._state = RuntimeState.DEGRADED
-            raise AutonomyLeaseError("the runtime lease is not valid")
-        self._set_mode(wanted, reason=reason or "operator resume")
+            error = "the runtime lease is not valid"
+            self._record_control(
+                "resume",
+                actor=actor,
+                reason=reason,
+                outcome="refused",
+                requested_mode=wanted.value,
+                error=error,
+            )
+            raise AutonomyLeaseError(error)
+        self._set_mode(
+            wanted, operation="resume", actor=actor, reason=reason or "operator resume"
+        )
         return self.status()
 
-    def stop(self, *, reason: str = "") -> dict[str, object]:
+    def stop(
+        self,
+        *,
+        reason: str = "",
+        disable_autostart: bool = False,
+        actor: str = "system",
+    ) -> dict[str, object]:
+        """Stop the runtime.  An operator/emergency stop also disables auto-start;
+        a graceful application shutdown preserves it for the next launch."""
+
+        return self._stop(
+            operation="stop",
+            actor=actor,
+            reason=reason or "operator stop",
+            disable_autostart=disable_autostart,
+        )
+
+    def _stop(
+        self,
+        *,
+        operation: str,
+        actor: str,
+        reason: str,
+        disable_autostart: bool,
+    ) -> dict[str, object]:
         if self._closed:
             return self.status()
+        now = self._now()
+        from_mode = self._mode.value
+        if disable_autostart:
+            self._store.save_auto_start(
+                enabled=False,
+                mode=self._config().auto_start_mode,
+                now=now,
+            )
+        self._state = RuntimeState.STOPPING
         if self._lease_token:
+            # The lease release and its audit event commit together, so an
+            # emergency stop can never be durable without its record.
             self._store.release_lease(
                 self.owner_id,
                 self._lease_token,
                 reason=reason or "operator stop",
-                now=self._now(),
+                now=now,
+                control={
+                    "operation": operation,
+                    "actor": actor,
+                    "reason": reason,
+                    "occurred_at": now,
+                    "from_mode": from_mode,
+                    "requested_mode": AutonomyMode.DISABLED.value,
+                    "resulting_mode": AutonomyMode.DISABLED.value,
+                    "desired_mode": AutonomyMode.DISABLED.value,
+                    "lease_owner": self.owner_id,
+                    "lease_valid": True,
+                    "outcome": "applied",
+                },
+            )
+        elif operation != "shutdown" or from_mode != AutonomyMode.DISABLED.value:
+            self._record_control(
+                operation,
+                actor=actor,
+                reason=reason,
+                outcome="noop",
+                requested_mode=AutonomyMode.DISABLED.value,
+                resulting_mode=AutonomyMode.DISABLED.value,
+                error=(
+                    "no runtime lease was held; only in-memory state changed"
+                    if operation != "shutdown"
+                    else "the runtime was already stopped"
+                ),
             )
         self._lease_token = ""
         self._mode = AutonomyMode.DISABLED
         self._state = RuntimeState.STOPPED
+        self._failed = False
         self._started_at = None
         self._last_error = ""
         return self.status()
@@ -443,17 +785,41 @@ class AutonomyRuntime:
 
         self._require_open()
         if self._lease_token:
+            now = self._now()
             self._store.release_lease(
                 self.owner_id,
                 self._lease_token,
                 reason="runtime recovery",
-                now=self._now(),
+                now=now,
+                control={
+                    "operation": "recover",
+                    "actor": "system",
+                    "reason": "runtime recovery",
+                    "occurred_at": now,
+                    "from_mode": self._mode.value,
+                    "requested_mode": AutonomyMode.DISABLED.value,
+                    "resulting_mode": AutonomyMode.DISABLED.value,
+                    "desired_mode": AutonomyMode.DISABLED.value,
+                    "lease_owner": self.owner_id,
+                    "lease_valid": True,
+                    "outcome": "applied",
+                },
             )
             self._lease_token = ""
         self._store.recover(self._now())
         self._mode = AutonomyMode.DISABLED
         self._state = RuntimeState.STOPPED
+        self._failed = False
         self._started_at = None
+        self._last_error = ""
+        return self.status()
+
+    def fail(self, error: str) -> dict[str, object]:
+        """Mark the runtime failed closed; no new entries may start."""
+
+        self._failed = True
+        self._last_error = str(error or "runtime dependency failure")
+        self._state = RuntimeState.FAILED
         return self.status()
 
     # -- the one-cycle invariant (no scanning or execution) -----------------
@@ -500,7 +866,12 @@ class AutonomyRuntime:
 
         if self._closed:
             return
-        self.stop(reason="runtime closed")
+        self._stop(
+            operation="shutdown",
+            actor="system",
+            reason="runtime closed",
+            disable_autostart=False,
+        )
         self._closed = True
         self._store.close()
 

@@ -234,6 +234,12 @@ class ReducedMotionPlaywrightTests(unittest.TestCase):
         only problem is that the mouse never arrived. The Command Center's first
         card in DOM order sits below the fold on a 720px-tall viewport (the
         telemetry section leads the panel), so the check is a viewport test.
+
+        It must also be TILTABLE: effects.js deliberately skips cards containing
+        controls (a tilted ancestor moves clicks), so the Command console is not
+        a valid probe even though it is the first on-screen card.  Pick the
+        first on-screen card without an interactive descendant, matching the
+        handler's own eligibility rule.
         """
         cards_js = (
             "'.surface, .command-console, .info-card, .metric-card, .telemetry-card'"
@@ -244,10 +250,13 @@ class ReducedMotionPlaywrightTests(unittest.TestCase):
         )
         box = page.evaluate(
             f"""(() => {{
+              const interactive = "button, a[href], input, select, textarea, "
+                + "[role='button'], [contenteditable='true']";
               const cards = [...document.querySelectorAll({cards_js})];
               const card = cards.find(c => {{
                 const r = c.getBoundingClientRect();
                 if (!(r.width > 40 && r.height > 40)) return false;
+                if (c.querySelector(interactive)) return false;
                 const cx = r.left + r.width / 2;
                 const cy = r.top + r.height / 2;
                 // Inside the viewport, and clear of the sticky ribbon.

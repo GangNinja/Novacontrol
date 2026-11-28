@@ -514,7 +514,7 @@ class ApiSurface:
                 ApiRoute(
                     "POST",
                     "/market/autonomy/start",
-                    "Start/renew the autonomy shell in monitoring or non-trading autonomous mode; requires the operator token.",
+                    "Start/renew the paper-only autonomy shell in monitoring or autonomous mode; autonomous orders still require NM-08 approval and NM-10 execution; requires the operator token.",
                     authenticated=True,
                 ),
                 ApiRoute(
@@ -526,7 +526,7 @@ class ApiSurface:
                 ApiRoute(
                     "POST",
                     "/market/autonomy/resume",
-                    "Resume a paused autonomy shell in monitoring or autonomous mode; requires the operator token.",
+                    "Resume a paused shell in its prior mode (or an explicitly requested monitoring/autonomous mode), subject to lease, health and paper-only checks; requires the operator token.",
                     authenticated=True,
                 ),
                 ApiRoute(
@@ -1502,6 +1502,18 @@ class ApiSurface:
                     "GET",
                     "/market/strategies/contracts",
                     "NM-09 strategy operation.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/market/multi-timeframe/status",
+                    "20m/5m/1m hierarchy contract and thresholds.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "GET",
+                    "/market/multi-timeframe/analysis",
+                    "Cross-timeframe decision evidence for a short-term portfolio.",
                     authenticated=True,
                 ),
                 ApiRoute(
@@ -4972,6 +4984,13 @@ class ApiSurface:
                     "GET",
                     "/events/stream",
                     "Live activity channel: the application EventBus as SSE.",
+                    authenticated=True,
+                ),
+                ApiRoute(
+                    "POST",
+                    "/events/session",
+                    "Open an opaque HttpOnly SSE session for EventSource clients.",
+                    authenticated=True,
                 ),
                 ApiRoute("GET", "/settings", "Read local user settings.", authenticated=True),
                 ApiRoute("POST", "/settings", "Update local user settings.", authenticated=True),

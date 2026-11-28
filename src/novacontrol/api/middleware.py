@@ -16,12 +16,184 @@ buffering side effect.
 
 from __future__ import annotations
 
+import contextvars
+import json
+import logging
+import re
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from novacontrol.api.auth import ApiTokenAuthenticator
+
+
+_REQUEST_ID = contextvars.ContextVar("novacontrol_request_id", default="")
+_REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+_PUBLIC_PATHS = frozenset(
+    {"/", "/health", "/favicon.ico", "/docs", "/docs/oauth2-redirect", "/openapi.json", "/redoc"}
+)
+_PUBLIC_PREFIXES = ("/static/",)
+_LOOPBACK_CLIENTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
+# SSE validates its own separate cookie/session; a raw API token is never
+# accepted in the URL.  Keeping the stream out of the generic gate avoids
+# double-reading the cookie while still failing closed inside the handler.
+_SELF_AUTHENTICATED_PATHS = frozenset({"/events/stream"})
+
+
+def current_request_id() -> str:
+    """The request id bound by :class:`RequestContextMiddleware`."""
+    return _REQUEST_ID.get()
+
+
+def _headers(scope: Scope) -> dict[str, str]:
+    return {
+        key.decode("latin-1").lower(): value.decode("latin-1")
+        for key, value in scope.get("headers", [])
+    }
+
+
+def _is_loopback_client(scope: Scope) -> bool:
+    client = scope.get("client")
+    host = str(client[0]).strip().lower() if client and client[0] else ""
+    return host in _LOOPBACK_CLIENTS or host.startswith("127.")
+
+
+class RequestContextMiddleware:
+    """Bind a bounded request id and echo it on every HTTP response."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        supplied = _headers(scope).get("x-request-id", "").strip()
+        request_id = supplied if _REQUEST_ID_PATTERN.fullmatch(supplied) else uuid4().hex
+        state = scope.setdefault("state", {})
+        if isinstance(state, dict):
+            state["request_id"] = request_id
+        reset = _REQUEST_ID.set(request_id)
+
+        async def send_with_request_id(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                if not any(key.lower() == b"x-request-id" for key, _ in headers):
+                    headers.append((b"x-request-id", request_id.encode("ascii")))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_with_request_id)
+        finally:
+            _REQUEST_ID.reset(reset)
+
+
+class SensitivePathAuthMiddleware:
+    """Fail closed on every non-public path when authentication is configured.
+
+    Route dependencies remain the first line of defence.  This middleware is
+    the second: a newly added sensitive endpoint that forgets ``Depends(require_auth)``
+    is still refused.  The root, health probe, static assets and API docs stay
+    public; ``/events/stream`` validates its own cookie in the handler.
+    """
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        authenticator: ApiTokenAuthenticator,
+        admin_authenticator: ApiTokenAuthenticator,
+        legacy_admin_authenticator: ApiTokenAuthenticator | None = None,
+        anonymous_local: bool = False,
+    ) -> None:
+        self.app = app
+        self.authenticator = authenticator
+        self.admin_authenticator = admin_authenticator
+        self.legacy_admin_authenticator = legacy_admin_authenticator
+        self.anonymous_local = anonymous_local
+
+    def _admin_from_loopback(self, headers: dict[str, str], scope: Scope) -> bool:
+        if not _is_loopback_client(scope):
+            return False
+        bearer = headers.get("authorization", "")
+        operator = headers.get("x-autonomy-operator-token", "")
+        candidates = [operator]
+        if bearer.lower().startswith("bearer "):
+            candidates.append(bearer[7:].strip())
+        authenticators = [self.admin_authenticator]
+        if self.legacy_admin_authenticator is not None:
+            authenticators.append(self.legacy_admin_authenticator)
+        return any(
+            candidate
+            and any(
+                authenticator.authenticate(f"Bearer {candidate}").authenticated
+                for authenticator in authenticators
+            )
+            for candidate in candidates
+        )
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        method = scope.get("method", "GET").upper()
+        path = scope.get("path", "")
+        public = (
+            method == "OPTIONS"
+            or path in _PUBLIC_PATHS
+            or path in _SELF_AUTHENTICATED_PATHS
+            or any(path.startswith(prefix) for prefix in _PUBLIC_PREFIXES)
+        )
+        client = scope.get("client")
+        client_host = str(client[0]) if client and client[0] else ""
+        if public or (self.anonymous_local and _is_loopback_client(scope)):
+            await self.app(scope, receive, send)
+            return
+
+        headers = _headers(scope)
+        auth_result = self.authenticator.authenticate(headers.get("authorization"))
+        allowed = auth_result.authenticated or self._admin_from_loopback(headers, scope)
+        if allowed:
+            await self.app(scope, receive, send)
+            return
+
+        request_id = current_request_id()
+        logging.getLogger("novacontrol.api.security").warning(
+            "authentication refused path=%s method=%s request_id=%s client=%s",
+            path,
+            method,
+            request_id or "-",
+            client_host or "-",
+        )
+        body = json.dumps(
+            {"detail": "Authentication required.", "request_id": request_id}
+        ).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode()),
+                    (b"www-authenticate", b"Bearer"),
+                    (b"cache-control", b"no-store"),
+                    (b"x-content-type-options", b"nosniff"),
+                    (b"x-frame-options", b"DENY"),
+                    (
+                        b"content-security-policy",
+                        b"frame-ancestors 'none'; base-uri 'self'; "
+                        b"object-src 'none'; form-action 'self'",
+                    ),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
 
 
 # --- Rate Limiter ---
@@ -126,11 +298,12 @@ class RequestLoggingMiddleware:
 
                 logger = logging.getLogger("novacontrol.api")
                 logger.info(
-                    "%s %s %d %.1fms",
+                    "%s %s %d %.1fms request_id=%s",
                     scope.get("method", ""),
                     path,
                     status_code,
                     (time.time() - start) * 1000,
+                    current_request_id() or "-",
                 )
 
 

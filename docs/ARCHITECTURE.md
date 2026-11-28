@@ -842,7 +842,7 @@ path. `NovaMarketService` supplies a read-only context from NM-02 stored data,
 PI-04 features/regimes, existing forecasts, the NM-04 event radar, sector flow
 and NM-07 portfolio detail.
 
-- `models.py` owns the versioned contracts: nine horizons, analysis types,
+- `models.py` owns the versioned contracts: ten horizons, analysis types,
   verification statuses, evidence, statements, ratios, events, news, peers,
   macro observations, valuation assumptions/results, thesis and authority
   flags. Every run records its research ID, as-of cutoff, configuration and
@@ -1271,3 +1271,30 @@ overview, timeline, relevance, impact, warnings, features, outcomes and agent
 evidence. It displays only backend values and exposes no forecast, risk, order
 or ledger control. Full evidence and the final reconciliation are in
 [PI24_FINAL_COMPLETION_REPORT.md](PI24_FINAL_COMPLETION_REPORT.md).
+
+## Multi-Timeframe Trading Intelligence (post-PI-24)
+
+`src/novacontrol/novamarket/multitimeframe/` adds the missing decision hierarchy
+without adding a scheduler, indicator set, risk engine or execution path. It
+reads completed observations through the existing market-data store, builds
+20-minute context from complete 5-minute buckets, evaluates a 5-minute setup
+against that context and a 1-minute entry/exit trigger, then resolves the three
+views with an explicit conflict matrix. Missing, stale, partial or gapped layers
+fail closed to `WAIT_FOR_CONFIRMATION`; opposing setup/context is
+`REJECT_SIGNAL`. A candidate is only a BUY/SELL candidate.
+
+`StrategyEngine.run` consults the hierarchy only for `short_term` (day-trading)
+portfolios: BUY/SELL proposals need the matching candidate side, EXIT/HOLD pass,
+and WAIT/REJECT/HOLD block new entries. The signal record remains auditable. The
+gate runs **before** NM-08, so a rejected hierarchy creates no proposal and
+nothing to forward; approved candidates still receive an independent risk
+decision and use the unchanged NM-10 bridge. Swing and long-term books are not
+gated.
+
+`ForecastHorizon.MINUTES_1` adds a real one-minute forecast cycle (initial at
+creation, T−30s and T−5s confirmations). Routes:
+`GET /market/multi-timeframe/status` and
+`GET /market/multi-timeframe/analysis?portfolio_id=…`. The API reference is in
+sync at **935 routes**. Rules, failure handling, tests, the real-data
+chronological comparison and latency measurements are in
+[MULTITIMEFRAME_TRADING_INTELLIGENCE.md](MULTITIMEFRAME_TRADING_INTELLIGENCE.md).

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { History, RefreshCw, Save, Search } from "lucide-react";
-import { API_BASE, apiGet, apiPut, getToken } from "../api";
+import { API_BASE, apiGet, apiPost, apiPut } from "../api";
 import { useApi, useDocumentTitle } from "../hooks";
 import { arrayFrom, dateTime, num, title } from "../lib";
 import {
@@ -127,16 +127,41 @@ const EMPTY_FILTERS: Filters = {
 function useDashboardEvents(): number {
   const [revision, setRevision] = useState(0);
   useEffect(() => {
-    const token = getToken();
-    const url = `${API_BASE}/events/stream${token ? `?token=${encodeURIComponent(token)}` : ""}`;
-    const stream = new EventSource(url);
     const refresh = () => setRevision((current) => current + 1);
-    DASHBOARD_EVENT_TYPES.forEach((eventType) =>
-      stream.addEventListener(eventType, refresh),
-    );
-    // EventSource reconnects on its own. A broken stream must not break the
-    // dashboard or turn into a polling loop.
-    return () => stream.close();
+    let cancelled = false;
+    let stream: EventSource | null = null;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    const scheduleRetry = () => {
+      if (cancelled || retry) return;
+      retry = setTimeout(() => {
+        retry = undefined;
+        void open();
+      }, 5_000);
+    };
+    const open = async () => {
+      try {
+        await apiPost("/events/session", {}, undefined, { timeoutMs: 5_000 });
+        if (cancelled) return;
+        stream = new EventSource(`${API_BASE}/events/stream`);
+        stream.onerror = () => {
+          stream?.close();
+          stream = null;
+          scheduleRetry();
+        };
+        DASHBOARD_EVENT_TYPES.forEach((eventType) =>
+          stream?.addEventListener(eventType, refresh),
+        );
+      } catch {
+        // A broken stream must not break the dashboard or become a polling loop.
+      }
+    };
+    void open();
+    // EventSource reconnects on its own while the server-side session lives.
+    return () => {
+      cancelled = true;
+      if (retry) clearTimeout(retry);
+      stream?.close();
+    };
   }, []);
   return revision;
 }

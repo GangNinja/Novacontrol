@@ -52,7 +52,7 @@ class DataStatus(StrEnum):
     FAILED = "FAILED"
 
 
-HORIZONS = ("5m", "15m", "20m", "1h", "1d", "3d", "5d", "30d", "90d")
+HORIZONS = ("1m", "5m", "15m", "20m", "1h", "1d", "3d", "5d", "30d", "90d")
 # Older notes called the one-hour contract 60m; the forecast engine emits 1h.
 HORIZON_ALIASES = {"60m": "1h"}
 HORIZON_FAMILIES = {

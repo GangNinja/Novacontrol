@@ -20,6 +20,7 @@ _COMPONENT_CATEGORIES = {
     "portfolio_management": "portfolio",
     "execution_quality": "execution",
 }
+_OPTIONAL_COMPONENT_CATEGORIES = {"cash_drag": "opportunity"}
 
 
 def _clamp(value: float, low: float = -1.0, high: float = 1.0) -> float:
@@ -413,6 +414,51 @@ class PortfolioManagementComponent(RewardComponent):
         )
 
 
+class CashDragComponent(RewardComponent):
+    """Charge idle cash for a positive decision-time expected return.
+
+    This is intentionally one-sided: it never pays a bonus for holding cash,
+    even when the forecast is negative or unavailable.  The term is therefore
+    an explicit opportunity cost, not a disguised abstention reward.
+    """
+
+    name = "cash_drag"
+    category = _OPTIONAL_COMPONENT_CATEGORIES[name]
+
+    def evaluate(self, context: RewardContext) -> ComponentResult:
+        view = context.transition
+        if view.after_equity <= 0:
+            return ComponentResult(
+                self.name, self.category, None, available=False, reason="no positive equity"
+            )
+        expected = view.expected_return
+        basis = "forecast_expected_return"
+        if expected is None or not view.forecast_available:
+            # The historical bar observations do not carry a forecast in the
+            # baseline evaluation.  Use only the already-computed trailing
+            # return as a decision-time opportunity proxy; never a future bar.
+            expected = float(view.market.get("return_5") or 0.0)
+            basis = "market_return_5_proxy"
+        cash_weight = max(0.0, min(1.0, view.cash_weight or 0.0))
+        drag = max(0.0, cash_weight * expected)
+        return ComponentResult(
+            self.name,
+            self.category,
+            -drag,
+            metrics={
+                "cash_weight": round(cash_weight, 8),
+                "expected_return": round(expected, 10),
+                "return_basis": basis,
+                "cash_drag": round(drag, 10),
+                "bonus_for_abstention": False,
+                "formula": "-max(0, cash_weight * expected_return)",
+                "information_boundary": (
+                    "decision-time forecast or trailing market return and simulated cash only"
+                ),
+            },
+        )
+
+
 class ExecutionQualityComponent(RewardComponent):
     name = "execution_quality"
     category = _COMPONENT_CATEGORIES[name]
@@ -482,22 +528,33 @@ COMPONENT_REGISTRY: dict[str, RewardComponent] = {
     "portfolio_management": PortfolioManagementComponent(),
     "execution_quality": ExecutionQualityComponent(),
 }
+EXPERIMENTAL_COMPONENT_REGISTRY: dict[str, RewardComponent] = {
+    **COMPONENT_REGISTRY,
+    "cash_drag": CashDragComponent(),
+}
 
 
-def validate_component_registry() -> None:
+def validate_component_registry(
+    registry: dict[str, RewardComponent] | None = None,
+) -> None:
+    selected = COMPONENT_REGISTRY if registry is None else registry
     expected = set(_COMPONENT_CATEGORIES)
-    if set(COMPONENT_REGISTRY) != expected:
+    if set(selected) == expected | set(_OPTIONAL_COMPONENT_CATEGORIES):
+        expected |= set(_OPTIONAL_COMPONENT_CATEGORIES)
+    if set(selected) != expected:
         raise RewardValidationError("reward component registry is incomplete")
-    for name, component in COMPONENT_REGISTRY.items():
+    for name, component in selected.items():
         if component.name != name:
             raise RewardValidationError(f"component registry key {name!r} does not match its name")
 
 
 __all__ = [
     "COMPONENT_REGISTRY",
+    "CashDragComponent",
     "DecisionQualityComponent",
     "DisciplineComponent",
     "ExecutionQualityComponent",
+    "EXPERIMENTAL_COMPONENT_REGISTRY",
     "ForecastUtilizationComponent",
     "PortfolioManagementComponent",
     "ProfitabilityComponent",

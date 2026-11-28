@@ -1283,6 +1283,7 @@ def interval_duration(resolution: DataInterval | str) -> timedelta:
         DataInterval.MINUTE_1: timedelta(minutes=1),
         DataInterval.MINUTE_5: timedelta(minutes=5),
         DataInterval.MINUTE_15: timedelta(minutes=15),
+        DataInterval.MINUTE_20: timedelta(minutes=20),
         DataInterval.MINUTE_30: timedelta(minutes=30),
         DataInterval.HOUR_1: timedelta(hours=1),
         DataInterval.DAY_1: timedelta(days=1),
@@ -1294,11 +1295,12 @@ def interval_duration(resolution: DataInterval | str) -> timedelta:
 def resolution_rank(resolution: DataInterval | str) -> int:
     """Coarse-to-fine rank; shared with the PI-01 horizon compatibility rules."""
     return {
-        DataInterval.MONTH_1: 8,
-        DataInterval.WEEK_1: 7,
-        DataInterval.DAY_1: 6,
-        DataInterval.HOUR_1: 5,
-        DataInterval.MINUTE_30: 4,
+        DataInterval.MONTH_1: 9,
+        DataInterval.WEEK_1: 8,
+        DataInterval.DAY_1: 7,
+        DataInterval.HOUR_1: 6,
+        DataInterval.MINUTE_30: 5,
+        DataInterval.MINUTE_20: 4,
         DataInterval.MINUTE_15: 3,
         DataInterval.MINUTE_5: 2,
         DataInterval.MINUTE_1: 1,

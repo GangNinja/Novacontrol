@@ -31,22 +31,29 @@ NovaMarket configuration is validated, versioned and secret-free. This reference
 | Frontend build/dev environment | `NOVAMARKET_API_ORIGIN` at Vite dev-server start; `VITE_API_BASE_URL` at build time | Changes the API target/origin; never provides server authority |
 | Local Vite proxy | `NOVACONTROL_ADMIN_TOKEN` at Vite dev-server start | Supplies the loopback-only admin session for `/market` and `/events`; the credential stays in the dev server, not the browser bundle |
 | Runtime browser token | `sessionStorage["novamarket.apiToken"]` | A session credential entered in the UI for separately hosted frontends; never persisted in `localStorage` or source |
+| Project `.env` | `.env` beside `novamarket/` (gitignored) | Read by the API at startup and by `start.ps1`. Real process variables always win; a file value only fills a variable that is not already set. Accepts `NAME=value`, `export NAME=value` and PowerShell `$env:NAME = "value"`. Values are never returned by any API and names only are applied. Ignored under pytest and when `NOVACONTROL_SKIP_DOTENV=1`. |
 
 The stored payload has `schema_version: 1` and `contract_version: "1.0.0"` in the accepted baseline. A newer/incompatible schema is refused rather than best-effort parsed. `POST /market/config` is a full validated configuration application; inspect the current payload before editing it.
 
 ## 2. Server environment variables
 
-These are verified names. All are optional for a local first run.
+These are verified names. A local first run needs either `NOVACONTROL_API_TOKEN` (or the
+launcher-generated `NOVACONTROL_ADMIN_TOKEN`) or the explicit tokenless-loopback opt-in
+`NOVACONTROL_ALLOW_ANONYMOUS_LOCAL=1`; a production-like configuration requires the API token.
 
 | Variable | Purpose | Default | Accepted / notes |
 |---|---|---|---|
-| `NOVACONTROL_API_TOKEN` | Shared bearer token for protected API routes | unset | Any non-empty local secret; `/health` stays public. Send `Authorization: Bearer <token>` |
+| `NOVACONTROL_API_TOKEN` | Shared bearer token for protected API routes | unset | Required (32+ random characters) for production-like/non-loopback deployments; 16+ when `NOVACONTROL_REQUIRE_AUTH=1`; `/health` stays public. Generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Send `Authorization: Bearer <token>` |
 | `NOVACONTROL_AUTONOMY_OPERATOR_TOKEN` | Dedicated token for autonomy mutations (`start`, `pause`, `resume`, `stop`, `recover`, decision/execution/exit runs) | unset | Must be a non-empty secret distinct from `NOVACONTROL_API_TOKEN`; a missing or equal value fails closed with 403. Send `X-Autonomy-Operator-Token: <token>` with ordinary authentication. Never put it in frontend source or `VITE_*`. |
-| `NOVACONTROL_ADMIN_TOKEN` | Local admin credential accepted only from loopback clients | unset; the local `start.ps1` launchers set `narasimha-novacontrol` | Accepted only when explicitly set, so a deployed backend behind a loopback reverse proxy cannot inherit a predictable key. Acts as both the ordinary API credential and the autonomy-operator credential for `127.0.0.1` requests, from either `Authorization: Bearer <key>` or `X-Autonomy-Operator-Token: <key>`. The Vite dev proxy sends it automatically; a key pasted into the API dialog also unlocks operator actions. Remote clients are always refused this credential; a deployed backend still requires the two configured tokens above. |
+| `NOVACONTROL_ADMIN_TOKEN` | Local admin credential accepted only from loopback clients | unset in the backend; `start.ps1` generates a random 64-hex value once and stores it in `.runtime/admin-token` | The old `narasimha-novacontrol` literal is refused unless the owner opts in with `NOVACONTROL_ALLOW_LEGACY_ADMIN_TOKEN=1` (next row). Acts as both the ordinary API credential and the autonomy-operator credential for `127.0.0.1` requests, from either `Authorization: Bearer <key>` or `X-Autonomy-Operator-Token: <key>`. The Vite dev proxy sends it automatically; a key pasted into the API dialog also unlocks operator actions. Remote clients are always refused this credential; a deployed backend still requires the two configured tokens above. |
+| `NOVACONTROL_ALLOW_LEGACY_ADMIN_TOKEN` | Development-only opt-in that accepts the retired launcher literal as an EXTRA loopback admin credential | `0` | `1` permits exactly `narasimha-novacontrol`, only for loopback clients and only outside a production-like environment; it is ignored (and the literal still refused) when `NOVACONTROL_ENV` is production-like. Every other weak secret remains refused. |
+| `NOVACONTROL_ALLOW_ANONYMOUS_LOCAL` | Explicit tokenless loopback development | `0` | Only `1` enables anonymous access, and only when no API/admin token is set, the environment is development/local/test, and every trusted host is loopback. Production-like or exposed configurations refuse to start. |
+| `NOVACONTROL_REQUIRE_AUTH` | Force authentication in a development environment | `0` | `1` requires `NOVACONTROL_API_TOKEN` (16+ characters) or `NOVACONTROL_ADMIN_TOKEN`; missing credentials fail startup. |
+| `NOVACONTROL_ENV` | Deployment classification | `development` | Any value outside `dev`, `development`, `local`, `test`, `testing` is production-like: API token required. |
 | `NOVAMARKET_CORS_ORIGINS` | Exact browser origins allowed by CORS | empty | Comma-separated origins, e.g. `http://127.0.0.1:5173`; exact match, no wildcard |
 | `NOVAMARKET_ALLOWED_ORIGINS` | Additional exact origins accepted by the application's mutation origin guard | built-in loopback entries, including `http://127.0.0.1:5173` | Comma-separated; do not disable the guard |
 | `NOVACONTROL_TRUSTED_HOSTS` | Accepted `Host` headers | `127.0.0.1,localhost,::1,testserver` | Comma-separated host names; keep loopback values for local use |
-| `NOVAMARKET_SMTP_HOST` | SMTP server hostname | unset | Required only for test/notification email |
+| `NOVAMARKET_SMTP_HOST` | SMTP server hostname | unset | Required only for test/notification email; may come from the process environment or the project `.env` |
 | `NOVAMARKET_SMTP_PORT` | SMTP port | `587` | Integer; transport uses the configured TLS policy |
 | `NOVAMARKET_SMTP_USER` | SMTP username | unset | Required by most authenticated relays |
 | `NOVAMARKET_SMTP_PASSWORD` | SMTP password | unset | Secret; supply through the process environment, never a committed file |
@@ -65,9 +72,9 @@ PowerShell session example:
 ```powershell
 $env:NOVACONTROL_API_TOKEN = "use-a-long-random-local-token"
 $env:NOVACONTROL_AUTONOMY_OPERATOR_TOKEN = "use-a-different-long-random-local-token"
-# The loopback-only key used by the backend and the local Vite proxy; the
-# launchers set it for local runs. Optional here: change it, or unset it.
-# $env:NOVACONTROL_ADMIN_TOKEN = "narasimha-novacontrol"
+# The loopback-only key used by the backend and the local Vite proxy. The
+# launcher generates it; export the same value only if you run Vite yourself.
+# $env:NOVACONTROL_ADMIN_TOKEN = "<64 random hex characters from .runtime/admin-token>"
 $env:NOVAMARKET_CORS_ORIGINS = "http://127.0.0.1:5173"
 $env:NOVAMARKET_API_ORIGIN = "http://127.0.0.1:8011"
 ```
@@ -276,6 +283,8 @@ npm run build
 |---|---|
 | API authentication | `NOVACONTROL_API_TOKEN`; shared with NovaControl |
 | Autonomy operator authentication | `NOVACONTROL_AUTONOMY_OPERATOR_TOKEN`; separate credential, held in Autonomy page memory only, never `sessionStorage` or `localStorage` |
+| SSE authentication | `POST /events/session` exchanges the bearer/admin credential for an opaque, HttpOnly, SameSite=Strict cookie scoped to `/events`; `GET /events/stream` refuses query-string tokens |
+| Anonymous local mode | `NOVACONTROL_ALLOW_ANONYMOUS_LOCAL=1` only; never inferred from a missing token, and refused for production-like/exposed deployments |
 | Browser token storage | ordinary API token in `sessionStorage` key `novamarket.apiToken`; the operator token is not stored |
 | CORS | `NOVAMARKET_CORS_ORIGINS` exact allowlist |
 | Mutation origin guard | `NOVAMARKET_ALLOWED_ORIGINS` plus built-in loopback entries |
@@ -294,6 +303,8 @@ The API is not a multi-tenant authorization system. A bearer token grants access
 - Activity/audit and risk alerts are separate surfaces; an empty list is not proof that nothing happened.
 - Provider latency/health is reported by `/market/data/providers` (and can be probed explicitly).
 - Ingestion and reconciliation errors are surfaced in status/error fields; do not hide them by lowering log levels.
+- Every HTTP response carries `X-Request-ID`; internal 5xx diagnostics are logged with the same id while the client receives a generic message.
+- `/audit/status` reports `write_failures`, `last_write_error` and `degraded`; a failed audit append is logged at CRITICAL and is never reported as a successful audit record.
 
 No log file path is promised by the app; capture stdout/stderr from the process that starts Uvicorn if you need persistent logs.
 

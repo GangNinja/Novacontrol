@@ -28,6 +28,7 @@ from novacontrol.novamarket.autonomy import (
     AutonomyMode,
     AutonomyRuntime,
     AutonomyStateError,
+    AutonomyValidationError,
     PAPER_ONLY,
     TRADING_IMPLEMENTED,
 )
@@ -119,16 +120,41 @@ class AutonomyRuntimeTests(unittest.TestCase):
         self.assertTrue(runtime.status()["lease"]["valid"] is False)
         runtime.close()
 
-    def test_autonomous_requires_acknowledgement_and_has_no_trading_path(self) -> None:
+    def test_resume_without_a_mode_restores_the_mode_that_was_paused(self) -> None:
+        runtime = self._runtime()
+        try:
+            runtime.start("autonomous", acknowledge_paper_only=True)
+            paused = runtime.pause()
+            self.assertEqual(paused["desired_mode"], "autonomous")
+            # No mode is supplied: the durable pre-pause mode is the target, and
+            # autonomous still requires its explicit paper-only acknowledgement.
+            resumed = runtime.resume(acknowledge_paper_only=True)
+            self.assertEqual(resumed["mode"], "autonomous")
+            self.assertEqual(resumed["desired_mode"], "autonomous")
+            self.assertTrue(resumed["paper_only"])
+            self.assertFalse(resumed["live_orders_possible"])
+
+            runtime.pause()
+            with self.assertRaises(AutonomyValidationError):
+                runtime.resume()
+            still_autonomous = runtime.resume(acknowledge_paper_only=True)
+            self.assertEqual(still_autonomous["mode"], "autonomous")
+            self.assertEqual(still_autonomous["desired_mode"], "autonomous")
+        finally:
+            runtime.close()
+
+    def test_autonomous_requires_acknowledgement_and_enables_only_paper_trading(self) -> None:
         runtime = self._runtime()
         with self.assertRaises(Exception):
             runtime.start("autonomous")
         started = runtime.start("autonomous", acknowledge_paper_only=True)
-        self.assertFalse(started["trading_implemented"])
-        self.assertFalse(started["orders_possible"])
-        self.assertEqual(started["release_gate"], "closed")
+        self.assertTrue(started["trading_implemented"])
+        self.assertTrue(started["orders_possible"])
+        self.assertFalse(started["live_orders_possible"])
+        self.assertEqual(started["release_gate"], "open")
         self.assertTrue(started["paper_only"])
         self.assertFalse(started["live_trading"])
+        self.assertFalse(started["broker_connected"])
         runtime.close()
 
     def test_lease_renewal_expiry_and_explicit_recovery(self) -> None:
@@ -185,7 +211,8 @@ class AutonomyRuntimeTests(unittest.TestCase):
         try:
             meta = store._conn.execute("SELECT value FROM autonomy_meta WHERE key = 'schema_version'").fetchone()
             # AT-02 adds the monitoring tables additively; the AT-01 tables stay.
-            self.assertEqual(meta["value"], "3")
+            # Stage C R-02 adds the append-only control audit additively.
+            self.assertEqual(meta["value"], "5")
             tables = {
                 row["name"]
                 for row in store._conn.execute(
@@ -203,6 +230,7 @@ class AutonomyRuntimeTests(unittest.TestCase):
                     "autonomy_monitoring_state",
                     "autonomy_monitoring_cycles",
                     "autonomy_monitoring_candidates",
+                    "autonomy_control_events",
                 },
             )
         finally:
@@ -242,7 +270,7 @@ class AutonomyRuntimeTests(unittest.TestCase):
 
     def test_paper_only_constants(self) -> None:
         self.assertTrue(PAPER_ONLY)
-        self.assertFalse(TRADING_IMPLEMENTED)
+        self.assertTrue(TRADING_IMPLEMENTED)
 
 
 @unittest.skipIf(TestClient is None, "fastapi.testclient requires httpx")
@@ -307,8 +335,9 @@ class AutonomyApiTests(unittest.TestCase):
         self.assertEqual(body["mode"], "monitoring")
         self.assertEqual(body["runtime_state"], "running")
         self.assertTrue(body["operator_authorized"])
-        self.assertFalse(body["trading_implemented"])
-        self.assertFalse(body["orders_possible"])
+        self.assertTrue(body["trading_implemented"])
+        self.assertTrue(body["orders_possible"])
+        self.assertFalse(body["live_orders_possible"])
 
         status = self.client.get("/market/autonomy/status", headers=self.operator)
         self.assertEqual(status.json()["mode"], "monitoring")
@@ -324,6 +353,12 @@ class AutonomyApiTests(unittest.TestCase):
             json={"mode": "monitoring"},
         )
         self.assertEqual(resumed.status_code, 200, resumed.text)
+        # Omitting the mode restores the paused mode rather than silently
+        # downgrading (or escalating) it.
+        self.client.post("/market/autonomy/pause", headers=self.operator, json={})
+        restored = self.client.post("/market/autonomy/resume", headers=self.operator, json={})
+        self.assertEqual(restored.status_code, 200, restored.text)
+        self.assertEqual(restored.json()["mode"], "monitoring")
         stopped = self.client.post("/market/autonomy/stop", headers=self.operator, json={})
         self.assertEqual(stopped.status_code, 200, stopped.text)
         self.assertEqual(stopped.json()["mode"], "disabled")
@@ -353,19 +388,20 @@ class AutonomyApiTests(unittest.TestCase):
                 renewed = datetime.fromisoformat(status.json()["lease"]["expires_at"])
                 self.assertGreater(renewed, first)
 
-    def test_contract_exposes_no_trading_or_order_route(self) -> None:
+    def test_contract_exposes_paper_execution_and_no_live_route(self) -> None:
         contracts = self.client.get("/market/autonomy/contracts", headers=self.auth)
         self.assertEqual(contracts.status_code, 200, contracts.text)
         body = contracts.json()
-        self.assertFalse(body["trading_implemented"])
-        self.assertFalse(body["orders_possible"])
-        self.assertEqual(body["release_gate"], "closed")
+        self.assertTrue(body["trading_implemented"])
+        self.assertTrue(body["orders_possible"])
+        self.assertFalse(body["live_orders_possible"])
+        self.assertEqual(body["release_gate"], "open")
         self.assertTrue(body["paper_only"])
         self.assertFalse(body["live_trading"])
+        self.assertFalse(body["broker_connected"])
         for path in body["routes"]:
-            self.assertNotIn("order", path["path"])
-            self.assertNotIn("scan", path["path"])
-            self.assertNotIn("execute", path["path"])
+            self.assertNotIn("live", path["path"])
+            self.assertNotIn("broker", path["path"])
 
     def test_operator_token_is_distinct_and_fails_closed_when_unset(self) -> None:
         self._env.stop()

@@ -6,11 +6,11 @@ from novacontrol.api import ApiSurface, ApiTokenAuthenticator
 
 
 class ApiTests(unittest.TestCase):
-    def test_authenticator_allows_local_when_no_token_configured(self) -> None:
+    def test_authenticator_fails_closed_when_no_token_configured(self) -> None:
         result = ApiTokenAuthenticator().authenticate(None)
 
-        self.assertTrue(result.authenticated)
-        self.assertEqual(result.principal, "local")
+        self.assertFalse(result.authenticated)
+        self.assertEqual(result.reason, "Authentication is not configured.")
 
     def test_authenticator_requires_bearer_token_when_configured(self) -> None:
         authenticator = ApiTokenAuthenticator("secret")

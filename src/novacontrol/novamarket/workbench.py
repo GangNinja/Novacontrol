@@ -522,6 +522,7 @@ class MarketWorkbench:
             DataInterval.MINUTE_1: "1-minute",
             DataInterval.MINUTE_5: "5-minute",
             DataInterval.MINUTE_15: "15-minute",
+            DataInterval.MINUTE_20: "20-minute",
             DataInterval.MINUTE_30: "30-minute",
             DataInterval.HOUR_1: "1-hour",
             DataInterval.DAY_1: "Daily",

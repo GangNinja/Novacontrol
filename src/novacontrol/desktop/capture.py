@@ -840,6 +840,13 @@ class PersistentScreenCapture:
             return None
         try:
             raw = await asyncio.wait_for(process.stdout.readline(), timeout)
+        except asyncio.CancelledError:
+            # A cancelled read (the startup banner included) leaves its reply on
+            # the pipe: the next exchange would read that line as its own answer
+            # (a cancelled capture made the following command parse "ready
+            # 800x600" as a frame). Mark the worker for a restart, then unwind.
+            self._desynced = True
+            raise
         except TimeoutError:
             self.last_error = f"the capture worker did not answer in {timeout:.0f}s"
             # The worker may still answer the command we stopped waiting for, and

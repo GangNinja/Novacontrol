@@ -193,19 +193,37 @@ class PortfolioStore:
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
-        """One atomic unit across several writes; inner calls do not commit."""
+        """One atomic unit across several writes; inner calls do not commit.
+
+        Nested blocks use savepoints instead of a second ``BEGIN``.  SQLite
+        rejects a nested ``BEGIN IMMEDIATE`` outright, so the previous shape
+        made the documented nested-call contract fail before the inner body ran.
+        An inner failure rolls back only that savepoint; the outer block may
+        still commit the writes it accepted.
+        """
         with self._lock:
+            outermost = self._depth == 0
+            savepoint = f"portfolio_tx_{self._depth}"
+            if outermost:
+                self._connection.execute("BEGIN IMMEDIATE")
+            else:
+                self._connection.execute(f"SAVEPOINT {savepoint}")
             self._depth += 1
-            self._connection.execute("BEGIN IMMEDIATE")
             try:
                 yield
-            except Exception:
+            except BaseException:
                 self._depth -= 1
-                self._connection.rollback()
+                if outermost:
+                    self._connection.rollback()
+                else:
+                    self._connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                    self._connection.execute(f"RELEASE SAVEPOINT {savepoint}")
                 raise
             self._depth -= 1
-            if self._depth == 0:
+            if outermost:
                 self._connection.commit()
+            else:
+                self._connection.execute(f"RELEASE SAVEPOINT {savepoint}")
 
     def _commit(self) -> None:
         if self._depth == 0:

@@ -26,6 +26,7 @@ from novacontrol.novamarket.agent_training.agent import (
     ACTION_NAMES,
     DQNAgent,
     ObservationEncoder,
+    TrainedPolicy,
 )
 from novacontrol.novamarket.agent_training.models import (
     PolicyArtifact,
@@ -36,6 +37,11 @@ from novacontrol.novamarket.agent_training.models import (
 )
 from novacontrol.novamarket.backtesting.core import HistoricalBar
 from novacontrol.novamarket.rewards import RewardService, default_reward_config
+from novacontrol.novamarket.rl import (
+    RLEnvironment,
+    RLEnvironmentConfig,
+    RLInvalidActionError,
+)
 from test_novamarket_pi14 import environment_payload
 
 START = datetime(2026, 1, 5, 10, 0, tzinfo=UTC)
@@ -236,6 +242,133 @@ class ModelContractTests(unittest.TestCase):
         payload["feature_set_version"] = "unverified-feature-set-v9"
         with self.assertRaises(TrainingValidationError):
             TrainingConfig.from_mapping(payload)
+
+
+class TrainedPolicyActionMaskTests(unittest.TestCase):
+    """The adapter must never emit a structurally impossible trade."""
+
+    def decision(
+        self,
+        q_values: Sequence[float],
+        *,
+        portfolio: dict[str, Any],
+        environment: dict[str, Any] | None = None,
+    ) -> Any:
+        encoder = ObservationEncoder()
+        agent = DQNAgent(
+            input_dim=encoder.dimension,
+            hidden_layers=(8,),
+            seed=11,
+            encoder=encoder,
+        )
+        policy = TrainedPolicy(agent, name="masked-test-policy")
+        with mock.patch.object(agent, "q_values", return_value=list(q_values)):
+            return policy.select(
+                observation={"instrument_id": "XNSE:ALPHA"},
+                portfolio=portfolio,
+                environment=environment
+                or {
+                    "max_position_weight": "0.25",
+                    "max_gross_exposure": "1.00",
+                },
+                history=(),
+            )
+
+    @staticmethod
+    def portfolio(*, quantity: str, market_value: str) -> dict[str, Any]:
+        positions = []
+        if Decimal(quantity) > 0:
+            positions.append(
+                {
+                    "instrument_id": "XNSE:ALPHA",
+                    "quantity": quantity,
+                    "market_value": market_value,
+                    "last_price": "100.00",
+                }
+            )
+        return {
+            "cash": "75000.00",
+            "equity": "100000.00",
+            "positions": positions,
+        }
+
+    def test_buy_is_masked_at_the_position_cap(self) -> None:
+        decision = self.decision(
+            [10.0, 0.0, 1.0, 0.0, 0.0],
+            portfolio=self.portfolio(quantity="250.000000", market_value="25000.00"),
+        )
+        self.assertEqual(decision.action["action_type"], "hold")
+        self.assertIn("buy is unavailable at the position/exposure cap", decision.rationale)
+
+    def test_sell_is_masked_without_a_position(self) -> None:
+        decision = self.decision(
+            [0.0, 10.0, 1.0, 0.0, 0.0],
+            portfolio=self.portfolio(quantity="0", market_value="0.00"),
+        )
+        self.assertEqual(decision.action["action_type"], "hold")
+        self.assertIn("sell is unavailable without a simulated position", decision.rationale)
+
+    def test_buy_remains_legal_below_the_cap(self) -> None:
+        decision = self.decision(
+            [10.0, 0.0, 1.0, 0.0, 0.0],
+            portfolio=self.portfolio(quantity="100.000000", market_value="10000.00"),
+        )
+        self.assertEqual(decision.action["action_type"], "buy")
+        self.assertNotIn("buy is unavailable", decision.rationale)
+
+    def test_sell_remains_legal_with_a_position(self) -> None:
+        decision = self.decision(
+            [0.0, 10.0, 1.0, 0.0, 0.0],
+            portfolio=self.portfolio(quantity="250.000000", market_value="25000.00"),
+        )
+        self.assertEqual(decision.action["action_type"], "sell")
+
+    def test_the_stricter_gross_exposure_cap_also_masks_buy(self) -> None:
+        decision = self.decision(
+            [10.0, 0.0, 1.0, 0.0, 0.0],
+            portfolio=self.portfolio(quantity="250.000000", market_value="25000.00"),
+            environment={
+                "max_position_weight": "0.50",
+                "max_gross_exposure": "0.25",
+            },
+        )
+        self.assertEqual(decision.action["action_type"], "hold")
+
+    def test_environment_risk_and_execution_checks_remain_authoritative(self) -> None:
+        bars = price_bars()
+        payload = environment_payload(
+            bars,
+            max_position_weight="0.25",
+            max_order_notional="25000.00",
+        )
+        config = RLEnvironmentConfig.from_mapping(payload)
+        env = RLEnvironment(config, bars)
+        env.reset("mask-authority-buy")
+        env.step(
+            {
+                "action_type": "buy",
+                "instrument_id": "XNSE:ALPHA",
+                "size_fraction": "0.25",
+            }
+        )
+        self.assertTrue(env.portfolio.positions)
+        self.assertGreaterEqual(
+            env.portfolio.positions[0].market_value,
+            env.portfolio.equity * Decimal("0.25"),
+        )
+        with self.assertRaisesRegex(RLInvalidActionError, "position/exposure"):
+            env.step(
+                {
+                    "action_type": "buy",
+                    "instrument_id": "XNSE:ALPHA",
+                    "size_fraction": "0.25",
+                }
+            )
+
+        flat = RLEnvironment(config, bars)
+        flat.reset("mask-authority-sell")
+        with self.assertRaisesRegex(RLInvalidActionError, "no simulated position"):
+            flat.step({"action_type": "sell", "instrument_id": "XNSE:ALPHA"})
 
 
 class TrainingFixture(unittest.TestCase):

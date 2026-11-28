@@ -101,6 +101,32 @@ export function dateTime(value: unknown, fallback = "—"): string {
   }).format(date);
 }
 
+export function dateTimeInZone(
+  value: unknown,
+  timeZone: unknown,
+  fallback = "—",
+): string {
+  const zone = String(timeZone ?? "").trim();
+  if (!zone) return fallback;
+  if (!value) return fallback;
+  const date = new Date(String(value));
+  if (Number.isNaN(date.getTime())) return fallback;
+  try {
+    return new Intl.DateTimeFormat("en-IN", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      timeZone: zone,
+      timeZoneName: "short",
+    }).format(date);
+  } catch {
+    // An unknown IANA zone must not silently fall back to browser time.
+    return fallback;
+  }
+}
+
 export function shortDate(value: unknown, fallback = "—"): string {
   if (!value) return fallback;
   const date = new Date(String(value));
@@ -119,7 +145,7 @@ export function timeAgo(value: unknown): string {
   const seconds = Math.round((date.getTime() - Date.now()) / 1000);
   const abs = Math.abs(seconds);
   const formatter = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
-  if (abs < 45) return "just now";
+  if (abs < 45) return formatter.format(Math.round(seconds), "second");
   if (abs < 3600) return formatter.format(Math.round(seconds / 60), "minute");
   if (abs < 86_400) return formatter.format(Math.round(seconds / 3600), "hour");
   if (abs < 2_592_000) return formatter.format(Math.round(seconds / 86_400), "day");

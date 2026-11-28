@@ -30,7 +30,17 @@ FEATURE_SET_VERSION = "pi04-feature-set-1.0"
 REGIME_METHOD_VERSION = "pi04-regime-1.0"
 PREPROCESSING_VERSION = "pi04-preprocess-1.0"
 SELECTION_VERSION = "pi04-selection-1.0"
-SUPPORTED_RESOLUTIONS = ("1m", "5m", "15m", "30m", "1h", "1d", "1wk", "1mo")
+SUPPORTED_RESOLUTIONS = (
+    "1m",
+    "5m",
+    "15m",
+    "20m",
+    "30m",
+    "1h",
+    "1d",
+    "1wk",
+    "1mo",
+)
 
 _INSTRUMENT_ID = re.compile(r"^[A-Z0-9][A-Z0-9._:-]{0,63}$")
 
@@ -133,6 +143,7 @@ def _canonical_resolution(value: str) -> str:
         "1minute": "1m",
         "5min": "5m",
         "15min": "15m",
+        "20min": "20m",
         "30min": "30m",
         "60m": "1h",
         "hour": "1h",

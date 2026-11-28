@@ -26,6 +26,7 @@ Guarantees this class is responsible for:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -400,10 +401,18 @@ class MarketEventRadar:
     ) -> dict[str, int]:
         """Run the pipeline for each entry; one bad entry cannot stop the rest."""
         counts = {"created": 0, "updated": 0, "duplicates": 0, "unclassified": 0, "rejected": 0}
+        # The instrument table and its entity hints are identical for every
+        # entry in one refresh.  Build them once, not once per feed item.
+        instruments = self.instruments()
+        entities = entity_hints(instruments)
         for entry in entries:
             try:
                 outcome = await self._ingest_entry(
-                    definition, entry, fetched_at or self._clock()
+                    definition,
+                    entry,
+                    fetched_at or self._clock(),
+                    instruments=instruments,
+                    entities=entities,
                 )
             except (EventValidationError, EventStateError) as exc:
                 counts["rejected"] += 1
@@ -431,11 +440,17 @@ class MarketEventRadar:
         definition: EventSourceDefinition,
         entry: SourceEntry,
         fetched_at: datetime,
+        *,
+        instruments: Sequence[mapping_module.InstrumentView],
+        entities: Sequence[extraction_module.EntityHint],
     ) -> str:
-        instruments = self.instruments()
-        extraction = extraction_module.extract(
+        # Extraction is deterministic CPU work (normalization plus a regex test
+        # for every instrument alias).  Run it off the event loop: a refresh
+        # must never make the API stop answering while it classifies a feed.
+        extraction = await asyncio.to_thread(
+            extraction_module.extract,
             entry,
-            entities=entity_hints(instruments),
+            entities=entities,
             publisher=definition.publisher,
         )
         if extraction.unclassified:

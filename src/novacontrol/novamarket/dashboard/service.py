@@ -1528,7 +1528,7 @@ class PredictionDashboardService:
                     ),
                     "checkpoint_schedule": (
                         "intraday T-20/T-5/T-1/T"
-                        if cycle_horizon in {"5m", "15m", "20m", "1h"}
+                        if cycle_horizon in {"1m", "5m", "15m", "20m", "1h"}
                         else "as recorded for this swing/long-term lifecycle"
                     ),
                     "evaluation_schedule": _text(

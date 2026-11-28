@@ -20,6 +20,8 @@ from novacontrol.novamarket.contracts import (
     StrategyStateError,
     StrategyValidationError,
 )
+from novacontrol.novamarket.marketdata.dedupe import one_close_per_session
+from novacontrol.novamarket.marketdata.models import DataInterval
 from novacontrol.novamarket.risk.metrics import sharpe as sharpe_metric
 from novacontrol.novamarket.strategies.catalog import (
     EVALUATORS,
@@ -81,6 +83,7 @@ class StrategyEngine:
         *,
         market_data: Any | None = None,
         forecasts: Any | None = None,
+        timeframe: Any | None = None,
         radar: Any | None = None,
         discovery: Any | None = None,
         publisher: Publisher | None = None,
@@ -92,6 +95,7 @@ class StrategyEngine:
         self._risk = risk
         self._market_data = market_data
         self._forecasts = forecasts
+        self._timeframe = timeframe
         self._radar = radar
         self._discovery = discovery
         self._publisher = publisher
@@ -116,6 +120,10 @@ class StrategyEngine:
 
     def set_forecasts(self, forecasts: Any | None) -> None:
         self._forecasts = forecasts
+
+    def set_timeframe_analyzer(self, analyzer: Any | None) -> None:
+        """Install the 20m/5m/1m analysis gate for day-trading entries."""
+        self._timeframe = analyzer
 
     def set_radar(self, radar: Any | None) -> None:
         self._radar = radar
@@ -550,9 +558,17 @@ class StrategyEngine:
             raise StrategyStateError(
                 f"{signal.signal_type.value} needs an existing holding of {signal.instrument_id}"
             )
+        price = signal.reference_price
+        if price is None or price <= 0:
+            # A signal with no positive reference price cannot size an EXIT or
+            # validate a notional.  Fail closed with a validation error instead
+            # of raising an opaque TypeError while multiplying by None.
+            raise StrategyValidationError(
+                "signal has no positive reference price; re-evaluate before proposing"
+            )
         action = _ACTION_BY_SIGNAL[signal.signal_type]
         side = _SIDE_BY_SIGNAL[signal.signal_type]
-        amount = self._notional(record, signal, detail, holding, notional)
+        amount = self._notional(record, signal, detail, holding, notional, price)
         if amount <= 0:
             raise StrategyValidationError("a proposal needs a positive notional")
         if holding is not None:
@@ -563,10 +579,16 @@ class StrategyEngine:
                 raise StrategyValidationError(
                     f"SELL notional {amount} exceeds the held value {holding_value}"
                 )
-            if signal.signal_type is SignalType.EXIT and amount != holding_value:
-                raise StrategyValidationError(
-                    f"EXIT must close the whole position ({holding_value}), not {amount}"
+            if signal.signal_type is SignalType.EXIT:
+                quantity = Decimal(str(holding.get("quantity") or "0"))
+                expected = (quantity * price).quantize(
+                    Decimal("0.01")
                 )
+                if amount != expected:
+                    raise StrategyValidationError(
+                        f"EXIT must close the whole {quantity} unit position "
+                        f"({expected}), not {amount}"
+                    )
         proposal_id = make_id("sprop_", signal_id, action, str(amount))
         existing = self._store.proposal(proposal_id)
         if existing is not None:
@@ -670,7 +692,12 @@ class StrategyEngine:
         detail: Mapping[str, Any],
         holding: Mapping[str, Any] | None,
         requested: object | None,
+        reference_price: Decimal,
     ) -> Decimal:
+        exit_quantity = Decimal(str((holding or {}).get("quantity") or "0"))
+        exit_value = (exit_quantity * reference_price).quantize(
+            Decimal("0.01")
+        )
         if requested is not None:
             try:
                 value = Decimal(str(requested))
@@ -678,14 +705,20 @@ class StrategyEngine:
                 raise StrategyValidationError("notional must be a decimal number") from exc
             if value <= 0:
                 raise StrategyValidationError("notional must be positive")
+            if signal.signal_type is SignalType.EXIT and value != exit_value:
+                raise StrategyValidationError(
+                    f"EXIT must close the whole {exit_quantity} unit position "
+                    f"({exit_value}), not {value.quantize(Decimal('0.01'))}"
+                )
             return value.quantize(Decimal("0.01"))
         total = Decimal(str(detail["valuation"]["total_value"]))
         if signal.signal_type is SignalType.BUY:
             fraction = Decimal(str(record.config.get("notional_fraction", 0.10)))
             return (total * fraction).quantize(Decimal("0.01"))
+        if signal.signal_type is SignalType.EXIT:
+            return exit_value
         value = Decimal(str((holding or {}).get("market_value") or "0"))
-        factor = Decimal("0.50") if signal.signal_type is SignalType.SELL else Decimal("1")
-        return (value * factor).quantize(Decimal("0.01"))
+        return (value * Decimal("0.50")).quantize(Decimal("0.01"))
 
     async def forward(self, proposal_id: str, *, actor: str = "") -> dict[str, Any]:
         """Hand an approved proposal to NM-10 paper execution exactly once."""
@@ -756,6 +789,25 @@ class StrategyEngine:
         ]
         signals: list[StrategySignal] = []
         errors: list[dict[str, str]] = []
+        detail = self._portfolios.detail(portfolio_id)
+        horizon_value = str(detail["portfolio"]["horizon"])
+        timeframe_applied = horizon_value == "short_term" and self._timeframe is not None
+        timeframe_decisions: dict[str, Any] = {}
+        timeframe_errors: list[dict[str, str]] = []
+        analyzer = self._timeframe if timeframe_applied else None
+        if analyzer is not None:
+            for instrument_id in self._instruments(detail, instrument_ids):
+                try:
+                    timeframe_decisions[instrument_id] = analyzer.analyse(
+                        instrument_id
+                    )
+                except Exception as exc:  # noqa: BLE001 - fail closed per instrument
+                    timeframe_errors.append(
+                        {
+                            "instrument_id": instrument_id,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
         for record in chosen:
             if record.status is not StrategyStatus.ACTIVE:
                 continue
@@ -774,7 +826,36 @@ class StrategyEngine:
                 )
             except Exception as exc:  # noqa: BLE001 - one strategy cannot stop others
                 errors.append({"strategy_id": record.strategy_id, "error": str(exc)})
-        selected, conflicts = await self._resolve_conflicts(signals, conflict_policy)
+        admissible = signals
+        timeframe_rejected: list[dict[str, Any]] = []
+        if timeframe_applied:
+            admissible = []
+            for signal in signals:
+                if signal.signal_type not in {SignalType.BUY, SignalType.SELL}:
+                    admissible.append(signal)
+                    continue
+                decision = timeframe_decisions.get(signal.instrument_id)
+                if decision is not None and decision.allows_signal(
+                    signal.signal_type.value
+                ):
+                    admissible.append(signal)
+                    continue
+                timeframe_rejected.append(
+                    {
+                        "signal_id": signal.signal_id,
+                        "instrument_id": signal.instrument_id,
+                        "signal_type": signal.signal_type.value,
+                        "timeframe_outcome": (
+                            decision.outcome.value if decision is not None else "unavailable"
+                        ),
+                        "reason": (
+                            "; ".join(decision.reasons)
+                            if decision is not None
+                            else "multi-timeframe analysis is unavailable"
+                        ),
+                    }
+                )
+        selected, conflicts = await self._resolve_conflicts(admissible, conflict_policy)
         conflict_by_signal = {
             conflict.selected_signal_id: conflict.conflict_id
             for conflict in conflicts
@@ -802,6 +883,14 @@ class StrategyEngine:
             "conflicts": [item.to_dict() for item in conflicts],
             "proposals": proposals,
             "errors": errors,
+            "timeframe": {
+                "applied": timeframe_applied,
+                "portfolio_horizon": horizon_value,
+                "applies_to": "short_term/day_trading entries only",
+                "decisions": [item.to_dict() for item in timeframe_decisions.values()],
+                "rejected": timeframe_rejected,
+                "errors": timeframe_errors,
+            },
         }
 
     async def _resolve_conflicts(
@@ -1113,7 +1202,23 @@ class StrategyEngine:
                 result["observed_at"] = getattr(selected, "observed_at", None)
             # Take the newest window, then restore chronological order for the
             # evaluators. Ascending here would take the OLDEST 200 bars.
-            page = self._market_data.bars(instrument_id, limit=200, ascending=False)
+            # The strategy catalogue is defined on daily closes.  Without an
+            # explicit interval the store returns every interval mixed together,
+            # so once 1m/5m hierarchy data exists it would silently become the
+            # strategy's input series.
+            try:
+                page = self._market_data.bars(
+                    instrument_id,
+                    interval=DataInterval.DAY_1,
+                    limit=200,
+                    ascending=False,
+                )
+            except TypeError:
+                # Older injected market adapters do not accept an interval;
+                # the real engine does, and this keeps such adapters usable.
+                page = self._market_data.bars(
+                    instrument_id, limit=200, ascending=False
+                )
             bars = list(getattr(page, "items", ()) or ())
             # A provider flag is a request, not a guarantee. Order the window
             # by the bar timestamp so an oldest-first or unstable source still
@@ -1132,6 +1237,11 @@ class StrategyEngine:
                     return float(observed.timestamp())
 
                 bars.sort(key=_epoch)
+            # One effective close per exchange session.  The store's unique
+            # key includes the provider, so an official bhavcopy import and
+            # a quote provider can otherwise contribute two closes for one
+            # session and shift the SMA window.
+            bars = one_close_per_session(bars)
             closes: list[float] = []
             highs: list[float] = []
             lows: list[float] = []

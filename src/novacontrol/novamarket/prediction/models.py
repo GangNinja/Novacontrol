@@ -91,6 +91,7 @@ class ForecastFamily(StrEnum):
 class ForecastHorizon(StrEnum):
     """The horizon labels the prediction program must distinguish."""
 
+    MINUTES_1 = "1m"
     MINUTES_5 = "5m"
     MINUTES_15 = "15m"
     MINUTES_20 = "20m"
@@ -202,11 +203,12 @@ _INTERVAL_RANK: dict[DataInterval, int] = {
     DataInterval.MINUTE_1: 1,
     DataInterval.MINUTE_5: 2,
     DataInterval.MINUTE_15: 3,
-    DataInterval.MINUTE_30: 4,
-    DataInterval.HOUR_1: 5,
-    DataInterval.DAY_1: 6,
-    DataInterval.WEEK_1: 7,
-    DataInterval.MONTH_1: 8,
+    DataInterval.MINUTE_20: 4,
+    DataInterval.MINUTE_30: 5,
+    DataInterval.HOUR_1: 6,
+    DataInterval.DAY_1: 7,
+    DataInterval.WEEK_1: 8,
+    DataInterval.MONTH_1: 9,
 }
 
 
@@ -249,6 +251,15 @@ class HorizonSpec:
 #: contract targets; an exchange calendar may move an actual target across a
 #: holiday, which is why the persisted target timestamp remains authoritative.
 HORIZON_SPECS: dict[ForecastHorizon, HorizonSpec] = {
+    ForecastHorizon.MINUTES_1: HorizonSpec(
+        ForecastHorizon.MINUTES_1,
+        ForecastFamily.INTRADAY,
+        timedelta(minutes=1),
+        DataInterval.MINUTE_1,
+        30,
+        0.02,
+        "One-minute direction for entry and exit timing.",
+    ),
     ForecastHorizon.MINUTES_5: HorizonSpec(
         ForecastHorizon.MINUTES_5,
         ForecastFamily.INTRADAY,

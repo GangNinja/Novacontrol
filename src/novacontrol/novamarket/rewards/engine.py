@@ -8,7 +8,11 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from .components import COMPONENT_REGISTRY, validate_component_registry
+from .components import (
+    COMPONENT_REGISTRY,
+    EXPERIMENTAL_COMPONENT_REGISTRY,
+    validate_component_registry,
+)
 from .models import (
     ComponentResult,
     RewardConfig,
@@ -35,9 +39,13 @@ class RewardEngine:
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._registry = dict(registry or COMPONENT_REGISTRY)
-        validate_component_registry()
-        if set(self._registry) != set(COMPONENT_REGISTRY):
-            raise RewardValidationError("a custom reward registry must contain every component")
+        validate_component_registry(self._registry)
+        allowed_registries = (
+            set(COMPONENT_REGISTRY),
+            set(EXPERIMENTAL_COMPONENT_REGISTRY),
+        )
+        if set(self._registry) not in allowed_registries:
+            raise RewardValidationError("a reward registry must contain every supported component")
         self._clock = clock or (lambda: datetime.now(UTC))
         self._lock = threading.RLock()
         self._calculations = 0
@@ -59,6 +67,12 @@ class RewardEngine:
         config = config or default_reward_config()
         if not isinstance(config, RewardConfig):
             raise RewardValidationError("config must be a RewardConfig")
+        unavailable = sorted(set(config.enabled) - set(self._registry))
+        if unavailable:
+            raise RewardValidationError(
+                "enabled component(s) are unavailable in this reward engine: "
+                + ", ".join(unavailable)
+            )
         view = TransitionView.from_transition(transition, environment=environment)
         history_views = tuple(
             TransitionView.from_transition(row, environment=environment)
@@ -167,7 +181,7 @@ class RewardEngine:
                     "component": name,
                     "contribution": _round(value),
                     "weight": float(config.components.get(name, 0.0)),
-                    "category": COMPONENT_REGISTRY[name].category,
+                    "category": self._registry[name].category,
                 }
                 for name, value in contributions.items()
             ),

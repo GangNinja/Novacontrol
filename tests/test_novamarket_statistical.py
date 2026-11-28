@@ -54,9 +54,15 @@ from novacontrol.novamarket.statistical import (
 )
 from novacontrol.novamarket.statistical.metrics import (
     PredictionRow,
+    StatisticalMetrics,
     evaluate_rows,
 )
-from novacontrol.novamarket.statistical.validation import default_resolution
+from novacontrol.novamarket.statistical.validation import (
+    SELECTION_MARGIN_PCT,
+    ModelComparison,
+    _select_with_margin,
+    default_resolution,
+)
 from novacontrol.api.app import create_app
 from novacontrol.application import NovaControlApplication
 from novacontrol.browser import NoopBrowserRunner
@@ -462,6 +468,21 @@ class LeakageSafeEvaluationTests(unittest.TestCase):
         self.assertFalse(report.test_used_for_selection)
         self.assertIn(report.selected_model, {"naive_last", "random_walk", "sma", "ses"})
         self.assertEqual(report.selection_metric, "validation_return_mae")
+        self.assertEqual(report.selection_margin_pct, SELECTION_MARGIN_PCT)
+        self.assertIn(report.selection_decision, {"baseline", "challenger"})
+        if report.selection_decision == "baseline":
+            self.assertEqual(report.selected_model, "random_walk")
+        else:
+            self.assertNotEqual(report.selected_model, "random_walk")
+            self.assertIsNotNone(report.challenger_validation_mae)
+            self.assertIsNotNone(report.required_challenger_mae)
+            self.assertLessEqual(
+                report.challenger_validation_mae or 0.0,
+                report.required_challenger_mae or 0.0,
+            )
+        payload = report.to_dict()
+        self.assertEqual(payload["selection_margin_pct"], SELECTION_MARGIN_PCT)
+        self.assertEqual(payload["selection_decision"], report.selection_decision)
         self.assertGreater(report.validation_origins, 0)
         self.assertGreater(report.test_origins, 0)
         self.assertTrue(report.regime_samples)
@@ -474,6 +495,35 @@ class LeakageSafeEvaluationTests(unittest.TestCase):
             self.assertIsNotNone(model.validation.return_mae)
             self.assertIsNotNone(model.test)
 
+    def test_invalid_selection_margin_is_rejected(self) -> None:
+        rows = _bars(280)
+        for margin in (-0.1, 100.0, float("nan")):
+            with self.assertRaises(StatisticalValidationError):
+                evaluate_models(
+                    [row.close for row in rows],
+                    rows,
+                    instrument_id="XNSE:ALPHA",
+                    horizon="1d",
+                    resolution="1d",
+                    models=("random_walk", "sma"),
+                    selection_margin_pct=margin,
+                )
+
+    def test_random_walk_baseline_is_added_when_the_caller_omits_it(self) -> None:
+        rows = _bars(280)
+        report = evaluate_models(
+            [row.close for row in rows],
+            rows,
+            instrument_id="XNSE:ALPHA",
+            horizon="1d",
+            resolution="1d",
+            models=("sma",),
+        )
+        self.assertIn("random_walk", report.models)
+        self.assertEqual(report.baseline_model, "random_walk")
+        self.assertIn(report.selected_model, {"sma", "random_walk"})
+        self.assertIn(report.selection_decision, {"baseline", "challenger"})
+
     def test_insufficient_history_is_reported_not_fabricated(self) -> None:
         rows = _bars(40)
         with self.assertRaises(StatisticalValidationError):
@@ -484,6 +534,80 @@ class LeakageSafeEvaluationTests(unittest.TestCase):
                 horizon="1d",
                 resolution="1d",
                 models=("random_walk",),
+            )
+
+
+class ValidationMarginSelectionTests(unittest.TestCase):
+    """The challenger must clear a pre-registered validation-only hurdle."""
+
+    @staticmethod
+    def _comparison(model_id: str, mae: float, *, samples: int = 10) -> ModelComparison:
+        return ModelComparison(
+            model_id=model_id,
+            config=ModelConfig(),
+            validation=StatisticalMetrics(samples=samples, return_mae=mae),
+            test=None,
+            validation_rows=samples,
+            test_rows=0,
+        )
+
+    def test_challenger_below_five_percent_margin_retains_baseline(self) -> None:
+        self.assertEqual(SELECTION_MARGIN_PCT, 5.0)
+        decision = _select_with_margin(
+            {
+                "random_walk": self._comparison("random_walk", 0.100),
+                "sma": self._comparison("sma", 0.096),
+            },
+            minimum_samples=3,
+            margin_pct=5.0,
+        )
+        self.assertEqual(decision.decision, "baseline")
+        self.assertEqual(decision.selected.model_id, "random_walk")
+        self.assertIsNotNone(decision.challenger)
+        assert decision.challenger is not None
+        self.assertEqual(decision.challenger.model_id, "sma")
+        self.assertAlmostEqual(decision.required_challenger_mae, 0.095)
+        self.assertAlmostEqual(decision.baseline_validation_mae, 0.100)
+        self.assertAlmostEqual(decision.challenger_validation_mae or 0.0, 0.096)
+
+    def test_challenger_clearing_five_percent_margin_is_selected(self) -> None:
+        decision = _select_with_margin(
+            {
+                "random_walk": self._comparison("random_walk", 0.100),
+                "sma": self._comparison("sma", 0.095),
+            },
+            minimum_samples=3,
+            margin_pct=5.0,
+        )
+        self.assertEqual(decision.decision, "challenger")
+        self.assertEqual(decision.selected.model_id, "sma")
+        self.assertAlmostEqual(decision.required_challenger_mae, 0.095)
+
+    def test_baseline_only_is_retained_not_relabelled(self) -> None:
+        decision = _select_with_margin(
+            {"random_walk": self._comparison("random_walk", 0.100)},
+            minimum_samples=3,
+            margin_pct=5.0,
+        )
+        self.assertEqual(decision.decision, "baseline")
+        self.assertEqual(decision.selected.model_id, "random_walk")
+        self.assertIsNone(decision.challenger)
+
+    def test_missing_or_ineligible_baseline_abstains(self) -> None:
+        with self.assertRaisesRegex(StatisticalValidationError, "baseline"):
+            _select_with_margin(
+                {"sma": self._comparison("sma", 0.050)},
+                minimum_samples=3,
+                margin_pct=5.0,
+            )
+        with self.assertRaisesRegex(StatisticalValidationError, "baseline"):
+            _select_with_margin(
+                {
+                    "random_walk": self._comparison("random_walk", 0.100, samples=2),
+                    "sma": self._comparison("sma", 0.050),
+                },
+                minimum_samples=3,
+                margin_pct=5.0,
             )
 
 

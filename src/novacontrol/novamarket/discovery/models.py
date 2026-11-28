@@ -155,11 +155,19 @@ class UniverseFilter:
             tuple(str(item).strip().upper() for item in self.exchanges if str(item).strip()),
         )
 
-    def allows(self, asset_class: str, exchange: str) -> bool:
+    def allows(self, asset_class: str, exchange: str, mic: str = "") -> bool:
         if str(asset_class).strip().lower() not in self.asset_classes:
             return False
-        if self.exchanges and str(exchange).strip().upper() not in self.exchanges:
-            return False
+        if self.exchanges:
+            # Instruments carry both a venue name (NSE) and a MIC (XNSE).  A
+            # filter declared in MICs must match either, or every real
+            # instrument would be excluded from a MIC-scoped cycle.
+            candidates = {
+                str(exchange or "").strip().upper(),
+                str(mic or "").strip().upper(),
+            }
+            if not candidates.intersection(self.exchanges):
+                return False
         return True
 
     def to_dict(self) -> dict[str, Any]:

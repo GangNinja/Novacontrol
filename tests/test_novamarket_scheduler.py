@@ -16,6 +16,7 @@ from unittest import mock
 
 import pytest
 
+from novacontrol.novamarket.marketdata.calendar import calendar_by_mic
 from novacontrol.novamarket.prediction.models import ForecastOutput
 from novacontrol.novamarket.prediction.service import PredictionIntelligenceService
 from novacontrol.novamarket.prediction.store import PredictionStore
@@ -23,7 +24,6 @@ from novacontrol.novamarket.scheduling.models import (
     CheckpointKind,
     CheckpointState,
     CycleState,
-    RevisionClass,
     SchedulerConfig,
 )
 from novacontrol.novamarket.scheduling.schedule import ScheduleValidationError, build_cycle
@@ -526,11 +526,16 @@ def test_accuracy_reports_sample_size_and_small_sample_caveat() -> None:
 
 
 def test_horizon_policies_are_explicit_for_intraday_and_swing() -> None:
+    from novacontrol.novamarket.prediction.models import ForecastHorizon
     from novacontrol.novamarket.scheduling.models import HORIZON_SCHEDULE_POLICIES
 
     assert HORIZON_SCHEDULE_POLICIES[next(iter(HORIZON_SCHEDULE_POLICIES))].to_dict()
     assert HORIZON_SCHEDULE_POLICIES[next(iter(HORIZON_SCHEDULE_POLICIES))].target_rule
-    assert len(HORIZON_SCHEDULE_POLICIES) == 9
+    assert len(HORIZON_SCHEDULE_POLICIES) == 10
+    one_minute = HORIZON_SCHEDULE_POLICIES[ForecastHorizon.MINUTES_1]
+    assert one_minute.initial_lead_seconds == 60
+    assert one_minute.first_lead_seconds == 30
+    assert one_minute.final_lead_seconds == 5
 
 
 @pytest.mark.asyncio
@@ -835,7 +840,9 @@ def test_api_exposes_cycle_scheduler_and_missed_surfaces() -> None:
                 api_target = (datetime.now(UTC) + timedelta(days=1)).replace(
                     hour=4, minute=5, second=0, microsecond=0
                 )
-                while api_target.weekday() >= 5:
+                exchange_calendar = calendar_by_mic(EXCHANGE)
+                assert exchange_calendar is not None
+                while not exchange_calendar.is_trading_day(api_target.date()):
                     api_target += timedelta(days=1)
                 target_text = api_target.isoformat()
                 created = client.post(

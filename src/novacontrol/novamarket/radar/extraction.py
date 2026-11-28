@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from functools import lru_cache
 from typing import Iterable, Sequence
 
 from novacontrol.novamarket.radar.models import (
@@ -82,6 +83,19 @@ _RELATIVE = re.compile(r"\b(today|yesterday)\b")
 
 def _keyword_pattern(term: str) -> re.Pattern[str]:
     """A whole-phrase match; ``re.escape`` keeps punctuation out of the regex."""
+    return re.compile(rf"\b{re.escape(term)}\b")
+
+
+@lru_cache(maxsize=8192)
+def _term_pattern(term: str) -> re.Pattern[str]:
+    """Compile an entity term once, not once per feed entry.
+
+    Radar extraction normalizes every entry and then tests every instrument
+    name/alias against it.  Compiling each term inside that nested loop made a
+    refresh a long CPU-bound burst on the event loop and the API stopped
+    answering while it ran.  The pattern is a pure function of the term, so
+    caching it changes no matching semantics.
+    """
     return re.compile(rf"\b{re.escape(term)}\b")
 
 
@@ -176,7 +190,7 @@ def _matched_entities(
         for term in hint.terms():
             if len(term) < 2:
                 continue
-            if re.search(rf"\b{re.escape(term)}\b", normalized):
+            if _term_pattern(term).search(normalized):
                 if hint.name not in seen:
                     seen.add(hint.name)
                     hits.append(hint.name)

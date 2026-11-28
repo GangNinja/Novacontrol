@@ -301,8 +301,9 @@ routes); 14 stores integrity-clean; paper E2E consistent at 100.50.
 
 ### Still open (not addressed by this addendum)
 
-- The 20m → 5m → 1m decision hierarchy is not implemented; 1 minute is only the
-  T−1m checkpoint and a data interval.
+- The 20m → 5m → 1m decision hierarchy was implemented after this addendum as
+  a post-PI-24 enhancement; see
+  [MULTITIMEFRAME_TRADING_INTELLIGENCE.md](MULTITIMEFRAME_TRADING_INTELLIGENCE.md).
 - PI-23 portfolio-horizon to forecast-horizon mapping and the AT-03 venue /
   instrument-identifier mismatch recorded in the README remain open.
 - No live-market validation or sustained live paper session exists.

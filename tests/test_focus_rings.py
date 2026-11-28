@@ -536,7 +536,8 @@ class FocusRingBrowserWalkTests(unittest.TestCase):
     def test_tab_walk_shows_2px_solid_focus_ring_everywhere(self) -> None:
         result = subprocess.run(
             ["node", str(WALKER), self.ws_url, f"http://127.0.0.1:{self.app_port}/"],
-            capture_output=True, text=True, timeout=180,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=180,
         )
         if result.returncode not in (0, 1):
             self.fail(f"walker crashed: {result.stderr.strip()[:500]}")

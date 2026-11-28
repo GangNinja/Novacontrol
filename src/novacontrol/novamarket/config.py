@@ -42,7 +42,17 @@ from novacontrol.novamarket.marketdata.settings import (
 #: The operational mode this build implements. ``paper`` and ``live`` are
 #: deliberately absent from the allowed set; reserved modes are named below.
 OPERATIONAL_MODES: tuple[str, ...] = ("observe",)
-FEATURE_RESOLUTIONS: tuple[str, ...] = ("1m", "5m", "15m", "30m", "1h", "1d", "1wk", "1mo")
+FEATURE_RESOLUTIONS: tuple[str, ...] = (
+    "1m",
+    "5m",
+    "15m",
+    "20m",
+    "30m",
+    "1h",
+    "1d",
+    "1wk",
+    "1mo",
+)
 
 #: Modes a later phase will introduce, and the phase (or reason) responsible.
 RESERVED_MODES: dict[str, str] = {

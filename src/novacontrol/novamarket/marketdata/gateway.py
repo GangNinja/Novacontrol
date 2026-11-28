@@ -253,6 +253,7 @@ class GatewaySettings:
                         DataInterval.MINUTE_1.value,
                         DataInterval.MINUTE_5.value,
                         DataInterval.MINUTE_15.value,
+                        DataInterval.MINUTE_20.value,
                         DataInterval.MINUTE_30.value,
                         DataInterval.HOUR_1.value,
                         DataInterval.SPOT.value,

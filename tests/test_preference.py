@@ -2513,6 +2513,15 @@ class PreferenceApiTests(unittest.TestCase):
             mock.patch("novacontrol.api.app.NovaControlApplication", side_effect=self._isolated),
             mock.patch("novacontrol.application.LocalDesktopRunner", NoopDesktopRunner),
             mock.patch("novacontrol.application.PlaywrightBrowserRunner", NoopBrowserRunner),
+            # These API tests exercise preference runs, not the resource guard.
+            # The live machine can be low on free memory after a long suite and
+            # make a dry-run estimate UNSAFE, which would turn every start into
+            # a 409 and mask the behavior under test.  The estimator's own
+            # verdict tests stay on the real/patchable readings.
+            mock.patch(
+                "novacontrol.training.resources.ResourceEstimator._free_memory",
+                return_value=(64 * 1024**3, 0, "test fixture"),
+            ),
         ]
         for patcher in self._patchers:
             patcher.start()

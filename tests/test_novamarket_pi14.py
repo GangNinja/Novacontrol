@@ -29,6 +29,7 @@ from novacontrol.novamarket.backtesting.core import HistoricalBar
 from novacontrol.novamarket.rewards import (
     DEFAULT_COMPONENTS,
     DEFAULT_WEIGHTS,
+    EXPERIMENTAL_COMPONENT_REGISTRY,
     EvaluationConfig,
     PolicyEvaluationError,
     RewardConfig,
@@ -39,6 +40,7 @@ from novacontrol.novamarket.rewards import (
     SplitDefinition,
     TransitionView,
     default_reward_config,
+    experimental_cash_drag_reward_config,
     policy_catalogue,
 )
 from novacontrol.novamarket.rewards.components import COMPONENT_REGISTRY
@@ -462,6 +464,51 @@ class RewardEngineTests(unittest.TestCase):
         forecast_component = result.components["forecast_utilization"]
         self.assertTrue(forecast_component["metrics"]["abstention"])
         self.assertGreater(forecast_component["raw_value"], 0)
+
+    def test_experimental_cash_drag_does_not_change_the_default_reward(self) -> None:
+        default = default_reward_config()
+        self.assertEqual(default.components, DEFAULT_WEIGHTS)
+        self.assertEqual(default.enabled, DEFAULT_COMPONENTS)
+        self.assertNotIn("cash_drag", default.components)
+        self.assertNotIn("cash_drag", default.enabled)
+        self.assertEqual(set(RewardEngine().registry), set(DEFAULT_COMPONENTS))
+
+    def test_experimental_cash_drag_configuration_has_no_abstention_bonus(self) -> None:
+        config = experimental_cash_drag_reward_config()
+        engine = RewardEngine(registry=EXPERIMENTAL_COMPONENT_REGISTRY)
+        self.assertIn("cash_drag", config.enabled)
+        self.assertNotIn("decision_quality", config.enabled)
+        self.assertNotIn("forecast_utilization", config.enabled)
+        self.assertEqual(config.components["cash_drag"], 0.30)
+
+        no_evidence = engine.calculate(transition(action="wait"), config=config)
+        self.assertEqual(no_evidence.components["cash_drag"]["raw_value"], 0.0)
+        self.assertFalse(
+            no_evidence.components["cash_drag"]["metrics"]["bonus_for_abstention"]
+        )
+        self.assertEqual(no_evidence.total, 0.0)
+
+        positive_forecast = engine.calculate(
+            transition(
+                action="wait",
+                forecast_payload=forecast(START, direction="up", expected=0.03),
+            ),
+            config=config,
+        )
+        self.assertLess(positive_forecast.components["cash_drag"]["raw_value"], 0.0)
+        self.assertLess(positive_forecast.total, 0.0)
+        self.assertFalse(
+            positive_forecast.components["cash_drag"]["metrics"]["bonus_for_abstention"]
+        )
+
+        trailing_payload = transition(action="wait")
+        trailing_payload["observation"]["market"]["return_5"] = 0.03
+        trailing = engine.calculate(trailing_payload, config=config)
+        self.assertLess(trailing.components["cash_drag"]["raw_value"], 0.0)
+        self.assertEqual(
+            trailing.components["cash_drag"]["metrics"]["return_basis"],
+            "market_return_5_proxy",
+        )
 
     def test_execution_quality_and_partial_fill(self) -> None:
         result = RewardEngine().calculate(

@@ -89,7 +89,16 @@ async function main() {
     });
     if (res.result.value) { loaded = true; break; }
   }
-  if (!loaded) throw new Error("app did not finish loading");
+  if (!loaded) {
+    const diag = await cdp.send("Runtime.evaluate", {
+      expression:
+        "({ready: document.readyState, nav: document.querySelectorAll('.nav-item').length, " +
+        "status: document.getElementById('statusText') ? document.getElementById('statusText').textContent : null, " +
+        "text: (document.body ? document.body.innerText : '').slice(0, 400)})",
+      returnByValue: true,
+    });
+    throw new Error("app did not finish loading: " + JSON.stringify(diag.result.value));
+  }
 
   const failures = [];
   let total = 0;

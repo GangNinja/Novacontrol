@@ -28,8 +28,9 @@ EXECUTION_AUTHORITY = "NM-10"
 AUTOMATIC_PROMOTION = False
 PRODUCTION_WEIGHT_MUTATION = False
 
-HORIZONS = ("5m", "15m", "20m", "1h", "1d", "3d", "5d", "30d", "90d")
+HORIZONS = ("1m", "5m", "15m", "20m", "1h", "1d", "3d", "5d", "30d", "90d")
 HORIZON_FAMILY = {
+    "1m": "intraday",
     "5m": "intraday",
     "15m": "intraday",
     "20m": "intraday",
@@ -41,6 +42,7 @@ HORIZON_FAMILY = {
     "90d": "long_term",
 }
 HORIZON_DURATION = {
+    "1m": timedelta(minutes=1),
     "5m": timedelta(minutes=5),
     "15m": timedelta(minutes=15),
     "20m": timedelta(minutes=20),

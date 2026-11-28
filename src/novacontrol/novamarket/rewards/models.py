@@ -113,6 +113,8 @@ DEFAULT_COMPONENTS: tuple[str, ...] = (
     "portfolio_management",
     "execution_quality",
 )
+EXPERIMENTAL_COMPONENTS: tuple[str, ...] = ("cash_drag",)
+ALL_COMPONENTS: tuple[str, ...] = DEFAULT_COMPONENTS + EXPERIMENTAL_COMPONENTS
 
 #: Explicitly experimental defaults, not financially validated weights.
 DEFAULT_WEIGHTS: dict[str, float] = {
@@ -181,14 +183,14 @@ class RewardConfig:
         if not name or not version:
             raise RewardValidationError("reward configuration name and version are required")
         components = _mapping(self.components, "components")
-        unknown = sorted(set(components) - set(DEFAULT_COMPONENTS))
+        unknown = sorted(set(components) - set(ALL_COMPONENTS))
         if unknown:
             raise RewardValidationError("unknown reward component(s): " + ", ".join(unknown))
         weights = {key: _finite(value, f"components.{key}") for key, value in components.items()}
         if any(abs(value) > 10 for value in weights.values()):
             raise RewardValidationError("component weights must be within [-10, 10]")
         enabled = _sequence(self.enabled, "enabled")
-        unknown_enabled = sorted(set(enabled) - set(DEFAULT_COMPONENTS))
+        unknown_enabled = sorted(set(enabled) - set(ALL_COMPONENTS))
         if unknown_enabled:
             raise RewardValidationError(
                 "unknown enabled component(s): " + ", ".join(unknown_enabled)
@@ -210,7 +212,7 @@ class RewardConfig:
         if not low < high:
             raise RewardValidationError("bounds.minimum must be below bounds.maximum")
         scales = _mapping(self.scales, "scales")
-        unknown_scales = sorted(set(scales) - set(DEFAULT_COMPONENTS))
+        unknown_scales = sorted(set(scales) - set(ALL_COMPONENTS))
         if unknown_scales:
             raise RewardValidationError("unknown reward scale(s): " + ", ".join(unknown_scales))
         scale_values = {key: _finite(value, f"scales.{key}") for key, value in scales.items()}
@@ -322,6 +324,46 @@ class RewardConfig:
 
 def default_reward_config() -> RewardConfig:
     return RewardConfig(name="PI-14 experimental default")
+
+
+EXPERIMENTAL_CASH_DRAG_WEIGHTS: dict[str, float] = {
+    "profitability": 0.35,
+    "risk": 0.10,
+    "transaction_cost": 0.10,
+    "discipline": 0.05,
+    "portfolio_management": 0.05,
+    "execution_quality": 0.05,
+    "cash_drag": 0.30,
+}
+EXPERIMENTAL_CASH_DRAG_SCALES: dict[str, float] = {
+    **DEFAULT_SCALES,
+    "cash_drag": 0.02,
+}
+
+
+def experimental_cash_drag_reward_config() -> RewardConfig:
+    """Explicit cash-drag experiment; deliberately not the default reward.
+
+    ``decision_quality`` and ``forecast_utilization`` are excluded because
+    both can pay a flat positive reward for waiting or holding without
+    evidence.  ``cash_drag`` charges positive expected return held in cash and
+    never pays a bonus for abstention.
+    """
+
+    return RewardConfig(
+        name="PI-14 experimental cash drag",
+        version="experimental-cash-drag-1",
+        components=EXPERIMENTAL_CASH_DRAG_WEIGHTS,
+        enabled=tuple(EXPERIMENTAL_CASH_DRAG_WEIGHTS),
+        scales=EXPERIMENTAL_CASH_DRAG_SCALES,
+        thresholds=DEFAULT_THRESHOLDS,
+        experimental=True,
+        description=(
+            "Experimental opportunity-cost reward: charges idle cash against a "
+            "positive decision-time expected return. Excludes the unconditional "
+            "abstention bonuses in decision_quality and forecast_utilization."
+        ),
+    )
 
 
 def _value(value: object, default: float = 0.0) -> float:
@@ -960,6 +1002,10 @@ __all__ = [
     "DEFAULT_SCALES",
     "DEFAULT_THRESHOLDS",
     "DEFAULT_WEIGHTS",
+    "EXPERIMENTAL_CASH_DRAG_SCALES",
+    "EXPERIMENTAL_CASH_DRAG_WEIGHTS",
+    "EXPERIMENTAL_COMPONENTS",
+    "ALL_COMPONENTS",
     "EvaluationConfig",
     "MAX_POLICY_EVALUATIONS",
     "MAX_REWARD_CONFIGS",
@@ -980,4 +1026,5 @@ __all__ = [
     "TransitionView",
     "canonical_hash",
     "default_reward_config",
+    "experimental_cash_drag_reward_config",
 ]

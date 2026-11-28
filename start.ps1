@@ -48,11 +48,30 @@ if (Test-Path -LiteralPath $SmtpEnvironmentFile) {
         }
     }
 }
-# The loopback-only admin key is opt-in in the backend, so a deployed copy
-# cannot inherit a predictable credential.  Local runs opt in here; the API
-# and Vite child processes inherit this value, keeping proxy auto-connect.
-if ([string]::IsNullOrWhiteSpace($env:NOVACONTROL_ADMIN_TOKEN)) {
-    $env:NOVACONTROL_ADMIN_TOKEN = "narasimha-novacontrol"
+# The loopback-only admin key is opt-in in the backend, and the launcher must
+# never create a predictable one.  Generate a cryptographically random token
+# once per installation, keep it in the gitignored .runtime directory, and let
+# both child processes inherit it.  An explicitly configured value still wins,
+# except for the retired hard-coded launcher key (the backend refuses that too).
+$RuntimeDir = Join-Path $Root ".runtime"
+$AdminTokenPath = Join-Path $RuntimeDir "admin-token"
+$OldLauncherKey = "narasimha-novacontrol"
+if ([string]::IsNullOrWhiteSpace($env:NOVACONTROL_ADMIN_TOKEN) -or $env:NOVACONTROL_ADMIN_TOKEN -eq $OldLauncherKey) {
+    if (-not (Test-Path -LiteralPath $RuntimeDir)) {
+        New-Item -ItemType Directory -Path $RuntimeDir -Force | Out-Null
+    }
+    $StoredAdminToken = ""
+    if (Test-Path -LiteralPath $AdminTokenPath) {
+        $StoredAdminToken = (Get-Content -LiteralPath $AdminTokenPath -Raw -ErrorAction SilentlyContinue).Trim()
+    }
+    if ([string]::IsNullOrWhiteSpace($StoredAdminToken) -or $StoredAdminToken -eq $OldLauncherKey) {
+        $TokenBytes = New-Object byte[] 32
+        $Generator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        try { $Generator.GetBytes($TokenBytes) } finally { $Generator.Dispose() }
+        $StoredAdminToken = -join ($TokenBytes | ForEach-Object { $_.ToString("x2") })
+        Set-Content -LiteralPath $AdminTokenPath -Value $StoredAdminToken -NoNewline -Encoding ascii
+    }
+    $env:NOVACONTROL_ADMIN_TOKEN = $StoredAdminToken
 }
 $Parent = Split-Path -Parent $Root
 $Python = Join-Path $Parent ".venv\Scripts\python.exe"

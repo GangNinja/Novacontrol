@@ -20,6 +20,7 @@ from novacontrol.novamarket.marketdata.models import DataInterval
 _ALLOWED_INTERVALS = (
     DataInterval.MINUTE_5,
     DataInterval.MINUTE_15,
+    DataInterval.MINUTE_20,
     DataInterval.MINUTE_30,
     DataInterval.HOUR_1,
     DataInterval.DAY_1,

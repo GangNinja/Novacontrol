@@ -131,6 +131,8 @@ _MARKET_ROUTES = {
     ("POST", "/market/strategies"),
     ("GET", "/market/strategies/status"),
     ("GET", "/market/strategies/contracts"),
+    ("GET", "/market/multi-timeframe/status"),
+    ("GET", "/market/multi-timeframe/analysis"),
     ("GET", "/market/strategies/proposals"),
     ("GET", "/market/strategies/proposals/{proposal_id}"),
     ("POST", "/market/strategies/proposals/{proposal_id}/forward"),
@@ -836,6 +838,24 @@ class MultiAgentApiTests(_MarketApiCase):
         self.assertEqual(self._nova.novamarket.portfolio_status(), portfolios_before)
 
 
+class NovaMarketMultiTimeframeApiTests(_MarketApiCase):
+    def test_status_is_read_only_and_names_the_authorities(self) -> None:
+        response = self._client.get("/market/multi-timeframe/status")
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertTrue(body["ok"])
+        self.assertFalse(body["authority"]["executes"])
+        self.assertFalse(body["authority"]["approves"])
+        self.assertEqual(body["timeframes"]["context"], "20m")
+        self.assertEqual(body["config"]["minimum_confidence"], 0.55)
+
+    def test_analysis_refuses_an_unknown_portfolio_without_a_500(self) -> None:
+        response = self._client.get(
+            "/market/multi-timeframe/analysis?portfolio_id=not_a_portfolio"
+        )
+        self.assertIn(response.status_code, {404, 409, 422})
+
+
 class NovaMarketCorsTests(unittest.TestCase):
     """CORS is opt-in, exact and never a wildcard."""
 
@@ -864,11 +884,24 @@ class NovaMarketCorsTests(unittest.TestCase):
         return NovaControlApplication(**kwargs)
 
     def _client(self, origins: str | None) -> Any:
-        environment = {} if origins is None else {"NOVAMARKET_CORS_ORIGINS": origins}
+        environment = (
+            {}
+            if origins is None
+            else {
+                "NOVAMARKET_CORS_ORIGINS": origins,
+                # An exposed CORS origin is a non-loopback deployment and now
+                # requires the API credential before the app may start.
+                "NOVACONTROL_API_TOKEN": "c" * 40,
+            }
+        )
         with mock.patch.dict(os.environ, environment, clear=False):
             if origins is None:
                 os.environ.pop("NOVAMARKET_CORS_ORIGINS", None)
-            return TestClient(create_app())
+            return TestClient(
+                create_app(), headers={"Authorization": f"Bearer {'c' * 40}"}
+                if origins is not None
+                else {}
+            )
 
     def test_no_environment_variable_means_no_cross_origin_access(self) -> None:
         client = self._client(None)
@@ -942,7 +975,10 @@ class NovaMarketLifecycleApiTests(_MarketApiCase):
 
         response = self._client.post("/market/enable", json={})
         self.assertEqual(response.status_code, 500)
-        self.assertIn("market data provider refused", response.json()["detail"])
+        self.assertEqual(response.json()["detail"], "Internal server error.")
+        self.assertEqual(response.json()["error"], "internal_server_error")
+        self.assertTrue(response.headers.get("x-request-id"))
+        self.assertNotIn("market data provider refused", response.text)
 
         status = self._status()
         self.assertEqual(status["lifecycle"], "error")
@@ -1223,7 +1259,7 @@ class NovaMarketRouteContractTests(unittest.TestCase):
     def test_every_market_route_is_on_the_api_surface(self) -> None:
         routes = {(route.method, route.path) for route in ApiSurface.default().routes}
         self.assertEqual(routes & _MARKET_ROUTES, _MARKET_ROUTES)
-        self.assertEqual(len(_MARKET_ROUTES), 339)
+        self.assertEqual(len(_MARKET_ROUTES), 341)
 
     def test_every_market_route_declares_a_non_render_consumer(self) -> None:
         for route in _MARKET_ROUTES:
@@ -1466,6 +1502,8 @@ class NovaMarketRouteContractTests(unittest.TestCase):
                 "/market/strategies",
                 "/market/strategies/status",
                 "/market/strategies/contracts",
+                "/market/multi-timeframe/status",
+                "/market/multi-timeframe/analysis",
                 "/market/strategies/proposals",
                 "/market/strategies/proposals/{proposal_id}",
                 "/market/strategies/proposals/{proposal_id}/forward",

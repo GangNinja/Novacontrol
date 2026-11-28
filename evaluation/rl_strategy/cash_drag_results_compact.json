@@ -1,0 +1,487 @@
+{
+  "aggregate": {
+    "drawdowns": {
+      "n": 0
+    },
+    "returns": {
+      "bootstrap": {
+        "ci95": [
+          -0.01027904,
+          0.02471058
+        ],
+        "max": 0.0430145,
+        "mean": 0.00319968,
+        "median": -0.0067214,
+        "min": -0.0148041,
+        "n": 5
+      },
+      "max": 0.0430145,
+      "mean": 0.00319968,
+      "median": -0.0067214,
+      "min": -0.0148041,
+      "n": 5,
+      "stdev": 0.02061218
+    },
+    "sharpes": {
+      "bootstrap": {
+        "ci95": [
+          -0.6751908,
+          0.9827942
+        ],
+        "max": 1.74997,
+        "mean": -0.0032218,
+        "median": -0.425856,
+        "min": -1.004284,
+        "n": 5
+      },
+      "max": 1.74997,
+      "mean": -0.0032218,
+      "median": -0.425856,
+      "min": -1.004284,
+      "n": 5,
+      "stdev": 0.94784814
+    },
+    "total_fees": 39.34,
+    "trades": 5,
+    "turnover": {
+      "bootstrap": {
+        "ci95": [
+          0.20013727,
+          0.20174128
+        ],
+        "max": 0.20264401,
+        "mean": 0.2008327,
+        "median": 0.20038685,
+        "min": 0.19979149,
+        "n": 5
+      },
+      "max": 0.20264401,
+      "mean": 0.2008327,
+      "median": 0.20038685,
+      "min": 0.19979149,
+      "n": 5,
+      "stdev": 0.00098096
+    }
+  },
+  "artifact": "tracked compact extract",
+  "default_reward": {
+    "cash_drag_enabled": false,
+    "cash_drag_weighted": false,
+    "config_hash": "92ce8a98ade3b83a0703ef140d129efc0523846bf9bafb7183a692912e677366"
+  },
+  "errors": [],
+  "experiment": "experimental cash-drag reward",
+  "generated_at": "2026-11-23T18:08:25.332714+00:00",
+  "instruments": {
+    "XNSE:HDFCBANK": {
+      "action_distribution": {
+        "buy": 87,
+        "hold": 0,
+        "no_action": 0,
+        "sell": 0,
+        "wait": 0
+      },
+      "artifact": "evaluation/rl_strategy/artifacts/cash_drag/policies/XNSE_HDFCBANK_cash_drag.json",
+      "average_reward": -0.4995408149,
+      "constraint_violations": 86,
+      "fees_paid": 7.82,
+      "final_value": "98519.59",
+      "invalid_actions": 0,
+      "q_value_diagnostics": {
+        "all_equal_observations": 87,
+        "max_q": 0.0,
+        "max_spread": 0.0,
+        "mean_spread": 0.0,
+        "min_q": 0.0,
+        "observations": 87,
+        "zero_q_observations": 87
+      },
+      "selection": "TrainedPolicy.select masked argmax",
+      "test_bars_snapshot": "evaluation/rl_strategy/artifacts/test_bars/XNSE_HDFCBANK.json",
+      "total_return": -0.0148041,
+      "total_reward": -43.4600509004,
+      "trades": 1,
+      "training": {
+        "algorithm": "dqn",
+        "algorithm_version": "pi15-dqn-pure-python-1",
+        "best_validation_score": 0.0,
+        "elapsed_seconds": 30.1688,
+        "episodes": 20,
+        "instrument": "XNSE:HDFCBANK",
+        "reward_config": "PI-14 experimental cash drag",
+        "reward_config_hash": "0949d32a13715be9e62bc72fd6e5353f06771127c9296de17fb1018c6ea29511",
+        "seed": 7,
+        "train_bars": 120,
+        "training_action_distribution": {
+          "buy": 20,
+          "hold": 1977,
+          "no_action": 127,
+          "sell": 107,
+          "wait": 129
+        },
+        "training_q_value_diagnostics": {
+          "all_equal_observations": 2132,
+          "max_q": 0.8890960651522912,
+          "max_spread": 0.8890960651522912,
+          "mean_spread": 0.009567620467,
+          "min_q": 0.0,
+          "observations": 2360,
+          "zero_q_observations": 2132
+        },
+        "validation_bars": 40
+      }
+    },
+    "XNSE:ITC": {
+      "action_distribution": {
+        "buy": 87,
+        "hold": 0,
+        "no_action": 0,
+        "sell": 0,
+        "wait": 0
+      },
+      "artifact": "evaluation/rl_strategy/artifacts/cash_drag/policies/XNSE_ITC_cash_drag.json",
+      "average_reward": -0.4907306792,
+      "constraint_violations": 86,
+      "fees_paid": 7.85,
+      "final_value": "99246.72",
+      "invalid_actions": 0,
+      "q_value_diagnostics": {
+        "all_equal_observations": 87,
+        "max_q": 0.0,
+        "max_spread": 0.0,
+        "mean_spread": 0.0,
+        "min_q": 0.0,
+        "observations": 87,
+        "zero_q_observations": 87
+      },
+      "selection": "TrainedPolicy.select masked argmax",
+      "test_bars_snapshot": "evaluation/rl_strategy/artifacts/test_bars/XNSE_ITC.json",
+      "total_return": -0.0075328,
+      "total_reward": -42.693569089,
+      "trades": 1,
+      "training": {
+        "algorithm": "dqn",
+        "algorithm_version": "pi15-dqn-pure-python-1",
+        "best_validation_score": 0.0,
+        "elapsed_seconds": 30.9137,
+        "episodes": 20,
+        "instrument": "XNSE:ITC",
+        "reward_config": "PI-14 experimental cash drag",
+        "reward_config_hash": "0949d32a13715be9e62bc72fd6e5353f06771127c9296de17fb1018c6ea29511",
+        "seed": 7,
+        "train_bars": 120,
+        "training_action_distribution": {
+          "buy": 20,
+          "hold": 2006,
+          "no_action": 107,
+          "sell": 103,
+          "wait": 124
+        },
+        "training_q_value_diagnostics": {
+          "all_equal_observations": 2293,
+          "max_q": 2.1438353114403175e+153,
+          "max_spread": 2.1438353114403175e+153,
+          "mean_spread": 9.084047929831939e+149,
+          "min_q": 0.0,
+          "observations": 2360,
+          "zero_q_observations": 2293
+        },
+        "validation_bars": 40
+      }
+    },
+    "XNSE:RELIANCE": {
+      "action_distribution": {
+        "buy": 90,
+        "hold": 0,
+        "no_action": 0,
+        "sell": 0,
+        "wait": 0
+      },
+      "artifact": "evaluation/rl_strategy/artifacts/cash_drag/policies/XNSE_RELIANCE_cash_drag.json",
+      "average_reward": -0.494933298,
+      "constraint_violations": 89,
+      "fees_paid": 7.85,
+      "final_value": "100204.22",
+      "invalid_actions": 0,
+      "q_value_diagnostics": {
+        "all_equal_observations": 90,
+        "max_q": 0.0,
+        "max_spread": 0.0,
+        "mean_spread": 0.0,
+        "min_q": 0.0,
+        "observations": 90,
+        "zero_q_observations": 90
+      },
+      "selection": "TrainedPolicy.select masked argmax",
+      "test_bars_snapshot": "evaluation/rl_strategy/artifacts/test_bars/XNSE_RELIANCE.json",
+      "total_return": 0.0020422,
+      "total_reward": -44.5439968168,
+      "trades": 1,
+      "training": {
+        "algorithm": "dqn",
+        "algorithm_version": "pi15-dqn-pure-python-1",
+        "best_validation_score": 0.0,
+        "elapsed_seconds": 32.5054,
+        "episodes": 20,
+        "instrument": "XNSE:RELIANCE",
+        "reward_config": "PI-14 experimental cash drag",
+        "reward_config_hash": "0949d32a13715be9e62bc72fd6e5353f06771127c9296de17fb1018c6ea29511",
+        "seed": 7,
+        "train_bars": 120,
+        "training_action_distribution": {
+          "buy": 20,
+          "hold": 1996,
+          "no_action": 121,
+          "sell": 98,
+          "wait": 125
+        },
+        "training_q_value_diagnostics": {
+          "all_equal_observations": 2200,
+          "max_q": 0.8380744118647439,
+          "max_spread": 0.8380744118647439,
+          "mean_spread": 0.008913049204,
+          "min_q": 0.0,
+          "observations": 2360,
+          "zero_q_observations": 2200
+        },
+        "validation_bars": 40
+      }
+    },
+    "XNSE:TATASTEEL": {
+      "action_distribution": {
+        "buy": 87,
+        "hold": 0,
+        "no_action": 0,
+        "sell": 0,
+        "wait": 0
+      },
+      "artifact": "evaluation/rl_strategy/artifacts/cash_drag/policies/XNSE_TATASTEEL_cash_drag.json",
+      "average_reward": -0.4786502156,
+      "constraint_violations": 86,
+      "fees_paid": 7.88,
+      "final_value": "99327.86",
+      "invalid_actions": 0,
+      "q_value_diagnostics": {
+        "all_equal_observations": 87,
+        "max_q": 0.0,
+        "max_spread": 0.0,
+        "mean_spread": 0.0,
+        "min_q": 0.0,
+        "observations": 87,
+        "zero_q_observations": 87
+      },
+      "selection": "TrainedPolicy.select masked argmax",
+      "test_bars_snapshot": "evaluation/rl_strategy/artifacts/test_bars/XNSE_TATASTEEL.json",
+      "total_return": -0.0067214,
+      "total_reward": -41.6425687574,
+      "trades": 1,
+      "training": {
+        "algorithm": "dqn",
+        "algorithm_version": "pi15-dqn-pure-python-1",
+        "best_validation_score": 0.0,
+        "elapsed_seconds": 31.1708,
+        "episodes": 20,
+        "instrument": "XNSE:TATASTEEL",
+        "reward_config": "PI-14 experimental cash drag",
+        "reward_config_hash": "0949d32a13715be9e62bc72fd6e5353f06771127c9296de17fb1018c6ea29511",
+        "seed": 7,
+        "train_bars": 120,
+        "training_action_distribution": {
+          "buy": 20,
+          "hold": 2004,
+          "no_action": 101,
+          "sell": 110,
+          "wait": 125
+        },
+        "training_q_value_diagnostics": {
+          "all_equal_observations": 2292,
+          "max_q": 2.25271503691645e+162,
+          "max_spread": 2.25271503691645e+162,
+          "mean_spread": 9.545402698798521e+158,
+          "min_q": 0.0,
+          "observations": 2360,
+          "zero_q_observations": 2292
+        },
+        "validation_bars": 40
+      }
+    },
+    "XNSE:TCS": {
+      "action_distribution": {
+        "buy": 87,
+        "hold": 0,
+        "no_action": 0,
+        "sell": 0,
+        "wait": 0
+      },
+      "artifact": "evaluation/rl_strategy/artifacts/cash_drag/policies/XNSE_TCS_cash_drag.json",
+      "average_reward": -0.5289860573,
+      "constraint_violations": 86,
+      "fees_paid": 7.94,
+      "final_value": "104301.45",
+      "invalid_actions": 0,
+      "q_value_diagnostics": {
+        "all_equal_observations": 87,
+        "max_q": 0.0,
+        "max_spread": 0.0,
+        "mean_spread": 0.0,
+        "min_q": 0.0,
+        "observations": 87,
+        "zero_q_observations": 87
+      },
+      "selection": "TrainedPolicy.select masked argmax",
+      "test_bars_snapshot": "evaluation/rl_strategy/artifacts/test_bars/XNSE_TCS.json",
+      "total_return": 0.0430145,
+      "total_reward": -46.0217869869,
+      "trades": 1,
+      "training": {
+        "algorithm": "dqn",
+        "algorithm_version": "pi15-dqn-pure-python-1",
+        "best_validation_score": 0.0,
+        "elapsed_seconds": 30.692,
+        "episodes": 20,
+        "instrument": "XNSE:TCS",
+        "reward_config": "PI-14 experimental cash drag",
+        "reward_config_hash": "0949d32a13715be9e62bc72fd6e5353f06771127c9296de17fb1018c6ea29511",
+        "seed": 7,
+        "train_bars": 120,
+        "training_action_distribution": {
+          "buy": 20,
+          "hold": 1989,
+          "no_action": 113,
+          "sell": 122,
+          "wait": 116
+        },
+        "training_q_value_diagnostics": {
+          "all_equal_observations": 2206,
+          "max_q": 0.852886071581714,
+          "max_spread": 0.852886071581714,
+          "mean_spread": 0.008248834676,
+          "min_q": 0.0,
+          "observations": 2360,
+          "zero_q_observations": 2206
+        },
+        "validation_bars": 40
+      }
+    }
+  },
+  "learning_diagnostic": {
+    "best_validation_scores": {
+      "XNSE:HDFCBANK": 0.0,
+      "XNSE:ITC": 0.0,
+      "XNSE:RELIANCE": 0.0,
+      "XNSE:TATASTEEL": 0.0,
+      "XNSE:TCS": 0.0
+    },
+    "reason": "Every saved checkpoint has zero Q-value spread on every test observation; the best validation score is 0.0 and training remains HOLD-dominated.",
+    "test_all_equal_observations": 438,
+    "test_max_spread": 0.0,
+    "test_q_observations": 438,
+    "test_zero_q_observations": 438,
+    "training_action_distribution": {
+      "buy": 100,
+      "hold": 9972,
+      "no_action": 569,
+      "sell": 540,
+      "wait": 619
+    },
+    "training_q_observations": 11800,
+    "training_zero_q_observations": 11123,
+    "verdict": "did_not_learn"
+  },
+  "out_of_sample": {
+    "instruments_with_trades": 5,
+    "policy_produced_non_zero_trades": true,
+    "selection": "TrainedPolicy.select: masked argmax (zero-Q tie selects first legal action)",
+    "split": "test",
+    "trades": 5
+  },
+  "out_of_sample_reevaluation": {
+    "evaluated_at": "2026-11-24T17:29:41.056785+00:00",
+    "note": "evaluate_trained_adapters.py rescores the tracked cash-drag artifacts through TrainedPolicy.select and writes this compact directly; training and validation selection were unchanged.",
+    "runner": "evaluation/rl_strategy/evaluate_trained_adapters.py",
+    "script": "evaluation/rl_strategy/evaluate_trained_adapters.py",
+    "selection": "TrainedPolicy.select: masked argmax (zero-Q tie selects first legal action)",
+    "source_artifacts": [
+      "evaluation/rl_strategy/artifacts/cash_drag/policies/*.json",
+      "evaluation/rl_strategy/artifacts/test_bars/*.json"
+    ]
+  },
+  "reproduction_command": "PYTHONPATH=src ../.venv/Scripts/python.exe evaluation/rl_strategy/evaluate_trained_adapters.py",
+  "reproduction_exit_code": 0,
+  "reward_config": {
+    "advisory_only": true,
+    "bounds": [
+      -1.0,
+      1.0
+    ],
+    "components": {
+      "cash_drag": 0.3,
+      "discipline": 0.05,
+      "execution_quality": 0.05,
+      "portfolio_management": 0.05,
+      "profitability": 0.35,
+      "risk": 0.1,
+      "transaction_cost": 0.1
+    },
+    "config_hash": "0949d32a13715be9e62bc72fd6e5353f06771127c9296de17fb1018c6ea29511",
+    "config_id": "rwc_0949d32a13715be9e62b",
+    "description": "Experimental opportunity-cost reward: charges idle cash against a positive decision-time expected return. Excludes the unconditional abstention bonuses in decision_quality and forecast_utilization.",
+    "enabled": [
+      "profitability",
+      "risk",
+      "transaction_cost",
+      "discipline",
+      "portfolio_management",
+      "execution_quality",
+      "cash_drag"
+    ],
+    "experimental": true,
+    "experimental_status": "experimental",
+    "missing_policy": "renormalize",
+    "name": "PI-14 experimental cash drag",
+    "normalization": "bounded",
+    "penalties": {
+      "constraint_violation": 0.25,
+      "repeated_trade": 0.05,
+      "unfilled_trade": 0.1
+    },
+    "production_authority": false,
+    "scales": {
+      "cash_drag": 0.02,
+      "decision_quality": 1.0,
+      "discipline": 1.0,
+      "execution_quality": 1.0,
+      "forecast_utilization": 1.0,
+      "portfolio_management": 1.0,
+      "profitability": 0.02,
+      "risk": 0.2,
+      "transaction_cost": 0.01
+    },
+    "schema_version": "pi14-reward-config-v1",
+    "simulated": true,
+    "thresholds": {
+      "decision_full_exposure": 0.9,
+      "decision_weak_forecast": 0.4,
+      "discipline_lookback_trades": 3.0,
+      "discipline_repeated_penalty": 0.5,
+      "portfolio_concentration_high": 0.25,
+      "portfolio_drawdown_high": 0.1,
+      "portfolio_exposure_change_high": 0.5,
+      "risk_concentration_high": 0.25,
+      "risk_drawdown_high": 0.1,
+      "risk_exposure_high": 0.9,
+      "risk_volatility_high_pct": 25.0
+    },
+    "version": "experimental-cash-drag-1"
+  },
+  "split": "train/validation/test from run_rl_evaluation",
+  "test_bars_snapshot": "evaluation/rl_strategy/artifacts/test_bars/*.json",
+  "test_bars_snapshots": {
+    "XNSE:HDFCBANK": "evaluation/rl_strategy/artifacts/test_bars/XNSE_HDFCBANK.json",
+    "XNSE:ITC": "evaluation/rl_strategy/artifacts/test_bars/XNSE_ITC.json",
+    "XNSE:RELIANCE": "evaluation/rl_strategy/artifacts/test_bars/XNSE_RELIANCE.json",
+    "XNSE:TATASTEEL": "evaluation/rl_strategy/artifacts/test_bars/XNSE_TATASTEEL.json",
+    "XNSE:TCS": "evaluation/rl_strategy/artifacts/test_bars/XNSE_TCS.json"
+  },
+  "verified_at": "2026-11-24T17:29:41.056785+00:00"
+}

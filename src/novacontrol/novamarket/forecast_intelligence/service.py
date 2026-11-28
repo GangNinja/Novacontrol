@@ -193,6 +193,7 @@ def _scope(values: Mapping[str, Any]) -> tuple[str, str]:
 def _horizon_seconds(horizon: str) -> int:
     return int(
         {
+            "1m": 60,
             "5m": 300,
             "15m": 900,
             "20m": 1200,
@@ -610,6 +611,7 @@ class ForecastIntelligenceService:
             "month_1": 8,
         }
         maximum = {
+            "1m": 1,
             "5m": 2,
             "15m": 3,
             "20m": 3,

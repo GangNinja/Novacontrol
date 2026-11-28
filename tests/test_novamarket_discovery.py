@@ -403,6 +403,39 @@ class DiscoveryCycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["scanned"], 0)
         self.assertEqual(engine.candidates()["total"], 0)
 
+    async def test_a_mic_scope_matches_an_instrument_venue_name(self) -> None:
+        market = MarketDataStore(":memory:", clock=lambda: NOW)
+        _instrument(market, "XNSE:ALPHA", exchange="NSE")
+        _bars(market)
+        _quote(market)
+        engine, _, _ = _engine(
+            market,
+            universe=UniverseFilter(asset_classes=("equity",), exchanges=("XNSE",)),
+        )
+        report = await engine.run_cycle()
+        self.assertEqual(report["scanned"], 1)
+        self.assertEqual(engine.candidates()["candidates"][0]["instrument_id"], ALPHA)
+
+    async def test_a_configured_instrument_list_limits_one_cycle(self) -> None:
+        market = MarketDataStore(":memory:", clock=lambda: NOW)
+        _instrument(market, "XNSE:ALPHA")
+        _bars(market)
+        _quote(market)
+        _instrument(market, "XNSE:BETA", name="Beta Ltd")
+        _bars(market, "XNSE:BETA")
+        _quote(market, "XNSE:BETA")
+        engine, _, _ = _engine(market)
+        report = await engine.run_cycle(
+            force=True,
+            universe=UniverseFilter(asset_classes=("equity",), exchanges=("XNSE",)),
+            instrument_ids=("XNSE:ALPHA",),
+        )
+        self.assertEqual(report["scanned"], 1)
+        self.assertEqual(
+            [row["instrument_id"] for row in engine.candidates()["candidates"]],
+            [ALPHA],
+        )
+
     async def test_the_exchange_boundary_is_respected(self) -> None:
         market = MarketDataStore(":memory:", clock=lambda: NOW)
         _instrument(market, "XNSE:ALPHA")

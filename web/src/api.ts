@@ -111,7 +111,9 @@ async function request<T>(
       headers,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
       signal,
-      credentials: "omit",
+      // Same-origin only: the SSE session endpoint must be allowed to set its
+      // HttpOnly cookie, while a cross-origin API keeps its bearer-only model.
+      credentials: "same-origin",
     });
   } catch (error: any) {
     if (error?.name === "AbortError") throw error;

@@ -32,14 +32,30 @@ PYTHONPATH=src ../.venv/Scripts/python.exe -m uvicorn novacontrol.api.app:create
 During local development the Vite proxy supplies a loopback-only admin session
 (`Authorization` and `X-Autonomy-Operator-Token`), so a new tab opens the desk
 without a token prompt. The backend accepts this credential only from loopback
-clients, and only when the backend was started with `NOVACONTROL_ADMIN_TOKEN`
-set; the local `start.ps1` sets it to `narasimha-novacontrol`, and setting a
-different value rotates the key.
+clients, and only when the backend was started with `NOVACONTROL_ADMIN_TOKEN`.
+The local `start.ps1` generates a cryptographically random value once and keeps
+it in the gitignored `.runtime/admin-token`; there is no fallback literal. If
+you run Vite directly, export the same token yourself.
 
 A separately hosted frontend still asks for the backend bearer token at runtime
 and keeps it in the current tab's `sessionStorage`. Configure
 `NOVACONTROL_API_TOKEN` on the backend. Tokens are never bundled, committed, or
 written to local storage.
+
+### SSE migration
+
+The dashboard's live channel now calls `POST /events/session` once, then opens
+`GET /events/stream` with the resulting opaque, HttpOnly session cookie. The old
+`GET /events/stream?token=…` form is refused: an `EventSource` client must
+exchange a bearer credential (or use the loopback Vite proxy) and reconnect
+through the session endpoint after the cookie expires. This keeps the API token
+out of URLs, history and proxy access logs.
+
+The session cookie is `SameSite=Strict`; the browser client sends it only
+same-origin. If you serve the frontend from a different origin, proxy `/events`
+through that origin (as the Vite dev server does) or the live channel will not
+connect. Cross-origin browser SSE is intentionally not enabled; non-browser
+clients can send an `Authorization` header to `/events/stream` directly.
 
 ## Build and deploy
 

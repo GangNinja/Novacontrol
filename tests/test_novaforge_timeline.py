@@ -762,7 +762,18 @@ class ReplaySafetyTests(unittest.TestCase):
         timeline_routes = {
             key: route for key, route in routes.items() if "/timeline" in key[1]
         }
-        self.assertEqual(len(timeline_routes), 3)
+        # Four routes are legitimate: the three NovaForge replay routes plus
+        # NovaMarket's event-intelligence publication timeline.  Assert the
+        # exact inventory instead of an outdated count.
+        self.assertEqual(
+            set(timeline_routes),
+            {
+                ("GET", "/market/event-intelligence/timeline"),
+                ("GET", "/novaforge/sessions/{session_id}/timeline"),
+                ("GET", "/novaforge/sessions/{session_id}/timeline/{seq}"),
+                ("GET", "/novaforge/timeline/compare"),
+            },
+        )
         for (method, _path), route in timeline_routes.items():
             self.assertEqual(method, "GET", "replay must not accept a mutating method")
             self.assertTrue(route.authenticated)

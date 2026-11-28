@@ -249,8 +249,9 @@ class Harness(unittest.IsolatedAsyncioTestCase):
         eligible: bool = True,
         status: str = "completed",
         instrument: str = "XNSE:ALPHA",
+        exchange: str = "XNSE",
     ) -> str:
-        cycle_id = f"mon_at03_{quality}_{eligible}_{status}_{instrument[-5:]}"
+        cycle_id = f"mon_at03_{exchange}_{quality}_{eligible}_{status}_{instrument[-5:]}"
         existing = self.runtime.store.monitoring_cycle(cycle_id)
         if existing is None:
             self.runtime.store.create_monitoring_cycle(
@@ -287,7 +288,7 @@ class Harness(unittest.IsolatedAsyncioTestCase):
                     {
                         "instrument_id": instrument,
                         "symbol": instrument.split(":", 1)[1],
-                        "exchange": "XNSE",
+                        "exchange": exchange,
                         "disposition": "processed" if status == "completed" else "deferred",
                         "reason": "test fixture",
                         "rank": 1,
@@ -382,6 +383,79 @@ class PipelineTests(Harness):
             detail["signal"]["evaluation_id"],
         )
         self.assertEqual(self.snapshot(), before)
+
+    async def test_legacy_venue_candidate_is_canonicalised_to_its_mic(self) -> None:
+        body = await self.run_once(self._seed_cycle(exchange="NSE"))
+        self.assertTrue(body["ok"], body)
+        self.assertGreaterEqual(body["evaluations"], 1)
+        proposals = self.pipeline.store.proposals(run_id=body["run_id"])
+        self.assertEqual(len(proposals), 1)
+        self.assertEqual(proposals[0]["instrument_id"], "XNSE:ALPHA")
+
+    async def test_cross_exchange_candidate_is_still_refused(self) -> None:
+        cycle = self._seed_cycle(exchange="BSE")
+        with self.assertRaises(DecisionError) as caught:
+            await self.run_once(cycle)
+        self.assertEqual(
+            caught.exception.code, DecisionErrorCode.NO_ELIGIBLE_CANDIDATES.value
+        )
+
+    async def test_attribute_based_instruments_are_eligible_on_nse_and_nyse(self) -> None:
+        # Market-data seams may return a read-only record.  Its identity is
+        # accepted only when it is the requested MIC:SYMBOL, and the venue must
+        # match the configured cycle exchange.
+        original = self.market.get_instrument
+        self.market.get_instrument = lambda instrument_id: SimpleNamespace(
+            instrument_id=instrument_id,
+            mic=instrument_id.split(":", 1)[0],
+            exchange=instrument_id.split(":", 1)[0],
+        )
+        try:
+            for mic in ("XNSE", "XNYS"):
+                with self.subTest(mic=mic):
+                    cycle = self._seed_cycle(
+                        instrument=f"{mic}:ALPHA", exchange=mic
+                    )
+                    candidates = self.pipeline._candidates(cycle)
+                    self.assertEqual(len(candidates), 1)
+                    self.assertEqual(candidates[0]["instrument_id"], f"{mic}:ALPHA")
+                    self.assertEqual(candidates[0]["exchange"], mic)
+
+            closed_cycle = self._seed_cycle(
+                instrument="XNSE:CLOSED", exchange="XNYS"
+            )
+            self.assertEqual(self.pipeline._candidates(closed_cycle), [])
+        finally:
+            self.market.get_instrument = original
+
+    async def test_an_instrument_lookup_with_another_identity_fails_closed(self) -> None:
+        self.market.get_instrument = lambda _instrument_id: SimpleNamespace(
+            instrument_id="XNSE:OTHER"
+        )
+        cycle = self._seed_cycle()
+        with self.assertRaises(DecisionError) as caught:
+            await self.run_once(cycle)
+        self.assertEqual(
+            caught.exception.code, DecisionErrorCode.NO_ELIGIBLE_CANDIDATES.value
+        )
+
+    async def test_a_lookup_mic_must_match_the_candidate_prefix_and_exchange(self) -> None:
+        original = self.market.get_instrument
+        self.market.get_instrument = lambda instrument_id: SimpleNamespace(
+            instrument_id=instrument_id,
+            mic="XNYS",
+        )
+        try:
+            cycle = self._seed_cycle()  # XNSE:ALPHA, configured exchange XNSE
+            self.assertEqual(self.pipeline._candidates(cycle), [])
+            with self.assertRaises(DecisionError) as caught:
+                await self.run_once(cycle)
+            self.assertEqual(
+                caught.exception.code,
+                DecisionErrorCode.NO_ELIGIBLE_CANDIDATES.value,
+            )
+        finally:
+            self.market.get_instrument = original
 
     async def test_repeat_run_reuses_signal_proposal_and_risk(self) -> None:
         cycle = self._seed_cycle()

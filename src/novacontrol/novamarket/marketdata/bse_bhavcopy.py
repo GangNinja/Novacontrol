@@ -23,6 +23,10 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from novacontrol.novamarket.marketdata.dedupe import (
+    OFFICIAL_DAILY_PROVIDERS,
+    bar_session_date,
+)
 from novacontrol.novamarket.marketdata.models import (
     DataInterval,
     DataQuality,
@@ -205,6 +209,15 @@ def _registered_bse_instruments(store: MarketDataStore) -> dict[str, str]:
     return mapping
 
 
+def _same_session_bar(previous: Any, incoming: Any) -> bool:
+    """Equal OHLCV means the same session, whichever provider stored it."""
+
+    for name in ("open", "high", "low", "close"):
+        if getattr(previous, name, None) != getattr(incoming, name, None):
+            return False
+    return bool(getattr(previous, "volume", None) == incoming.volume)
+
+
 def import_bse_bhavcopy(
     store: MarketDataStore,
     *,
@@ -233,6 +246,24 @@ def import_bse_bhavcopy(
     inserted = duplicate = conflict = rejected = 0
     processed = 0
     errors: list[dict[str, str]] = []
+    session_conflicts: list[dict[str, str]] = []
+
+    # An official import must not add a second close for a session that
+    # another provider already stored.  The store's unique key includes
+    # the provider, so this check is by exchange-local session date.
+    existing_sessions: dict[str, dict[date, Any]] = {}
+    for registered_id in set(instruments.values()):
+        page = store.bars(
+            registered_id,
+            interval=DataInterval.DAY_1,
+            limit=1000,
+            ascending=False,
+        )
+        existing_sessions[registered_id] = {
+            day: bar
+            for bar in page.items
+            if (day := bar_session_date(bar)) is not None
+        }
 
     for session in trading_days(start, end):
         if processed >= max_sessions:
@@ -279,9 +310,39 @@ def import_bse_bhavcopy(
                 },
                 raw=row.raw,
             )
+            prior = existing_sessions[instrument_id].get(row.trade_date)
+            if prior is not None:
+                prior_provider = str(getattr(prior, "provider", ""))
+                if _same_session_bar(prior, bar):
+                    counts["duplicate"] += 1
+                    continue
+                counts["conflict"] += 1
+                official_prior = prior_provider in OFFICIAL_DAILY_PROVIDERS
+                session_conflicts.append(
+                    {
+                        "symbol": row.symbol,
+                        "date": key,
+                        "existing_provider": prior_provider,
+                        "existing_close": str(getattr(prior, "close", "")),
+                        "incoming_provider": "bse_bhavcopy",
+                        "incoming_close": str(row.close),
+                        "action": (
+                            "skipped_official_conflict"
+                            if official_prior
+                            else "official_session_appended"
+                        ),
+                    }
+                )
+                if official_prior:
+                    continue
+                # The official row is appended beside the quote-provider row:
+                # nothing is overwritten, and the reader's deterministic policy
+                # prefers the official close for that session.
+
             result = store.append_bar(bar)
             if result.inserted:
                 counts["inserted"] += 1
+                existing_sessions[instrument_id][row.trade_date] = bar
             elif result.duplicate:
                 counts["duplicate"] += 1
             elif result.conflict:
@@ -325,6 +386,13 @@ def import_bse_bhavcopy(
         "conflict": conflict,
         "rejected": rejected,
         "errors": errors,
+        "duplicate_session_policy": (
+            "one effective daily close per instrument and exchange session; "
+            "an existing session is never rewritten, and a provider conflict "
+            "is reported rather than merged"
+        ),
+        "session_conflict_count": len(session_conflicts),
+        "session_conflicts": session_conflicts[:50],
         "sessions": sessions,
         "checkpoint": str(checkpoint) if checkpoint is not None else "",
     }

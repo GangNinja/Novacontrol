@@ -613,7 +613,11 @@ class FakeObserver:
     ) -> None:
         self.session_id = session_id
         self.seq = seq
-        self.at = at or stamp()
+        #: ``None`` means "the observer's newest frame is current at read
+        #: time".  Stamping it at construction instead would make a slow app
+        #: startup turn a fresh synthetic frame stale before the first request;
+        #: tests that want staleness pass an explicit old timestamp below.
+        self.at = at
         self.width = width
         self.height = height
         self.title = title
@@ -635,7 +639,7 @@ class FakeObserver:
             {
                 "observation_id": self.observation_id,
                 "seq": self.seq,
-                "at": self.at,
+                "at": self.at or stamp(),
                 "width": self.width,
                 "height": self.height,
                 "backend": "printwindow",

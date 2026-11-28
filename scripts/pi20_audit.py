@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import time
 import urllib.request
@@ -347,7 +348,12 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", default="http://127.0.0.1:5173")
     parser.add_argument("--api", default="http://127.0.0.1:8011")
-    parser.add_argument("--token", default="narasimha-novacontrol")
+    parser.add_argument(
+        "--token",
+        default=os.environ.get("NOVACONTROL_API_TOKEN")
+        or os.environ.get("NOVACONTROL_ADMIN_TOKEN", ""),
+        help="Bearer credential; defaults to NOVACONTROL_API_TOKEN or NOVACONTROL_ADMIN_TOKEN",
+    )
     parser.add_argument("--out", default=".ui_audit/pi20_audit.json")
     parser.add_argument("--widths", type=int, nargs="*", default=list(WIDTHS))
     parser.add_argument("--headed", action="store_true")

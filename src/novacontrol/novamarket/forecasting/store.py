@@ -535,7 +535,7 @@ class ForecastStore:
     def save_performance(self, payload: dict[str, Any]) -> None:
         with self._lock:
             self._connection.execute(
-                "INSERT INTO forecast_performance(snapshot_id, model_id, instrument_id, "
+                "INSERT OR REPLACE INTO forecast_performance(snapshot_id, model_id, instrument_id, "
                 "horizon, samples, created_at, metrics) VALUES (?,?,?,?,?,?,?)",
                 (
                     payload["snapshot_id"],
@@ -597,14 +597,26 @@ class ForecastStore:
             )
             self._commit()
 
-    def calibration(self, model_id: str, horizon: str) -> dict[str, Any] | None:
+    def calibration(
+        self, model_id: str, horizon: str, instrument_id: str = ""
+    ) -> dict[str, Any] | None:
+        """Latest calibration, optionally restricted to one instrument.
+
+        A calibrator fitted on another instrument's return distribution must
+        never be applied: the payload records its instrument and the caller's
+        instrument must match it.
+        """
         with self._lock:
-            row = self._connection.execute(
+            rows = self._connection.execute(
                 "SELECT payload FROM forecast_calibration WHERE model_id=? AND "
-                "horizon=? ORDER BY created_at DESC LIMIT 1",
+                "horizon=? ORDER BY created_at DESC LIMIT 100",
                 (model_id, horizon),
-            ).fetchone()
-        return json.loads(row["payload"]) if row is not None else None
+            ).fetchall()
+        for row in rows:
+            body: dict[str, Any] = json.loads(row["payload"])
+            if not instrument_id or body.get("instrument_id") == instrument_id:
+                return body
+        return None
 
     def reliability(self, *, model_id: str | None = None) -> list[dict[str, Any]]:
         clause = " WHERE model_id=?" if model_id else ""

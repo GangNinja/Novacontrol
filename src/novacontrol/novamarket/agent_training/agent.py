@@ -16,6 +16,7 @@ from collections import deque
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 ACTION_NAMES: tuple[str, ...] = ("buy", "sell", "hold", "wait", "no_action")
@@ -617,11 +618,86 @@ def action_payload(action_index: int, observation: Mapping[str, Any]) -> dict[st
     return {"action_type": "wait" if name in {"buy", "sell"} else name}
 
 
+def _decimal(value: Any) -> Decimal | None:
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return number if number.is_finite() else None
+
+
+def _position_quantity(portfolio: Mapping[str, Any]) -> Decimal:
+    positions = portfolio.get("positions")
+    if not isinstance(positions, (list, tuple)):
+        return Decimal("0")
+    return sum(
+        (
+            _decimal(row.get("quantity")) or Decimal("0")
+            for row in positions
+            if isinstance(row, Mapping)
+        ),
+        Decimal("0"),
+    )
+
+
+def _position_value(portfolio: Mapping[str, Any]) -> Decimal:
+    positions = portfolio.get("positions")
+    if not isinstance(positions, (list, tuple)):
+        return Decimal("0")
+    total = Decimal("0")
+    for row in positions:
+        if not isinstance(row, Mapping):
+            continue
+        value = _decimal(row.get("market_value"))
+        if value is None:
+            quantity = _decimal(row.get("quantity"))
+            price = _decimal(row.get("last_price"))
+            value = (quantity or Decimal("0")) * (price or Decimal("0"))
+        total += value
+    return total
+
+
+def _position_mask(
+    portfolio: Mapping[str, Any], environment: Mapping[str, Any]
+) -> tuple[tuple[bool, ...], tuple[str, ...]]:
+    """Return legal buy/sell/trade mask and human-readable mask reasons.
+
+    This is a policy-side guard only.  The PI-13 environment still validates
+    cash, notional, liquidity, price and the projected fill boundary.
+    """
+
+    mask = [True] * len(ACTION_NAMES)
+    reasons: list[str] = []
+    quantity = _position_quantity(portfolio)
+    if quantity <= 0:
+        mask[ACTION_NAMES.index("sell")] = False
+        reasons.append("sell is unavailable without a simulated position")
+
+    equity = _decimal(portfolio.get("equity"))
+    weights = [
+        value
+        for value in (
+            _decimal(environment.get("max_position_weight")),
+            _decimal(environment.get("max_gross_exposure")),
+        )
+        if value is not None and value > 0
+    ]
+    if equity is not None and equity > 0 and weights:
+        cap = min(weights)
+        if _position_value(portfolio) >= equity * cap:
+            mask[ACTION_NAMES.index("buy")] = False
+            reasons.append("buy is unavailable at the position/exposure cap")
+    return tuple(mask), tuple(reasons)
+
+
 class TrainedPolicy:
     """PI-14 ``Policy`` adapter over a persisted PI-15 DQN agent.
 
-    The adapter produces advisory actions only.  It has no controller, order
-    gateway, risk engine or autonomy handle.
+    The adapter produces advisory actions only.  It masks a buy at the
+    configured position/exposure cap and a sell without a long position before
+    choosing the argmax; the PI-13 environment remains the authority for cash,
+    notional, liquidity, price and projected-fill checks.  It has no controller,
+    order gateway, risk engine or autonomy handle.
     """
 
     def __init__(
@@ -648,12 +724,22 @@ class TrainedPolicy:
         from novacontrol.novamarket.rewards.policies import PolicyDecision
 
         state = self.agent.encoder.encode(observation)
-        action_index = self.agent.act(state, epsilon=0.0)
-        return PolicyDecision(
-            action_payload(action_index, observation),
-            f"PI-15 trained DQN argmax action {ACTION_NAMES[action_index]}; "
-            "experimental and advisory only.",
-        )
+        mask, mask_reasons = _position_mask(portfolio, environment)
+        values = list(self.agent.q_values(state))
+        legal = [
+            index
+            for index in range(min(len(values), len(ACTION_NAMES)))
+            if mask[index]
+        ]
+        if legal:
+            action_index = max(legal, key=lambda index: values[index])
+        else:
+            action_index = ACTION_NAMES.index("wait")
+        rationale = f"PI-15 masked DQN argmax action {ACTION_NAMES[action_index]}; "
+        if mask_reasons:
+            rationale += "masked: " + "; ".join(mask_reasons) + "; "
+        rationale += "experimental and advisory only."
+        return PolicyDecision(action_payload(action_index, observation), rationale)
 
 
 __all__ = [

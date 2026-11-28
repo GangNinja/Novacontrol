@@ -94,9 +94,11 @@ class _Discovery:
         self.fail_times = fail_times
         self.raises = raises
         self.calls = 0
+        self.last_kwargs: dict[str, Any] = {}
 
-    async def run_cycle(self, **_kwargs: Any) -> dict[str, Any]:
+    async def run_cycle(self, **kwargs: Any) -> dict[str, Any]:
         self.calls += 1
+        self.last_kwargs = dict(kwargs)
         if self.raises is not None:
             raise self.raises
         if self.fail_times:
@@ -229,6 +231,8 @@ class MonitoringConfigTests(unittest.TestCase):
         with self.assertRaises(AutonomyValidationError):
             MonitoringConfig(exchange="  ")
         self.assertEqual(MonitoringConfig(exchange="xnse").exchange, "XNSE")
+        self.assertEqual(MonitoringConfig(exchange="NSE").exchange, "XNSE")
+        self.assertEqual(MonitoringConfig(exchange="BSE").exchange, "XBOM")
 
 
 class MonitoringCycleTests(unittest.TestCase):
@@ -444,6 +448,35 @@ class MonitoringCycleTests(unittest.TestCase):
         rejected = [row for row in detail["candidates"] if row["disposition"] == "rejected"]
         self.assertIn("INVALID_INSTRUMENT", rejected[0]["reason"])
 
+    def test_instrument_lookup_with_another_identity_fails_closed(self) -> None:
+        self._start()
+        discovery = _Discovery(
+            [
+                {
+                    "instrument_id": "XNSE:ALPHA",
+                    "symbol": "ALPHA",
+                    "exchange": "XNSE",
+                    "data_quality": "good",
+                }
+            ]
+        )
+        monitor = AutonomyMonitoring(
+            self.runtime,
+            discovery=lambda: discovery,
+            clock=self.clock,
+            instrument_lookup=lambda _instrument_id: {
+                "instrument_id": "XNSE:OTHER",
+                "symbol": "OTHER",
+                "exchange": "XNSE",
+            },
+        )
+        result = _run(monitor.run_cycle())
+        self.assertEqual(result["eligible"], 0)
+        self.assertEqual(result["rejected"], 1)
+        detail = monitor.cycle(result["cycle_id"])
+        rejected = [row for row in detail["candidates"] if row["disposition"] == "rejected"]
+        self.assertIn("INVALID_INSTRUMENT", rejected[0]["reason"])
+
     def test_concurrent_cycle_is_refused_not_queued(self) -> None:
         self._start()
 
@@ -600,6 +633,91 @@ class RotationTests(unittest.TestCase):
         _run(monitor.run_cycle())
         self.assertEqual(monitor.status()["rotation"]["cursor"], 0)
 
+    def test_discovery_is_scoped_to_the_configured_exchange_and_universe(self) -> None:
+        discovery = _Discovery(_rows(1))
+        monitor = AutonomyMonitoring(
+            self.runtime,
+            discovery=lambda: discovery,
+            clock=self.clock,
+            universe=lambda: ("XNSE:001",),
+        )
+        _run(monitor.run_cycle())
+        scope = discovery.last_kwargs["universe"]
+        self.assertEqual(scope.exchanges, ("XNSE",))
+        self.assertEqual(scope.max_instruments, 20)
+        self.assertEqual(discovery.last_kwargs["instrument_ids"], ("XNSE:001",))
+
+    def test_a_candidate_outside_the_configured_universe_is_rejected(self) -> None:
+        discovery = _Discovery(
+            [
+                {
+                    "instrument_id": "XNSE:ALPHA",
+                    "symbol": "ALPHA",
+                    "exchange": "XNSE",
+                    "data_quality": "good",
+                },
+                {
+                    "instrument_id": "XNSE:BETA",
+                    "symbol": "BETA",
+                    "exchange": "XNSE",
+                    "data_quality": "good",
+                },
+            ]
+        )
+        monitor = AutonomyMonitoring(
+            self.runtime,
+            discovery=lambda: discovery,
+            clock=self.clock,
+            universe=lambda: ("XNSE:ALPHA",),
+        )
+        result = _run(monitor.run_cycle())
+        self.assertEqual(result["eligible"], 1)
+        self.assertEqual(result["rejected"], 1)
+        detail = monitor.cycle(result["cycle_id"])
+        rejected = [row for row in detail["candidates"] if row["disposition"] == "rejected"]
+        self.assertEqual(rejected[0]["instrument_id"], "XNSE:BETA")
+        self.assertIn("OUTSIDE_CONFIGURED_UNIVERSE", rejected[0]["reason"])
+
+    def test_legacy_venue_names_are_stored_as_mics_and_real_mismatches_rejected(self) -> None:
+        discovery = _Discovery(
+            [
+                {
+                    "instrument_id": "XNSE:ALPHA",
+                    "symbol": "ALPHA",
+                    "exchange": "NSE",
+                    "data_quality": "good",
+                },
+                {
+                    "instrument_id": "XNSE:CROSS",
+                    "symbol": "CROSS",
+                    "exchange": "BSE",
+                    "data_quality": "good",
+                },
+            ]
+        )
+
+        def lookup(instrument_id: str) -> dict[str, Any]:
+            return {
+                "symbol": instrument_id.split(":", 1)[1],
+                "exchange": "NSE" if instrument_id.endswith("ALPHA") else "BSE",
+                "mic": "XNSE" if instrument_id.endswith("ALPHA") else "XBOM",
+            }
+
+        monitor = AutonomyMonitoring(
+            self.runtime,
+            discovery=lambda: discovery,
+            clock=self.clock,
+            instrument_lookup=lookup,
+        )
+        result = _run(monitor.run_cycle())
+        self.assertEqual(result["eligible"], 1)
+        self.assertEqual(result["rejected"], 1)
+        detail = monitor.cycle(result["cycle_id"])
+        processed = [row for row in detail["candidates"] if row["disposition"] == "processed"]
+        rejected = [row for row in detail["candidates"] if row["disposition"] == "rejected"]
+        self.assertEqual(processed[0]["exchange"], "XNSE")
+        self.assertIn("EXCHANGE_MISMATCH", rejected[0]["reason"])
+
 
 class PersistenceAndRecoveryTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -616,7 +734,8 @@ class PersistenceAndRecoveryTests(unittest.TestCase):
             version = store._conn.execute(
                 "SELECT value FROM autonomy_meta WHERE key = 'schema_version'"
             ).fetchone()[0]
-            self.assertEqual(version, "3")
+            # Stage C R-02 adds the append-only control audit (v5).
+            self.assertEqual(version, "5")
             tables = {
                 row[0]
                 for row in store._conn.execute(
@@ -671,7 +790,8 @@ class PersistenceAndRecoveryTests(unittest.TestCase):
             version = store._conn.execute(
                 "SELECT value FROM autonomy_meta WHERE key = 'schema_version'"
             ).fetchone()[0]
-            self.assertEqual(version, "3")
+            # Stage C R-02 adds the append-only control audit (v5).
+            self.assertEqual(version, "5")
             marker = store._conn.execute(
                 "SELECT value FROM autonomy_meta WHERE key = 'at01_marker'"
             ).fetchone()[0]

@@ -26,7 +26,9 @@ from novacontrol.novamarket.discovery.sessions import SESSION_TABLE
 from novacontrol.novamarket.forecasting import estimators
 from novacontrol.novamarket.forecasting.calibration import (
     CalibrationSample,
+    IsotonicCalibrator,
     calibrate_probability,
+    calibrator_from_dict,
 )
 from novacontrol.novamarket.forecasting.features import (
     PriceBar,
@@ -55,6 +57,7 @@ from novacontrol.novamarket.forecasting.store import ForecastStore
 from novacontrol.novamarket.forecasting.validation import (
     best_model,
     evaluate_models,
+    walk_forward_origins,
 )
 
 _LOGGER = logging.getLogger("novacontrol.novamarket.forecasting")
@@ -160,6 +163,7 @@ class ForecastEngine:
         try:
             page = self._market_data.bars(
                 instrument_id,
+                interval="1d",
                 limit=self.policy.max_history_bars,
                 # The store applies LIMIT before ORDER BY, so ascending=True
                 # would return the OLDEST N bars and silently exclude the
@@ -261,6 +265,85 @@ class ForecastEngine:
 
     # -- forecasting ----------------------------------------------------------
 
+    def _calibrated_probabilities(
+        self,
+        instrument_id: str,
+        model_id: str,
+        horizon: str,
+        p_up: float | None,
+        p_down: float | None,
+        p_sideways: float | None,
+    ) -> tuple[float | None, float | None, float | None, str, str, list[str]]:
+        """Apply a stored, validation-only calibrator when one is valid.
+
+        Returns the probabilities plus explicit provenance.  A missing,
+        insufficient or rejected calibrator leaves the raw probabilities
+        untouched and labels them ``uncalibrated``; it never invents confidence.
+        """
+        if p_up is None or p_down is None or p_sideways is None:
+            return p_up, p_down, p_sideways, "not_applicable", "", []
+        if not self.policy.apply_calibration:
+            return (
+                p_up,
+                p_down,
+                p_sideways,
+                "uncalibrated",
+                "",
+                [
+                    "calibration is report-only in this policy; raw probabilities "
+                    "are shown as uncalibrated"
+                ],
+            )
+        stored = self._store.calibration(model_id, horizon, instrument_id)
+        if not stored or stored.get("status") != "calibrated":
+            reason = (stored or {}).get("status", "missing")
+            return (
+                p_up,
+                p_down,
+                p_sideways,
+                "uncalibrated",
+                "",
+                [f"directional probabilities are uncalibrated (calibration {reason})"],
+            )
+        body = stored.get("calibrator")
+        calibrator = calibrator_from_dict(body if isinstance(body, dict) else {})
+        if calibrator is None:
+            return (
+                p_up,
+                p_down,
+                p_sideways,
+                "uncalibrated",
+                "",
+                ["the stored calibrator could not be decoded; raw probabilities retained"],
+            )
+        if isinstance(calibrator, IsotonicCalibrator):
+            up = calibrator.calibrate(p_up)
+            remainder = max(0.0, 1.0 - up)
+            other = p_down + p_sideways
+            if other <= 0.0:
+                down = sideways = remainder / 2.0
+            else:
+                down = remainder * p_down / other
+                sideways = remainder * p_sideways / other
+        else:
+            up, down, sideways = calibrator.calibrate(p_up, p_down, p_sideways)
+        floor = 1e-9
+        up = max(floor, up)
+        down = max(floor, down)
+        sideways = max(floor, sideways)
+        total = up + down + sideways
+        return (
+            up / total,
+            down / total,
+            sideways / total,
+            "calibrated",
+            str(stored.get("calibration_id") or ""),
+            [
+                "directional probabilities calibrated on a validation-only "
+                f"chronological holdout ({stored.get('holdout_samples')} samples)"
+            ],
+        )
+
     async def generate(
         self,
         instrument_id: str,
@@ -307,10 +390,20 @@ class ForecastEngine:
             ) from exc
         if output.lower_return is None or output.upper_return is None:
             raise ForecastDataError(f"{model_id} produced no predictive interval")
+        p_up, p_down, p_sideways, probability_status, calibration_id, probability_notes = (
+            self._calibrated_probabilities(
+                instrument_id,
+                model_id,
+                chosen.value,
+                output.p_up,
+                output.p_down,
+                output.p_sideways,
+            )
+        )
         event_ids, pressure = self._event_context(instrument_id, cutoff)
         lower = output.lower_return
         upper = output.upper_return
-        notes = list(output.notes)
+        notes = [*output.notes, *probability_notes]
         if pressure:
             factor = self.policy.event_interval_widen
             lower = output.predicted_return - (output.predicted_return - lower) * factor
@@ -331,8 +424,11 @@ class ForecastEngine:
                 "model_id": model_id,
                 "features": features.digest,
                 "predicted_return": output.predicted_return,
-                "p_up": output.p_up,
-                "p_down": output.p_down,
+                "p_up": p_up,
+                "p_down": p_down,
+                "p_sideways": p_sideways,
+                "probability_status": probability_status,
+                "calibration_id": calibration_id,
                 "lower": lower,
                 "upper": upper,
                 "policy": self.policy.to_dict(),
@@ -351,9 +447,9 @@ class ForecastEngine:
             feature_set_version=FEATURE_SET_VERSION,
             predicted_return=output.predicted_return,
             predicted_price=features.last_close * (1.0 + output.predicted_return),
-            p_up=float(output.p_up or 0.0),
-            p_down=float(output.p_down or 0.0),
-            p_sideways=float(output.p_sideways or 0.0),
+            p_up=float(p_up or 0.0),
+            p_down=float(p_down or 0.0),
+            p_sideways=float(p_sideways or 0.0),
             lower_return=lower,
             upper_return=upper,
             lower_price=features.last_close * (1.0 + lower),
@@ -371,6 +467,8 @@ class ForecastEngine:
             methodology_version=METHODOLOGY_VERSION,
             digest=digest,
             notes=tuple(notes),
+            probability_status=probability_status,
+            calibration_id=calibration_id,
         )
         self._store.save_forecast(record)
         self._last_error = ""
@@ -577,10 +675,18 @@ class ForecastEngine:
             "mae": round(fmean(errors), 6) if errors else None,
             "coverage": round(fmean(coverage), 6) if coverage else None,
         }
+        # Several forecasts for the same model/instrument/horizon can become
+        # due in one evaluation cycle.  Including the resolved-outcome set keeps
+        # each snapshot unique without making the snapshot identity depend on
+        # iteration order.
+        signature = "|".join(
+            sorted(str(row["forecast_id"]) for row in outcomes)
+        )
         payload = {
             "snapshot_id": "fps_"
             + hashlib.sha256(
-                f"{model_id}|{instrument_id}|{horizon}|{at.isoformat()}".encode()
+                f"{model_id}|{instrument_id}|{horizon}|{at.isoformat()}"
+                f"|{len(outcomes)}|{signature}".encode()
             ).hexdigest()[:16],
             "model_id": model_id,
             "instrument_id": instrument_id,
@@ -618,31 +724,64 @@ class ForecastEngine:
                 f"{self.policy.min_training_bars} are required to train"
             )
         sessions = HORIZON_SESSIONS[chosen]
-        result = evaluate_models(closes, sessions, self.policy)
+        all_origins = walk_forward_origins(
+            len(closes), self.policy.min_training_bars, sessions
+        )
+        split_index = max(1, int(len(all_origins) * self.policy.validation_fraction))
+        validation_origins = all_origins[:split_index]
+        test_origins = all_origins[split_index:]
+        result = evaluate_models(
+            closes, sessions, self.policy, origins=validation_origins
+        )
         if not result.scores:
             raise ForecastDataError(
                 "not enough chronological windows for walk-forward validation"
             )
+        # The later slice is scored but never used to choose a model or fit a
+        # calibrator.  It is an untouched chronological test set, not a tuning
+        # set.  A short slice may be reported with its sample count rather than
+        # silently enlarged into the validation slice.
+        test_result = (
+            evaluate_models(
+                closes,
+                sessions,
+                self.policy,
+                origins=test_origins,
+                min_samples=min(5, self.policy.min_validation_samples),
+            )
+            if test_origins
+            else None
+        )
         baseline = result.scores.get("random_walk")
         best_id, best = best_model(
             result, minimum_samples=self.policy.min_validation_samples
         )
         selected = "random_walk"
-        if (
+        has_skill = bool(
             best is not None
             and best.brier is not None
+            and best.brier_skill_score is not None
+            and best.brier_skill_score > 0.0
             and baseline is not None
             and baseline.brier is not None
             and best.brier < baseline.brier
-        ):
+        )
+        if best is not None and has_skill:
             selected = best.model_id
         baseline_brier = baseline.brier if baseline is not None else None
+        selected_score = result.scores.get(selected)
         for model_id, score in result.scores.items():
-            if model_id == selected:
+            if model_id == selected and has_skill:
                 state = ModelState.ACTIVE
                 reason = (
-                    f"selected on walk-forward Brier {score.brier} vs baseline "
-                    f"{baseline_brier}"
+                    f"selected on validation Brier {score.brier} vs baseline "
+                    f"{baseline_brier}; skill {score.brier_skill_score} vs uniform"
+                )
+            elif model_id == selected:
+                state = ModelState.ACTIVE
+                reason = (
+                    "baseline retained: no model beat the uninformed uniform "
+                    f"Brier reference on validation (baseline {baseline_brier})"
                 )
             elif (
                 score.brier is not None
@@ -666,7 +805,16 @@ class ForecastEngine:
                     updated_at=cutoff,
                     instrument_id=instrument_id,
                     horizon=chosen.value,
-                    metrics={**score.to_dict(), "baseline_brier": baseline_brier},
+                    metrics={
+                        **score.to_dict(),
+                        "baseline_brier": baseline_brier,
+                        "test": (
+                            test_result.scores[model_id].to_dict()
+                            if test_result is not None
+                            and model_id in test_result.scores
+                            else None
+                        ),
+                    },
                     reason=reason,
                 )
             )
@@ -681,7 +829,16 @@ class ForecastEngine:
             instrument_id,
             chosen.value,
             selected,
-            result.scores[selected].to_dict() if selected in result.scores else {},
+            {
+                **(
+                    selected_score.to_dict()
+                    if selected_score is not None
+                    else {}
+                ),
+                "abstained": not has_skill,
+                "validation_origins": result.origins,
+                "test_origins": test_result.origins if test_result else 0,
+            },
             cutoff,
         )
         calibration_reports: dict[str, Any] = {}
@@ -693,6 +850,7 @@ class ForecastEngine:
                 samples,
                 min_samples=self.policy.calibration_min_samples,
                 holdout_fraction=self.policy.calibration_holdout_fraction,
+                min_improvement=self.policy.calibration_min_improvement,
             )
             payload = {
                 "calibration_id": "fcal_"
@@ -727,6 +885,11 @@ class ForecastEngine:
             "finished_at": self._now().isoformat(),
             "samples": result.origins,
             "metrics": {key: score.to_dict() for key, score in result.scores.items()},
+            "test_metrics": (
+                {key: score.to_dict() for key, score in test_result.scores.items()}
+                if test_result is not None
+                else {}
+            ),
             "calibration": {
                 key: report.get("status") for key, report in calibration_reports.items()
             },
@@ -755,8 +918,19 @@ class ForecastEngine:
             "selected_model": selected,
             "baseline_model": "random_walk",
             "scores": {key: score.to_dict() for key, score in result.scores.items()},
+            "test_scores": (
+                {key: score.to_dict() for key, score in test_result.scores.items()}
+                if test_result is not None
+                else {}
+            ),
+            "reference_brier": 2.0 / 3.0,
+            "selected_brier_skill_score": (
+                selected_score.brier_skill_score if selected_score else None
+            ),
+            "abstained": not has_skill,
             "calibration": calibration_reports,
             "origins": result.origins,
+            "test_origins": test_result.origins if test_result else 0,
             "run_id": run["run_id"],
         }
 

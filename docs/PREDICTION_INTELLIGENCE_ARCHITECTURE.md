@@ -40,14 +40,14 @@ leakage-safe validation/test selection, walk-forward evaluation and regime-aware
 comparison. It adds no risk or execution authority and claims no calibrated
 probability.
 **Scope of PI-06:** XGBoost and LightGBM gradient-boosting forecasts — native
-booster training for return regression and direction classification, all nine
+booster training for return regression and direction classification, all ten
 PI-01 horizons, validation-only bounded configuration selection, walk-forward
 refits, PI-05 baseline comparison, TreeSHAP-style local contributions, native
 artifact persistence and the existing forecast API/UI. It adds no promotion,
 risk or execution authority and withholds uncalibrated probabilities.
 **Scope of PI-07:** PyTorch CPU LSTM sequence models over chronological PI-04
 feature windows — configurable sequence lengths and bounded architectures,
-regression and three-class direction heads, all nine PI-01 horizons when the
+regression and three-class direction heads, all ten PI-01 horizons when the
 observed resolution and usable history support them, training-only
 preprocessing, validation-selected candidates with early stopping and best-
 checkpoint restoration, native state-dict artifacts with checksums, walk-forward
@@ -356,9 +356,16 @@ arbitrary model score is never relabelled as a statistically valid probability.
 
 | Family | Horizons | Maximum input resolution | Minimum history guidance |
 |---|---|---|---|
-| Intraday | 5m, 15m, 20m, 1h | 1m / 5m / 5m / 15m | 60 / 48 / 48 / 40 bars |
+| Intraday | 1m, 5m, 15m, 20m, 1h | 1m / 1m / 5m / 5m / 15m | 30 / 60 / 48 / 48 / 40 bars |
 | Swing | 1d, 3d, 5d | 1d | 80 / 80 / 100 bars |
 | Long-term | 30d, 90d | 1d | 120 / 180 bars |
+
+The one-minute horizon has its own scheduler lifecycle (initial at creation,
+T−30s first confirmation, T−5s final confirmation) rather than being only the
+last checkpoint of a longer horizon. The post-PI-24 multi-timeframe decision
+layer reads completed 20m/5m/1m observations independently of these forecast
+cycles; see
+[MULTITIMEFRAME_TRADING_INTELLIGENCE.md](MULTITIMEFRAME_TRADING_INTELLIGENCE.md).
 
 Target semantics are explicit. Swing targets count 1, 3 or 5 verified trading
 sessions after the decision session; long-term targets count 30 or 90 elapsed
@@ -996,7 +1003,7 @@ bounded candidate grid per model family. `arima` is always evaluated with the
 stationarity/differencing evidence; it is never silently replaced by a
 different model.
 
-The nine PI-01 horizons are accepted:
+The ten PI-01 horizons are accepted:
 
 | Horizon | Family | Finest accepted input |
 |---|---|---|

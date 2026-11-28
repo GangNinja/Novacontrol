@@ -24,7 +24,11 @@ dependencies = [
   "tzdata>=2024.1",
   # Vision layer: image loading for OCR/LLM element location (vision_guide)
   # and the Pillow fallback of the pixel-diff verification (desktop/vision).
-  "pillow>=10.0",
+  # 13.0.0 is the first release that fixes the 12.x image-decoder advisories
+  # found by the 2026-11 dependency audit (including the Ghostscript argument
+  # injection and TIFF/PDF heap overflows).  The project uses only the stable
+  # Image/ImageChops surface, which is unchanged.
+  "pillow>=13.0.0",
   # Vision layer fast path: numpy-backed pixel-diff + change-region
   # localization for guided-click verification (desktop/vision).
   "opencv-python>=4.10",
@@ -38,6 +42,7 @@ dev = [
   "mypy>=1.10",
   "coverage>=7.5",
   "httpx>=0.27",  # required by fastapi.testclient.TestClient
+  "pip-audit>=2.10",  # supported dependency-vulnerability scanner
 ]
 database = [
   "sqlalchemy>=2.0",

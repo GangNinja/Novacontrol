@@ -79,6 +79,7 @@ async function run(targetId, type, task, buttonId, options = {}) {
 /* ── Live activity stream (ONE SSE channel on the app EventBus) ── */
 
 let activitySource = null;
+let activityConnecting = false;
 
 // Which progress families a run type subscribes to while loading. "ask" (Chat)
 // accepts research AND command steps, because a chat answer can be an Explore
@@ -90,9 +91,20 @@ function activityFamily(type) {
   return null;
 }
 
-function activitySourceUrl() {
-  const token = byId("tokenInput").value.trim();
-  return token ? `/events/stream?token=${encodeURIComponent(token)}` : "/events/stream";
+// EventSource cannot set an Authorization header, and putting the API token in
+// the URL leaks it into history/proxy logs. Exchange the bearer credential for
+// an opaque HttpOnly session cookie first; the cookie is scoped to /events.
+async function openActivitySession() {
+  try {
+    const response = await fetch("/events/session", {
+      method: "POST",
+      headers: { ...authHeaders() },
+      credentials: "same-origin",
+    });
+    return response.ok;
+  } catch (_) {
+    return false;
+  }
 }
 
 /* ── Run-scoped correlation ─────────────────────────────────
@@ -152,10 +164,12 @@ function slotFamilyAccepts(slotFamily, eventFamily) {
 
 // Open the single channel once per page. Native EventSource reconnects after
 // drops; the server sends comment keep-alive frames so the connection stays warm.
-function connectActivitySource() {
-  if (activitySource || typeof EventSource === "undefined") return;
+async function connectActivitySource() {
+  if (activitySource || activityConnecting || typeof EventSource === "undefined") return;
+  activityConnecting = true;
   try {
-    activitySource = new EventSource(activitySourceUrl());
+    if (!(await openActivitySession())) return;
+    activitySource = new EventSource("/events/stream");
     activitySource.addEventListener("explore.progress", onActivityEvent);
     activitySource.addEventListener("command.progress", onActivityEvent);
     // Completion events feed the Recent Activity timeline (activity.js) —
@@ -166,8 +180,18 @@ function connectActivitySource() {
     // (Re)seed from the journal whenever the channel (re)opens — EventSource
     // auto-reconnect after a drop backfills anything missed while offline.
     activitySource.onopen = () => { if (typeof loadActivityFromServer === "function") loadActivityFromServer(); };
+    // A reconnect after the one-hour session TTL would retry the expired
+    // cookie forever. Exchange the bearer credential for a fresh cookie and
+    // reopen instead; the old stream is closed so the browser cannot race us.
+    activitySource.onerror = () => {
+      activitySource?.close();
+      activitySource = null;
+      setTimeout(() => { void connectActivitySource(); }, 5000);
+    };
   } catch (_) {
     activitySource = null;
+  } finally {
+    activityConnecting = false;
   }
 }
 

@@ -95,7 +95,8 @@ body {
   font-size: 0.82rem;
   cursor: pointer;
 }
-.nav-item:hover, .nav-item:focus-visible { color: var(--text); border-color: var(--line); outline: none; }
+.nav-item:hover { color: var(--text); border-color: var(--line); }
+.nav-item:focus-visible { color: var(--text); border-color: var(--line); outline: var(--focus-ring, 2px solid currentColor); outline-offset: var(--focus-offset, 2px); }
 .nav-item.is-active { color: var(--cyan); background: rgba(79, 227, 255, 0.08); border-color: var(--line); }
 .rail-footer { margin-top: auto; padding: 18px 6px 0; display: grid; gap: 7px; }
 .rail-footer label { color: var(--dim); font-size: 0.66rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; }
@@ -117,7 +118,8 @@ body {
   font-weight: 700;
   cursor: pointer;
 }
-.button:hover:not(:disabled), .button:focus-visible:not(:disabled) { background: rgba(79, 227, 255, 0.18); outline: none; }
+.button:hover:not(:disabled) { background: rgba(79, 227, 255, 0.18); }
+.button:focus-visible:not(:disabled) { background: rgba(79, 227, 255, 0.18); outline: var(--focus-ring, 2px solid currentColor); outline-offset: var(--focus-offset, 2px); }
 .button.ghost { color: var(--muted); border-color: var(--line); background: transparent; }
 .button.small { padding: 6px 8px; font-size: 0.7rem; }
 .button:disabled { cursor: not-allowed; opacity: 0.4; }

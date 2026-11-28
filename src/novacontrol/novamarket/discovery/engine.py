@@ -332,20 +332,55 @@ class AssetDiscoveryEngine:
     # -- discovery cycles -----------------------------------------------------
 
     def _universe_items(
-        self, limit: int | None = None
+        self,
+        limit: int | None = None,
+        *,
+        universe: UniverseFilter | None = None,
+        instrument_ids: Sequence[str] | None = None,
     ) -> tuple[list[dict[str, Any]], list[str]]:
         """The instruments this cycle may scan, plus the catalogue failures.
+
+        ``universe`` overrides the engine-wide filter for one cycle so a caller
+        (notably AT-02 monitoring) never has to mutate shared discovery state.
+        ``instrument_ids`` narrows the scan to the configured allow-list.
 
         A failing catalogue is returned, never swallowed: a cycle that read
         nothing must not be reported as a successful scan of zero instruments.
         """
         if self._market_data is None:
             return [], ["market data is not initialised"]
-        cap = min(limit or self.universe.max_instruments, self.universe.max_instruments)
+        scope = universe or self.universe
+        allowed = {
+            str(item or "").strip().upper()
+            for item in (instrument_ids or ())
+            if str(item or "").strip()
+        }
+        cap = min(limit or scope.max_instruments, scope.max_instruments)
         rows: dict[str, dict[str, Any]] = {}
         failures: list[str] = []
         self._last_universe_source = "catalogue"
-        for asset_class in self.universe.asset_classes:
+        if allowed:
+            # A configured universe is authoritative.  Reading those rows
+            # directly prevents the catalogue page or bar inventory from
+            # silently omitting a configured instrument.
+            self._last_universe_source = "configured_universe"
+            for instrument_id in sorted(allowed):
+                try:
+                    body = self._instrument(instrument_id)
+                except Exception as exc:  # noqa: BLE001 - one bad row is not a cycle failure
+                    failures.append(
+                        f"instrument catalogue ({instrument_id}): "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    continue
+                if scope.allows(
+                    str(body.get("asset_class") or ""),
+                    str(body.get("exchange") or ""),
+                    str(body.get("mic") or ""),
+                ):
+                    rows[instrument_id] = body
+            return list(rows.values())[:cap], failures
+        for asset_class in scope.asset_classes:
             try:
                 page = self._market_data.list_instruments(
                     asset_class=asset_class, limit=cap
@@ -366,9 +401,10 @@ class AssetDiscoveryEngine:
                 continue
             for instrument in page.items:
                 body = instrument.to_dict()
-                if self.universe.allows(
+                if scope.allows(
                     str(body.get("asset_class") or ""),
                     str(body.get("exchange") or ""),
+                    str(body.get("mic") or ""),
                 ):
                     rows[str(body["instrument_id"])] = body
         # A catalogue that failed on every class is a source failure, not an
@@ -407,9 +443,10 @@ class AssetDiscoveryEngine:
                             f"{type(exc).__name__}: {exc}"
                         )
                         continue
-                    if self.universe.allows(
+                    if scope.allows(
                         str(instrument.get("asset_class") or ""),
                         str(instrument.get("exchange") or ""),
+                        str(instrument.get("mic") or ""),
                     ):
                         stored[instrument_id] = instrument
                 if stored:
@@ -423,11 +460,18 @@ class AssetDiscoveryEngine:
         force: bool = False,
         trigger: TriggerKind = TriggerKind.MANUAL,
         limit: int | None = None,
+        universe: UniverseFilter | None = None,
+        instrument_ids: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         """Run one discovery cycle; overlapping or too-frequent runs are refused."""
         moment = self._now()
+        scope = universe or self.universe
         if trigger is TriggerKind.SCHEDULED:
-            sessions = self.sessions_now()
+            sessions = (
+                sessions_for(scope.exchanges, moment)
+                if scope.exchanges
+                else self.sessions_now()
+            )
             if sessions and all(
                 state == SessionState.CLOSED.value for state in sessions.values()
             ):
@@ -453,11 +497,21 @@ class AssetDiscoveryEngine:
                 }
         async with self._cycle_lock:
             return await self._run_cycle_locked(
-                trigger=trigger, limit=limit, started=moment
+                trigger=trigger,
+                limit=limit,
+                started=moment,
+                scope=scope,
+                instrument_ids=instrument_ids,
             )
 
     async def _run_cycle_locked(
-        self, *, trigger: TriggerKind, limit: int | None, started: datetime
+        self,
+        *,
+        trigger: TriggerKind,
+        limit: int | None,
+        started: datetime,
+        scope: UniverseFilter | None = None,
+        instrument_ids: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         self._cycles += 1
         cycle_id = "cyc_" + hashlib.sha256(
@@ -471,7 +525,10 @@ class AssetDiscoveryEngine:
             self._store.record_source(
                 "market_data", status="error", at=started, error=errors[-1]
             )
-        items, catalogue_errors = self._universe_items(limit)
+        scope = scope or self.universe
+        items, catalogue_errors = self._universe_items(
+            limit, universe=scope, instrument_ids=instrument_ids
+        )
         if catalogue_errors and self._market_data is not None:
             failed_sources += 1
             errors.extend(catalogue_errors[:5])
@@ -494,7 +551,7 @@ class AssetDiscoveryEngine:
         skipped = 0
         for instrument in items:
             status = str(instrument.get("trading_status") or "unknown")
-            if self.universe.exclude_unknown_trading_status and status == "unknown":
+            if scope.exclude_unknown_trading_status and status == "unknown":
                 skipped += 1
                 continue
             try:

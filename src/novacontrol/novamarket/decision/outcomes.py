@@ -307,6 +307,16 @@ class ForecastOutcomeTracker:
         primary = decision.get("primary_forecast") or {}
         forecast_direction = str(primary.get("direction") or "").lower()
         expected_return = _number(primary.get("predicted_return"))
+        if expected_return is None:
+            expected_return = _number(decision.get("expected_return"))
+        direction_probability = None
+        if forecast_direction == "up":
+            direction_probability = _number(decision.get("probability_up"))
+        elif forecast_direction == "down":
+            direction_probability = _number(decision.get("probability_down"))
+        forecast_error = (
+            expected_return - actual_return if expected_return is not None else None
+        )
         forecast_correct = (
             forecast_direction == actual_direction
             if forecast_direction in {"up", "down", "neutral"}
@@ -328,6 +338,11 @@ class ForecastOutcomeTracker:
             and actual_direction == "down"
             else None
         )
+        probability = None
+        brier_score = None
+        if direction_probability is not None and forecast_correct is not None:
+            probability = min(1.0, max(0.0, float(direction_probability)))
+            brier_score = (probability - (1.0 if forecast_correct else 0.0)) ** 2
         order_status = str(execution.get("status") or "")
         filled = _decimal(execution.get("filled_quantity")) or Decimal("0")
         average_fill = _decimal(execution.get("average_fill_price"))
@@ -366,9 +381,41 @@ class ForecastOutcomeTracker:
             "actual_direction": actual_direction,
             "forecast": {
                 "forecast_id": str(decision.get("primary_forecast_id") or ""),
+                "prediction_id": str(decision.get("decision_id") or ""),
+                "model_id": str(primary.get("model_version") or ""),
+                "ensemble_id": str(primary.get("ensemble_id") or ""),
+                "models": list(primary.get("member_versions") or ()),
                 "horizon": str(decision.get("horizon") or ""),
+                "prediction_at": str(
+                    decision.get("created_at") or decision.get("decided_at") or ""
+                ),
+                "target_at": (
+                    target.isoformat()
+                    if target
+                    else str(decision.get("target_at") or "")
+                ),
+                "source_observed_at": str(
+                    primary.get("data_observed_at") or decision.get("source_market_data_at") or ""
+                ),
+                "provenance": {
+                    "source": "persisted PI-08/PI-10/PI-11 forecast decision",
+                    "reference_price": str(reference),
+                    "actual_observation_at": bar["observed_at"].isoformat(),
+                },
                 "direction": forecast_direction,
                 "expected_return": expected_return,
+                "actual_return": round(actual_return, 8),
+                "confidence": probability,
+                "error": round(forecast_error, 8) if forecast_error is not None else None,
+                "absolute_error": (
+                    round(abs(forecast_error), 8) if forecast_error is not None else None
+                ),
+                "squared_error": (
+                    round(forecast_error * forecast_error, 8)
+                    if forecast_error is not None
+                    else None
+                ),
+                "brier_score": round(brier_score, 8) if brier_score is not None else None,
                 "correct": forecast_correct,
                 "basis": "forecast direction compared with the target-period return",
             },

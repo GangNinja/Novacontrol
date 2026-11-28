@@ -1,0 +1,1230 @@
+{
+  "aggregate": {
+    "day_momentum": {
+      "drawdown_mean": -0.00938635,
+      "return_max": 0.0197865,
+      "return_mean": 0.00254288,
+      "return_min": -0.0052848,
+      "sharpe_mean": 0.05109846,
+      "total_fees": 312.58,
+      "total_slippage": 327.659929,
+      "trades": 40
+    },
+    "long_horizon_proxy": {
+      "drawdown_mean": -0.00108201,
+      "return_max": 0.0,
+      "return_mean": -0.00091036,
+      "return_min": -0.0045518,
+      "sharpe_mean": -1.37284752,
+      "total_fees": 7.94,
+      "total_slippage": 8.211401,
+      "trades": 1
+    },
+    "rl_default": {
+      "drawdown_mean": null,
+      "return_max": 0.0,
+      "return_mean": -0.00581166,
+      "return_min": -0.0148041,
+      "sharpe_mean": -0.633635,
+      "total_fees": 23.55,
+      "total_slippage": 24.949941,
+      "trades": 3
+    },
+    "rl_trading": {
+      "drawdown_mean": null,
+      "return_max": 0.0430145,
+      "return_mean": 0.00319968,
+      "return_min": -0.0148041,
+      "sharpe_mean": -0.0032218,
+      "total_fees": 39.34,
+      "total_slippage": 41.219941,
+      "trades": 5
+    },
+    "swing_trend": {
+      "drawdown_mean": -0.00823188,
+      "return_max": 0.0032832,
+      "return_mean": -0.00436128,
+      "return_min": -0.0107466,
+      "sharpe_mean": -0.24424647,
+      "total_fees": 61.31,
+      "total_slippage": 63.943274,
+      "trades": 8
+    }
+  },
+  "artifact": "compact tracked extract",
+  "automatic_policy_promotion": false,
+  "errors": [],
+  "execution_assumptions": {
+    "execution_config": {
+      "allow_bar_fallback": false,
+      "brokerage_bps": "3.0000",
+      "default_order_ttl_seconds": 86400,
+      "exchange_bps": "0.2970",
+      "fee_disclaimer": "Illustrative Indian cash-equity simulation schedule. Verify against the current broker/exchange tariff before relying on exact costs.",
+      "fee_effective_date": "2026-01-01",
+      "gst_percent": "18.0000",
+      "impact_coefficient_bps": "12.0000",
+      "maximum_slippage_bps": "150.0000",
+      "minimum_liquidity_quantity": "0.0000",
+      "minimum_total_fee": "0.0000",
+      "participation_rate": "0.1000",
+      "require_fresh_data": true,
+      "sebi_bps": "0.0100",
+      "spread_bps": "8.0000",
+      "stale_after_seconds": 300,
+      "stamp_duty_bps": "0.0150",
+      "version": "nm10-exec-v1",
+      "volatility_weight": "0.3500"
+    },
+    "fills": "next completed daily bar open + NM-10 fee/slippage functions",
+    "max_gross_exposure": "1.00",
+    "max_position_weight": "0.25",
+    "order_notional": "20000.00"
+  },
+  "existing_registry": {
+    "counts": {
+      "rl_train_configs": 6,
+      "rl_train_evaluations": 6,
+      "rl_train_policies": 6,
+      "rl_train_runs": 6
+    },
+    "evaluations": [
+      {
+        "action_distribution": {
+          "buy": 0,
+          "hold": 0,
+          "no_action": 44,
+          "sell": 0,
+          "wait": 0
+        },
+        "baselines": [
+          {
+            "action_distribution": {
+              "buy": 0,
+              "hold": 0,
+              "no_action": 44,
+              "sell": 0,
+              "wait": 0
+            },
+            "name": "no_action",
+            "total_return": 0.0
+          },
+          {
+            "action_distribution": {
+              "buy": 0,
+              "hold": 0,
+              "no_action": 0,
+              "sell": 0,
+              "wait": 44
+            },
+            "name": "rule_based",
+            "total_return": 0.0
+          },
+          {
+            "action_distribution": {
+              "buy": 0,
+              "hold": 0,
+              "no_action": 0,
+              "sell": 0,
+              "wait": 44
+            },
+            "name": "pi12_adapter",
+            "total_return": 0.0
+          }
+        ],
+        "policy_name": "Browser walkthrough DQN experimental DQN",
+        "split": "validation",
+        "total_return": 0.0,
+        "transitions": 44
+      },
+      {
+        "action_distribution": {
+          "buy": 0,
+          "hold": 0,
+          "no_action": 40,
+          "sell": 0,
+          "wait": 0
+        },
+        "baselines": [
+          {
+            "action_distribution": {
+              "buy": 0,
+              "hold": 0,
+              "no_action": 40,
+              "sell": 0,
+              "wait": 0
+            },
+            "name": "no_action",
+            "total_return": 0.0
+          },
+          {
+            "action_distribution": {
+              "buy": 0,
+              "hold": 0,
+              "no_action": 0,
+              "sell": 0,
+              "wait": 40
+            },
+            "name": "rule_based",
+            "total_return": 0.0
+          },
+          {
+            "action_distribution": {
+              "buy": 0,
+              "hold": 0,
+              "no_action": 0,
+              "sell": 0,
+              "wait": 40
+            },
+            "name": "pi12_adapter",
+            "total_return": 0.0
+          }
+        ],
+        "policy_name": "Browser walkthrough DQN experimental DQN",
+        "split": "test",
+        "total_return": 0.0,
+        "transitions": 40
+      },
+      {
+        "action_distribution": {
+          "buy": 0,
+          "hold": 0,
+          "no_action": 0,
+          "sell": 0,
+          "wait": 44
+        },
+        "baselines": [
+          {
+            "action_distribution": {
+              "buy": 0,
+              "hold": 0,
+              "no_action": 44,
+              "sell": 0,
+              "wait": 0
+            },
+            "name": "no_action",
+            "total_return": 0.0
+          },
+          {
+            "action_distribution": {
+              "buy": 0,
+              "hold": 0,
+              "no_action": 0,
+              "sell": 0,
+              "wait": 44
+            },
+            "name": "rule_based",
+            "total_return": 0.0
+          },
+          {
+            "action_distribution": {
+              "buy": 0,
+              "hold": 0,
+              "no_action": 0,
+              "sell": 0,
+              "wait": 44
+            },
+            "name": "pi12_adapter",
+            "total_return": 0.0
+          }
+        ],
+        "policy_name": "Browser walkthrough DQN experimental DQN",
+        "split": "validation",
+        "total_return": 0.0,
+        "transitions": 44
+      },
+      {
+        "action_distribution": {
+          "buy": 0,
+          "hold": 0,
+          "no_action": 0,
+          "sell": 0,
+          "wait": 40
+        },
+        "baselines": [
+          {
+            "action_distribution": {
+              "buy": 0,
+              "hold": 0,
+              "no_action": 40,
+              "sell": 0,
+              "wait": 0
+            },
+            "name": "no_action",
+            "total_return": 0.0
+          },
+          {
+            "action_distribution": {
+              "buy": 0,
+              "hold": 0,
+              "no_action": 0,
+              "sell": 0,
+              "wait": 40
+            },
+            "name": "rule_based",
+            "total_return": 0.0
+          },
+          {
+            "action_distribution": {
+              "buy": 0,
+              "hold": 0,
+              "no_action": 0,
+              "sell": 0,
+              "wait": 40
+            },
+            "name": "pi12_adapter",
+            "total_return": 0.0
+          }
+        ],
+        "policy_name": "Browser walkthrough DQN experimental DQN",
+        "split": "test",
+        "total_return": 0.0,
+        "transitions": 40
+      },
+      {
+        "action_distribution": {
+          "buy": 0,
+          "hold": 0,
+          "no_action": 0,
+          "sell": 0,
+          "wait": 44
+        },
+        "baselines": [
+          {
+            "action_distribution": {
+              "buy": 0,
+              "hold": 0,
+              "no_action": 44,
+              "sell": 0,
+              "wait": 0
+            },
+            "name": "no_action",
+            "total_return": 0.0
+          },
+          {
+            "action_distribution": {
+              "buy": 0,
+              "hold": 0,
+              "no_action": 0,
+              "sell": 0,
+              "wait": 44
+            },
+            "name": "rule_based",
+            "total_return": 0.0
+          },
+          {
+            "action_distribution": {
+              "buy": 0,
+              "hold": 0,
+              "no_action": 0,
+              "sell": 0,
+              "wait": 44
+            },
+            "name": "pi12_adapter",
+            "total_return": 0.0
+          }
+        ],
+        "policy_name": "Browser walkthrough DQN experimental DQN",
+        "split": "validation",
+        "total_return": 0.0,
+        "transitions": 44
+      },
+      {
+        "action_distribution": {
+          "buy": 0,
+          "hold": 0,
+          "no_action": 0,
+          "sell": 0,
+          "wait": 40
+        },
+        "baselines": [
+          {
+            "action_distribution": {
+              "buy": 0,
+              "hold": 0,
+              "no_action": 40,
+              "sell": 0,
+              "wait": 0
+            },
+            "name": "no_action",
+            "total_return": 0.0
+          },
+          {
+            "action_distribution": {
+              "buy": 0,
+              "hold": 0,
+              "no_action": 0,
+              "sell": 0,
+              "wait": 40
+            },
+            "name": "rule_based",
+            "total_return": 0.0
+          },
+          {
+            "action_distribution": {
+              "buy": 0,
+              "hold": 0,
+              "no_action": 0,
+              "sell": 0,
+              "wait": 40
+            },
+            "name": "pi12_adapter",
+            "total_return": 0.0
+          }
+        ],
+        "policy_name": "Browser walkthrough DQN experimental DQN",
+        "split": "test",
+        "total_return": 0.0,
+        "transitions": 40
+      }
+    ],
+    "policies": [
+      {
+        "activation_available": false,
+        "algorithm": "dqn",
+        "policy_id": "rl_policy_f9d66d3b103c4eed979afd75819aa0ac",
+        "production_authority": false,
+        "status": "tested"
+      },
+      {
+        "activation_available": false,
+        "algorithm": "dqn",
+        "policy_id": "rl_policy_aaf5b5da1e9c416ea4f23f82139b29b9",
+        "production_authority": false,
+        "status": "rejected"
+      },
+      {
+        "activation_available": false,
+        "algorithm": "dqn",
+        "policy_id": "rl_policy_51f2a1f616c74ec8ad1a164efdeece95",
+        "production_authority": false,
+        "status": "tested"
+      },
+      {
+        "activation_available": false,
+        "algorithm": "dqn",
+        "policy_id": "rl_policy_4f7b8eda966541f4a013752e9640071e",
+        "production_authority": false,
+        "status": "tested"
+      },
+      {
+        "activation_available": false,
+        "algorithm": "dqn",
+        "policy_id": "rl_policy_a21389ca9a484a129ea6d319480d7c70",
+        "production_authority": false,
+        "status": "training"
+      },
+      {
+        "activation_available": false,
+        "algorithm": "dqn",
+        "policy_id": "rl_policy_f679fefbc35b47219a836ebd2d106754",
+        "production_authority": false,
+        "status": "training"
+      }
+    ],
+    "test_evaluations": 3,
+    "test_evaluations_with_zero_trades": 3,
+    "tested_policies": 3
+  },
+  "full_runtime_output": "tmp/rl_evaluation/results.json",
+  "full_runtime_output_tracked": false,
+  "generated_at": "2026-11-24T17:03:09.755548+00:00",
+  "hardware": {
+    "logical_cpus": 18,
+    "platform": "Windows-11-10.0.26300-SP0",
+    "processor": "Intel64 Family 6 Model 170 Stepping 4, GenuineIntel",
+    "python": "3.13.0"
+  },
+  "initial_capital": "100000.00",
+  "instruments": {
+    "XNSE:HDFCBANK": {
+      "bars": 248,
+      "baselines": {
+        "day_momentum": {
+          "benchmark_excess_return": 0.07080596,
+          "benchmark_total_return": -0.07467186,
+          "final_value": "99613.41",
+          "max_drawdown": -0.00946886,
+          "sharpe": -0.82801977,
+          "total_fees": "54.45",
+          "total_return": -0.0038659,
+          "total_slippage": "56.011122",
+          "trades": 7
+        },
+        "long_horizon_proxy": {
+          "benchmark_excess_return": 0.07467186,
+          "benchmark_total_return": -0.07467186,
+          "final_value": "100000.00",
+          "max_drawdown": 0.0,
+          "sharpe": null,
+          "total_fees": "0",
+          "total_return": 0.0,
+          "total_slippage": "0",
+          "trades": 0
+        },
+        "swing_trend": {
+          "benchmark_excess_return": 0.06711946,
+          "benchmark_total_return": -0.07467186,
+          "final_value": "99244.76",
+          "max_drawdown": -0.01185548,
+          "sharpe": -1.29258019,
+          "total_fees": "15.23",
+          "total_return": -0.0075524,
+          "total_slippage": "15.640002",
+          "trades": 2
+        }
+      },
+      "rl_default": {
+        "action_distribution": {
+          "buy": 87,
+          "hold": 0,
+          "no_action": 0,
+          "sell": 0,
+          "wait": 0
+        },
+        "artifact_bytes": 31065,
+        "average_reward": -0.742851368,
+        "constraint_violations": 86,
+        "fees_paid": 7.82,
+        "final_value": "98519.59",
+        "invalid_actions": 0,
+        "parameters": 653,
+        "q_value_diagnostics": {
+          "all_equal_observations": 87,
+          "max_q": 0.0,
+          "max_spread": 0.0,
+          "mean_spread": 0.0,
+          "min_q": 0.0,
+          "observations": 87,
+          "zero_q_observations": 87
+        },
+        "total_return": -0.0148041,
+        "total_reward": -64.628069014,
+        "trades": 1
+      },
+      "rl_trading": {
+        "action_distribution": {
+          "buy": 87,
+          "hold": 0,
+          "no_action": 0,
+          "sell": 0,
+          "wait": 0
+        },
+        "artifact_bytes": 49663,
+        "average_reward": -0.4845784832,
+        "constraint_violations": 86,
+        "fees_paid": 7.82,
+        "final_value": "98519.59",
+        "invalid_actions": 0,
+        "parameters": 653,
+        "q_value_diagnostics": {
+          "all_equal_observations": 87,
+          "max_q": 0.0,
+          "max_spread": 0.0,
+          "mean_spread": 0.0,
+          "min_q": 0.0,
+          "observations": 87,
+          "zero_q_observations": 87
+        },
+        "total_return": -0.0148041,
+        "total_reward": -42.1583280415,
+        "trades": 1
+      },
+      "test_bars": 88,
+      "test_bars_snapshot": "evaluation/rl_strategy/artifacts/test_bars/XNSE_HDFCBANK.json",
+      "test_first": "2026-07-01T03:45:00+00:00",
+      "test_last": "2026-11-04T03:45:00+00:00",
+      "train_bars": 120,
+      "validation_bars": 40
+    },
+    "XNSE:ITC": {
+      "bars": 248,
+      "baselines": {
+        "day_momentum": {
+          "benchmark_excess_return": 0.03905724,
+          "benchmark_total_return": -0.03548054,
+          "final_value": "100357.67",
+          "max_drawdown": -0.00263198,
+          "sharpe": 1.05488101,
+          "total_fees": "38.99",
+          "total_return": 0.0035767,
+          "total_slippage": "41.525430",
+          "trades": 5
+        },
+        "long_horizon_proxy": {
+          "benchmark_excess_return": 0.03548054,
+          "benchmark_total_return": -0.03548054,
+          "final_value": "100000.00",
+          "max_drawdown": 0.0,
+          "sharpe": null,
+          "total_fees": "0",
+          "total_return": 0.0,
+          "total_slippage": "0",
+          "trades": 0
+        },
+        "swing_trend": {
+          "benchmark_excess_return": 0.03063344,
+          "benchmark_total_return": -0.03548054,
+          "final_value": "99515.29",
+          "max_drawdown": -0.01045752,
+          "sharpe": -0.45709031,
+          "total_fees": "15.45",
+          "total_return": -0.0048471,
+          "total_slippage": "16.597504",
+          "trades": 2
+        }
+      },
+      "rl_default": {
+        "action_distribution": {
+          "buy": 87,
+          "hold": 0,
+          "no_action": 0,
+          "sell": 0,
+          "wait": 0
+        },
+        "artifact_bytes": 31039,
+        "average_reward": -0.7141402933,
+        "constraint_violations": 86,
+        "fees_paid": 7.85,
+        "final_value": "99246.72",
+        "invalid_actions": 0,
+        "parameters": 653,
+        "q_value_diagnostics": {
+          "all_equal_observations": 87,
+          "max_q": 0.0,
+          "max_spread": 0.0,
+          "mean_spread": 0.0,
+          "min_q": 0.0,
+          "observations": 87,
+          "zero_q_observations": 87
+        },
+        "total_return": -0.0075328,
+        "total_reward": -62.1302055212,
+        "trades": 1
+      },
+      "rl_trading": {
+        "action_distribution": {
+          "buy": 87,
+          "hold": 0,
+          "no_action": 0,
+          "sell": 0,
+          "wait": 0
+        },
+        "artifact_bytes": 31042,
+        "average_reward": -0.4665137766,
+        "constraint_violations": 86,
+        "fees_paid": 7.85,
+        "final_value": "99246.72",
+        "invalid_actions": 0,
+        "parameters": 653,
+        "q_value_diagnostics": {
+          "all_equal_observations": 87,
+          "max_q": 0.0,
+          "max_spread": 0.0,
+          "mean_spread": 0.0,
+          "min_q": 0.0,
+          "observations": 87,
+          "zero_q_observations": 87
+        },
+        "total_return": -0.0075328,
+        "total_reward": -40.5866985639,
+        "trades": 1
+      },
+      "test_bars": 88,
+      "test_bars_snapshot": "evaluation/rl_strategy/artifacts/test_bars/XNSE_ITC.json",
+      "test_first": "2026-07-01T03:45:00+00:00",
+      "test_last": "2026-11-04T03:45:00+00:00",
+      "train_bars": 120,
+      "validation_bars": 40
+    },
+    "XNSE:RELIANCE": {
+      "bars": 251,
+      "baselines": {
+        "day_momentum": {
+          "benchmark_excess_return": -0.01782303,
+          "benchmark_total_return": 0.01253823,
+          "final_value": "99471.52",
+          "max_drawdown": -0.01427617,
+          "sharpe": -1.1829807,
+          "total_fees": "85.46",
+          "total_return": -0.0052848,
+          "total_slippage": "88.391645",
+          "trades": 11
+        },
+        "long_horizon_proxy": {
+          "benchmark_excess_return": -0.01253823,
+          "benchmark_total_return": 0.01253823,
+          "final_value": "100000.00",
+          "max_drawdown": 0.0,
+          "sharpe": null,
+          "total_fees": "0",
+          "total_return": 0.0,
+          "total_slippage": "0",
+          "trades": 0
+        },
+        "swing_trend": {
+          "benchmark_excess_return": -0.00925503,
+          "benchmark_total_return": 0.01253823,
+          "final_value": "100328.32",
+          "max_drawdown": 0.0,
+          "sharpe": 3.14818443,
+          "total_fees": "7.79",
+          "total_return": 0.0032832,
+          "total_slippage": "7.951684",
+          "trades": 1
+        }
+      },
+      "rl_default": {
+        "action_distribution": {
+          "buy": 0,
+          "hold": 0,
+          "no_action": 90,
+          "sell": 0,
+          "wait": 0
+        },
+        "artifact_bytes": 52218,
+        "average_reward": 0.095,
+        "constraint_violations": 0,
+        "fees_paid": 0.0,
+        "final_value": "100000.00",
+        "invalid_actions": 0,
+        "parameters": 653,
+        "q_value_diagnostics": {
+          "all_equal_observations": 0,
+          "max_q": 0.21007836743595057,
+          "max_spread": 0.041221836938665185,
+          "mean_spread": 0.041221836939,
+          "min_q": 0.16885653049728538,
+          "observations": 90,
+          "zero_q_observations": 0
+        },
+        "total_return": 0.0,
+        "total_reward": 8.55,
+        "trades": 0
+      },
+      "rl_trading": {
+        "action_distribution": {
+          "buy": 90,
+          "hold": 0,
+          "no_action": 0,
+          "sell": 0,
+          "wait": 0
+        },
+        "artifact_bytes": 51569,
+        "average_reward": -0.4575899794,
+        "constraint_violations": 89,
+        "fees_paid": 7.85,
+        "final_value": "100204.22",
+        "invalid_actions": 0,
+        "parameters": 653,
+        "q_value_diagnostics": {
+          "all_equal_observations": 90,
+          "max_q": 0.0,
+          "max_spread": 0.0,
+          "mean_spread": 0.0,
+          "min_q": 0.0,
+          "observations": 90,
+          "zero_q_observations": 90
+        },
+        "total_return": 0.0020422,
+        "total_reward": -41.183098146,
+        "trades": 1
+      },
+      "test_bars": 91,
+      "test_bars_snapshot": "evaluation/rl_strategy/artifacts/test_bars/XNSE_RELIANCE.json",
+      "test_first": "2026-07-01T03:45:00+00:00",
+      "test_last": "2026-11-09T03:45:00+00:00",
+      "train_bars": 120,
+      "validation_bars": 40
+    },
+    "XNSE:TATASTEEL": {
+      "bars": 248,
+      "baselines": {
+        "day_momentum": {
+          "benchmark_excess_return": 0.02680022,
+          "benchmark_total_return": -0.02829832,
+          "final_value": "99850.19",
+          "max_drawdown": -0.01046605,
+          "sharpe": -0.2858544,
+          "total_fees": "70.29",
+          "total_return": -0.0014981,
+          "total_slippage": "75.877102",
+          "trades": 9
+        },
+        "long_horizon_proxy": {
+          "benchmark_excess_return": 0.02829832,
+          "benchmark_total_return": -0.02829832,
+          "final_value": "100000.00",
+          "max_drawdown": 0.0,
+          "sharpe": null,
+          "total_fees": "0",
+          "total_return": 0.0,
+          "total_slippage": "0",
+          "trades": 0
+        },
+        "swing_trend": {
+          "benchmark_excess_return": 0.01755172,
+          "benchmark_total_return": -0.02829832,
+          "final_value": "98925.34",
+          "max_drawdown": -0.0108625,
+          "sharpe": -2.27648647,
+          "total_fees": "15.02",
+          "total_return": -0.0107466,
+          "total_slippage": "15.721620",
+          "trades": 2
+        }
+      },
+      "rl_default": {
+        "action_distribution": {
+          "buy": 87,
+          "hold": 0,
+          "no_action": 0,
+          "sell": 0,
+          "wait": 0
+        },
+        "artifact_bytes": 31026,
+        "average_reward": -0.7056052364,
+        "constraint_violations": 86,
+        "fees_paid": 7.88,
+        "final_value": "99327.86",
+        "invalid_actions": 0,
+        "parameters": 653,
+        "q_value_diagnostics": {
+          "all_equal_observations": 87,
+          "max_q": 0.0,
+          "max_spread": 0.0,
+          "mean_spread": 0.0,
+          "min_q": 0.0,
+          "observations": 87,
+          "zero_q_observations": 87
+        },
+        "total_return": -0.0067214,
+        "total_reward": -61.3876555665,
+        "trades": 1
+      },
+      "rl_trading": {
+        "action_distribution": {
+          "buy": 87,
+          "hold": 0,
+          "no_action": 0,
+          "sell": 0,
+          "wait": 0
+        },
+        "artifact_bytes": 31022,
+        "average_reward": -0.4615803299,
+        "constraint_violations": 86,
+        "fees_paid": 7.88,
+        "final_value": "99327.86",
+        "invalid_actions": 0,
+        "parameters": 653,
+        "q_value_diagnostics": {
+          "all_equal_observations": 87,
+          "max_q": 0.0,
+          "max_spread": 0.0,
+          "mean_spread": 0.0,
+          "min_q": 0.0,
+          "observations": 87,
+          "zero_q_observations": 87
+        },
+        "total_return": -0.0067214,
+        "total_reward": -40.1574886991,
+        "trades": 1
+      },
+      "test_bars": 88,
+      "test_bars_snapshot": "evaluation/rl_strategy/artifacts/test_bars/XNSE_TATASTEEL.json",
+      "test_first": "2026-07-01T03:45:00+00:00",
+      "test_last": "2026-11-04T03:45:00+00:00",
+      "train_bars": 120,
+      "validation_bars": 40
+    },
+    "XNSE:TCS": {
+      "bars": 248,
+      "baselines": {
+        "day_momentum": {
+          "benchmark_excess_return": -0.2089031,
+          "benchmark_total_return": 0.2286896,
+          "final_value": "101978.65",
+          "max_drawdown": -0.0100887,
+          "sharpe": 1.49746618,
+          "total_fees": "63.39",
+          "total_return": 0.0197865,
+          "total_slippage": "65.854630",
+          "trades": 8
+        },
+        "long_horizon_proxy": {
+          "benchmark_excess_return": -0.2332414,
+          "benchmark_total_return": 0.2286896,
+          "final_value": "99544.82",
+          "max_drawdown": -0.00541003,
+          "sharpe": -1.37284752,
+          "total_fees": "7.94",
+          "total_return": -0.0045518,
+          "total_slippage": "8.211401",
+          "trades": 1
+        },
+        "swing_trend": {
+          "benchmark_excess_return": -0.2306331,
+          "benchmark_total_return": 0.2286896,
+          "final_value": "99805.65",
+          "max_drawdown": -0.00798389,
+          "sharpe": -0.34325983,
+          "total_fees": "7.82",
+          "total_return": -0.0019435,
+          "total_slippage": "8.032464",
+          "trades": 1
+        }
+      },
+      "rl_default": {
+        "action_distribution": {
+          "buy": 0,
+          "hold": 0,
+          "no_action": 87,
+          "sell": 0,
+          "wait": 0
+        },
+        "artifact_bytes": 48973,
+        "average_reward": 0.095,
+        "constraint_violations": 0,
+        "fees_paid": 0.0,
+        "final_value": "100000.00",
+        "invalid_actions": 0,
+        "parameters": 653,
+        "q_value_diagnostics": {
+          "all_equal_observations": 0,
+          "max_q": 0.1648626725643652,
+          "max_spread": 0.031506762948594724,
+          "mean_spread": 0.031506762949,
+          "min_q": 0.13335590961577048,
+          "observations": 87,
+          "zero_q_observations": 0
+        },
+        "total_return": 0.0,
+        "total_reward": 8.265,
+        "trades": 0
+      },
+      "rl_trading": {
+        "action_distribution": {
+          "buy": 87,
+          "hold": 0,
+          "no_action": 0,
+          "sell": 0,
+          "wait": 0
+        },
+        "artifact_bytes": 48488,
+        "average_reward": -0.449542138,
+        "constraint_violations": 86,
+        "fees_paid": 7.94,
+        "final_value": "104301.45",
+        "invalid_actions": 0,
+        "parameters": 653,
+        "q_value_diagnostics": {
+          "all_equal_observations": 87,
+          "max_q": 0.0,
+          "max_spread": 0.0,
+          "mean_spread": 0.0,
+          "min_q": 0.0,
+          "observations": 87,
+          "zero_q_observations": 87
+        },
+        "total_return": 0.0430145,
+        "total_reward": -39.1101660069,
+        "trades": 1
+      },
+      "test_bars": 88,
+      "test_bars_snapshot": "evaluation/rl_strategy/artifacts/test_bars/XNSE_TCS.json",
+      "test_first": "2026-07-01T03:45:00+00:00",
+      "test_last": "2026-11-04T03:45:00+00:00",
+      "train_bars": 120,
+      "validation_bars": 40
+    }
+  },
+  "isolation": {
+    "autonomy_state_opened": false,
+    "order_gateway_opened": false,
+    "policy_activated_or_promoted": false,
+    "policy_artifacts_under_evaluation_rl_strategy_artifacts": true,
+    "policy_registry_mutated": false,
+    "production_ledger_opened": false,
+    "production_portfolio_opened": false,
+    "risk_engine_opened": false,
+    "runtime_outputs_under_tmp_rl_evaluation": true,
+    "source_opened_read_only": true
+  },
+  "out_of_sample_reevaluation": {
+    "evaluated_at": "2026-11-24T17:29:41.056785+00:00",
+    "note": "evaluate_trained_adapters.py rescores the tracked policy artifacts through TrainedPolicy.select and writes this compact directly; training and validation selection were unchanged.",
+    "runner": "evaluation/rl_strategy/evaluate_trained_adapters.py",
+    "script": "evaluation/rl_strategy/evaluate_trained_adapters.py",
+    "selection": "TrainedPolicy.select: masked argmax (zero-Q tie selects first legal action)",
+    "source_artifacts": [
+      "evaluation/rl_strategy/artifacts/policies/*.json",
+      "evaluation/rl_strategy/artifacts/test_bars/*.json"
+    ]
+  },
+  "paired_differences": {
+    "rl_default_minus_day_momentum": {
+      "ci95": [
+        -0.01513846,
+        -0.00102006
+      ],
+      "max": 0.0052848,
+      "mean": -0.00835454,
+      "median": -0.0109382,
+      "min": -0.0197865,
+      "n": 5
+    },
+    "rl_default_minus_long_horizon_proxy": {
+      "ci95": [
+        -0.01044132,
+        0.00122452
+      ],
+      "max": 0.0045518,
+      "mean": -0.0049013,
+      "median": -0.0067214,
+      "min": -0.0148041,
+      "n": 5
+    },
+    "rl_default_minus_swing_trend": {
+      "ci95": [
+        -0.0048706,
+        0.00214718
+      ],
+      "max": 0.0040252,
+      "mean": -0.00145038,
+      "median": -0.0026857,
+      "min": -0.0072517,
+      "n": 5
+    },
+    "rl_trading_minus_day_momentum": {
+      "ci95": [
+        -0.00986374,
+        0.01321456
+      ],
+      "max": 0.023228,
+      "mean": 0.0006568,
+      "median": -0.0052233,
+      "min": -0.0111095,
+      "n": 5
+    },
+    "rl_trading_minus_long_horizon_proxy": {
+      "ci95": [
+        -0.01027904,
+        0.02744166
+      ],
+      "max": 0.0475663,
+      "mean": 0.00411004,
+      "median": -0.0067214,
+      "min": -0.0148041,
+      "n": 5
+    },
+    "rl_trading_minus_swing_trend": {
+      "ci95": [
+        -0.00422316,
+        0.0264784
+      ],
+      "max": 0.044958,
+      "mean": 0.00756096,
+      "median": -0.001241,
+      "min": -0.0072517,
+      "n": 5
+    }
+  },
+  "production_authority": false,
+  "reproduction_command": "PYTHONPATH=src ../.venv/Scripts/python.exe evaluation/rl_strategy/evaluate_trained_adapters.py",
+  "reproduction_exit_code": 0,
+  "resources": {
+    "note": "CPU-only pure-Python DQN; no GPU or NPU path was used.",
+    "training": {
+      "XNSE:HDFCBANK": {
+        "rl_default": 23.2839,
+        "rl_trading": 24.0727
+      },
+      "XNSE:ITC": {
+        "rl_default": 23.7323,
+        "rl_trading": 22.8367
+      },
+      "XNSE:RELIANCE": {
+        "rl_default": 23.2322,
+        "rl_trading": 21.9842
+      },
+      "XNSE:TATASTEEL": {
+        "rl_default": 22.6147,
+        "rl_trading": 23.3005
+      },
+      "XNSE:TCS": {
+        "rl_default": 23.36,
+        "rl_trading": 25.7032
+      }
+    }
+  },
+  "reward_configs": {
+    "default": {
+      "advisory_only": true,
+      "bounds": [
+        -1.0,
+        1.0
+      ],
+      "components": {
+        "decision_quality": 0.15,
+        "discipline": 0.1,
+        "execution_quality": 0.1,
+        "forecast_utilization": 0.1,
+        "portfolio_management": 0.1,
+        "profitability": 0.2,
+        "risk": 0.15,
+        "transaction_cost": 0.1
+      },
+      "config_hash": "54be55e2bd27d2af96d1637783cd940be8efc66361bc35cdabb196670d2bed2f",
+      "config_id": "rwc_54be55e2bd27d2af96d1",
+      "description": "Isolated evaluation configuration. Fixed scales; never promoted. No test split is used to select it.",
+      "enabled": [
+        "profitability",
+        "risk",
+        "transaction_cost",
+        "decision_quality",
+        "forecast_utilization",
+        "discipline",
+        "portfolio_management",
+        "execution_quality"
+      ],
+      "experimental": true,
+      "experimental_status": "experimental",
+      "missing_policy": "renormalize",
+      "name": "evaluation-default",
+      "normalization": "bounded",
+      "penalties": {
+        "constraint_violation": 0.25,
+        "repeated_trade": 0.05,
+        "unfilled_trade": 0.1
+      },
+      "production_authority": false,
+      "scales": {
+        "decision_quality": 1.0,
+        "discipline": 1.0,
+        "execution_quality": 1.0,
+        "forecast_utilization": 1.0,
+        "portfolio_management": 1.0,
+        "profitability": 0.02,
+        "risk": 0.2,
+        "transaction_cost": 0.01
+      },
+      "schema_version": "pi14-reward-config-v1",
+      "simulated": true,
+      "thresholds": {
+        "decision_full_exposure": 0.9,
+        "decision_weak_forecast": 0.4,
+        "discipline_lookback_trades": 3.0,
+        "discipline_repeated_penalty": 0.5,
+        "portfolio_concentration_high": 0.25,
+        "portfolio_drawdown_high": 0.1,
+        "portfolio_exposure_change_high": 0.5,
+        "risk_concentration_high": 0.25,
+        "risk_drawdown_high": 0.1,
+        "risk_exposure_high": 0.9,
+        "risk_volatility_high_pct": 25.0
+      },
+      "version": "rl-eval-1"
+    },
+    "trading": {
+      "advisory_only": true,
+      "bounds": [
+        -1.0,
+        1.0
+      ],
+      "components": {
+        "decision_quality": 0.0,
+        "discipline": 0.15,
+        "execution_quality": 0.0,
+        "forecast_utilization": 0.0,
+        "portfolio_management": 0.0,
+        "profitability": 0.6,
+        "risk": 0.1,
+        "transaction_cost": 0.15
+      },
+      "config_hash": "6c4ab808af843d0bbf08ebe2cde30f3b1be35697b6f5824d4e777c40b9977fc5",
+      "config_id": "rwc_6c4ab808af843d0bbf08",
+      "description": "Isolated evaluation configuration. Fixed scales; never promoted. No test split is used to select it.",
+      "enabled": [
+        "profitability",
+        "risk",
+        "transaction_cost",
+        "decision_quality",
+        "forecast_utilization",
+        "discipline",
+        "portfolio_management",
+        "execution_quality"
+      ],
+      "experimental": true,
+      "experimental_status": "experimental",
+      "missing_policy": "renormalize",
+      "name": "evaluation-trading",
+      "normalization": "bounded",
+      "penalties": {
+        "constraint_violation": 0.25,
+        "repeated_trade": 0.05,
+        "unfilled_trade": 0.1
+      },
+      "production_authority": false,
+      "scales": {
+        "decision_quality": 1.0,
+        "discipline": 1.0,
+        "execution_quality": 1.0,
+        "forecast_utilization": 1.0,
+        "portfolio_management": 1.0,
+        "profitability": 0.02,
+        "risk": 0.2,
+        "transaction_cost": 0.01
+      },
+      "schema_version": "pi14-reward-config-v1",
+      "simulated": true,
+      "thresholds": {
+        "decision_full_exposure": 0.9,
+        "decision_weak_forecast": 0.4,
+        "discipline_lookback_trades": 3.0,
+        "discipline_repeated_penalty": 0.5,
+        "portfolio_concentration_high": 0.25,
+        "portfolio_drawdown_high": 0.1,
+        "portfolio_exposure_change_high": 0.5,
+        "risk_concentration_high": 0.25,
+        "risk_drawdown_high": 0.1,
+        "risk_exposure_high": 0.9,
+        "risk_volatility_high_pct": 25.0
+      },
+      "version": "rl-eval-1"
+    }
+  },
+  "simulation_only": true,
+  "source_database": "data/novamarket.sqlite3",
+  "source_harness": "evaluation/rl_strategy/run_rl_evaluation.py",
+  "source_mode": "read-only",
+  "split": {
+    "chronological": true,
+    "test_end_inclusive": "2026-11-11T00:00:00+00:00",
+    "test_start_exclusive": "2026-07-01T00:00:00+00:00",
+    "test_used_for_training_or_selection": false,
+    "train_end_exclusive": "2026-05-01T00:00:00+00:00",
+    "train_start": "2025-11-04T00:00:00+00:00",
+    "validation_end_inclusive": "2026-07-01T00:00:00+00:00",
+    "validation_start": "2026-05-01T00:00:00+00:00"
+  },
+  "test_bars_snapshot": "evaluation/rl_strategy/artifacts/test_bars/*.json",
+  "test_bars_snapshots": {
+    "XNSE:HDFCBANK": "evaluation/rl_strategy/artifacts/test_bars/XNSE_HDFCBANK.json",
+    "XNSE:ITC": "evaluation/rl_strategy/artifacts/test_bars/XNSE_ITC.json",
+    "XNSE:RELIANCE": "evaluation/rl_strategy/artifacts/test_bars/XNSE_RELIANCE.json",
+    "XNSE:TATASTEEL": "evaluation/rl_strategy/artifacts/test_bars/XNSE_TATASTEEL.json",
+    "XNSE:TCS": "evaluation/rl_strategy/artifacts/test_bars/XNSE_TCS.json"
+  },
+  "verdict": {
+    "fresh_policies": 10,
+    "fresh_policies_with_nonzero_trades": 8,
+    "fresh_policies_with_zero_trades": 2,
+    "rl_default_aggregate_trades": 3,
+    "rl_default_total_reward": -171.3309,
+    "rl_trading_aggregate_trades": 5,
+    "rl_trading_total_reward": -203.1958,
+    "selection": "TrainedPolicy.select: masked argmax (zero-Q tie selects first legal action)",
+    "summary": "Through the actual TrainedPolicy masked-argmax selector, 8 of the 10 fresh default/trading policies make an out-of-sample trade. Simulation evidence only; no policy is promoted."
+  },
+  "verified_at": "2026-11-24T17:29:41.056785+00:00"
+}

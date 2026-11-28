@@ -57,3 +57,17 @@ web/*.tsbuildinfo
 # need to be in the tree.
 /tmp_pi*.json
 /tmp_pi*.log
+
+# Stage C 27 November acceptance driver and working notes; evidence is preserved
+# separately under the isolated tmp/stage_c_v2_2026_11_27 directories.
+/.planning/2026-11-27-stage-c-acceptance/
+
+# SQLite sidecars written beside every store (data/, and the isolated Stage C
+# acceptance stores under the already-ignored tmp/ tree).
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Stage C per-file suite ledger/logs and 5m backfill helpers live under tmp/,
+# which is ignored above; these guard the copies made outside it.
+/tmp_stage_c*
+/stage_c_evidence*/

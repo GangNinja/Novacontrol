@@ -109,6 +109,9 @@ class BuildSaveApiTests(unittest.TestCase):
             # start() is awaited in the startup hook: it must be awaitable.
             instance.start = AsyncMock()
             instance.stop = AsyncMock()
+            # The shutdown hook also awaits the NovaMarket runtime stop, which
+            # is an async lifecycle method in production: configure it as one.
+            instance.novamarket.stop_runtime = AsyncMock()
 
             def fake_save(*, filename: str, content: str, language: str = "python", goal: str = ""):
                 if not content.strip():

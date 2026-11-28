@@ -22,6 +22,36 @@ from novacontrol.novamarket.marketdata.calendar import (
     calendar_by_mic,
 )
 
+#: Venue names that appear in discovery and legacy monitoring rows.  A MIC is
+#: always preferred, but an accepted calendar MIC also resolves a venue name so
+#: the monitoring handoff never writes a value its session gate cannot read.
+_VENUE_MICS: dict[str, str] = {
+    "NSE": "XNSE",
+    "BSE": "XBOM",
+    "NYSE": "XNYS",
+    "NASDAQ": "XNAS",
+    "NYSEARCA": "ARCX",
+    "AMEX": "XASE",
+    "NYSEAMERICAN": "XASE",
+}
+
+
+def canonical_mic(exchange: str) -> str:
+    """Return the verified MIC for a venue name or MIC, preserving unknowns.
+
+    Unknown values are uppercased and returned unchanged so the session gate
+    can fail closed with ``calendar_unavailable`` rather than inventing a
+    market.  This is the ONE venue-to-MIC conversion used by AT-02 and AT-03.
+    """
+
+    value = str(exchange or "").strip().upper()
+    if not value:
+        return ""
+    calendar = calendar_by_mic(value)
+    if calendar is not None:
+        return calendar.mic
+    return _VENUE_MICS.get(value, value)
+
 
 class SessionVerdict(StrEnum):
     """The honest answer to "may monitoring run for this exchange now?"."""
@@ -237,6 +267,7 @@ __all__ = [
     "SessionDecision",
     "SessionReason",
     "SessionVerdict",
+    "canonical_mic",
     "evaluate_session",
     "session_contract",
 ]

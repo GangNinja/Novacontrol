@@ -1042,6 +1042,21 @@ def test_feature_service_persists_and_emits_typed_events(tmp_path: Path) -> None
         service.close()
 
 
+def test_twenty_minute_feature_resolution_is_accepted_with_the_existing_intraday_set() -> None:
+    settings = FeatureSettings(default_timeframes=("1m", "5m", "15m", "20m"))
+    assert settings.default_timeframes == ("1m", "5m", "15m", "20m")
+    assert FeatureSettings(default_timeframes=("1m", "5m", "15m", "30m"))
+    request = FeatureRequest(
+        instrument_id="XNSE:RELIANCE",
+        as_of=datetime(2026, 11, 20, 10, 0, tzinfo=UTC),
+        resolution="20min",
+        profile="intraday",
+        timeframes=("5m", "1m"),
+    )
+    assert request.resolution == "20m"
+    assert request.requested_timeframes == ("20m", "5m", "1m")
+
+
 def test_feature_service_uses_configured_regime_thresholds_and_missing_policy() -> None:
     settings = FeatureSettings(
         strong_adx=30.0,

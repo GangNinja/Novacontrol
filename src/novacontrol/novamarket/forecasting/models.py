@@ -114,9 +114,18 @@ class Regime(StrEnum):
 class ForecastPolicy:
     """Every threshold is a stated decision, published in the contract."""
 
-    max_history_bars: int = 320
+    max_history_bars: int = 720
     min_history_bars: int = 80
     min_training_bars: int = 140
+    #: Share of chronological walk-forward origins used for selection.  The
+    #: remainder is an untouched test slice reported but never selected on.
+    validation_fraction: float = 0.7
+    #: A calibrator is accepted only when its holdout Brier improves by more
+    #: than this amount.  A tie is not evidence of calibration.
+    calibration_min_improvement: float = 0.0
+    #: Calibration is reported and gated by default, but not applied to live
+    #: probabilities: the real-data test showed no reliable Brier gain.
+    apply_calibration: bool = False
     min_validation_samples: int = 5
     #: |return| at or below this is SIDEWAYS; both edges are explicit.
     directional_threshold_pct: float = 0.5
@@ -149,6 +158,10 @@ class ForecastPolicy:
             raise ValueError("uncertainty_low_pct must be below the high mark")
         if not 0.0 < self.calibration_holdout_fraction < 1.0:
             raise ValueError("calibration_holdout_fraction must be within (0, 1)")
+        if not 0.5 <= self.validation_fraction < 1.0:
+            raise ValueError("validation_fraction must be within [0.5, 1)")
+        if self.calibration_min_improvement < 0.0:
+            raise ValueError("calibration_min_improvement must be non-negative")
         if self.bootstrap_paths < 50:
             raise ValueError("bootstrap_paths must be at least 50")
 
@@ -157,6 +170,9 @@ class ForecastPolicy:
             "max_history_bars": self.max_history_bars,
             "min_history_bars": self.min_history_bars,
             "min_training_bars": self.min_training_bars,
+            "validation_fraction": self.validation_fraction,
+            "calibration_min_improvement": self.calibration_min_improvement,
+            "apply_calibration": self.apply_calibration,
             "min_validation_samples": self.min_validation_samples,
             "directional_threshold_pct": self.directional_threshold_pct,
             "interval_low": self.interval_low,
@@ -207,6 +223,10 @@ class ForecastRecord:
     methodology_version: str
     digest: str
     notes: tuple[str, ...] = field(default_factory=tuple)
+    #: "calibrated" only when a validation-only calibrator was actually
+    #: applied.  Raw model frequencies are always "uncalibrated".
+    probability_status: str = "uncalibrated"
+    calibration_id: str = ""
 
     def __post_init__(self) -> None:
         for name in ("p_up", "p_down", "p_sideways"):
@@ -265,6 +285,8 @@ class ForecastRecord:
             "methodology_version": self.methodology_version,
             "digest": self.digest,
             "notes": list(self.notes),
+            "probability_status": self.probability_status,
+            "calibration_id": self.calibration_id,
             "is_price_prediction": False,
             "is_investment_advice": False,
             "guaranteed": False,

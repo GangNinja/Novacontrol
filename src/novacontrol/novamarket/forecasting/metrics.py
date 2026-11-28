@@ -169,6 +169,12 @@ class ModelScore:
     calibration_error: float | None
     confusion: dict[str, dict[str, int]] = field(default_factory=dict)
     notes: tuple[str, ...] = ()
+    #: Multi-class Brier of a uniform up/down/sideways forecast (2/3).
+    reference_brier: float | None = None
+    #: 1 - brier/reference_brier; positive only when better than uniform.
+    brier_skill_score: float | None = None
+    #: Mean absolute change in the point forecast between consecutive origins.
+    mean_forecast_change: float | None = None
 
     def to_dict(self) -> dict[str, object]:
         def rounded(value: float | None) -> float | None:
@@ -188,6 +194,9 @@ class ModelScore:
             "calibration_error": rounded(self.calibration_error),
             "confusion": self.confusion,
             "notes": list(self.notes),
+            "reference_brier": rounded(self.reference_brier),
+            "brier_skill_score": rounded(self.brier_skill_score),
+            "mean_forecast_change": rounded(self.mean_forecast_change),
         }
 
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import os
 import unittest
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -192,6 +192,56 @@ def yahoo_chart(
     return payload
 
 
+def yahoo_5m_series(*, count: int = 9) -> dict[str, Any]:
+    """Nine complete 5m bars from the NSE open: two full 20m groups plus one."""
+    payload = yahoo_chart()
+    result = payload["chart"]["result"][0]
+    start = datetime(2026, 11, 2, 3, 45, tzinfo=UTC)
+    result["timestamp"] = [
+        _epoch(start + timedelta(minutes=5 * index)) for index in range(count)
+    ]
+    result["indicators"]["quote"][0].update(
+        {
+            "open": [100 + index for index in range(count)],
+            "high": [101 + index for index in range(count)],
+            "low": [99 + index for index in range(count)],
+            "close": [100.5 + index for index in range(count)],
+            "volume": [10 + index for index in range(count)],
+        }
+    )
+    return payload
+
+
+def yahoo_daily_history() -> dict[str, Any]:
+    """Three completed US daily bars, with today's bar still open."""
+    payload = yahoo_chart(price="250", currency="USD")
+    result = payload["chart"]["result"][0]
+    result["meta"].update(
+        {
+            "symbol": "AAPL",
+            "exchangeName": "NMS",
+            "fullExchangeName": "NasdaqGS",
+            "exchangeTimezoneName": "America/New_York",
+        }
+    )
+    moments = [
+        datetime(2026, 10, 29, 13, 30, tzinfo=UTC),
+        datetime(2026, 10, 30, 13, 30, tzinfo=UTC),
+        datetime(2026, 11, 2, 14, 30, tzinfo=UTC),
+    ]
+    result["timestamp"] = [_epoch(moment) for moment in moments]
+    result["indicators"]["quote"][0].update(
+        {
+            "open": [240 + index for index in range(3)],
+            "high": [255 + index for index in range(3)],
+            "low": [238 + index for index in range(3)],
+            "close": [250 + index for index in range(3)],
+            "volume": [1_000_000 + index for index in range(3)],
+        }
+    )
+    return payload
+
+
 def coingecko_quote(price: object = "65000.25", observed_at: datetime = _INSTANT) -> dict[str, Any]:
     return {
         "bitcoin": {
@@ -230,6 +280,19 @@ def equity_instrument() -> Instrument:
         currency="INR",
         timezone="Asia/Kolkata",
         provider_symbols={"yahoo": "RELIANCE.NS"},
+    )
+
+
+def us_instrument(*, mic: str = "XNAS") -> Instrument:
+    return Instrument.create(
+        symbol="AAPL",
+        name="Apple Inc.",
+        exchange="NASDAQ" if mic == "XNAS" else "NYSE",
+        mic=mic,
+        asset_class=AssetClass.EQUITY,
+        currency="USD",
+        timezone="America/New_York",
+        provider_symbols={"yahoo": "AAPL"},
     )
 
 
@@ -330,6 +393,32 @@ class ProviderAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bars[0].close, Decimal("2450.5"))
         self.assertEqual(bars[0].volume, Decimal("1250000"))
         self.assertEqual(bars[0].currency, "INR")
+
+    async def test_yahoo_20m_is_an_exact_aggregate_of_four_5m_bars(self) -> None:
+        transport = FakeTransport(
+            {"query1.finance.yahoo.com": _response(yahoo_5m_series())}
+        )
+
+        bars = await make_yahoo(transport).fetch_ohlcv(
+            equity_instrument(), DataInterval.MINUTE_20
+        )
+
+        self.assertEqual(len(bars), 2, "the incomplete final group is dropped")
+        first, second = bars
+        self.assertEqual(first.interval, DataInterval.MINUTE_20)
+        self.assertEqual(first.open, Decimal("100"))
+        self.assertEqual(first.high, Decimal("104"))
+        self.assertEqual(first.low, Decimal("99"))
+        self.assertEqual(first.close, Decimal("103.5"))
+        self.assertEqual(first.volume, Decimal("46"))
+        self.assertEqual(first.observed_at, datetime(2026, 11, 2, 3, 45, tzinfo=UTC))
+        self.assertEqual(second.open, Decimal("104"))
+        self.assertEqual(second.close, Decimal("107.5"))
+        self.assertEqual(second.volume, Decimal("62"))
+        self.assertEqual(first.provider_metadata["derived_from"], "5m")
+        self.assertEqual(first.provider_metadata["component_count"], 4)
+        self.assertEqual(transport.calls[-1][1]["interval"], "5m")
+        self.assertEqual(transport.calls[-1][1]["range"], "60d")
 
     async def test_yahoo_unknown_symbol_and_schema_change_are_distinct(self) -> None:
         missing = FakeTransport(
@@ -923,6 +1012,65 @@ class EnginePipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bar.usable)
         self.assertEqual(engine.latest("XNSE:RELIANCE").status, ReconciliationStatus.UNAVAILABLE)
 
+    async def test_a_20m_request_ingests_exact_derived_bars(self) -> None:
+        transport = FakeTransport(
+            {"query1.finance.yahoo.com": _response(yahoo_5m_series())}
+        )
+        engine = self._engine(
+            (make_yahoo(transport),),
+            ingestion=IngestionSettings(
+                include_quotes=False,
+                include_bars=True,
+                intervals=(DataInterval.MINUTE_20.value,),
+            ),
+        )
+
+        report = await engine.run_ingestion(["XNSE:RELIANCE"])
+
+        self.assertEqual(report.bars_inserted, 2, report.errors)
+        self.assertEqual(report.provider_attempts, 1)
+        page = engine.bars("XNSE:RELIANCE", interval=DataInterval.MINUTE_20)
+        self.assertEqual(page.total, 2)
+        self.assertTrue(all(bar.interval is DataInterval.MINUTE_20 for bar in page.items))
+        self.assertTrue(all(bar.usable for bar in page.items))
+
+    async def test_daily_history_is_ingested_while_the_us_session_is_open(self) -> None:
+        # Both US calendars share this path; the reported XNYS case is exercised
+        # explicitly rather than assuming XNAS coverage proves it.
+        for mic in ("XNAS", "XNYS"):
+            with self.subTest(mic=mic):
+                instrument_id = f"{mic}:AAPL"
+                self.store.upsert_instrument(us_instrument(mic=mic))
+                transport = FakeTransport(
+                    {"query1.finance.yahoo.com": _response(yahoo_daily_history())}
+                )
+                # 10:00 in New York: the US session is open, so today's daily
+                # bar is partial, but the previous two completed sessions must
+                # still arrive.
+                open_now = datetime(2026, 11, 2, 15, 0, tzinfo=UTC)
+                engine = self._engine(
+                    (make_yahoo(transport),),
+                    now=open_now,
+                    ingestion=IngestionSettings(
+                        include_quotes=False,
+                        include_bars=True,
+                        intervals=(DataInterval.DAY_1.value,),
+                    ),
+                )
+
+                report = await engine.run_ingestion([instrument_id])
+
+                self.assertEqual(report.bars_inserted, 2, report.errors)
+                self.assertEqual(report.provider_attempts, 1)
+                self.assertNotEqual(report.instruments_skipped, 1)
+                page = engine.bars(instrument_id, interval=DataInterval.DAY_1)
+                self.assertEqual(page.total, 2)
+                observed = [bar.observed_at.date() for bar in page.items]
+                self.assertEqual(
+                    observed, [date(2026, 10, 30), date(2026, 10, 29)]
+                )
+                self.assertTrue(all(bar.usable for bar in page.items))
+
     async def test_a_quote_from_an_uninstalled_provider_stays_readable(self) -> None:
         self.store.append_observation(
             PriceObservation.create(
@@ -1365,6 +1513,49 @@ class MarketDataApiTests(unittest.TestCase):
         self.assertTrue(body["freshness"]["reasons"])
         self.assertFalse(body["freshness"]["live"])
 
+    def test_ingest_accepts_20m_with_the_existing_intraday_intervals(self) -> None:
+        self._use_fake_provider(yahoo_5m_series())
+        assert self._nova is not None
+        self._nova.novamarket._market_engine._ingestion = IngestionSettings(
+            include_quotes=False,
+            include_bars=True,
+            run_when_closed=True,
+        )
+        registered = self._register_equity()
+        self.assertEqual(registered.status_code, 200, registered.text)
+
+        intervals = ("1m", "5m", "15m", "20m", "30m")
+        report = self._client.post(
+            "/market/data/ingest",
+            json={
+                "instrument_ids": ["XNSE:RELIANCE"],
+                "intervals": list(intervals),
+            },
+        )
+        self.assertEqual(report.status_code, 200, report.text)
+        body = report.json()
+        self.assertTrue(body["ok"], body["errors"])
+        self.assertEqual(body["instruments_succeeded"], 1)
+
+        for interval in intervals:
+            with self.subTest(interval=interval):
+                bars = self._client.get(
+                    "/market/data/bars/XNSE:RELIANCE",
+                    params={"interval": interval},
+                )
+                self.assertEqual(bars.status_code, 200, bars.text)
+                self.assertGreaterEqual(bars.json()["total"], 1)
+
+        unsupported = self._client.post(
+            "/market/data/ingest",
+            json={
+                "instrument_ids": ["XNSE:RELIANCE"],
+                "intervals": ["2m"],
+            },
+        )
+        self.assertEqual(unsupported.status_code, 422, unsupported.text)
+        self.assertIn("not supported", unsupported.text)
+
     def test_invalid_inputs_have_distinct_statuses(self) -> None:
         self._use_fake_provider()
         self.assertEqual(
@@ -1383,6 +1574,18 @@ class MarketDataApiTests(unittest.TestCase):
             ).status_code,
             422,
         )
+        self._register_equity()
+        unknown_ingest = self._client.post(
+            "/market/data/ingest",
+            json={"instrument_ids": ["XNSE:RELIANCE"], "intervals": ["2m"]},
+        )
+        self.assertEqual(unknown_ingest.status_code, 422, unknown_ingest.text)
+        self.assertIn("not supported", unknown_ingest.text)
+        unknown_bars = self._client.get(
+            "/market/data/bars/XNSE:RELIANCE", params={"interval": "2m"}
+        )
+        self.assertEqual(unknown_bars.status_code, 422, unknown_bars.text)
+        self.assertIn("not supported", unknown_bars.text)
 
     def test_disabled_market_data_is_a_conflict_not_an_invented_quote(self) -> None:
         self._use_fake_provider()

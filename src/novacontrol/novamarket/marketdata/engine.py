@@ -39,6 +39,7 @@ from novacontrol.novamarket.contracts import (
     ProviderAuthenticationError,
     ProviderError,
     ProviderInvalidResponseError,
+    UnsupportedIntervalError,
 )
 from novacontrol.novamarket.marketdata.calendar import (
     SessionState,
@@ -444,7 +445,10 @@ class MarketDataEngine:
     ) -> dict[str, Any]:
         """Read-only inventory of stored series for the analysis workbench."""
         return self.store.bar_inventory(
-            interval=interval, min_bars=min_bars, limit=limit, offset=offset
+            interval=_bar_interval(interval, parameter="inventory interval"),
+            min_bars=min_bars,
+            limit=limit,
+            offset=offset,
         )
 
     def board_rows(self, *, exchange: str | None = None) -> list[dict[str, Any]]:
@@ -468,7 +472,7 @@ class MarketDataEngine:
         page_limit = cap if limit is None else min(int(limit), cap)
         return self.store.bars(
             instrument_id,
-            interval=interval,
+            interval=(None if interval is None else _bar_interval(interval)),
             start=start,
             end=end,
             provider=provider,
@@ -730,6 +734,14 @@ class MarketDataEngine:
             )
         self._provider_attempts = 0
         self._provider_failures = 0
+        # Validate the requested interval before provider availability: an
+        # unknown interval is a bad request whether or not a provider is on.
+        scheduled_intervals = tuple(
+            _bar_interval(item, parameter="ingestion interval")
+            for item in (
+                intervals if intervals is not None else self._ingestion.intervals
+            )
+        )
         if not self._enabled_names:
             report = IngestionReport(
                 started_at=started,
@@ -742,12 +754,6 @@ class MarketDataEngine:
             self._last_report = report
             return report
 
-        scheduled_intervals = tuple(
-            DataInterval(item)
-            for item in (
-                intervals if intervals is not None else self._ingestion.intervals
-            )
-        )
         semaphore = asyncio.Semaphore(self._ingestion.max_concurrency)
 
         async def one(instrument_id: str) -> InstrumentIngestResult:
@@ -967,10 +973,12 @@ class MarketDataEngine:
     ) -> bool:
         if calendar is None:
             return interval.is_intraday
-        state = calendar.state(now)
         if interval is DataInterval.DAY_1:
-            if state is SessionState.OPEN and not self._ingestion.allow_partial_bars:
-                return False
+            # During an open session, today's daily bar is partial and is dropped
+            # by ``_collect_bars``.  That is not a reason to skip the whole
+            # request: a US instrument with no daily history still needs the
+            # completed sessions in the provider's window.  Ask for daily bars
+            # whenever the most recent completed session is absent.
             last_close = calendar.last_session_close(now)
             if last_close is None:
                 return True
@@ -1180,6 +1188,7 @@ class MarketDataEngine:
                 continue
             provider_name = adapter.name
             accepted = 0
+            prepared: list[Any] = []
             for row in rows:
                 try:
                     bar = self._normalize_bar(instrument, adapter, row, now)
@@ -1191,12 +1200,17 @@ class MarketDataEngine:
                 except (ProviderInvalidResponseError, ValueError, TypeError) as exc:
                     errors.append(f"{adapter.name}: malformed bar skipped: {exc}")
                     continue
-                try:
-                    append = self.store.append_bar(bar)
-                except MarketDataStoreError as exc:
-                    self._last_store_error = str(exc)
-                    errors.append(f"{adapter.name}: store refused a bar: {exc}")
-                    break
+                prepared.append(bar)
+            try:
+                # One transaction for the whole provider page.  The previous
+                # per-bar commit performed a synchronous SQLite commit on the
+                # event loop once per row.
+                appends = self.store.append_bars(prepared)
+            except MarketDataStoreError as exc:
+                self._last_store_error = str(exc)
+                errors.append(f"{adapter.name}: store refused the page: {exc}")
+                break
+            for bar, append in zip(prepared, appends, strict=True):
                 if bar.quality is DataQuality.INVALID:
                     rejected += 1
                     await self._publish(
@@ -1238,9 +1252,7 @@ class MarketDataEngine:
         ingestion.  Repeated calls are idempotent because the store's unique key
         keeps the first observation and records conflicts.
         """
-        canonical = DataInterval(interval)
-        if canonical is DataInterval.SPOT:
-            raise MarketDataError("historical acquisition needs a bar interval, not SPOT")
+        canonical = _bar_interval(interval, parameter="historical interval")
         if start.tzinfo is None or end.tzinfo is None:
             raise MarketDataError("historical acquisition bounds must be timezone-aware")
         if end < start:
@@ -1921,11 +1933,32 @@ class MarketDataEngine:
         }
 
 
+def _bar_interval(
+    value: DataInterval | str, *, parameter: str = "interval"
+) -> DataInterval:
+    """Parse a public bar interval as a typed 4xx, never a bare ValueError."""
+    try:
+        interval = DataInterval(value)
+    except (TypeError, ValueError) as exc:
+        allowed = ", ".join(
+            item.value for item in DataInterval if item is not DataInterval.SPOT
+        )
+        raise UnsupportedIntervalError(
+            f"{parameter} {value!r} is not supported; use one of: {allowed}"
+        ) from exc
+    if interval is DataInterval.SPOT:
+        raise UnsupportedIntervalError(
+            f"{parameter} must be a bar interval, not spot"
+        )
+    return interval
+
+
 def _interval_seconds(interval: DataInterval) -> int:
     return {
         DataInterval.MINUTE_1: 60,
         DataInterval.MINUTE_5: 300,
         DataInterval.MINUTE_15: 900,
+        DataInterval.MINUTE_20: 1_200,
         DataInterval.MINUTE_30: 1_800,
         DataInterval.HOUR_1: 3_600,
         DataInterval.DAY_1: 86_400,
