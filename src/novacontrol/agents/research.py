@@ -294,6 +294,14 @@ class ResearchAgent(SpecialistAgent):
         """Whether a web search is on the table at all (authorization + wiring)."""
         return bool(self.allow_web and self.research_fn is not None)
 
+    def availability(self) -> Mapping[str, Any]:
+        """Research remains available offline; web access is a separate capability."""
+        return {
+            "available": True,
+            "reason": "",
+            "web_available": self.web_available(),
+        }
+
     # -- decision -------------------------------------------------------------
 
     def decide(

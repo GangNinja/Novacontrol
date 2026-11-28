@@ -205,6 +205,12 @@ from .objective_service import (
     OBJECTIVE_NAMESPACE,
     ObjectiveService,
 )
+from .model_policy import (
+    DecisionSeer,
+    ModelDecisionPolicy,
+    build_decision_prompt,
+    parse_decision,
+)
 from .policy import (
     HARNESS_STAGES,
     STAGE_ACTIONS,
@@ -448,6 +454,10 @@ __all__ = [
     "STAGE_EXPECTATIONS",
     "DecisionProposal",
     "DecisionProvider",
+    "DecisionSeer",
+    "ModelDecisionPolicy",
+    "build_decision_prompt",
+    "parse_decision",
     "FixedKeyPolicy",
     "HarnessReadyPolicy",
     "HarnessStagesPolicy",

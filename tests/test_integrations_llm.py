@@ -130,14 +130,13 @@ class OllamaCompletionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("/v1/v1/", str(requested["url"]))
         self.assertEqual(answer, "hello from ollama")
 
-    async def test_a_structured_local_call_uses_the_json_constrained_native_path(self) -> None:
-        """Reasoning must not consume the whole reply on a JSON request.
+    async def test_a_local_call_uses_the_thinking_free_native_path(self) -> None:
+        """Reasoning must not consume the whole reply — JSON or prose.
 
-        ``json_mode`` is the caller's hint that this is a structured call; on
-        the local transport it selects ``/api/chat`` with thinking disabled, and
-        the body asks Ollama itself for JSON. Without the hint the call stays on
-        the compatible surface, where a reasoning VLM can burn the budget and
-        answer nothing (measured on qwen3-vl:4b).
+        ``json_mode`` still asks Ollama itself for JSON, but the thinking-free
+        endpoint is not limited to structured callers any more: Explore's prose
+        synthesis spent 106.1s on qwen3:8b and returned HTTP 500 with no answer
+        through the compatible surface, which cannot turn reasoning off.
         """
         provider = OpenAICompatibleLLMProvider(
             name="ollama",
@@ -150,6 +149,7 @@ class OllamaCompletionTests(unittest.IsolatedAsyncioTestCase):
             "model": "qwen3-vl:4b",
             "messages": [{"role": "user", "content": "describe"}],
             "max_tokens": 200,
+            "temperature": 0.2,
         }
         with mock.patch(
             "novacontrol.integrations.llm.ollama_disable_thinking", return_value=True
@@ -160,8 +160,50 @@ class OllamaCompletionTests(unittest.IsolatedAsyncioTestCase):
         assert native is not None
         self.assertIs(native["think"], False)
         self.assertEqual(native["format"], "json")
-        self.assertEqual(native["options"], {"num_predict": 200})
-        self.assertIsNone(prose)
+        self.assertEqual(native["options"], {"num_predict": 200, "temperature": 0.2})
+        assert prose is not None
+        self.assertIs(prose["think"], False)
+        self.assertNotIn("format", prose)
+        self.assertEqual(prose["options"], {"num_predict": 200, "temperature": 0.2})
+
+    async def test_a_local_prose_completion_goes_to_the_native_chat_endpoint(self) -> None:
+        """The whole request path, not just the payload shape: prose must not
+        reach ``/v1/chat/completions``, where qwen3 reasons instead of writing."""
+        requested: dict[str, object] = {}
+
+        def fake_transport(url: str, headers: dict[str, str], payload: dict[str, object]) -> dict[str, object]:
+            requested["url"] = url
+            requested["payload"] = payload
+            return {
+                "message": {"content": "a written answer"},
+                "done_reason": "stop",
+                "prompt_eval_count": 10,
+                "eval_count": 5,
+            }
+
+        with (
+            mock.patch("novacontrol.integrations.llm._default_transport", fake_transport),
+            mock.patch("novacontrol.integrations.llm.ollama_disable_thinking", return_value=True),
+            mock.patch("novacontrol.integrations.llm.ollama_unload_on_switch", return_value=False),
+        ):
+            provider = OpenAICompatibleLLMProvider(
+                name="ollama",
+                base_url=OLLAMA_URL,
+                api_key="x",
+                model="qwen3:8b",
+                ollama_url=OLLAMA_URL,
+            )
+            answer = await provider.complete(
+                [{"role": "user", "content": "write an answer"}], max_tokens=64
+            )
+
+        self.assertEqual(requested["url"], f"{OLLAMA_URL}/api/chat")
+        payload = requested["payload"]
+        assert isinstance(payload, dict)
+        self.assertIs(payload["think"], False)
+        self.assertNotIn("format", payload)
+        self.assertEqual(payload["options"], {"num_predict": 64})
+        self.assertEqual(answer, "a written answer")
 
     async def test_empty_choices_return_empty_answer(self) -> None:
         provider = OpenAICompatibleLLMProvider(
@@ -863,6 +905,27 @@ class OllamaMemoryGuardedLoadTests(unittest.TestCase):
         self.assertEqual([call[0] for call in server.calls].count("/api/generate"), 1)
 
 
+class OllamaPromptTimingTests(unittest.TestCase):
+    """Prefill throughput is measured, because it is half of a prompt's cost.
+
+    The 2,271-token / 135s pair is the real measurement that made Explore's
+    local synthesis unaffordable; it must be visible to the budgeting caller.
+    """
+
+    def test_prompt_throughput_is_reported(self) -> None:
+        timings = llm_module._ollama_timings(
+            {
+                "prompt_eval_count": 2271,
+                "prompt_eval_duration": 135_000_000_000,
+                "eval_count": 24,
+                "eval_duration": 9_000_000_000,
+            }
+        )
+        self.assertEqual(timings["prompt_tokens"], 2271.0)
+        self.assertAlmostEqual(timings["prompt_tokens_per_second"], 16.82, places=2)
+        self.assertAlmostEqual(timings["tokens_per_second"], 2.67, places=2)
+
+
 class OllamaExclusiveCompletionTests(unittest.IsolatedAsyncioTestCase):
     """A local completion evicts the other model BEFORE it runs."""
 
@@ -875,7 +938,7 @@ class OllamaExclusiveCompletionTests(unittest.IsolatedAsyncioTestCase):
             # The real server brings the requested model into memory on the
             # completion itself — model this so the residency roster is honest.
             server.loaded.append(str(payload["model"]))
-            return {"choices": [{"message": {"content": "ok"}}]}
+            return {"message": {"content": "ok"}, "done_reason": "stop"}
 
         with (
             mock.patch("novacontrol.integrations.llm._default_transport", fake_default_transport),
@@ -896,7 +959,7 @@ class OllamaExclusiveCompletionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(server.calls[0], ("/api/ps", {}))
         self.assertIn(("/api/generate", {"model": "qwen3-vl:4b", "keep_alive": 0}), server.calls)
         self.assertEqual(server.loaded, ["qwen3:8b"])
-        self.assertEqual(requested, [f"{OLLAMA_URL}/v1/chat/completions"])
+        self.assertEqual(requested, [f"{OLLAMA_URL}/api/chat"])
 
     async def test_injected_transport_is_never_reached_around(self) -> None:
         """A caller that supplies its own transport owns the HTTP surface."""

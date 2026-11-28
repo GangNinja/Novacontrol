@@ -211,6 +211,9 @@ function el(tag, cls, text) { return makeEl(tag, cls, text); }
 global.el = el;
 function showToast() {}
 global.showToast = showToast;
+// The real module runs in a browser, where `window` exists; the shim must provide
+// it or onActivityEvent's window.NovaCompanion probe throws ReferenceError.
+global.window = global;
 // Real code under test:
 eval(fs.readFileSync("src/novacontrol/web/static/js/render-utils.js", "utf8"));
 

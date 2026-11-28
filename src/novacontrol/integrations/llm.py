@@ -24,6 +24,17 @@ class EchoLLMProvider:
     def name(self) -> str:
         return "echo"
 
+    @property
+    def capabilities(self) -> dict[str, object]:
+        """Only what this deterministic provider can actually do."""
+        return {
+            "text_generation": True,
+            "structured_output": False,
+            "tool_calling": False,
+            "vision": False,
+            "streaming": False,
+        }
+
     async def complete(self, messages: Sequence[Mapping[str, str]], **kwargs: object) -> str:
         if not messages:
             return ""
@@ -105,6 +116,17 @@ class OpenAICompatibleLLMProvider:
         return self._name
 
     @property
+    def capabilities(self) -> dict[str, object]:
+        """Text completion only; the class does not expose tools or images."""
+        return {
+            "text_generation": True,
+            "structured_output": False,
+            "tool_calling": False,
+            "vision": False,
+            "streaming": False,
+        }
+
+    @property
     def answer_was_truncated(self) -> bool:
         """True when the last reply ran out of token budget.
 
@@ -120,33 +142,45 @@ class OpenAICompatibleLLMProvider:
     ) -> dict[str, Any] | None:
         """Native Ollama chat payload with thinking off, or None for /v1.
 
-        Only for STRUCTURED calls (understanding, JSON extraction) to the local
-        Ollama over the default transport, and only while thinking is disabled.
-        Chat is deliberately left on the compatible surface: it wants prose, and
-        a model's reasoning costs latency it does not need to pay.
+        EVERY local Ollama call over the default transport takes this path
+        while thinking is disabled, prose included. The compatible surface
+        cannot turn reasoning off (it only separates it from the content), so a
+        reasoning-capable model there spends the whole reply budget thinking
+        and answers nothing: measured on qwen3:8b (CPU-only) with Explore's own
+        prompts, 71.8s for a 400-token search plan and 106.1s for a synthesis
+        that ended in HTTP 500 with no answer at all. The same request through
+        this endpoint returns the answer instead of the reasoning.
 
-        ``num_predict`` carries the caller's budget across, so the truncation
-        contract (``answer_was_truncated``) holds on this path too.
+        ``format: json`` is for STRUCTURED callers only — a prose reply must
+        not be constrained to JSON. ``num_predict`` carries the caller's budget
+        across, so the truncation contract (``answer_was_truncated``) holds on
+        this path too, and a caller's temperature rides along into Ollama's
+        options instead of being silently dropped.
         """
-        if not structured:
-            return None
         if not self.ollama_url or self.transport is not _default_transport:
             return None
         if not ollama_disable_thinking():
             return None
-        budget = payload.get("max_tokens")
+        budget = payload.get("max_tokens", payload.get("max_completion_tokens"))
         body: dict[str, Any] = {
             "model": self.model,
             "messages": [dict(message) for message in payload.get("messages", ())],
             "stream": False,
             "think": False,
+        }
+        if structured:
             # The compatible surface gets this from ``response_format``; the
             # native endpoint needs its own field or a JSON-constrained caller
             # receives free-form prose.
-            "format": "json",
-        }
+            body["format"] = "json"
+        options: dict[str, Any] = {}
         if isinstance(budget, int) and budget > 0:
-            body["options"] = {"num_predict": budget}
+            options["num_predict"] = budget
+        temperature = payload.get("temperature")
+        if isinstance(temperature, (int, float)) and not isinstance(temperature, bool):
+            options["temperature"] = temperature
+        if options:
+            body["options"] = options
         return body
 
     @property
@@ -205,16 +239,18 @@ class OpenAICompatibleLLMProvider:
         # LOCAL REASONING MODELS need the NATIVE endpoint, not just a flag. A
         # reasoning-capable model spends its reply budget on its thinking, so a
         # capped request can come back with NO answer at all — measured on
-        # qwen3:8b (CPU-only) with this project's real understanding prompt:
+        # qwen3:8b (CPU-only):
         #
         #   /v1/chat/completions, max_tokens 700   115.4s, 0 chars of answer
         #   /api/chat, think=false                 13.9s, valid JSON
         #
-        # The OpenAI-compatible surface ignores ``think`` (it separates the
-        # reasoning instead), so the flag alone does not fix anything; matching
-        # the endpoint to the capability does. Only the real local transport is
-        # redirected — an injected transport stands in for the whole HTTP
-        # surface and must keep seeing the shape it was written for.
+        # Explore's prose synthesis was the same failure at a larger scale
+        # (106.1s, HTTP 500). The OpenAI-compatible surface ignores ``think``
+        # (it separates the reasoning instead), so the flag alone does not fix
+        # anything; matching the endpoint to the capability does. Only the real
+        # local transport is redirected — an injected transport stands in for
+        # the whole HTTP surface and must keep seeing the shape it was written
+        # for.
         native = self._ollama_native_payload(payload, structured=structured)
         url = (
             f"{self.ollama_url.rstrip('/')}/api/chat"
@@ -330,6 +366,17 @@ class AnthropicMessagesProvider:
     @property
     def name(self) -> str:
         return self._name
+
+    @property
+    def capabilities(self) -> dict[str, object]:
+        """The native text surface; tool-use blocks are ignored."""
+        return {
+            "text_generation": True,
+            "structured_output": False,
+            "tool_calling": False,
+            "vision": False,
+            "streaming": False,
+        }
 
     async def complete(self, messages: Sequence[Mapping[str, str]], **kwargs: object) -> str:
         # Split the OpenAI-style message list into Claude's shape: system text
@@ -461,6 +508,17 @@ def _ollama_timings(response: Mapping[str, Any]) -> dict[str, float]:
     tokens = response.get("eval_count")
     if isinstance(tokens, int) and tokens > 0 and decode:
         timings["tokens_per_second"] = round(tokens / (decode / 1000.0), 2)
+    # Prefill cost is the other half of a prompt's latency, and it is what makes
+    # a large evidence block unaffordable on a CPU-only model: 2,271 prompt
+    # tokens measured 135s here. Recording both the count and the rate lets a
+    # caller budget a LATER prompt instead of discovering the cost by waiting.
+    prompt_tokens = response.get("prompt_eval_count")
+    if isinstance(prompt_tokens, int) and prompt_tokens > 0:
+        timings["prompt_tokens"] = float(prompt_tokens)
+        if prefill:
+            timings["prompt_tokens_per_second"] = round(
+                prompt_tokens / (prefill / 1000.0), 2
+            )
     return timings
 
 

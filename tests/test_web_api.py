@@ -31,6 +31,7 @@ from novacontrol.browser import NoopBrowserRunner
 from novacontrol.desktop import NoopDesktopRunner
 from novacontrol.integrations.llm import EchoLLMProvider
 from novacontrol.phone.models import PhoneBridgeState, PhoneBridgeStatus, PhoneDevice
+from novacontrol.tools.models import ToolRequest, ToolStatus
 
 # Each device kind plans and executes through the same /command/* endpoints; the
 # intent router dispatches desktop commands to the desktop controller and browser
@@ -116,6 +117,129 @@ class _IsolatedApiTestCase(unittest.TestCase):
         app = NovaControlApplication(**kwargs)  # type: ignore[arg-type]
         self._nova = app
         return app
+
+
+class SkillApiTests(_IsolatedApiTestCase):
+    """Phase 31: acquire -> validate -> search -> execute over the real HTTP app."""
+
+    def _observations(self, goal: str) -> list[dict]:
+        rows: list[dict] = []
+        for _ in range(2):
+            result = asyncio.run(
+                self._nova.tool_executor.execute(
+                    ToolRequest("machine_facts", {"scope": "all"})
+                )
+            )
+            self.assertIs(result.status, ToolStatus.COMPLETED)
+            rows.append(
+                {
+                    "goal": goal,
+                    "steps": [
+                        {
+                            "instruction": "use machine_facts",
+                            "kind": "tool",
+                            "tool": "machine_facts",
+                        }
+                    ],
+                    "verified": True,
+                    "environment": self._nova.skill_service.environment,
+                    "inputs": {"scope": "all"},
+                    "tools": ["machine_facts"],
+                }
+            )
+        return rows
+
+    def test_skill_lifecycle_over_http(self) -> None:
+        goal = "report stable machine facts"
+        acquired = self._client.post(
+            "/skills/acquire",
+            json={
+                "goal": goal,
+                "name": "HTTP machine facts",
+                "observations": self._observations(goal),
+            },
+        )
+        self.assertEqual(acquired.status_code, 200, acquired.text)
+        body = acquired.json()
+        self.assertTrue(body["created"])
+        skill_id = body["skill"]["id"]
+
+        validated = self._client.post(
+            "/skills/validate", json={"skill_id": skill_id}
+        )
+        self.assertEqual(validated.status_code, 200, validated.text)
+        self.assertEqual(validated.json()["lifecycle"], "validated")
+
+        searched = self._client.get(
+            "/skills/search", params={"query": "machine facts"}
+        )
+        self.assertEqual(searched.status_code, 200, searched.text)
+        self.assertTrue(
+            any(row["skill_id"] == skill_id for row in searched.json()["matches"])
+        )
+
+        executed = self._client.post(
+            "/skills/execute",
+            json={"skill_id": skill_id, "inputs": {"scope": "all"}},
+        )
+        self.assertEqual(executed.status_code, 200, executed.text)
+        self.assertEqual(executed.json()["status"], "completed")
+        self.assertTrue(executed.json()["verified"])
+
+        detail = self._client.get(f"/skills/{skill_id}")
+        self.assertEqual(detail.status_code, 200, detail.text)
+        self.assertEqual(detail.json()["skill"]["lifecycle"], "validated")
+
+        promoted = self._client.post(
+            "/skills/promote", json={"skill_id": skill_id, "version": 1}
+        )
+        self.assertEqual(promoted.status_code, 200, promoted.text)
+        self.assertEqual(promoted.json()["version"], 1)
+
+        composed = self._client.post(
+            "/skills/compose/execute",
+            json={
+                "objective": "run the machine facts report",
+                "skill_ids": [skill_id],
+                "inputs_by_skill": {skill_id: {"scope": "all"}},
+            },
+        )
+        self.assertEqual(composed.status_code, 200, composed.text)
+        self.assertEqual(composed.json()["status"], "completed", composed.text)
+        self.assertTrue(composed.json()["verified"], composed.text)
+
+        client_approval = self._client.post(
+            "/skills/execute",
+            json={"skill_id": skill_id, "approved": True},
+        )
+        self.assertEqual(client_approval.status_code, 403, client_approval.text)
+
+        refused = self._client.post(
+            "/skills/adapt",
+            json={
+                "skill_id": skill_id,
+                "goal": "report facts on another system",
+                "environment": "plan9",
+            },
+        )
+        self.assertEqual(refused.status_code, 200, refused.text)
+        self.assertFalse(refused.json()["compatible"])
+        self.assertEqual(
+            self._client.get(f"/skills/{skill_id}").json()["skill"]["lifecycle"],
+            "validated",
+        )
+
+    def test_one_execution_is_refused_over_http(self) -> None:
+        response = self._client.post(
+            "/skills/acquire",
+            json={
+                "goal": "one run is not a skill",
+                "observations": self._observations("one run is not a skill")[:1],
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(response.json()["created"])
+        self.assertTrue(response.json()["rejected"])
 
 
 class CommandExecutionApiTests(_IsolatedApiTestCase):
@@ -342,7 +466,10 @@ class CommandExecutionApiTests(_IsolatedApiTestCase):
             "/static/js/render-explore.js",
             "/static/js/render-panels.js",
             "/static/js/voice.js",
+            "/static/js/companion.js",
+            "/static/js/isometric.js",
             "/static/js/effects.js",
+            "/static/vendor/hairline/index.js",
             "/static/nova-mark.svg",
         )
         for path in paths:
@@ -1167,13 +1294,19 @@ class Phase14ApiTests(_IsolatedApiTestCase):
         payload = self._client.get("/diagnostics").json()
 
         # Phase 16 adds the SFT subsystem's row to the Phase 14 roster, Phase 17 adds
-        # preference optimization's, Phase 18 adds the RLHF / RLAIF row, and Phase 19
-        # adds RLVR + critique learning's.
-        self.assertEqual(len(payload["components"]), 25)
-        self.assertIn("RLHF / RLAIF", {row["component"] for row in payload["components"]})
-        self.assertIn("RLVR", {row["component"] for row in payload["components"]})
-        self.assertIn("Core", {row["component"] for row in payload["components"]})
-        self.assertIn("Training", {row["component"] for row in payload["components"]})
+        # preference optimization's, Phase 18 adds the RLHF / RLAIF row, Phase 19
+        # adds RLVR + critique learning's, and Phase 34 adds the operational
+        # components its self-management control plane must observe.
+        self.assertEqual(len(payload["components"]), 34)
+        names = {row["component"] for row in payload["components"]}
+        self.assertIn("RLHF / RLAIF", names)
+        self.assertIn("RLVR", names)
+        self.assertIn("Core", names)
+        self.assertIn("Training", names)
+        self.assertIn("Event bus", names)
+        self.assertIn("Background workers", names)
+        self.assertIn("Scheduled workflows", names)
+        self.assertIn("Memory services", names)
         self.assertEqual(payload["lines"][0], "NovaControl Health")
         subset = self._client.get("/diagnostics", params={"only": "Storage,Core"}).json()
         self.assertEqual(

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import ctypes
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -13,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.parse
 from typing import Any, Protocol, runtime_checkable
 
 from novacontrol.core.audit import AutomationAuditLog, InMemoryAutomationAuditLog
@@ -38,6 +41,27 @@ from novacontrol.desktop.input import (
     validate_input_target,
     vk_for_key,
 )
+from novacontrol.desktop.clipboard import (
+    ClipboardSnapshot,
+    ClipboardStatus,
+    plan_restore,
+)
+from novacontrol.desktop.containment import (
+    ContainmentError,
+    ContainmentProfile,
+    GatedChord,
+    Identity,
+    IntegrityVerdict,
+    compare_integrity,
+    residual_risk_notes,
+)
+from novacontrol.desktop.uia import (
+    ComtypesUiaBackend,
+    UiaAdapter,
+    UiaBackend,
+    UiaTarget,
+)
+from novacontrol.intelligence.messaging import parse_message_request
 from novacontrol.desktop.models import (
     DesktopAction,
     DesktopActionResult,
@@ -89,6 +113,10 @@ class DesktopStep:
     kind: str
     target: str = ""
     text: str = ""
+    # The app a message step drafts in (empty means the plan's default).
+    app: str = ""
+    # Mail only: the subject line, when the sentence named one.
+    subject: str = ""
 
     def describe(self) -> str:
         if self.kind == "open":
@@ -99,6 +127,8 @@ class DesktopStep:
             return f"Type '{self.text}'"
         if self.kind == "search":
             return f"Search the web for '{self.text}'"
+        if self.kind == "app_search":
+            return f"Search {self.target} for '{self.text}'"
         if self.kind == "press":
             return f"Press {self.text}"
         if self.kind == "click":
@@ -111,6 +141,10 @@ class DesktopStep:
             return f"Go to {self.text} in {self.target}"
         if self.kind == "stop":
             return f"Stop {self.target}" if self.target else "Stop the last app"
+        if self.kind == "message":
+            app = self.app or _DEFAULT_MESSAGE_APP
+            subject = f" with subject '{self.subject}'" if self.subject else ""
+            return f"Send a {app} message to '{self.target}'{subject} (sends immediately)"
         if self.kind == "execute":
             return f"Execute: {self.target}"
         return f"Run {self.kind}"
@@ -125,6 +159,8 @@ class DesktopStep:
             return controller.plan_type_text(self.text)
         if self.kind == "search":
             return controller.plan_web_search(self.text)
+        if self.kind == "app_search":
+            return controller.plan_app_search(self.target, self.text)
         if self.kind == "press":
             return controller.plan_keyboard_shortcut(self.text)
         if self.kind == "click":
@@ -137,9 +173,121 @@ class DesktopStep:
             return controller.plan_app_navigate(self.target, self.text)
         if self.kind == "stop":
             return controller.plan_stop(self.target)
+        if self.kind == "message":
+            return controller.plan_compose_message(
+                self.target, self.text, app=self.app or _DEFAULT_MESSAGE_APP, subject=self.subject
+            )
         if self.kind == "execute":
             return controller.plan_execute_script(self.target)
         raise ValueError(f"Unknown desktop step kind: {self.kind}")
+
+
+_PHONE_ANCHOR = re.compile(r"\b(?:on|from)\s+(?:my|the)\s+(?:phone|android|mobile)\b")
+
+# One declared default; an app the sentence names always overrides it.
+_DEFAULT_MESSAGE_APP = "whatsapp"
+# Where an app's own search box lives. One row per app that needs it; any
+# other app gets the near-universal Ctrl+F, so a new app is never a code change.
+_IN_APP_SEARCH_SHORTCUTS: dict[str, str] = {
+    "discord": "ctrl+f",
+    "spotify": "ctrl+k",
+    "slack": "ctrl+f",
+    "telegram": "ctrl+f",
+    "whatsapp": "ctrl+f",
+}
+# How long to let an in-app result list populate before selecting the first hit.
+_COMPOSE_RESULT_WAIT_SECONDS = 1.8
+# How each app sends a drafted message. Declared data; Enter is the default.
+_SEND_SHORTCUTS: dict[str, str] = {
+    "whatsapp": "enter",
+    "telegram": "enter",
+    "sms": "enter",
+    "messages": "enter",
+    "gmail": "ctrl+enter",
+    "outlook": "ctrl+enter",
+    "mail": "ctrl+enter",
+}
+_DEFAULT_SEND_SHORTCUT = "enter"
+# Apps whose composer is reached through an in-app search box.
+_COMPOSE_SEARCH_SHORTCUTS: dict[str, str] = {"whatsapp": "ctrl+f", "telegram": "ctrl+f"}
+# How each app's compose surface is reached — DECLARED data, one row per app:
+# `protocol` rows hand a link to the app's own handler (WhatsApp, SMS, the OS
+# mail client); `web` rows open the service's compose page in the default
+# browser, which is what Gmail/Outlook need — a `mailto:` link for Gmail makes
+# Windows ask "which app?", and the answer opens an empty tab.
+@dataclass(frozen=True, slots=True)
+class _MessageLink:
+    kind: str
+    template: str
+
+
+_MESSAGE_LINKS: dict[str, _MessageLink] = {
+    "whatsapp": _MessageLink("protocol", "whatsapp://send?phone={recipient}&text={body}"),
+    "sms": _MessageLink("protocol", "sms:{recipient}?body={body}"),
+    "messages": _MessageLink("protocol", "sms:{recipient}?body={body}"),
+    "telegram": _MessageLink("protocol", "https://t.me/{recipient}?text={body}"),
+    "gmail": _MessageLink(
+        "web",
+        "https://mail.google.com/mail/?view=cm&fs=1&to={recipient}&su={subject}&body={body}",
+    ),
+    "outlook": _MessageLink(
+        "web",
+        "https://outlook.live.com/mail/0/deeplink/compose"
+        "?to={recipient}&subject={subject}&body={body}",
+    ),
+    "mail": _MessageLink("protocol", "mailto:{recipient}?subject={subject}&body={body}"),
+}
+
+
+def _compose_link_kind(app: str) -> str:
+    """'web', 'protocol', or '' for an app with no declared compose link."""
+    link = _MESSAGE_LINKS.get(app)
+    return link.kind if link else ""
+
+
+def _contact_directory() -> tuple[str, ...]:
+    """Names the parser may use to split a multi-word recipient.
+
+    One name per line in ``data/contacts.txt`` (case-insensitive). Nothing is
+    invented here: without a name in that file, "text tejas classmate mg" is
+    ambiguous and the first token stays the recipient.
+    """
+    path = Path(__file__).resolve().parents[3] / "data" / "contacts.txt"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ()
+    return tuple(line.strip() for line in lines if line.strip() and not line.startswith("#"))
+
+
+def _parse_message_step(fragment: str) -> DesktopStep | None:
+    """Read a messaging instruction through the shared deterministic grammar.
+
+    The grammar lives in ``intelligence.messaging`` so the desk and the phone
+    read one sentence identically, and it never consults a model or a network.
+    """
+    if _PHONE_ANCHOR.search(fragment):
+        return None
+    request = parse_message_request(fragment, known_contacts=_contact_directory())
+    if request is None or not request.recipient or not request.body:
+        return None
+    return DesktopStep(
+        kind="message",
+        target=request.recipient,
+        text=request.body,
+        app=request.app,
+        subject=request.subject,
+    )
+
+
+def _strip_command_punctuation(text: str) -> str:
+    """Drop sentence punctuation a spoken transcript or typed sentence adds.
+
+    "open chrome." named an app called "chrome." and fell through to a Start
+    Menu search. Terminal punctuation is never part of a target here, so it
+    is removed at the edges of the command and of parsed targets.
+    """
+    return re.sub(r"^[\s.,!?;:]+", "", re.sub(r"[\s.,!?;:]+$", "", text.strip()))
 
 
 def parse_desktop_command(command: str) -> list[DesktopStep]:
@@ -159,7 +307,7 @@ def parse_desktop_command(command: str) -> list[DesktopStep]:
         "stop that" -> [stop '']
         "close chrome" -> [stop 'chrome']  (a named app to close)
     """
-    lower = command.lower().strip()
+    lower = _strip_command_punctuation(command).lower()
     steps: list[DesktopStep] = []
 
     # 'stop that' / 'stop' / 'close it' — cancel the last launched app. Handled
@@ -179,7 +327,7 @@ def parse_desktop_command(command: str) -> list[DesktopStep]:
     fragments = re.split(r"\s+and\s+", lower)
     merged: list[str] = []
     verb_prefix = re.compile(
-        r"^(?:type|write|enter|input|put|press|hit|click|tap|search|google|look up|find|browse|open|launch|start|run|go|stop|switch|take|capture|screenshot)\b"
+        r"^(?:type|write|enter|input|put|text|message|dm|send|post|msg|mail|email|compose|draft|press|hit|click|tap|search|google|look up|find|browse|open|launch|start|run|go|stop|switch|take|capture|screenshot)\b"
     )
     for fragment in fragments:
         if merged and not verb_prefix.match(fragment.strip()):
@@ -238,7 +386,10 @@ def parse_desktop_command(command: str) -> list[DesktopStep]:
     else:
         # Standalone screenshot: 'take a screenshot', 'capture my screen',
         # bare 'screenshot'.
-        if re.search(
+        main_message = _parse_message_step(main_part)
+        if main_message is not None:
+            steps.append(main_message)
+        elif re.search(
             r"(?:\bscreenshot\b|\b(?:take|capture|grab|snip)\b.*\bscreen\b|\bscreen(?:shot|capture|cap)\b)",
             main_part,
         ):
@@ -251,8 +402,12 @@ def parse_desktop_command(command: str) -> list[DesktopStep]:
             # fallback and ran "close chrome" as a shell command.
             close_match = re.match(r"(?:close|quit|exit|kill|stop)\s+(?:the\s+|my\s+)?(.+)", main_part)
             if app_match:
-                target = app_match.group(1).strip()
-                target = re.sub(r"\s*(please|for me|on my computer|on my laptop|on the computer)\s*$", "", target)
+                target = re.sub(
+                    r"\s*(please|for me|on my computer|on my laptop|on the computer)\s*$",
+                    "",
+                    _strip_command_punctuation(app_match.group(1).strip()),
+                )
+                target = _strip_command_punctuation(target)
                 if target:
                     steps.append(DesktopStep(kind="open", target=target))
             elif close_match:
@@ -278,15 +433,45 @@ def parse_desktop_command(command: str) -> list[DesktopStep]:
     for second_part in rest_parts:
         press_match = re.match(r"(?:press|hit|click|tap)\s+(.+)", second_part)
         type_match = re.match(r"(?:type|write|enter|input|put)\s+[\"']?(.+?)[\"']?\s*$", second_part)
+        # The fragment drafts in the app this chain already opened (or the one
+        # it names); a browser is not a messaging surface, so that pair is
+        # refused instead of typing into an address bar.
+        message_step = _parse_message_step(second_part)
+        if message_step is not None:
+            context_app = message_step.app or last_app.strip().lower()
+            # A mail verb names the MEDIUM, not the app: when the chain already
+            # opened a mail surface, the draft belongs in that surface.
+            if context_app == "mail" and last_app.strip().lower() in ("gmail", "outlook", "mail"):
+                context_app = last_app.strip().lower()
+            if context_app in _BROWSER_LAUNCH_NAMES:
+                message_step = None
+            elif context_app:
+                message_step = DesktopStep(
+                    kind="message",
+                    target=message_step.target,
+                    text=message_step.text,
+                    app=context_app,
+                    subject=message_step.subject,
+                )
         # 'go to library' / 'go library' / 'open the store' inside the running app.
         nav_match = re.match(r"(?:go(?:\s+to)?|open|show|switch to|navigate to)\s+(?:the\s+|my\s+)?(library|store|downloads|settings|friends|home)\b", second_part)
         # 'take a screenshot' / 'capture the screen' as a chain step.
         shot_match = re.match(r"(?:take|capture|screenshot)\b.*\bscreenshot\b|^(?:capture|screenshot)\b", second_part)
         stop_match = re.match(r"(?:stop|close|kill)(?:\s+(?:that|it|this|everything))?", second_part)
-        if shot_match:
+        # "open it" after a search means: select the first result, do not type
+        # the words into whatever window happens to be focused.
+        open_result = re.match(
+            r"^(?:open|select|click|launch)\s+(?:it|that|this|the\s+first(?:\s+(?:one|result))?|the\s+result)$",
+            second_part,
+        )
+        if open_result and any(step.kind in ("app_search", "search") for step in steps):
+            steps.append(DesktopStep(kind="press", text="enter"))
+        elif shot_match:
             steps.append(DesktopStep(kind="screenshot"))
         elif stop_match:
             steps.append(DesktopStep(kind="stop", target=last_app))
+        elif message_step is not None:
+            steps.append(message_step)
         elif press_match:
             steps.append(DesktopStep(kind="press", text=press_match.group(1).strip()))
         elif type_match:
@@ -309,11 +494,31 @@ def parse_desktop_command(command: str) -> list[DesktopStep]:
                 else:
                     steps.append(DesktopStep(kind="click", text=f"play {game}".strip()))
         else:
-            search_match = re.match(r"(?:search|google|look up|find|browse)\s+(?:for\s+)?(.+)", second_part)
+            search_match = re.match(
+                r"(?:search|google|look up|find|browse)\s+(?:for\s+)?(.+)", second_part
+            )
             if search_match:
-                steps.append(DesktopStep(kind="search", text=search_match.group(1).strip()))
+                query = search_match.group(1).strip()
+                if last_app and last_app.strip().lower() not in _BROWSER_LAUNCH_NAMES:
+                    # The chain already opened an app: "search X" is that app's
+                    # own search box, not a browser tab.
+                    steps.append(DesktopStep(kind="app_search", target=last_app, text=query))
+                else:
+                    steps.append(DesktopStep(kind="search", text=query))
             else:
                 steps.append(DesktopStep(kind="type", text=second_part))
+
+    # A message step needs its app open first: "text mom running late" alone
+    # must never type into whatever window happened to be focused.
+    if any(step.kind == "message" for step in steps):
+        first_message = next(index for index, step in enumerate(steps) if step.kind == "message")
+        wanted_app = steps[first_message].app or _DEFAULT_MESSAGE_APP
+        already_open = any(
+            step.kind == "open" and wanted_app in step.target.strip().lower()
+            for step in steps[:first_message]
+        )
+        if not already_open:
+            steps.insert(first_message, DesktopStep(kind="open", target=wanted_app))
 
     return steps or [DesktopStep(kind="execute", target=command)]
 
@@ -333,6 +538,207 @@ class VerificationError(RuntimeError):
     JARVIS must not report success for actions that never took effect (an app
     that failed to show a window, text that had no focused window to land in).
     """
+
+
+class PasteContainmentError(VerificationError, ContainmentError):
+    """A paste that was refused or aborted, carrying where its events went.
+
+    Still a :class:`VerificationError` (an action whose effect could not be
+    confirmed) and still a :class:`ContainmentError` (it carries the dispatch
+    record). Both matter: callers catch the first, M2.8 reads the second, and a
+    failed attempt that reported no destination is exactly the evidence gap
+    DF-6 was failed on.
+    """
+
+    def __init__(self, message: str, record: Mapping[str, Any] | None = None) -> None:
+        ContainmentError.__init__(self, message, record)
+
+
+#: Read the clipboard's sequence number and contents before staging. Only text
+#: is preserved; a non-text format is REPORTED (``HASOTHER``) rather than
+#: silently counted as restorable. The text travels base64-encoded so newlines
+#: and trailing spaces survive the console round trip.
+_CLIPBOARD_READ_SCRIPT = r"""
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class CBQ { [DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber(); }'
+$seq = [CBQ]::GetClipboardSequenceNumber()
+$hasText = [System.Windows.Forms.Clipboard]::ContainsText()
+$hasOther = ([System.Windows.Forms.Clipboard]::ContainsImage() -or [System.Windows.Forms.Clipboard]::ContainsFileDropList())
+$text = ''
+if ($hasText) { $text = [System.Windows.Forms.Clipboard]::GetText() }
+$b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($text))
+Write-Output ('SEQ|' + $seq)
+Write-Output ('HASTEXT|' + $hasText)
+Write-Output ('HASOTHER|' + $hasOther)
+Write-Output ('TEXTB64|' + $b64)
+""".strip()
+
+#: The clipboard sequence number alone, for the post-paste concurrency check.
+_CLIPBOARD_SEQUENCE_SCRIPT = r"""
+Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class CBQ { [DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber(); }'
+Write-Output ('SEQ|' + [CBQ]::GetClipboardSequenceNumber())
+""".strip()
+
+#: Integrity RIDs (mandatory label) for this process and the target pid.
+#: ``-1`` means "Windows would not tell us", which the gate treats as unknown
+#: and never as compatible: UIPI drops input silently.
+_INTEGRITY_SCRIPT = r"""
+$code = @'
+using System;
+using System.Runtime.InteropServices;
+public class ILP {
+  [StructLayout(LayoutKind.Sequential)] public struct SID_AND_ATTRIBUTES { public IntPtr Sid; public int Attributes; }
+  [StructLayout(LayoutKind.Sequential)] public struct TOKEN_MANDATORY_LABEL { public SID_AND_ATTRIBUTES Label; }
+  [DllImport("kernel32.dll", SetLastError=true)] public static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+  [DllImport("kernel32.dll", SetLastError=true)] public static extern bool CloseHandle(IntPtr h);
+  [DllImport("advapi32.dll", SetLastError=true)] public static extern bool OpenProcessToken(IntPtr p, uint access, out IntPtr t);
+  [DllImport("advapi32.dll", SetLastError=true)] public static extern bool GetTokenInformation(IntPtr t, int cls, IntPtr info, int len, out int ret);
+  public static int Rid(int pid) {
+    IntPtr p = OpenProcess(0x1000, false, pid);
+    if (p == IntPtr.Zero) return -1;
+    IntPtr tok;
+    if (!OpenProcessToken(p, 0x0008, out tok)) { CloseHandle(p); return -1; }
+    int len = 0;
+    GetTokenInformation(tok, 25, IntPtr.Zero, 0, out len);
+    IntPtr buf = Marshal.AllocHGlobal(len);
+    int rid = -1;
+    if (GetTokenInformation(tok, 25, buf, len, out len)) {
+      TOKEN_MANDATORY_LABEL tml = (TOKEN_MANDATORY_LABEL)Marshal.PtrToStructure(buf, typeof(TOKEN_MANDATORY_LABEL));
+      int count = Marshal.ReadByte(tml.Label.Sid, 1);
+      rid = Marshal.ReadInt32(tml.Label.Sid, 8 + 4 * (count - 1));
+    }
+    Marshal.FreeHGlobal(buf); CloseHandle(tok); CloseHandle(p);
+    return rid;
+  }
+}
+'@
+Add-Type -TypeDefinition $code
+$ours = [System.Diagnostics.Process]::GetCurrentProcess().Id
+Write-Output ('OURS|' + [ILP]::Rid($ours))
+Write-Output ('TARGET|' + [ILP]::Rid(__PID__))
+""".strip()
+
+
+def _tagged_int(out: str, tag: str) -> int | None:
+    """The integer after ``tag|`` in probe output, or None when it is absent."""
+    for line in out.splitlines():
+        key, _, value = line.partition("|")
+        if key.strip() != tag:
+            continue
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _windows_user32() -> Any | None:
+    """user32 on Windows, or None so a probe can answer 'cannot tell'."""
+    if not sys.platform.startswith("win"):
+        return None
+    return getattr(getattr(ctypes, "windll", None), "user32", None)
+
+
+def _foreground_title() -> str:
+    """Title of the window that currently holds keyboard focus ('' unknown).
+
+    Keystrokes go wherever focus is, so this is the only honest way to know
+    whether a draft is about to be typed into the app that was asked for.
+    """
+    user32 = _windows_user32()
+    if user32 is None:
+        return ""
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        return ""
+    length = int(user32.GetWindowTextLengthW(hwnd))
+    buffer = ctypes.create_unicode_buffer(length + 1)
+    user32.GetWindowTextW(hwnd, buffer, length + 1)
+    return str(buffer.value).strip()
+
+
+def _window_responding(hwnd: int) -> bool | None:
+    """Whether Windows reports this window as responsive.
+
+    ``None`` means the host cannot answer; it is not a claim that the window is
+    healthy. A hung window is reported as ``False`` and remains a real window,
+    so a caller can report it instead of treating the interface as absent.
+    """
+    user32 = _windows_user32()
+    if user32 is None:
+        return None
+    try:
+        return not bool(user32.IsHungAppWindow(int(hwnd)))
+    except Exception:
+        return None
+
+
+def _visible_window_titles() -> list[tuple[int, str]]:
+    """Visible top-level windows as (hwnd, title); [] when the probe is unavailable.
+
+    Walks the top-level chain with GetTopWindow/GetWindow instead of an
+    EnumWindows callback: no function-pointer conversion to get wrong, and no
+    PowerShell process that could steal the focus this is trying to observe.
+    """
+    user32 = _windows_user32()
+    if user32 is None:
+        return []
+    found: list[tuple[int, str]] = []
+    hwnd = user32.GetTopWindow(None)
+    for _ in range(2000):  # a bounded walk; the desktop never has more windows
+        if not hwnd:
+            break
+        if user32.IsWindowVisible(hwnd):
+            length = int(user32.GetWindowTextLengthW(hwnd))
+            if length > 0:
+                buffer = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buffer, length + 1)
+                title = str(buffer.value).strip()
+                if title:
+                    found.append((int(hwnd), title))
+        hwnd = user32.GetWindow(hwnd, 2)  # GW_HWNDNEXT
+    return found
+
+
+def _activate_window(stem: str) -> str:
+    """Bring the first visible window whose title contains ``stem`` to the front.
+
+    Returns the activated window's title, or '' when no window matched or the
+    activation could not be confirmed. Windows refuses a foreground change from
+    a background process, so the second attempt briefly attaches to the current
+    foreground thread — and the RESULT is checked either way.
+    """
+    user32 = _windows_user32()
+    if user32 is None or not stem.strip():
+        return ""
+    wanted = stem.strip().lower()
+    matches = [(hwnd, title) for hwnd, title in _visible_window_titles() if wanted in title.lower()]
+    for hwnd, title in matches:
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        # SwitchToThisWindow is the shell's own "bring this app forward" entry
+        # point. Unlike SetForegroundWindow it is accepted from a background
+        # process, which is what a plan run from the server always is.
+        user32.SwitchToThisWindow(hwnd, True)
+        if int(user32.GetForegroundWindow()) == hwnd:
+            return title
+        user32.SetForegroundWindow(hwnd)
+        if int(user32.GetForegroundWindow()) == hwnd:
+            return title
+            foreground = user32.GetForegroundWindow()
+            foreground_thread = user32.GetWindowThreadProcessId(foreground, None)
+            current_thread = getattr(
+                getattr(ctypes, "windll", None), "kernel32", user32
+            ).GetCurrentThreadId()
+            if foreground_thread:
+                user32.AttachThreadInput(current_thread, foreground_thread, True)
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+            if foreground_thread:
+                user32.AttachThreadInput(current_thread, foreground_thread, False)
+            if int(user32.GetForegroundWindow()) == hwnd:
+                return title
+    return ""
 
 
 def _window_stem(target: str) -> str:
@@ -621,6 +1027,40 @@ def _resolve_folder(value: str) -> str:
     return str(match) if match else str(path.resolve())
 
 
+def _containment_profile(value: object) -> ContainmentProfile:
+    """The requested input profile, or ``best_effort`` for an unknown label.
+
+    An unrecognised label must never *upgrade* a claim, so it falls back to the
+    labelled keyboard profile instead of being read as a guarantee.
+    """
+    label = str(value or "").strip().lower()
+    if not label:
+        return ContainmentProfile.BEST_EFFORT
+    try:
+        return ContainmentProfile(label)
+    except ValueError:
+        return ContainmentProfile.BEST_EFFORT
+
+
+def _uia_target_from(parameters: Mapping[str, Any]) -> UiaTarget | None:
+    """The automation element a UIA request addresses, or None when unnamed."""
+    handle = _optional_int(parameters.get("window_handle")) or _optional_int(
+        parameters.get("expect_handle")
+    )
+    pid = _optional_int(parameters.get("window_pid")) or _optional_int(
+        parameters.get("expect_pid")
+    )
+    if not handle or not pid:
+        return None
+    return UiaTarget(
+        window_handle=handle,
+        window_pid=pid,
+        name=_optional_str(parameters.get("element_name")) or "",
+        automation_id=_optional_str(parameters.get("automation_id")) or "",
+        control_type=_optional_str(parameters.get("control_type")) or "",
+    )
+
+
 class NoopDesktopRunner:
     """Safe runner that records intent without changing the desktop."""
 
@@ -644,6 +1084,7 @@ class LocalDesktopRunner:
         vision_provider: object | None = None,
         windows_type_paste: bool | None = None,
         screen_capture: object | None = None,
+        uia_backend: UiaBackend | None = None,
     ) -> None:
         self.command_timeout_seconds = command_timeout_seconds
         # Multimodal LLM for vision-guided element location (None = OCR/landmarks only).
@@ -663,6 +1104,10 @@ class LocalDesktopRunner:
         # close()/stop_input() release whatever is still held. A separate guard
         # per action could not hold a key ACROSS a workflow's steps.
         self._input_guard: InputGuard | None = None
+        # UI Automation transport. None means "use the COM backend on Windows,
+        # report UIA unavailable elsewhere" — never a keyboard fallback.
+        self._uia_backend = uia_backend
+        self._uia_adapter_instance: UiaAdapter | None = None
 
     def _uses_windows_type_paste(self) -> bool:
         if self._windows_type_paste is not None:
@@ -788,6 +1233,13 @@ class LocalDesktopRunner:
     async def run(self, action: DesktopAction) -> Mapping[str, Any]:
         if action.type is DesktopActionType.OPEN_APPLICATION:
             return await self._open_application(action.target)
+        if action.type is DesktopActionType.COMPOSE_MESSAGE:
+            return await self._compose_message(
+                str(action.parameters.get("app", "whatsapp")),
+                action.target,
+                str(action.parameters.get("message", "")),
+                str(action.parameters.get("subject", "")),
+            )
         if action.type is DesktopActionType.APP_NAVIGATE:
             return await self._app_navigate(
                 str(action.parameters.get("app", action.target)), action.target
@@ -831,6 +1283,17 @@ class LocalDesktopRunner:
             return await self._mouse_click(
                 x, y, str(action.parameters.get("button", "left")), action.parameters
             )
+        if action.type is DesktopActionType.MOUSE_SCROLL:
+            x, y = _coordinate_pair(action.parameters)
+            return await self._mouse_scroll(x, y, int(action.parameters.get("delta", 0)), action.parameters)
+        if action.type is DesktopActionType.MOUSE_DRAG:
+            return await self._mouse_drag(action.parameters)
+        if action.type is DesktopActionType.WINDOW_FOCUS:
+            return await self._window_control("focus", action.target)
+        if action.type is DesktopActionType.WINDOW_MINIMIZE:
+            return await self._window_control("minimize", action.target)
+        if action.type is DesktopActionType.WINDOW_MAXIMIZE:
+            return await self._window_control("maximize", action.target)
         if action.type is DesktopActionType.MOUSE_BUTTON_DOWN:
             return await self._mouse_button(
                 str(action.parameters.get("button", "left")), down=True, parameters=action.parameters
@@ -868,6 +1331,11 @@ class LocalDesktopRunner:
             return await self._type_text(
                 action.target,
                 delay_ms=int(action.parameters.get("delay_ms", 30)),
+                expect=_optional_str(action.parameters.get("expect")) or "",
+                expect_handle=int(action.parameters.get("expect_handle", 0) or 0),
+                expect_pid=int(action.parameters.get("expect_pid", 0) or 0),
+                profile=_containment_profile(action.parameters.get("containment")),
+                uia_target=_uia_target_from(action.parameters),
             )
         if action.type is DesktopActionType.OPEN_FOLDER:
             return await self._open_folder(action.target)
@@ -882,8 +1350,14 @@ class LocalDesktopRunner:
 
     async def _open_application(self, target: str) -> Mapping[str, Any]:
         resolved = self._resolve_app_target(target)
+        # A launch must be verified as a NEW window. Matching any pre-existing
+        # window whose title contains the app name is how "open notepad" once
+        # typed into an unrelated document that was already open.
+        baseline = set(await self._window_lines() or [])
         pid = await self._launch_open(target)
-        verified = await self._wait_for_window(target, resolved=resolved)
+        verified = await self._wait_for_window(
+            target, resolved=resolved, exclude_lines=baseline
+        )
         output: dict[str, Any] = {"adapter": "local-desktop", "pid": pid, "target": target, "resolved": resolved}
         if verified is None:
             # Probe unavailable (non-Windows or probe failed): don't fail a launch we
@@ -1090,6 +1564,77 @@ class LocalDesktopRunner:
         the distinction is preserved rather than flattened to an empty list.
         """
         return await self._window_lines()
+
+    async def window_details(self) -> list[dict[str, Any]] | None:
+        """Visible windows with their real geometry, ownership and state.
+
+        A raw title list cannot say where a window is or whether it is
+        minimized. This seam does, and keeps the same unavailable-vs-empty
+        distinction: ``None`` means the OS probe could not answer.
+        """
+        lines = await self._window_lines()
+        if lines is None:
+            return None
+        details: list[dict[str, Any]] = []
+        for line in lines[:40]:
+            process, _, title = line.partition("|")
+            title = title.strip()
+            if not title:
+                continue
+            geometry = await self._window_geometry({"window_title": title})
+            if geometry is None:
+                details.append(
+                    {
+                        "title": title,
+                        "process": process.strip(),
+                        "available": False,
+                        "reason": "geometry probe could not resolve this title",
+                    }
+                )
+                continue
+            details.append(
+                {
+                    "title": geometry.title,
+                    "process": process.strip(),
+                    "handle": geometry.handle,
+                    "pid": geometry.pid,
+                    "bounds": list(geometry.bounds),
+                    "client_bounds": list(geometry.client_bounds()),
+                    "scale": geometry.scale,
+                    "foreground": geometry.foreground,
+                    "minimized": geometry.minimized,
+                    "visible": geometry.visible,
+                    "responding": _window_responding(geometry.handle),
+                    "available": geometry.visible and not geometry.minimized,
+                }
+            )
+        # Process main-window enumeration does not include modal dialogs. Add
+        # the top-level windows the Win32 walk can see (a Save As / confirm
+        # dialog is one) without claiming geometry that was not resolved.
+        known = {str(item.get("title", "")) for item in details}
+        for hwnd, title in _visible_window_titles():
+            if title in known:
+                continue
+            known.add(title)
+            details.append(
+                {
+                    "title": title,
+                    "process": "",
+                    "handle": hwnd,
+                    "foreground": _foreground_title() == title,
+                    "visible": True,
+                    "responding": _window_responding(hwnd),
+                    "available": False,
+                    "reason": "top-level dialog surface (no process main-window geometry)",
+                }
+            )
+            if len(details) >= 60:
+                break
+        return details
+
+    async def foreground_window_title(self) -> str:
+        """The window that currently owns keyboard focus, or '' if unknown."""
+        return _foreground_title()
 
     # -- game catalog seams (NovaForge game discovery) ----------------------
 
@@ -1369,7 +1914,12 @@ class LocalDesktopRunner:
         return dict(await self._stop_app(title))
 
     async def _wait_for_window(
-        self, target: str, *, resolved: str | None = None, timeout_seconds: float = 8.0
+        self,
+        target: str,
+        *,
+        resolved: str | None = None,
+        timeout_seconds: float = 8.0,
+        exclude_lines: set[str] | None = None,
     ) -> dict[str, Any] | None:
         """Poll for a visible window matching the target (or its resolved form).
 
@@ -1383,6 +1933,8 @@ class LocalDesktopRunner:
             if lines is None:
                 return None
             for line in lines:
+                if exclude_lines and line in exclude_lines:
+                    continue
                 name, sep, title = line.partition("|")
                 if any(_window_matches(name, title if sep else "", stem) for stem in stems):
                     return {"window": (title if sep else name).strip()}
@@ -1465,39 +2017,193 @@ class LocalDesktopRunner:
             "moved_count": len(moved),
         }
 
-    async def _type_text(self, text: str, *, delay_ms: int = 30) -> Mapping[str, Any]:
-        """Type text into the currently focused window, then verify it landed.
+    async def _type_text(
+        self,
+        text: str,
+        *,
+        delay_ms: int = 30,
+        expect: str = "",
+        expect_handle: int = 0,
+        expect_pid: int = 0,
+        profile: ContainmentProfile = ContainmentProfile.BEST_EFFORT,
+        uia_target: UiaTarget | None = None,
+    ) -> Mapping[str, Any]:
+        """Type text into the objective-bound window, with a containment record.
 
-        On Windows the paste is staged through the clipboard and Ctrl+V; verification
-        confirms the exact payload reached the clipboard AND a window was focused to
-        receive it before reporting success. Other platforms keep the raw keystroke
-        behavior (unverified).
+        On Windows the paste is no longer one ``SendKeys('^v')`` chord: the four
+        events are dispatched one at a time, each preceded by its own foreground
+        identity check, and the remaining events are withheld the moment that
+        check fails (DF-6-L1). That bounds the exposure to at most one input
+        event per check. It cannot close a focus change that happens between the
+        final check and its event, so this path reports ``containment:
+        best_effort`` and never carries a DF-6 PASS.
+
+        The UIA profile is different in kind: it sets a control's value through
+        that control's own automation pattern, so no keyboard event exists to
+        leak. It is selected explicitly and refuses with
+        ``unsupported_capability`` rather than falling back to the keyboard.
         """
+        if profile is ContainmentProfile.UIA:
+            return await self._type_text_uia(text, target=uia_target)
         if self._uses_windows_type_paste():
-            await self._stage_and_paste_windows(text)
+            bound = Identity.of(expect_handle, expect_pid)
+            try:
+                staged_attempt = await self._stage_and_paste_windows(text, bound=bound)
+            except PasteContainmentError as exc:
+                record = exc.dispatch_record
+                if not isinstance(record.get("verification"), dict):
+                    # Every refused attempt still reports the destination it saw
+                    # and the identity the objective bound (M2.8b/c).
+                    record["verification"] = {
+                        "expected_identity": bound.to_list() if bound is not None else None,
+                        "observed_identity": record.get("last_identity"),
+                        "identity_match": False,
+                        "focused_window": False,
+                        "window_title": "",
+                        "clipboard_match": bool(record.get("clipboard_staged")),
+                    }
+                raise
             verification = await self._verify_type_windows(text)
+            chord = (
+                staged_attempt.get("chord")
+                if isinstance(staged_attempt, Mapping)
+                else None
+            )
+            chord_record: dict[str, Any] = dict(chord) if isinstance(chord, Mapping) else {}
+            clipboard_record = (
+                staged_attempt.get("clipboard")
+                if isinstance(staged_attempt, Mapping)
+                else None
+            )
+            # The real path reports whether the stage itself reached the
+            # clipboard (the clipboard is restored afterwards, so the post-hoc
+            # probe can no longer see the text). A runner whose paste step
+            # returns no record keeps the probe's answer, which is what the
+            # existing identity tests stub.
+            clipboard_staged = (
+                bool(verification.get("clipboard_match"))
+                if verification is not None
+                else False
+            )
+            if isinstance(staged_attempt, Mapping) and "clipboard_staged" in staged_attempt:
+                clipboard_staged = bool(staged_attempt.get("clipboard_staged"))
+            if verification is not None and (expect_handle or expect_pid):
+                # D12: a title is not an identity. The foreground window's handle
+                # and pid must be the objective-bound ones, or the paste went to a
+                # different window that merely happens to share (or lack) a title.
+                actual_handle = int(verification.get("foreground_handle") or 0)
+                actual_pid = int(verification.get("foreground_pid") or 0)
+                identity_ok = (
+                    (not expect_handle or actual_handle == int(expect_handle))
+                    and (not expect_pid or actual_pid == int(expect_pid))
+                )
+                verification["identity_match"] = identity_ok
+                verification["expected_identity"] = [int(expect_handle), int(expect_pid)]
+                verification["observed_identity"] = [actual_handle, actual_pid]
+                verification["focused_window"] = (
+                    bool(verification.get("focused_window")) and identity_ok
+                )
+            if expect and verification is not None and verification.get("focused_window"):
+                # A focused window is not enough: it has to be the app the
+                # draft was meant for, or the text landed somewhere else.
+                verification["focused_window"] = _window_stem(expect) in str(
+                    verification.get("window_title", "")
+                ).lower()
             output: dict[str, Any] = {
                 "adapter": "local-desktop",
                 "action": "type_text",
                 "text": text,
                 "char_count": len(text),
+                "containment": ContainmentProfile.BEST_EFFORT.value,
+                "guaranteed": False,
+                "bound_identity": bound.to_list() if bound is not None else None,
+                "destination_identity": chord_record.get("last_identity"),
+                "identity_checks": int(chord_record.get("identity_checks") or 0),
+                "events_dispatched": int(chord_record.get("events_dispatched") or 0),
+                "input_events": int(chord_record.get("input_events") or 0),
+                "events_after_last_identity_check": int(
+                    chord_record.get("events_after_last_identity_check") or 0
+                ),
+                "input_events_after_last_identity_check": int(
+                    chord_record.get("input_events_after_last_identity_check") or 0
+                ),
+                "aborted": bool(chord_record.get("aborted")),
+                "abort_reason": str(chord_record.get("abort_reason") or ""),
+                "stuck_keys": list(chord_record.get("stuck_keys") or []),
+                "integrity": str(
+                    chord_record.get("integrity") or IntegrityVerdict.UNKNOWN.value
+                ),
+                "integrity_verified": bool(chord_record.get("integrity_verified")),
+                "clipboard": clipboard_record,
+                "residual_risk": list(residual_risk_notes(dict(chord_record))),
             }
+            if chord_record.get("aborted"):
+                # A withheld sequence is not a success even when the foreground
+                # is still the bound window: some events may already have gone
+                # out, so delivery is UNCERTAIN and must never be replayed.
+                raise PasteContainmentError(
+                    "Typed text was not verified: the paste was aborted "
+                    f"({chord_record.get('abort_reason') or 'aborted'}) after "
+                    f"{int(chord_record.get('events_dispatched') or 0)} event(s), so "
+                    "delivery is uncertain and the input will not be repeated.",
+                    {
+                        **output,
+                        "verification": {
+                            "expected_identity": (
+                                bound.to_list() if bound is not None else None
+                            ),
+                            "observed_identity": chord_record.get("last_identity"),
+                            "identity_match": False,
+                            "focused_window": False,
+                            "window_title": (
+                                verification.get("window_title", "")
+                                if verification is not None
+                                else ""
+                            ),
+                            "clipboard_match": clipboard_staged,
+                        },
+                    },
+                )
             if verification is None:
                 output["verified"] = None
                 output["verification"] = "paste verification unavailable on this platform"
-            elif verification.get("clipboard_match") and verification.get("focused_window"):
+            elif clipboard_staged and verification.get("focused_window"):
                 output["verified"] = True
                 output["verification"] = {
                     "clipboard_staged": True,
                     "focused_window": verification.get("window_title") or "(unlabeled window)",
+                    "identity_match": verification.get("identity_match"),
+                    "expected_identity": verification.get("expected_identity"),
+                    "observed_identity": verification.get("observed_identity"),
                 }
             else:
                 reason = (
                     "the text never reached the clipboard (staging failed)"
-                    if not verification.get("clipboard_match")
-                    else "no window is focused — the paste had nowhere to land"
+                    if not clipboard_staged
+                    else (
+                        "the foreground window is not the intended target "
+                        f"(expected handle/pid {verification.get('expected_identity')}, "
+                        f"observed {verification.get('observed_identity')})"
+                        if verification.get("identity_match") is False
+                        else "no window is focused — the paste had nowhere to land"
+                    )
                 )
-                raise VerificationError(f"Typed text was not verified: {reason}.")
+                raise PasteContainmentError(
+                    f"Typed text was not verified: {reason}.",
+                    {
+                        **output,
+                        "aborted": True,
+                        "abort_reason": "identity_not_confirmed_after_dispatch",
+                        "verification": {
+                            "expected_identity": verification.get("expected_identity"),
+                            "observed_identity": verification.get("observed_identity"),
+                            "identity_match": verification.get("identity_match"),
+                            "focused_window": False,
+                            "window_title": verification.get("window_title", ""),
+                            "clipboard_match": clipboard_staged,
+                        },
+                    },
+                )
             return output
         if sys.platform == "darwin":
             process = await asyncio.create_subprocess_exec(
@@ -1520,15 +2226,298 @@ class LocalDesktopRunner:
             "char_count": len(text),
         }
 
-    async def _stage_and_paste_windows(self, text: str) -> None:
-        """Stage the exact text on the clipboard and paste it into the focused window."""
-        quoted = "'" + text.replace("'", "''") + "'"
-        script = (
-            f"Set-Clipboard -Value {quoted}; "
-            "Add-Type -AssemblyName System.Windows.Forms; "
-            "[System.Windows.Forms.SendKeys]::SendWait('^v')"
+    def _uia_adapter(self) -> UiaAdapter:
+        """The UIA adapter: the injected backend, else the COM transport."""
+        if self._uia_adapter_instance is None:
+            backend = self._uia_backend
+            if backend is None and sys.platform.startswith("win"):
+                backend = ComtypesUiaBackend()
+            self._uia_adapter_instance = UiaAdapter(backend=backend)
+        return self._uia_adapter_instance
+
+    async def _type_text_uia(
+        self, text: str, *, target: UiaTarget | None
+    ) -> Mapping[str, Any]:
+        """Type through a UI Automation pattern — never through the keyboard."""
+        adapter = self._uia_adapter()
+        availability = adapter.availability()
+        bound = [target.window_handle, target.window_pid] if target is not None else None
+        if target is None or not availability.get("available"):
+            detail = (
+                "the target names no automation element"
+                if target is None
+                else str(availability.get("detail") or "UI Automation is unavailable")
+            )
+            raise PasteContainmentError(
+                f"UI Automation input was not attempted: {detail}.",
+                {
+                    "containment": ContainmentProfile.UIA.value,
+                    "guaranteed": True,
+                    "bound_identity": bound,
+                    "uia": availability,
+                    "verification": {
+                        "expected_identity": bound,
+                        "observed_identity": None,
+                        "identity_match": False,
+                        "focused_window": False,
+                    },
+                },
+            )
+        result = await adapter.set_text(target, text)
+        payload = result.to_dict()
+        observed = (
+            [result.element.get("window_handle"), result.element.get("pid")]
+            if result.element is not None
+            else None
         )
-        await self._powershell(script, timeout=10)
+        if not result.ok:
+            raise PasteContainmentError(
+                f"UI Automation refused the input ({payload.get('refusal')}): {result.detail}",
+                {
+                    "containment": ContainmentProfile.UIA.value,
+                    "guaranteed": True,
+                    "bound_identity": bound,
+                    "destination_identity": observed,
+                    "uia": payload,
+                    "verification": {
+                        "expected_identity": bound,
+                        "observed_identity": observed,
+                        "identity_match": False,
+                        "focused_window": False,
+                    },
+                },
+            )
+        return {
+            "adapter": "local-desktop",
+            "action": "type_text",
+            "text": text,
+            "char_count": len(text),
+            "containment": ContainmentProfile.UIA.value,
+            "guaranteed": True,
+            "keyboard_events": 0,
+            "bound_identity": bound,
+            "destination_identity": observed,
+            "verified": True,
+            "uia": payload,
+            "verification": {
+                "clipboard_staged": False,
+                "focused_window": True,
+                "identity_match": True,
+                "expected_identity": bound,
+                "observed_identity": observed,
+            },
+        }
+
+    async def _stage_and_paste_windows(
+        self, text: str, *, bound: Identity | None = None
+    ) -> dict[str, Any]:
+        """Stage the exact text and paste it, one gated event at a time.
+
+        The four edges go out individually through the same worker the guard
+        uses, each after its own foreground identity check — as a single
+        ``SendKeys('^v')`` call Windows injected all four whatever the
+        foreground had become, and that tail is DF-6-L1. The clipboard is
+        restored on the refused path too: a failed paste is exactly when the
+        staged text must not be left behind.
+        """
+        snapshot = await self._clipboard_capture()
+        staged = await self._clipboard_write(text)
+        sequence = await self._clipboard_sequence() if staged else 0
+        chord = GatedChord(
+            identity=self._foreground_identity,
+            press=lambda key: self._paste_edge(key, down=True),
+            release=lambda key: self._paste_edge(key, down=False),
+            bound=bound,
+            profile=ContainmentProfile.BEST_EFFORT,
+            integrity=self._integrity_gate(bound),
+            stop_requested=self._stop_requested_for_input,
+        )
+        try:
+            record = await chord.run()
+        except ContainmentError as exc:
+            restore = await self._restore_clipboard(
+                snapshot, sequence_after_write=sequence, delivered=False
+            )
+            raise PasteContainmentError(
+                str(exc),
+                {
+                    **dict(exc.dispatch_record),
+                    "clipboard": restore,
+                    "clipboard_staged": staged,
+                },
+            ) from exc
+        restore = await self._restore_clipboard(
+            snapshot,
+            sequence_after_write=sequence,
+            delivered=not bool(record.get("aborted")),
+        )
+        return {"chord": record, "clipboard": restore, "clipboard_staged": staged}
+
+    async def _paste_edge(self, key: str, *, down: bool) -> None:
+        """One gated paste edge, through the worker the guard also uses.
+
+        Deliberately not :class:`InputGuard`: the guard releases whatever it
+        holds on every exit path, and a release aimed at a window that is no
+        longer the bound target is the event this change exists to prevent. The
+        chord tracks its own held keys and only releases while the identity
+        still matches (modifier releases excepted, see ``containment``).
+        """
+        await self._send_edge("key", key, down=down, worker=self._input_worker())
+
+    async def _foreground_identity(self) -> Identity | None:
+        """The identity of the window that would receive the next event."""
+        geometry = await self._input_worker().window_geometry(foreground=True)
+        if geometry is None:
+            return None
+        return Identity.of(geometry.handle, geometry.pid)
+
+    def _integrity_gate(
+        self, bound: Identity | None
+    ) -> Callable[[], Awaitable[IntegrityVerdict]] | None:
+        """The UIPI preflight for one paste, bound to the target's pid."""
+        if bound is None:
+            return None
+
+        async def _gate() -> IntegrityVerdict:
+            return await self._integrity_verdict(bound.pid)
+
+        return _gate
+
+    async def _integrity_verdict(self, pid: int) -> IntegrityVerdict:
+        """Compare this process's integrity level with the target's.
+
+        An unreadable level is ``UNKNOWN``, never "compatible": Windows drops
+        input to a higher-integrity target without reporting it.
+        """
+        if not sys.platform.startswith("win") or pid <= 0:
+            return IntegrityVerdict.UNKNOWN
+        try:
+            out = await self._powershell(
+                _INTEGRITY_SCRIPT.replace("__PID__", str(int(pid))), timeout=10
+            )
+        except Exception:
+            return IntegrityVerdict.UNKNOWN
+        ours = _tagged_int(out, "OURS")
+        target = _tagged_int(out, "TARGET")
+        if ours is not None and ours < 0:
+            ours = None
+        if target is not None and target < 0:
+            target = None
+        return compare_integrity(ours, target)
+
+    def _stop_requested_for_input(self) -> bool:
+        """Whether a stop has been requested (checked between chord edges)."""
+        guard = self._input_guard
+        return bool(guard is not None and guard.abort.stopped)
+
+    # -- clipboard lifecycle ----------------------------------------------
+
+    async def _clipboard_capture(self) -> ClipboardSnapshot:
+        """Snapshot the clipboard before staging, so it can be put back."""
+        if not sys.platform.startswith("win"):
+            return ClipboardSnapshot(
+                available=False, error="clipboard staging is Windows-only"
+            )
+        try:
+            out = await self._powershell(_CLIPBOARD_READ_SCRIPT, timeout=10)
+        except Exception as exc:
+            return ClipboardSnapshot(
+                available=False, error=f"{type(exc).__name__}: {exc}"
+            )
+        values: dict[str, str] = {}
+        for line in out.splitlines():
+            key, _, value = line.partition("|")
+            if key.strip():
+                values[key.strip()] = value.strip()
+        encoded = values.get("TEXTB64", "")
+        text = ""
+        if encoded:
+            try:
+                text = base64.b64decode(encoded).decode("utf-8", errors="replace")
+            except Exception:
+                text = ""
+        sequence = values.get("SEQ", "0")
+        return ClipboardSnapshot(
+            available="SEQ" in values,
+            sequence=int(sequence) if sequence.isdigit() else 0,
+            text=text or None,
+            has_text=values.get("HASTEXT", "").lower() == "true",
+            has_other=values.get("HASOTHER", "").lower() == "true",
+        )
+
+    async def _clipboard_write(self, text: str) -> bool:
+        """Put text on the clipboard. False when Windows refused the write."""
+        if not sys.platform.startswith("win"):
+            return False
+        quoted = "'" + text.replace("'", "''") + "'"
+        try:
+            await self._powershell(f"Set-Clipboard -Value {quoted}", timeout=10)
+        except Exception:
+            return False
+        return True
+
+    async def _clipboard_sequence(self) -> int:
+        """The clipboard sequence number, or 0 when it cannot be read."""
+        if not sys.platform.startswith("win"):
+            return 0
+        try:
+            out = await self._powershell(_CLIPBOARD_SEQUENCE_SCRIPT, timeout=10)
+        except Exception:
+            return 0
+        return _tagged_int(out, "SEQ") or 0
+
+    async def _clipboard_clear(self) -> bool:
+        """Empty the clipboard (the previous value was empty text)."""
+        if not sys.platform.startswith("win"):
+            return False
+        try:
+            await self._powershell(
+                "Add-Type -AssemblyName System.Windows.Forms; "
+                "[System.Windows.Forms.Clipboard]::Clear()",
+                timeout=10,
+            )
+        except Exception:
+            return False
+        return True
+
+    async def _restore_clipboard(
+        self,
+        snapshot: ClipboardSnapshot,
+        *,
+        sequence_after_write: int,
+        delivered: bool,
+    ) -> dict[str, Any]:
+        """Put the previous clipboard contents back when that is still safe.
+
+        A value another application wrote during the operation is never
+        overwritten; a denial is reported as ``denied`` rather than as a
+        restore that did not happen.
+        """
+        plan = plan_restore(
+            snapshot,
+            sequence_after_write=sequence_after_write,
+            sequence_now=await self._clipboard_sequence(),
+            delivered=delivered,
+        )
+        applied = not plan.modifies_clipboard
+        if plan.write_text is not None:
+            applied = await self._clipboard_write(plan.write_text)
+        elif plan.clear:
+            applied = await self._clipboard_clear()
+        status = plan.status if applied else ClipboardStatus.DENIED
+        return {
+            "status": status.value,
+            "reason": plan.reason,
+            "applied": applied,
+            "residue": status
+            in (
+                ClipboardStatus.SKIPPED_CONCURRENT_CHANGE,
+                ClipboardStatus.SKIPPED_NON_TEXT,
+                ClipboardStatus.DENIED,
+                ClipboardStatus.UNAVAILABLE,
+            ),
+            "previous": snapshot.to_dict(),
+        }
 
     async def _verify_type_windows(self, text: str) -> dict[str, Any] | None:
         """Confirm the staged text reached the clipboard and a window was focused.
@@ -1542,29 +2531,58 @@ class LocalDesktopRunner:
             "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; "
             "using System.Text; public class FG { "
             "[DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow(); "
+            "[DllImport(\"user32.dll\")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid); "
             "[DllImport(\"user32.dll\")] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n); }'; "
             "$h = [FG]::GetForegroundWindow(); "
+            "$fgpid = 0; [void][FG]::GetWindowThreadProcessId($h, [ref]$fgpid); "
             "$sb = New-Object System.Text.StringBuilder 512; "
             "[void][FG]::GetWindowText($h, $sb, 512); "
             "$cb = [System.Windows.Forms.Clipboard]::GetText(); "
             f"Write-Output ('CBOK|' + ($cb -eq {quoted})); "
             "Write-Output ('FGW|' + ($h -ne 0)); "
+            "Write-Output ('FGHWND|' + $h.ToInt64()); "
+            "Write-Output ('FGPID|' + $fgpid); "
             "Write-Output ('FGTTL|' + $sb.ToString())"
         )
         try:
             out = await self._powershell(script, timeout=10)
         except Exception:
             return None
-        parsed: dict[str, Any] = {"clipboard_match": False, "focused_window": False, "window_title": ""}
+        parsed: dict[str, Any] = {
+            "clipboard_match": False,
+            "focused_window": False,
+            "window_title": "",
+            "foreground_handle": 0,
+            "foreground_pid": 0,
+        }
         for line in out.splitlines():
             key, sep, value = line.partition("|")
             if key == "CBOK":
                 parsed["clipboard_match"] = value.strip() == "True"
             elif key == "FGW":
                 parsed["focused_window"] = value.strip() == "True"
+            elif key == "FGHWND":
+                parsed["foreground_handle"] = _safe_int(value)
+            elif key == "FGPID":
+                parsed["foreground_pid"] = _safe_int(value)
             elif key == "FGTTL":
                 parsed["window_title"] = value.strip()
         return parsed
+
+    async def _send_draft(self, app: str) -> tuple[bool, str]:
+        """Press the app's declared send shortcut, after confirming focus.
+
+        Sending is irreversible, so it happens only when the app's own window is
+        confirmed in the foreground; otherwise nothing is pressed and the reason
+        is reported. Delivery itself is not verified — no messenger exposes that.
+        """
+        shortcut = _SEND_SHORTCUTS.get(app.strip().lower(), _DEFAULT_SEND_SHORTCUT)
+        focus = await self._focus_window(app)
+        if not focus.get("focused"):
+            return False, f"could not confirm {app.title()} in the foreground, so nothing was sent"
+        await self._keyboard_shortcut(shortcut)
+        await asyncio.sleep(0.4)
+        return True, f"pressed {shortcut} to send"
 
     async def _open_folder(self, folder_path: str) -> Mapping[str, Any]:
         """Open a folder in the system file manager.
@@ -1679,16 +2697,23 @@ class LocalDesktopRunner:
         }
 
     async def _focus_window(self, target: str) -> Mapping[str, Any]:
-        """Bring an application's window to the foreground before in-app steps.
+        """Bring an application's window to the foreground, and CONFIRM it is there.
 
-        On Windows this uses the shell's AppActivate (matches by window title or
-        process name stem — "steam" finds "Steam", "notepad" finds the Untitled
-        Notepad); a leading app-launch step usually did the focusing already, and
-        this re-anchors it when other windows appeared in between.
+        The confirmation is the point: keystrokes land wherever focus is, so
+        "I asked Windows to activate it" is not evidence that the app is in
+        front. This reports focused only when the app's own window holds focus,
+        and callers refuse to type when it does not.
         """
         if not sys.platform.startswith("win"):
-            return {"focused": False, "reason": "window focus unsupported on this platform"}
+            return {"focused": False, "target": target, "reason": "window focus unsupported on this platform"}
         stem = _window_stem(target)
+        for attempt in range(3):
+            title = _activate_window(stem)
+            if title:
+                return {"focused": True, "target": target, "window": title}
+            if attempt < 2:
+                await asyncio.sleep(0.35)
+        # Fallback: the shell's AppActivate, verified the same way.
         quoted = stem.replace("'", "''")
         script = (
             "Add-Type -AssemblyName Microsoft.VisualBasic;"
@@ -1704,21 +2729,177 @@ class LocalDesktopRunner:
             out = await self._powershell(script, timeout=10)
         except Exception:
             out = ""
-        focused = "FOCUSED" in out
-        if not focused:
-            # Fallback: try the spoken name itself (AppActivate also matches by
-            # title substring; the stem may have been too short).
-            try:
-                alt = target.strip().replace("'", "''")
-                await self._powershell(
-                    "Add-Type -AssemblyName Microsoft.VisualBasic;"
-                    f"[Microsoft.VisualBasic.Interaction]::AppActivate('{alt}')",
-                    timeout=8,
+        foreground = _foreground_title()
+        focused = "FOCUSED" in out and bool(foreground) and stem.lower() in foreground.lower()
+        return {"focused": focused, "target": target, "window": foreground}
+
+    @staticmethod
+    def _recipient_for(app: str, recipient: str) -> str:
+        """The address a protocol link can actually carry, or ''.
+
+        A name is not an address: WhatsApp needs digits, mail needs an address,
+        Telegram needs a handle. A name that does not fit falls through to the
+        in-app drafting path instead of being pasted into a URL.
+        """
+        value = recipient.strip()
+        if not value:
+            return ""
+        if app in ("mail", "gmail", "outlook"):
+            return value if re.fullmatch(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", value) else ""
+        if app == "telegram":
+            handle = value.lstrip("@")
+            return handle if re.fullmatch(r"[A-Za-z0-9_]{4,}", handle) else ""
+        digits = re.sub(r"\D", "", value)
+        return digits if len(digits) >= 7 else ""
+
+    @staticmethod
+    def _compose_uri(app: str, recipient: str, message: str, subject: str = "") -> str:
+        """A conversation URL for an app with a published protocol, or ''.
+
+        The table is data: an app without a row is not special-cased, it simply
+        takes the in-app drafting path below.
+        """
+        link = _MESSAGE_LINKS.get(app)
+        if not link:
+            return ""
+        template = link.template
+        if not subject:
+            # Gmail/Outlook call it "su"/"subject"; both disappear, and so does
+            # the separator that would otherwise leave an empty parameter.
+            template = re.sub(r"(?:su|subject)=\{subject\}&?", "", template)
+        return template.format(
+            recipient=urllib.parse.quote(recipient, safe=""),
+            subject=urllib.parse.quote(subject, safe=""),
+            body=urllib.parse.quote(message, safe=""),
+        )
+
+    # Kept because the earlier WhatsApp pins name them; they are thin aliases of
+    # the generic helpers, not a second implementation.
+    @staticmethod
+    def _whatsapp_number(recipient: str) -> str:
+        return LocalDesktopRunner._recipient_for("whatsapp", recipient)
+
+    @staticmethod
+    def _whatsapp_send_uri(number: str, message: str) -> str:
+        return LocalDesktopRunner._compose_uri("whatsapp", number, message)
+
+    async def _compose_message(
+        self, app: str, recipient: str, message: str, subject: str = ""
+    ) -> Mapping[str, Any]:
+        """Open a chat/composer with the message typed, and stop before sending.
+
+        Nothing is transmitted: an outgoing message is irreversible and this
+        controller cannot prove which chat a keystroke landed in, so the draft
+        stops in the composer and the user presses Send.
+
+        Two routes, chosen by DECLARED data rather than by app name:
+        * an app with a protocol row and a recipient that fits it opens that
+          exact conversation with the text pre-filled (verified by the window);
+        * any other app receives the draft through its own focused window.
+        """
+        app_name = (app or _DEFAULT_MESSAGE_APP).strip().lower()
+        if not recipient.strip():
+            raise ValueError("No contact was named, so there is nobody to message.")
+        if not message.strip():
+            raise ValueError("There is no message text to compose.")
+        target_recipient = self._recipient_for(app_name, recipient)
+        uri = self._compose_uri(app_name, target_recipient, message, subject) if target_recipient else ""
+        if uri:
+            if not sys.platform.startswith("win"):
+                raise ValueError(f"{app_name.title()}'s compose link requires Windows.")
+            # os.startfile hands the URL straight to ShellExecute. Launching it
+            # through `cmd /c start` made cmd split the query string at `&`, so
+            # Gmail opened with `?fs=1&tf=cm` and lost to/su/body entirely.
+            os.startfile(uri)  # noqa: S606 - ShellExecute opens the declared link
+            if _compose_link_kind(app_name) == "web":
+                # The compose page opened in the default browser; focus it, verify
+                # it, and press the declared send shortcut.
+                sent, send_note = await self._send_draft(app_name)
+                return {
+                    "adapter": "local-desktop",
+                    "action": "compose_message",
+                    "app": app_name,
+                    "contact": recipient,
+                    "drafted": True,
+                    "sent": sent,
+                    "verified": None,
+                    "verification": (
+                        f"opened {app_name.title()}'s compose page in your default browser; "
+                        + send_note
+                    ),
+                    "note": f"Sent from {app_name.title()}." if sent else send_note,
+                }
+            verified = await self._wait_for_window(app_name)
+            if verified is None:
+                verification: Any = "window check unavailable on this platform"
+            elif verified:
+                verification = f"{app_name.title()} window appeared: {verified['window']}"
+            else:
+                raise VerificationError(
+                    f"{app_name.title()} did not open a window, so the message was not composed."
                 )
-                focused = True
-            except Exception:
-                focused = False
-        return {"focused": focused, "target": target}
+            sent, send_note = await self._send_draft(app_name)
+            return {
+                "adapter": "local-desktop",
+                "action": "compose_message",
+                "app": app_name,
+                "contact": recipient,
+                "drafted": True,
+                "sent": sent,
+                "verified": verified is not None,
+                "verification": f"{verification}; {send_note}",
+                "note": f"Sent from {app_name.title()}." if sent else send_note,
+            }
+        # In-app drafting: focus the app, address the recipient when one was
+        # named, then type the body. Draft only, and honest about what it proves.
+        focus = await self._focus_window(app_name)
+        if not focus.get("focused"):
+            raise VerificationError(
+                f"{app_name.title()} is open but its window could not be brought to the "
+                "foreground, so nothing was typed. Click the app once and try again."
+            )
+        shortcut = _COMPOSE_SEARCH_SHORTCUTS.get(app_name)
+        if shortcut and recipient.strip():
+            await self._keyboard_shortcut(shortcut)
+            await asyncio.sleep(0.5)
+        if recipient.strip():
+            await self._type_text(recipient, expect=app_name)
+            # A filtered list has to HAVE a first row before Enter can open it;
+            # selecting it explicitly (Down) is what makes this deterministic
+            # instead of hoping the search box opens something on its own.
+            await asyncio.sleep(_COMPOSE_RESULT_WAIT_SECONDS)
+            await self._keyboard_shortcut("down")
+            await asyncio.sleep(0.3)
+            await self._keyboard_shortcut("enter")
+            await asyncio.sleep(1.0)
+            if _foreground_title() and _window_stem(app_name) not in _foreground_title().lower():
+                raise VerificationError(
+                    f"The conversation did not open in {app_name.title()}, so the message was not typed."
+                )
+        output = dict(await self._type_text(message, expect=app_name))
+        output.update(
+            {
+                "action": "compose_message",
+                "app": app_name,
+                "contact": recipient,
+                "paste_verified": output.pop("verified", None),
+                "drafted": None,
+                "sent": False,
+                "verified": None,
+                "verification": (
+                    f"the message text was pasted into {app_name.title()}; which "
+                    "conversation received it was not independently verified"
+                ),
+                    "note": (
+                    f"Drafted the message in {app_name.title()}; check the recipient, then press Send."
+                ),
+            }
+        )
+        sent, send_note = await self._send_draft(app_name)
+        output.update({"sent": sent, "send_verification": send_note})
+        if sent:
+            output["note"] = f"Sent from {app_name.title()}."
+        return output
 
     async def _app_navigate(self, app: str, destination: str) -> Mapping[str, Any]:
         """Navigate inside an app via its URI scheme (steam://open/library, ...).
@@ -2158,8 +3339,10 @@ class LocalDesktopRunner:
     ) -> Mapping[str, Any]:
         """Move to a coordinate and click it — press and release, always paired.
 
-        The press and release travel through the SAME guard, so a click can
-        never leave a button held: even if the release edge failed, the guard's
+        ``count`` is bounded to three: a double-click is a gesture, while a
+        looping count is how an operator machine-guns a button. The press and
+        release travel through the SAME guard, so a click can never leave a
+        button held: even if the release edge failed, the guard's
         ``release_all`` (on close/stop) would free it.
         """
         geometry = await self._validate_target(parameters, x, y)
@@ -2167,16 +3350,97 @@ class LocalDesktopRunner:
         move = await worker.send_input(f"move {x} {y}")
         if not move.ok:
             raise VerificationError(f"Could not move the cursor to ({x}, {y}): {move.error}")
+        count = max(1, min(3, int(parameters.get("count", 1))))
         guard = self._guard()
         async with guard:
-            await guard.press_button(button)
-            await guard.release_button(button)
+            for index in range(count):
+                await guard.press_button(button)
+                await guard.release_button(button)
+                if index + 1 < count:
+                    await asyncio.sleep(0.08)
         return {
             "adapter": "local-desktop",
             "action": "mouse_click",
             "coordinates": [x, y],
             "button": MouseButton(button).value,
+            "count": count,
             "window": geometry.title if geometry else "",
+        }
+
+    async def _mouse_scroll(
+        self, x: int, y: int, delta: int, parameters: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        """Scroll at a verified screen point; positive is up, negative is down."""
+        geometry = await self._validate_target(parameters, x, y)
+        worker = self._input_worker()
+        move = await worker.send_input(f"move {x} {y}")
+        if not move.ok:
+            raise VerificationError(f"Could not move the cursor to ({x}, {y}): {move.error}")
+        step = max(-1200, min(1200, int(delta)))
+        result = await worker.send_input(f"scroll {step}")
+        if not result.ok:
+            raise VerificationError(f"Could not scroll at ({x}, {y}): {result.error}")
+        return {
+            "adapter": "local-desktop",
+            "action": "mouse_scroll",
+            "coordinates": [x, y],
+            "delta": step,
+            "window": geometry.title if geometry else "",
+        }
+
+    async def _mouse_drag(self, parameters: Mapping[str, Any]) -> Mapping[str, Any]:
+        """A guarded press → move → release drag between two verified points."""
+        start_x = int(parameters.get("x", 0))
+        start_y = int(parameters.get("y", 0))
+        end_x = int(parameters.get("to_x", start_x))
+        end_y = int(parameters.get("to_y", start_y))
+        button = str(parameters.get("button", "left"))
+        geometry = await self._validate_target(parameters, start_x, start_y)
+        # Validate the destination too. A drag that ends outside the addressed
+        # window can drop data into whatever is under the cursor.
+        await self._validate_target(parameters, end_x, end_y)
+        worker = self._input_worker()
+        move = await worker.send_input(f"move {start_x} {start_y}")
+        if not move.ok:
+            raise VerificationError(f"Could not move to the drag origin: {move.error}")
+        guard = self._guard()
+        async with guard:
+            await guard.press_button(button)
+            moved = await worker.send_input(f"move {end_x} {end_y}")
+            if not moved.ok:
+                raise VerificationError(f"Could not move to the drag destination: {moved.error}")
+            await guard.release_button(button)
+        return {
+            "adapter": "local-desktop",
+            "action": "mouse_drag",
+            "from": [start_x, start_y],
+            "to": [end_x, end_y],
+            "button": MouseButton(button).value,
+            "window": geometry.title if geometry else "",
+        }
+
+    async def _window_control(self, action: str, target: str) -> Mapping[str, Any]:
+        """Focus, minimize or maximize a named window, with a readable result."""
+        geometry = await self._window_geometry({"window_title": target})
+        if geometry is None:
+            raise VerificationError(f"No window matching {target!r} is visible.")
+        worker = self._input_worker()
+        if action == "focus":
+            result = await worker.send_input(f"focus {geometry.handle}")
+        else:
+            result = await worker.send_input(f"{action} {geometry.handle}")
+        if not result.ok:
+            raise VerificationError(f"Could not {action} {target!r}: {result.error}")
+        after = await self._window_geometry({"window_handle": geometry.handle})
+        return {
+            "adapter": "local-desktop",
+            "action": f"window_{action}",
+            "target": target,
+            "window": geometry.title,
+            "handle": geometry.handle,
+            "foreground": after.foreground if after else None,
+            "minimized": after.minimized if after else None,
+            "visible": after.visible if after else None,
         }
 
     async def _mouse_button(
@@ -2331,25 +3595,26 @@ class LocalDesktopRunner:
         return info
 
     async def _keyboard_shortcut(self, shortcut: str) -> Mapping[str, Any]:
-        """Simulate a keyboard shortcut (e.g., 'ctrl+c')."""
-        # Parse shortcut like 'ctrl+shift+s'
-        keys = [k.strip().lower() for k in shortcut.split("+")]
+        """Press a key combination through the guarded input path.
+
+        Modifiers are pressed first and released last. The guard's context
+        manager releases every still-held key on an exception or a concurrent
+        stop, which is what prevents a failed ``ctrl+shift+s`` from leaving
+        Ctrl and Shift down forever.
+        """
+        keys = [k.strip().lower() for k in shortcut.split("+") if k.strip()]
+        if not keys:
+            raise ValueError("A keyboard shortcut requires at least one key.")
 
         if sys.platform.startswith("win"):
-            # Use PowerShell with SendKeys
-            send_keys_map = {
-                "ctrl": "^",
-                "alt": "%",
-                "shift": "+",
-                "enter": "{ENTER}",
-                "tab": "{TAB}",
-                "esc": "{ESC}",
-                "delete": "{DELETE}",
-                "backspace": "{BACKSPACE}",
-            }
-            keys_str = "".join(send_keys_map.get(k, k) for k in keys)
-            script = f"Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{keys_str}')"
-            await self._powershell(script, timeout=5)
+            guard = self._guard()
+            async with guard:
+                for key in keys[:-1]:
+                    await guard.press_key(key)
+                await guard.press_key(keys[-1])
+                await guard.release_key(keys[-1])
+                for key in reversed(keys[:-1]):
+                    await guard.release_key(key)
         else:
             # Use xdotool on Linux
             keys_str = "+".join(keys)
@@ -2365,6 +3630,7 @@ class LocalDesktopRunner:
             "action": "keyboard_shortcut",
             "shortcut": shortcut,
             "keys": keys,
+            "released": True,
         }
 
 
@@ -2690,6 +3956,21 @@ class DesktopAutomationController:
         self.runner = runner or NoopDesktopRunner()
         self.audit_log = audit_log or InMemoryAutomationAuditLog()
 
+    async def stop_input(self) -> dict[str, Any]:
+        """Abort in-flight input and release everything held.
+
+        The controller exposes the same emergency seam as its runner so a
+        supervisor can stop a task without reaching past the controller's
+        approval/audit ownership.
+        """
+        stopper = getattr(self.runner, "stop_input", None)
+        if stopper is None:
+            return {"aborted": False, "presses": 0, "releases": 0}
+        result = stopper()
+        if hasattr(result, "__await__"):
+            result = await result
+        return dict(result) if isinstance(result, dict) else {"result": result}
+
     async def close(self) -> None:
         """Release anything the runner holds open (the capture worker).
 
@@ -2745,6 +4026,25 @@ class DesktopAutomationController:
         """Plan stopping the last launched/focused app gracefully."""
         return _single_action_workflow(
             "Stop", DesktopActionType.STOP_APP, target, f"Stop '{target or 'the last app'}' (close its window).",
+        )
+
+    def plan_compose_message(
+        self, contact: str, message: str, *, app: str = "whatsapp", subject: str = ""
+    ) -> DesktopWorkflow:
+        """Plan opening a chat with the message typed — never sending it.
+
+        An outgoing message is irreversible and the desktop controller cannot
+        prove which chat a keystroke landed in, so the draft stops in the
+        composer and the user presses Send — the same rule the phone path
+        follows with ACTION_SENDTO.
+        """
+        app_name = app.strip().lower()
+        return _single_action_workflow(
+            f"Draft a message to {contact}",
+            DesktopActionType.COMPOSE_MESSAGE,
+            contact,
+            f"Open {app_name.title()} and draft a message to '{contact}' (you press Send).",
+            {"app": app_name, "message": message, "subject": subject},
         )
 
     def plan_execute_script(self, command: str, *, working_directory: str | None = None) -> DesktopWorkflow:
@@ -2866,6 +4166,22 @@ class DesktopAutomationController:
             f"Search for {query}", DesktopActionType.SEARCH_START_MENU, query, f"Search Start Menu for '{query}'.",
         )
 
+    def plan_app_search(self, app: str, query: str) -> DesktopWorkflow:
+        """Plan a search INSIDE an app that is already open.
+
+        The step is one action: focus the app (verified), open its own search
+        with the declared shortcut, and type the query. It deliberately does not
+        open a result — "open it" is a second, explicit step.
+        """
+        shortcut = _IN_APP_SEARCH_SHORTCUTS.get(app.strip().lower(), "ctrl+f")
+        return _single_action_workflow(
+            f"Search {app} for {query}",
+            DesktopActionType.SEARCH_IN_APP,
+            app,
+            f"Search {app} for '{query}' in its own search box.",
+            {"app": app, "query": query, "shortcut": shortcut},
+        )
+
     def plan_web_search(self, query: str, *, browser: str | None = None) -> DesktopWorkflow:
         """Plan a real web search: a browser tab opened on the results URL.
 
@@ -2927,8 +4243,23 @@ class DesktopAutomationController:
                 break
         return tuple(results)
 
-    async def execute_action(self, action: DesktopAction) -> DesktopActionResult:
-        approval = await self.approval_gateway.request_approval(
+    async def execute_action(
+        self,
+        action: DesktopAction,
+        *,
+        approval_gateway: ApprovalGateway | None = None,
+    ) -> DesktopActionResult:
+        """Execute one action behind the approval layer.
+
+        ``approval_gateway`` is a per-action override. It exists so a read-only
+        action that is intrinsically approved by its caller (a Vision panel
+        screenshot) does not have to swap the controller's gateway and restore
+        it afterwards: that swap clobbered an outer approved session — an
+        operator run's actions were denied because the capture's ``finally``
+        installed deny-by-default over the run's gateway.
+        """
+        gateway = approval_gateway or self.approval_gateway
+        approval = await gateway.request_approval(
             ApprovalRequest(
                 action=action.description,
                 reason="Desktop automation requires explicit user approval.",
@@ -2989,6 +4320,8 @@ def _permissions_for(action_type: DesktopActionType) -> tuple[PermissionScope, .
         return (PermissionScope.DESKTOP_CONTROL,)
     if action_type is DesktopActionType.WEB_SEARCH:
         return (PermissionScope.DESKTOP_CONTROL,)
+    if action_type is DesktopActionType.SEARCH_IN_APP:
+        return (PermissionScope.DESKTOP_CONTROL,)
     # Coordinate-addressed input (Phase C): real input injected into whatever
     # window is under the cursor / focused. Held buttons and keys carry the
     # widest reach (a stuck key affects every app), so they are declared here
@@ -3010,6 +4343,14 @@ def _optional_str(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _safe_int(value: Any) -> int:
+    """Parse a probe output field; anything unparseable is 0, never an exception."""
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return 0
 
 
 def _optional_int(value: Any) -> int | None:

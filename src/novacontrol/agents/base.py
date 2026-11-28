@@ -62,6 +62,7 @@ def _response_for(role: AgentRole, goal: str, metadata: Mapping[str, object]) ->
         AgentRole.BROWSER: "Browser workflow prepared",
         AgentRole.DESKTOP_AUTOMATION: "Desktop automation workflow prepared",
         AgentRole.PROJECT_MANAGER: "Project tracking update prepared",
+        AgentRole.BUSINESS: "Business evidence brief prepared",
         AgentRole.COORDINATOR: "Delegation prepared",
     }[role]
     detail = f" for: {goal}"

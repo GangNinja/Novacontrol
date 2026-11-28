@@ -103,6 +103,23 @@ class TrendingTopicsProvider:
         except Exception:  # pragma: no cover - a broken policy means closed
             return True
 
+    def refresh(self) -> bool:
+        """Make the next :meth:`topics` call re-fetch the feed, bypassing the TTL.
+
+        The day bucket and the cached pool are deliberately KEPT: if the forced
+        fetch fails, _ensure_pool's failure branch leaves the existing pool in
+        place for the same day, so a refresh with no network degrades to the
+        topics the panel already had instead of blanking it.
+
+        Returns False when external search is closed — nothing was invalidated,
+        because a closed policy must not cause a fetch either.
+        """
+        if self._external_closed():
+            return False
+        with self._lock:
+            self._fetched_at = 0.0
+        return True
+
     def topics(self, *, count: int = PAGE_SIZE, exclude: tuple[str, ...] = ()) -> dict[str, object]:
         """Return `count` topics, a different window each hour.
 

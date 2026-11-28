@@ -61,7 +61,13 @@ MAX_ELEMENTS = 12
 MAX_EVIDENCE_REFS = 16
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 MAX_ERROR_CHARS = 200
-DEFAULT_VISION_TIMEOUT = 60.0
+#: How long one interpretation may take. A 4B vision model on a modest local
+#: machine is not fast: a structured decision on a real game frame measured
+#: 78 s with thinking off (and never answered at all with thinking on). A
+#: 60 s deadline therefore cut off decisions that were still being made, which
+#: is indistinguishable from a model that cannot answer. The bound is a
+#: failure deadline, not a latency target.
+DEFAULT_VISION_TIMEOUT = 180.0
 DEFAULT_MAX_FRAME_AGE = 2.0
 DEFAULT_LOCK_TIMEOUT = 300.0
 

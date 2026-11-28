@@ -25,9 +25,31 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import json
 import logging
+import os
 import re
 
 logger = logging.getLogger(__name__)
+
+
+# One wall-clock budget for any single LOCAL model call Explore makes. The
+# model is genuinely optional on a machine that cannot run it quickly: a CPU
+# resident qwen3:8b here measured 3.2 generated tokens/s and a 2,271-token
+# evidence block at 135s to prefill, so a "plan or write the answer" call is
+# minutes, not seconds. Both call sites ask the provider's OWN last timings
+# before spending that time; a GPU/cloud provider reports no local timings (or
+# fast ones) and is never gated. 0 disables the budget entirely.
+_MODEL_BUDGET_SECONDS = 25.0
+
+
+def local_model_budget_seconds() -> float:
+    """Configured wall-clock budget for one local Explore model call."""
+    raw = os.environ.get(
+        "NOVACONTROL_EXPLORE_MODEL_BUDGET_SECONDS", str(_MODEL_BUDGET_SECONDS)
+    ).strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return _MODEL_BUDGET_SECONDS
 
 
 _PLAN_SYSTEM_PROMPT = (
@@ -78,6 +100,48 @@ def usable_provider(provider: object | None) -> bool:
     return callable(getattr(provider, "complete", None))
 
 
+def local_planning_skip_reason(
+    provider: object | None,
+    question: str,
+    *,
+    prior_topics: Sequence[str] = (),
+) -> str:
+    """Why a LOCAL model should not be asked to plan, or '' when it should.
+
+    Uses the provider's measured prefill/decode rates from its last call, so a
+    GPU-accelerated model plans exactly as before while a CPU-bound one falls
+    back to the deterministic query builder. The plan is small (~120 output
+    tokens), so the estimate is dominated by resending the planner prompt.
+    """
+    if provider is None or not getattr(provider, "ollama_url", ""):
+        return ""
+    budget = local_model_budget_seconds()
+    if budget <= 0:
+        return ""
+    timings = getattr(provider, "last_timings", None)
+    if not isinstance(timings, Mapping):
+        return ""
+    decode_rate = float(timings.get("tokens_per_second") or 0.0)
+    prompt_rate = float(timings.get("prompt_tokens_per_second") or 0.0)
+    if decode_rate <= 0 or prompt_rate <= 0:
+        return ""
+    recent = "".join(str(topic) for topic in prior_topics[-3:])
+    prompt_chars = len(_PLAN_SYSTEM_PROMPT) + len(question) + len(recent) + 80
+    prompt_tokens = max(1, prompt_chars // 4)
+    estimate = prompt_tokens / prompt_rate + 120 / decode_rate
+    if estimate <= budget:
+        return ""
+    model = str(getattr(provider, "model", "") or getattr(provider, "name", ""))
+    return (
+        f"The local brain ({model}) generates about {decode_rate:.1f} tokens/s and "
+        f"reading the planning prompt takes about {prompt_tokens / prompt_rate:.0f}s "
+        f"here, so choosing fresh search queries would need roughly {estimate:.0f}s — "
+        f"beyond the {budget:.0f}s Explore budget. The built-in query builder chose "
+        "the searches instead. Connect a faster (GPU or cloud) brain, or raise "
+        "NOVACONTROL_EXPLORE_MODEL_BUDGET_SECONDS to let the model plan."
+    )
+
+
 async def plan_research(
     provider: object | None,
     question: str,
@@ -108,7 +172,11 @@ async def plan_research(
     if complete is None:  # pragma: no cover - usable_provider already checked
         return None
     try:
-        raw = await complete(messages, max_tokens=400, temperature=0.2)
+        # ``json_mode`` is the provider hint that this caller needs JSON: on the
+        # local Ollama it selects the thinking-free native endpoint AND asks
+        # Ollama itself to constrain the reply, so the plan is not lost to a
+        # reasoning budget spent before the first brace.
+        raw = await complete(messages, max_tokens=400, temperature=0.2, json_mode=True)
     except Exception as exc:  # a planning failure must never break the research
         logger.debug("Research planning failed: %s", exc)
         return None

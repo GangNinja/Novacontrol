@@ -132,6 +132,37 @@ class TrendingProviderTests(unittest.TestCase):
         self.assertEqual(result["source"], "unavailable")
         self.assertEqual(result["topics"], [])
 
+    def test_refresh_bypasses_the_cache_and_refetches(self) -> None:
+        from novacontrol.explore.trending import TrendingTopicsProvider
+
+        fetch = _fake_fetch_factory(self.HEADLINES)
+        provider = TrendingTopicsProvider(fetch=fetch)
+        provider.topics()
+        self.assertEqual(fetch.calls["n"], 1)
+        self.assertTrue(provider.refresh())
+        provider.topics()
+        self.assertEqual(fetch.calls["n"], 2, "the Refresh control must force a re-fetch")
+
+    def test_a_failed_refresh_keeps_the_pool_on_screen(self) -> None:
+        from novacontrol.explore.trending import TrendingTopicsProvider
+
+        provider = TrendingTopicsProvider(fetch=_fake_fetch_factory(self.HEADLINES))
+        before = provider.topics()
+        provider._fetch = lambda *, edition="us", timeout=8: ()  # type: ignore[assignment]
+        self.assertTrue(provider.refresh())
+        after = provider.topics()
+        self.assertEqual(after["source"], "news")
+        self.assertEqual(after["topics"], before["topics"], "a refresh with the feed down must not blank the panel")
+
+    def test_refresh_is_refused_when_external_search_is_closed(self) -> None:
+        from novacontrol.explore.trending import TrendingTopicsProvider
+
+        fetch = _fake_fetch_factory(self.HEADLINES)
+        provider = TrendingTopicsProvider(fetch=fetch, external_allowed=lambda: False)
+        self.assertFalse(provider.refresh(), "a closed policy must not even invalidate the cache")
+        self.assertEqual(fetch.calls["n"], 0, "no fetch may happen while external search is closed")
+        self.assertEqual(provider.topics()["source"], "unavailable")
+
     def test_failed_first_fetch_degrades_to_unavailable(self) -> None:
         from novacontrol.explore.trending import TrendingTopicsProvider
 

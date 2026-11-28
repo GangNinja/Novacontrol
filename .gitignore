@@ -43,3 +43,6 @@ build_workspace/
 # command recreates the script, and the measurements it quoted stay in the report.
 /.nc*/
 /.nc_*
+
+# Local UI-audit run output (a server log from scripts/ui_audit.py, never product)
+/.ui_audit/

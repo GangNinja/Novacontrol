@@ -94,6 +94,11 @@ DEFAULT_ALLOWED_KEYS: frozenset[str] = frozenset(
     {
         "up", "down", "left", "right",
         "space", "enter", "return", "esc", "escape", "tab",
+        # A text field cannot be CORRECTED without it: typing a value into a
+        # field that already holds one appends, and the demonstration then
+        # contains both. Clearing the field first is what makes a typed value
+        # verifiable instead of a growing concatenation.
+        "backspace", "end", "home", "delete",
         "w", "a", "s", "d", "q", "e", "f", "g", "h", "j", "k", "l",
         "i", "m", "n", "o", "p", "r", "t", "u", "v", "x", "y", "z", "b", "c",
         "1", "2", "3", "4", "5", "6", "7", "8", "9", "0",

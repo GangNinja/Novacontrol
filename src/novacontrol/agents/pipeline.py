@@ -72,7 +72,9 @@ __all__ = [
     "AgentRun",
     "PipelineStep",
     "RecoveryPlan",
+    "SKILL_TOOL",
     "STAGE_ORDER",
+    "SkillProvider",
     "SpecialistAgent",
     "SpecialistDecision",
     "SpecialistPipeline",
@@ -83,6 +85,12 @@ __all__ = [
     "StepStatus",
     "ToolGrant",
 ]
+
+#: The capability name an in-pipeline skill step runs through. It is not a
+#: model-selectable tool and is never registered in the tool registry: it names
+#: the Phase 31 skill library that the pipeline consults and executes through,
+#: so a specialist gains skills WITHOUT a second registry or executor.
+SKILL_TOOL = "skill.execute"
 
 
 class StageName(StrEnum):
@@ -420,6 +428,36 @@ class ToolCatalog(Protocol):
     def list(self) -> Sequence[Any]: ...
 
 
+class SkillProvider(Protocol):
+    """The Phase 31 skill library, as an in-pipeline selection needs it.
+
+    Deliberately two methods and no state: the pipeline asks which validated
+    procedure matches a goal and, when one does, asks for it to run. Both are
+    answered by the application's ONE ``SkillService``, which keeps its own
+    catalog, evidence, permission checks and execution routing. A provider that
+    cannot answer returns nothing, and the run reports "nothing to do" exactly
+    as it did before this seam existed.
+    """
+
+    def select(
+        self,
+        goal: str,
+        *,
+        inputs: Mapping[str, Any] | None = None,
+        skill: str = "",
+        limit: int = 5,
+    ) -> Sequence[Mapping[str, Any]]: ...
+
+    async def execute(
+        self,
+        skill_id: str,
+        *,
+        goal: str,
+        inputs: Mapping[str, Any],
+        version: int | None = None,
+    ) -> Mapping[str, Any]: ...
+
+
 class SpecialistAgent(ABC):
     """A specialized agent expressed as pipeline stage hooks.
 
@@ -465,6 +503,16 @@ class SpecialistAgent(ABC):
     def tools(self) -> tuple[str, ...]:
         """The capability names this agent may select, by default its declared ones."""
         return tuple(self.declarations())
+
+    def availability(self) -> Mapping[str, Any]:
+        """Whether this agent can accept work right now, and why not.
+
+        Registration means the object exists, not that its required local
+        resource exists. A filesystem agent whose root disappeared is present
+        but unavailable; reporting it as available is a false claim the
+        coordinator would then act on.
+        """
+        return {"available": True, "reason": ""}
 
     @abstractmethod
     def clone(self, pipeline: SpecialistPipeline) -> SpecialistAgent:
@@ -633,6 +681,7 @@ class SpecialistPipeline:
         tools: ToolCatalog | None = None,
         knowledge: KnowledgeProvider | None = None,
         event_bus: EventBus | None = None,
+        skills: SkillProvider | None = None,
         max_recovery_attempts: int = 2,
     ) -> None:
         self._interpreter = interpreter or TaskInterpreter()
@@ -644,6 +693,10 @@ class SpecialistPipeline:
         self._tools = tools
         self._knowledge = knowledge
         self._event_bus = event_bus
+        #: Optional on purpose: a pipeline built without the skill library runs
+        #: exactly as it did before Phase 31's integration, and every existing
+        #: caller keeps its behaviour.
+        self._skills = skills
         self._max_recovery_attempts = max(0, int(max_recovery_attempts))
 
     @property
@@ -667,6 +720,12 @@ class SpecialistPipeline:
             goal=task.goal,
             context=dict(context or {}),
         )
+        # The task's declared metadata is part of the run's context, not a
+        # separate channel: an agent's execute hook only receives the run, and a
+        # verifier that cannot see the evidence it was asked to check would have
+        # to guess. The collaboration layer puts each subtask's declared inputs
+        # here, so no hidden global context is consulted.
+        run.context.setdefault("task_metadata", dict(task.metadata))
         self._declare(agent)
         await self._emit(run, EventType.TASK_STARTED, {"task_id": run.id, "agent": agent.name})
         try:
@@ -741,6 +800,29 @@ class SpecialistPipeline:
             # Local facts are a convenience: losing them costs detail, not the
             # run, so this is recorded as a degraded stage rather than a failure.
             run.errors.append(f"local context: {type(exc).__name__}: {exc}")
+        # Phase 32: the application may attach a NARROW, already-filtered
+        # personal-knowledge view to the task. It is context, not a permission
+        # grant, and it is kept separate from the knowledge engine's block so
+        # provenance is visible to the agent that receives it.
+        personal_rows = (task.metadata or {}).get("personal_knowledge")
+        if isinstance(personal_rows, (list, tuple)):
+            lines = []
+            for row in personal_rows[:8]:
+                if not isinstance(row, Mapping):
+                    continue
+                record = row.get("record")
+                record = record if isinstance(record, Mapping) else {}
+                content = str(record.get("content", "") or "").strip()
+                if not content:
+                    continue
+                confidence = float(record.get("confidence", 0.0) or 0.0)
+                category = str(record.get("category", "fact") or "fact")
+                lines.append(f"- [{category}; {confidence:.2f}] {content}")
+            if lines:
+                block["personal_knowledge"] = personal_rows
+                run.context_text = "\n".join(
+                    ["Relevant permitted personal knowledge:", *lines]
+                )
         query = agent.context_query(task, interpretation) or task.goal
         strategy = "local-only"
         if self._knowledge is not None:
@@ -748,7 +830,9 @@ class SpecialistPipeline:
                 knowledge = await self._knowledge.context_for(query, active_task=task.goal)
                 text = str(getattr(knowledge, "text", "") or "")
                 if text:
-                    run.context_text = text
+                    run.context_text = "\n\n".join(
+                        part for part in (run.context_text, text) if part
+                    )
                     block["knowledge_tokens"] = int(getattr(knowledge, "tokens", 0) or 0)
                     backend = str(getattr(knowledge, "embedding_backend", "") or "lexical")
                     strategy = f"{backend} retrieval"
@@ -828,14 +912,33 @@ class SpecialistPipeline:
             )
             run.status = AgentTaskStatus.FAILED
             return ()
+        requested = str(
+            task.metadata.get("skill") or task.metadata.get("use_skill") or ""
+        ).strip()
+        if requested:
+            # An operator who NAMES a skill is asking for that procedure, not for
+            # the specialist's own. Every shipped specialist returns a plan, so
+            # without this branch an explicit request was silently ignored and the
+            # library was only ever consulted when a specialist had nothing to do.
+            chosen = self._select_skill(task, run)
+            if chosen is not None:
+                steps = (chosen,)
         if not steps:
-            run.record(
-                StageName.PLANNER,
-                StageStatus.SKIPPED,
-                f"nothing to do for {decision.action}",
-            )
-            run.status = AgentTaskStatus.FAILED
-            return ()
+            # The specialist has no procedure of its own for this goal. That is
+            # the one place an existing plan is never at risk, and exactly where
+            # a validated skill is worth selecting: the run can now do something
+            # it previously reported as nothing to do.
+            selected = self._select_skill(task, run)
+            if selected is not None:
+                steps = (selected,)
+            else:
+                run.record(
+                    StageName.PLANNER,
+                    StageStatus.SKIPPED,
+                    f"nothing to do for {decision.action}",
+                )
+                run.status = AgentTaskStatus.FAILED
+                return ()
         run.plan = tuple(step.to_dict() for step in steps)
         run.record(
             StageName.PLANNER,
@@ -927,7 +1030,10 @@ class SpecialistPipeline:
                 run, EventType.TOOL_STARTED, {"tool": step.tool or step.action, "step_id": step.id}
             )
             try:
-                outcome = await agent.execute(step, run)
+                if step.tool == SKILL_TOOL and self._skills is not None:
+                    outcome = await self._run_skill_step(step, run)
+                else:
+                    outcome = await agent.execute(step, run)
             except Exception as exc:
                 outcome = StepOutcome(
                     step_id=step.id,
@@ -989,6 +1095,11 @@ class SpecialistPipeline:
                 evidence={"status": outcome.status.value},
                 confidence=0.0,
             )
+        elif step.tool == SKILL_TOOL and self._skills is not None:
+            # The skill library's own verified verdict is the verification. An
+            # agent's default verifier would pass any step that produced output,
+            # and a skill that ran without verifying did produce output.
+            verification = self._verify_skill_step(step, outcome)
         else:
             try:
                 verification = agent.verify(step, outcome, run)
@@ -1023,6 +1134,17 @@ class SpecialistPipeline:
                 "reason": verification.reason,
             },
         )
+        # A refusal is a decision, not a transient fault: retrying it reuses a
+        # verdict that will not change, and for a skill step it starts a SECOND
+        # execution with its own approval checkpoint — one refusal became
+        # several pending approvals for one step.
+        if outcome.status is StepStatus.DENIED:
+            run.record(
+                StageName.RECOVERY,
+                StageStatus.SKIPPED,
+                f"{step.action}: refused, not retried",
+            )
+            return None
         # A step that never ran is INCONCLUSIVE, so it never reaches recovery:
         # retrying it cannot change the fact that there was nothing to do.
         if verification.status is not VerificationStatus.FAIL:
@@ -1068,7 +1190,177 @@ class SpecialistPipeline:
                 queue.appendleft(replacement)
         return plan
 
-    # -- finish ---------------------------------------------------------------
+    # -- skills: Phase 31 procedures selected inside the pipeline --------------
+
+    def _skill_inputs(self, task: AgentTask) -> dict[str, Any]:
+        """The inputs a selected skill is bound with, from the task's metadata."""
+        raw = task.metadata.get("skill_inputs")
+        return dict(raw) if isinstance(raw, Mapping) else {}
+
+    def _select_skill(self, task: AgentTask, run: AgentRun) -> PipelineStep | None:
+        """Choose a validated skill for a goal the specialist cannot plan itself.
+
+        Selection is the library's: this asks for the matches and refuses the
+        ones it can see are unusable — an unvalidated version, an incompatible
+        environment, an unbound required input. It never guesses a skill from a
+        name it recognises, and a goal nobody has a validated procedure for is
+        reported as nothing to do rather than handed the closest-looking skill.
+        """
+        if self._skills is None:
+            return None
+        requested = str(
+            task.metadata.get("skill") or task.metadata.get("use_skill") or ""
+        ).strip()
+        try:
+            matches = self._skills.select(
+                task.goal,
+                inputs=self._skill_inputs(task),
+                skill=requested,
+                limit=5,
+            )
+        except Exception as exc:  # a library that cannot answer selects nothing
+            run.errors.append(f"skill selection: {type(exc).__name__}: {exc}")
+            return None
+        for match in matches:
+            row = (
+                dict(match)
+                if isinstance(match, Mapping)
+                else (match.to_dict() if hasattr(match, "to_dict") else {})
+            )
+            if str(row.get("lifecycle", "") or "").lower() not in (
+                "validated",
+                "adapted",
+            ):
+                continue
+            if row.get("compatible") is False:
+                continue
+            if row.get("missing_inputs") or row.get("missing_capabilities"):
+                continue
+            skill_id = str(row.get("skill_id") or row.get("id") or "").strip()
+            if not skill_id:
+                continue
+            if not requested and float(row.get("score", 0.0) or 0.0) <= 0.0:
+                continue
+            name = str(row.get("name") or skill_id)
+            version = row.get("version")
+            return PipelineStep(
+                action=f"skill:{name}",
+                description=f"run the validated skill {name!r}",
+                tool=SKILL_TOOL,
+                target=skill_id,
+                expected=f"{name!r} completes and its own verification passes",
+                metadata={
+                    "skill_id": skill_id,
+                    "version": version if isinstance(version, int) else None,
+                    "inputs": self._skill_inputs(task),
+                    "selection": row,
+                },
+            )
+        return None
+
+    async def _run_skill_step(self, step: PipelineStep, run: AgentRun) -> StepOutcome:
+        """Run the selected skill through the application's ONE skill service."""
+        provider = self._skills
+        assert provider is not None  # guarded by the caller
+        skill_id = str(step.metadata.get("skill_id") or step.target or "")
+        inputs = dict(step.metadata.get("inputs") or {})
+        version = step.metadata.get("version")
+        try:
+            payload = await provider.execute(
+                skill_id,
+                goal=run.goal,
+                inputs=inputs,
+                version=version if isinstance(version, int) else None,
+            )
+        except Exception as exc:
+            return StepOutcome(
+                step_id=step.id,
+                action=step.action,
+                status=StepStatus.FAILED,
+                detail=f"{type(exc).__name__}: {exc}",
+                tool=SKILL_TOOL,
+            )
+        result = dict(payload) if isinstance(payload, Mapping) else {}
+        status = str(result.get("status", "") or "")
+        verified = bool(result.get("verified", False))
+        reason = str(result.get("reason") or result.get("error") or "")
+        rows = [row for row in (result.get("results") or ()) if isinstance(row, Mapping)]
+        output = {
+            "skill_id": skill_id,
+            "version": result.get("version", version),
+            "status": status,
+            "verified": verified,
+            "execution_id": str(result.get("id", "") or ""),
+            "steps": [
+                {
+                    "index": row.get("index"),
+                    "verified": bool(row.get("verified", False)),
+                    "detail": str(row.get("detail", ""))[:200],
+                }
+                for row in rows
+            ],
+        }
+        if status == "completed" and verified:
+            return StepOutcome(
+                step_id=step.id,
+                action=step.action,
+                status=StepStatus.COMPLETED,
+                detail=f"{step.action}: verified by the skill library",
+                output=output,
+                tool=SKILL_TOOL,
+            )
+        if status in ("waiting_approval", "blocked", "refused"):
+            # Nothing was started, or the library stopped for a person: that is
+            # a refusal to run, not a failed attempt, and the run must not
+            # report success while it stands.
+            return StepOutcome(
+                step_id=step.id,
+                action=step.action,
+                status=StepStatus.DENIED,
+                detail=reason or status,
+                output=output,
+                tool=SKILL_TOOL,
+            )
+        return StepOutcome(
+            step_id=step.id,
+            action=step.action,
+            status=StepStatus.FAILED,
+            detail=reason or f"the skill reported {status or 'no status'}",
+            output=output,
+            tool=SKILL_TOOL,
+        )
+
+    @staticmethod
+    def _verify_skill_step(step: PipelineStep, outcome: StepOutcome) -> VerificationResult:
+        """Verify a skill step from the library's own recorded verdict."""
+        expectation = step.expected or step.action
+        evidence = {
+            "status": outcome.status.value,
+            "skill": dict(outcome.output),
+        }
+        if outcome.status is StepStatus.SKIPPED:
+            return VerificationResult(
+                status=VerificationStatus.INCONCLUSIVE,
+                expectation=expectation,
+                reason=f"{step.action} did not run",
+                evidence=evidence,
+                confidence=0.0,
+            )
+        if outcome.ok and bool(outcome.output.get("verified", False)):
+            return VerificationResult(
+                status=VerificationStatus.PASS,
+                expectation=expectation,
+                reason=f"{step.action} verified ({len(outcome.output.get('steps') or ())} step(s))",
+                evidence=evidence,
+                confidence=0.9,
+            )
+        return VerificationResult(
+            status=VerificationStatus.FAIL,
+            expectation=expectation,
+            reason=outcome.detail or f"{step.action} did not verify",
+            evidence=evidence,
+            confidence=0.7,
+        )
 
     async def _finish(self, agent: SpecialistAgent, run: AgentRun) -> AgentRun:
         for stage in STAGE_ORDER:
@@ -1123,6 +1415,19 @@ class SpecialistPipeline:
     def _declare(self, agent: SpecialistAgent) -> None:
         for name, declaration in agent.declarations().items():
             self._permissions.declare(name, declaration)
+        if self._skills is not None:
+            # The skill library checks a skill's own declared scopes before any
+            # step runs, so what the PIPELINE authorizes is only the right to
+            # ask it. Declared LOW and reversible: the authority for a sensitive
+            # skill stays with the library's permission gate, not here.
+            self._permissions.declare(
+                SKILL_TOOL,
+                PermissionDeclaration(
+                    risk_level=RiskLevel.LOW,
+                    requires_confirmation=False,
+                    reversible=True,
+                ),
+            )
 
     def _available_tools(self, agent: SpecialistAgent) -> frozenset[str]:
         """What this agent may select: its declared capabilities, plus the live registry.
@@ -1134,6 +1439,8 @@ class SpecialistPipeline:
         refused instead of attempted.
         """
         names: set[str] = set(agent.tools())
+        if self._skills is not None:
+            names.add(SKILL_TOOL)
         if self._tools is not None:
             for entry in self._tools.list():
                 tool = getattr(entry, "tool", entry)

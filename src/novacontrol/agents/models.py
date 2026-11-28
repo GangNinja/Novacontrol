@@ -18,9 +18,12 @@ class AgentRole(StrEnum):
     DESIGN = "design"
     TESTING = "testing"
     REVIEW = "review"
+    DATA_ANALYSIS = "data_analysis"
+    VERIFICATION = "verification"
     BROWSER = "browser"
     DESKTOP_AUTOMATION = "desktop_automation"
     PROJECT_MANAGER = "project_manager"
+    BUSINESS = "business"
     COORDINATOR = "coordinator"
 
 

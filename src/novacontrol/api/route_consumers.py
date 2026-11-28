@@ -45,12 +45,249 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("POST", "/knowledge/teach"): "renderLearning",
     ("GET", "/knowledge"): "renderLearning",
     ("POST", "/knowledge/recall"): "renderLearning",
+    ("GET", "/memory/personal/status"): "no-render",  # personal-memory management is API/CLI until a panel exists
+    ("GET", "/memory/personal"): "no-render",  # searchable memory API
+    ("POST", "/memory/personal"): "no-render",  # acquisition API
+    ("GET", "/memory/personal/export"): "no-render",  # user-controlled export
+    ("POST", "/memory/personal/consolidate"): "no-render",  # maintenance API
+    ("POST", "/memory/personal/cleanup"): "no-render",  # retention maintenance
+    ("GET", "/memory/personal/{record_id}"): "no-render",  # inspect API
+    ("POST", "/memory/personal/{record_id}/correct"): "no-render",  # correction API
+    ("POST", "/memory/personal/{record_id}/delete"): "no-render",  # deletion API
+    ("POST", "/memory/personal/{record_id}/resolve"): "no-render",  # conflict resolution API
+    ("POST", "/memory/personal/relations"): "no-render",  # relationship API
     ("POST", "/improve/workflow"): "renderWorkflow",
     ("POST", "/improve/preview"): "renderWorkflow",
     ("POST", "/improve/approve"): "renderWorkflow",
     ("POST", "/learn"): "renderLearning",
     ("POST", "/train"): "renderLearning",
     ("GET", "/system/health"): "renderHealth",
+    # Phase 34: the self-management dashboard card. Control POSTs refresh the
+    # card from GET /self-management; no POST response is rendered as a card.
+    ("GET", "/self-management"): "renderSelfManagement",
+    ("POST", "/self-management/health"): "no-render",
+    ("POST", "/self-management/diagnose"): "no-render",
+    ("GET", "/self-management/incidents"): "no-render",
+    ("GET", "/self-management/incidents/{incident_id}"): "no-render",
+    ("POST", "/self-management/incidents/{incident_id}/investigate"): "no-render",
+    ("POST", "/self-management/incidents/{incident_id}/recommend"): "no-render",
+    ("POST", "/self-management/incidents/{incident_id}/recover"): "no-render",
+    ("POST", "/self-management/pause"): "no-render",
+    ("POST", "/self-management/resume"): "no-render",
+    ("POST", "/self-management/policy"): "no-render",
+    ("GET", "/self-management/maintenance"): "no-render",
+    ("POST", "/self-management/maintenance/preview"): "no-render",
+    ("POST", "/self-management/maintenance/run"): "no-render",
+    ("GET", "/self-management/configuration"): "no-render",
+    ("POST", "/self-management/configuration/snapshot"): "no-render",
+    ("POST", "/self-management/configuration/restore"): "no-render",
+    # Phase 35: the Business Opportunities workspace. The GET list owns the
+    # renderer; detail and all controls are read/updated by its own listener
+    # code so a mutation never replaces the panel with a raw JSON card.
+    ("GET", "/business/opportunities"): "renderBusinessOpportunities",
+    ("GET", "/business/status"): "no-render",
+    ("POST", "/business/discovery/scan"): "no-render",
+    ("POST", "/business/opportunities"): "no-render",
+    ("GET", "/business/opportunities/compare"): "no-render",
+    ("GET", "/business/opportunities/{opportunity_id}"): "no-render",
+    ("POST", "/business/opportunities/{opportunity_id}/research"): "no-render",
+    ("POST", "/business/opportunities/{opportunity_id}/evidence"): "no-render",
+    ("POST", "/business/opportunities/{opportunity_id}/assess"): "no-render",
+    ("POST", "/business/opportunities/{opportunity_id}/experiments/plan"): "no-render",
+    ("POST", "/business/opportunities/{opportunity_id}/evaluate"): "no-render",
+    ("POST", "/business/opportunities/{opportunity_id}/experiments/{experiment_id}/approval"): "no-render",
+    ("POST", "/business/opportunities/{opportunity_id}/experiments/{experiment_id}/outcome"): "no-render",
+    ("POST", "/business/opportunities/{opportunity_id}/pause"): "no-render",
+    ("POST", "/business/opportunities/{opportunity_id}/resume"): "no-render",
+    ("POST", "/business/opportunities/{opportunity_id}/reject"): "no-render",
+    ("POST", "/business/opportunities/{opportunity_id}/archive"): "no-render",
+    # Phase 36: the Product workspace owns list/detail rendering and all
+    # mutations refresh through its own listeners, so a mutation never replaces
+    # the panel with a raw JSON card.
+    ("GET", "/product/projects"): "renderProductProjects",
+    ("GET", "/product/projects/{product_id}"): "renderProductProject",
+    ("GET", "/product/status"): "no-render",
+    ("GET", "/product/projects/{product_id}/history"): "no-render",
+    ("POST", "/product/projects"): "no-render",
+    ("POST", "/product/projects/{product_id}/prd"): "no-render",
+    ("POST", "/product/projects/{product_id}/prd/approval"): "no-render",
+    ("POST", "/product/projects/{product_id}/architecture"): "no-render",
+    ("POST", "/product/projects/{product_id}/architecture/approval"): "no-render",
+    ("POST", "/product/projects/{product_id}/plan"): "no-render",
+    ("POST", "/product/projects/{product_id}/plan/approval"): "no-render",
+    ("POST", "/product/projects/{product_id}/development/start"): "no-render",
+    ("POST", "/product/projects/{product_id}/tasks/run-ready"): "no-render",
+    ("POST", "/product/projects/{product_id}/tasks/{task_id}/run"): "no-render",
+    ("POST", "/product/projects/{product_id}/tasks/{task_id}/result"): "no-render",
+    ("POST", "/product/projects/{product_id}/tasks/{task_id}/retry"): "no-render",
+    ("POST", "/product/projects/{product_id}/environment/validate"): "no-render",
+    ("POST", "/product/projects/{product_id}/workspace/files"): "no-render",
+    ("POST", "/product/projects/{product_id}/workspace/cleanup"): "no-render",
+    ("POST", "/product/projects/{product_id}/build"): "no-render",
+    ("POST", "/product/projects/{product_id}/tests"): "no-render",
+    ("POST", "/product/projects/{product_id}/quality/run"): "no-render",
+    ("POST", "/product/projects/{product_id}/defects"): "no-render",
+    ("POST", "/product/projects/{product_id}/defects/{defect_id}/resolve"): "no-render",
+    ("POST", "/product/projects/{product_id}/defects/{defect_id}/reopen"): "no-render",
+    ("POST", "/product/projects/{product_id}/requirements/{requirement_id}/verify"): "no-render",
+    ("POST", "/product/projects/{product_id}/corrective-tasks"): "no-render",
+    ("POST", "/product/projects/{product_id}/release"): "no-render",
+    ("POST", "/product/projects/{product_id}/release/approval"): "no-render",
+    ("POST", "/product/projects/{product_id}/launch-readiness"): "no-render",
+    ("POST", "/product/projects/{product_id}/launch/approval"): "no-render",
+    # Phase 37: the Customer & Growth workspace owns list/detail rendering; its
+    # controls refresh through the panel's own listeners, never a raw JSON card.
+    ("GET", "/customer/workspaces"): "renderCustomerGrowth",
+    ("GET", "/customer/status"): "no-render",
+    ("GET", "/customer/workspaces/{product_id}"): "no-render",
+    ("GET", "/customer/workspaces/{product_id}/history"): "no-render",
+    ("GET", "/customer/workspaces/{product_id}/analytics"): "no-render",
+    ("GET", "/customer/workspaces/{product_id}/customers"): "no-render",
+    ("GET", "/customer/workspaces/{product_id}/customers/{customer_id}"): "no-render",
+    ("GET", "/customer/workspaces/{product_id}/leads"): "no-render",
+    ("GET", "/customer/workspaces/{product_id}/tickets"): "no-render",
+    ("GET", "/customer/workspaces/{product_id}/tickets/{ticket_id}"): "no-render",
+    ("POST", "/customer/workspaces"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/refresh"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/segments"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/icps"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/research"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/customers"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/customers/{customer_id}/consent"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/customers/{customer_id}/success"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/customers/{customer_id}/churn"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/customers/{customer_id}/erasure"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/leads"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/leads/{lead_id}/consent"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/leads/{lead_id}/qualify"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/leads/{lead_id}/status"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/leads/{lead_id}/convert"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/sales/assist"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/interactions"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/deals"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/deals/{deal_id}/stage"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/deals/{deal_id}/proposals"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/deals/{deal_id}/decisions"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/policy"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/communications"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/communications/{communication_id}/approval"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/communications/{communication_id}/send"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/knowledge"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/tickets"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/tickets/{ticket_id}/triage"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/tickets/{ticket_id}/messages"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/tickets/{ticket_id}/status"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/tickets/{ticket_id}/assist"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/feedback"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/onboarding"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/onboarding/{onboarding_id}"): "no-render",
+    ("POST", "/customer/workspaces/{product_id}/costs"): "no-render",
+    # Phase 38: the Finance workspace reads the venture list, one venture and
+    # its dashboard. POSTs refresh those views explicitly, so they do not claim
+    # an automatic renderer.
+    ("GET", "/finance/status"): "no-render",
+    ("GET", "/finance/ventures"): "renderFinanceList",
+    ("POST", "/finance/ventures"): "no-render",
+    ("GET", "/finance/ventures/{venture_id}"): "renderFinanceDetail",
+    ("GET", "/finance/ventures/{venture_id}/dashboard"): "renderFinanceDashboard",
+    ("POST", "/finance/ventures/{venture_id}/status"): "no-render",
+    ("POST", "/finance/ventures/{venture_id}/members"): "no-render",
+    ("GET", "/finance/ventures/{venture_id}/operations"): "no-render",
+    ("POST", "/finance/ventures/{venture_id}/objectives"): "no-render",
+    ("POST", "/finance/ventures/{venture_id}/tasks"): "no-render",
+    ("POST", "/finance/ventures/{venture_id}/tasks/{task_id}"): "no-render",
+    ("POST", "/finance/ventures/{venture_id}/milestones"): "no-render",
+    ("POST", "/finance/ventures/{venture_id}/workflows"): "no-render",
+    ("POST", "/finance/ventures/{venture_id}/risks"): "no-render",
+    ("GET", "/finance/ventures/{venture_id}/revenue"): "no-render",
+    ("GET", "/finance/ventures/{venture_id}/revenue/summary"): "no-render",
+    ("POST", "/finance/ventures/{venture_id}/revenue"): "no-render",
+    ("POST", "/finance/ventures/{venture_id}/revenue/{revenue_id}/advance"): "no-render",
+    ("POST", "/finance/ventures/{venture_id}/revenue/{revenue_id}/refund"): "no-render",
+    ("GET", "/finance/ventures/{venture_id}/expenses"): "no-render",
+    ("POST", "/finance/ventures/{venture_id}/expenses"): "no-render",
+    ("POST", "/finance/ventures/{venture_id}/expenses/{expense_id}/approval"): "no-render",
+    ("POST", "/finance/ventures/{venture_id}/expenses/{expense_id}/payment"): "no-render",
+    ("GET", "/finance/ventures/{venture_id}/journal"): "no-render",
+    ("POST", "/finance/ventures/{venture_id}/journal"): "no-render",
+    ("POST", "/finance/ventures/{venture_id}/journal/{journal_id}/reverse"): "no-render",
+    ("POST", "/finance/ventures/{venture_id}/reconciliations"): "no-render",
+    ("POST", "/finance/ventures/{venture_id}/periods/close"): "no-render",
+    ("GET", "/finance/ventures/{venture_id}/trial-balance"): "no-render",
+    ("GET", "/finance/ventures/{venture_id}/statements/income"): "no-render",
+    ("GET", "/finance/ventures/{venture_id}/statements/balance-sheet"): "no-render",
+    ("GET", "/finance/ventures/{venture_id}/statements/cash-flow"): "no-render",
+    ("GET", "/finance/ventures/{venture_id}/statements/comparison"): "no-render",
+    ("GET", "/finance/ventures/{venture_id}/cash-flow"): "no-render",
+    ("GET", "/finance/ventures/{venture_id}/working-capital"): "no-render",
+    ("GET", "/finance/ventures/{venture_id}/profitability"): "no-render",
+    ("GET", "/finance/ventures/{venture_id}/budgets"): "no-render",
+    ("POST", "/finance/ventures/{venture_id}/budgets"): "no-render",
+    ("POST", "/finance/ventures/{venture_id}/budgets/{budget_id}/approval"): "no-render",
+    ("POST", "/finance/ventures/{venture_id}/budgets/{budget_id}/revisions"): "no-render",
+    ("GET", "/finance/ventures/{venture_id}/budgets/{budget_id}/report"): "no-render",
+    ("GET", "/finance/ventures/{venture_id}/forecasts"): "no-render",
+    ("POST", "/finance/ventures/{venture_id}/forecasts"): "no-render",
+    ("POST", "/finance/ventures/{venture_id}/scenarios"): "no-render",
+    ("GET", "/finance/ventures/{venture_id}/alerts"): "no-render",
+    ("POST", "/finance/ventures/{venture_id}/health/refresh"): "no-render",
+    ("POST", "/finance/ventures/{venture_id}/alerts/{alert_id}/resolve"): "no-render",
+    ("GET", "/finance/ventures/{venture_id}/reports"): "no-render",
+    ("POST", "/finance/ventures/{venture_id}/reports"): "no-render",
+    # Phase 39 portfolio workspace.
+    ("GET", "/portfolio/status"): "no-render",
+    ("GET", "/portfolios"): "renderPortfolioList",
+    ("POST", "/portfolios"): "no-render",
+    ("GET", "/portfolios/{portfolio_id}"): "renderPortfolioDetail",
+    ("PATCH", "/portfolios/{portfolio_id}"): "no-render",
+    ("POST", "/portfolios/{portfolio_id}/status"): "no-render",
+    ("POST", "/portfolios/{portfolio_id}/members"): "no-render",
+    ("POST", "/portfolios/{portfolio_id}/fx-rates"): "no-render",
+    ("POST", "/portfolios/{portfolio_id}/monitoring"): "no-render",
+    ("GET", "/portfolios/{portfolio_id}/ventures"): "no-render",
+    ("POST", "/portfolios/{portfolio_id}/ventures"): "no-render",
+    ("GET", "/portfolios/{portfolio_id}/ventures/{venture_id}"): "no-render",
+    ("GET", "/portfolios/{portfolio_id}/ventures/{venture_id}/lifecycle/evidence"): "no-render",
+    ("POST", "/portfolios/{portfolio_id}/ventures/{venture_id}/lifecycle"): "no-render",
+    ("GET", "/portfolios/{portfolio_id}/analytics"): "no-render",
+    ("GET", "/portfolios/{portfolio_id}/comparison"): "no-render",
+    ("POST", "/portfolios/{portfolio_id}/evaluation-policies"): "no-render",
+    ("POST", "/portfolios/{portfolio_id}/evaluations"): "no-render",
+    ("GET", "/portfolios/{portfolio_id}/ranking"): "no-render",
+    ("GET", "/portfolios/{portfolio_id}/risks"): "no-render",
+    ("POST", "/portfolios/{portfolio_id}/risks"): "no-render",
+    ("POST", "/portfolios/{portfolio_id}/risks/assess"): "no-render",
+    ("POST", "/portfolios/{portfolio_id}/risks/{risk_id}/resolve"): "no-render",
+    ("GET", "/portfolios/{portfolio_id}/allocations"): "no-render",
+    ("POST", "/portfolios/{portfolio_id}/allocations"): "no-render",
+    ("POST", "/portfolios/{portfolio_id}/allocations/{batch_id}/decision"): "no-render",
+    ("GET", "/portfolios/{portfolio_id}/resources"): "no-render",
+    ("POST", "/portfolios/{portfolio_id}/resources"): "no-render",
+    ("POST", "/portfolios/{portfolio_id}/resources/{resource_id}/allocations"): "no-render",
+    ("GET", "/portfolios/{portfolio_id}/scenarios"): "no-render",
+    ("POST", "/portfolios/{portfolio_id}/scenarios"): "no-render",
+    ("GET", "/portfolios/{portfolio_id}/recommendations"): "no-render",
+    ("POST", "/portfolios/{portfolio_id}/recommendations"): "no-render",
+    ("GET", "/portfolios/{portfolio_id}/decisions"): "no-render",
+    ("POST", "/portfolios/{portfolio_id}/decisions"): "no-render",
+    ("POST", "/portfolios/{portfolio_id}/decisions/{decision_id}/approval"): "no-render",
+    ("GET", "/portfolios/{portfolio_id}/coordination"): "no-render",
+    ("POST", "/portfolios/{portfolio_id}/coordination/dependencies"): "no-render",
+    ("GET", "/portfolios/{portfolio_id}/knowledge"): "no-render",
+    ("POST", "/portfolios/{portfolio_id}/knowledge"): "no-render",
+    ("POST", "/portfolios/{portfolio_id}/knowledge/{knowledge_id}/promote"): "no-render",
+    ("GET", "/portfolios/{portfolio_id}/alerts"): "no-render",
+    ("POST", "/portfolios/{portfolio_id}/alerts/refresh"): "no-render",
+    ("POST", "/portfolios/{portfolio_id}/alerts/{alert_id}/resolve"): "no-render",
+    ("GET", "/portfolios/{portfolio_id}/reports"): "no-render",
+    ("POST", "/portfolios/{portfolio_id}/reports"): "no-render",
+    ("GET", "/portfolios/{portfolio_id}/reports/{report_id}"): "no-render",
+    ("GET", "/portfolios/{portfolio_id}/dashboard"): "renderPortfolioDashboard",
+    ("GET", "/portfolios/{portfolio_id}/history"): "no-render",
+    ("POST", "/product/projects/{product_id}/conditions/resolve"): "no-render",
+    ("POST", "/product/projects/{product_id}/cancel"): "no-render",
+    ("POST", "/product/projects/{product_id}/resume"): "no-render",
+    ("POST", "/product/projects/{product_id}/archive"): "no-render",
     # Command Center telemetry has its own poll loop and in-place card updater
     # (js/telemetry.js) rather than going through run(type) -> render().
     ("GET", "/system/telemetry"): "renderTelemetry",
@@ -77,6 +314,42 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("GET", "/models/status"): "no-render",  # no panel: model-manager status (CLI/API)
     ("POST", "/models/load"): "no-render",  # no panel: load a model (CLI/API)
     ("POST", "/models/unload"): "no-render",  # no panel: release a model (CLI/API)
+    (
+        "GET",
+        "/models/routing",
+    ): "renderModelRouting",  # System panel: Adaptive Model Routing card
+    (
+        "POST",
+        "/models/routing/route",
+    ): "no-render",  # selection/explanation API
+    (
+        "POST",
+        "/models/routing/complete",
+    ): "no-render",  # routed completion API
+    (
+        "POST",
+        "/models/routing/config",
+    ): "no-render",  # real routing controls
+    (
+        "POST",
+        "/models/routing/providers",
+    ): "no-render",  # provider enable/disable control
+    (
+        "GET",
+        "/models/routing/history",
+    ): "no-render",  # routing evidence API
+    (
+        "GET",
+        "/models/routing/policy",
+    ): "no-render",  # learned-policy report
+    (
+        "POST",
+        "/models/routing/policy/activate",
+    ): "no-render",  # policy activation
+    (
+        "POST",
+        "/models/routing/policy/rollback",
+    ): "no-render",  # policy rollback
     ("GET", "/tasks"): "no-render",  # reserved for future explicit lists
     ("POST", "/tasks/delete"): "no-render",  # deleteTask row button + refreshStatus
     ("POST", "/tasks/clear"): "no-render",  # clearAllTasksButton + toast-undo
@@ -302,7 +575,19 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("POST", "/bugs/clear-fixed"): "no-render",  # Clear Fixed button re-fetches /bugs
     ("POST", "/agent/run"): "no-render",  # agentic loop (API/CLI surface; UI lands with the JARVIS panel)
     ("GET", "/agent/metrics"): "no-render",  # evaluation ledger metrics
-    ("GET", "/agent/knowledge"): "no-render",  # application knowledge graph dump
+    ("GET", "/agent/knowledge"): "no-render",  # application knowledge graph
+    # Phase 29: computer operation is an API/CLI surface in this build. No
+    # panel claims to render these bodies, so they are declared honestly.
+    ("GET", "/computer/status"): "no-render",
+    ("GET", "/computer/devices"): "no-render",
+    ("POST", "/computer/observe"): "no-render",
+    ("POST", "/computer/plan"): "no-render",
+    ("POST", "/computer/run"): "no-render",
+    ("POST", "/computer/stop"): "no-render",
+    ("GET", "/computer/history"): "no-render",
+    ("POST", "/computer/history/clear"): "no-render",
+    ("POST", "/computer/reference"): "no-render",
+  # application knowledge graph dump
     ("GET", "/plugins"): "no-render",  # plugin marketplace API (CLI only)
     ("GET", "/activity"): "no-render",  # timeline seed fetched by js/activity.js, not run()
     # Phase 13: automation and audit are API/CLI surfaces for now — the scheduler
@@ -315,6 +600,41 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("POST", "/automation/enable"): "no-render",
     ("POST", "/automation/disable"): "no-render",
     ("POST", "/automation/run"): "no-render",
+    # Phase 30: the Operations panel is the consumer. Each control posts to the
+    # route that performs exactly that change, and the board re-reads /objectives.
+    ("GET", "/operations"): "renderOperations",
+    ("GET", "/objectives"): "renderOperations",
+    ("POST", "/objectives"): "no-render",
+    ("POST", "/objectives/update"): "no-render",
+    ("POST", "/objectives/delete"): "no-render",
+    ("POST", "/objectives/control"): "no-render",
+    ("POST", "/objectives/tasks"): "no-render",
+    ("POST", "/objectives/milestones"): "no-render",
+    ("POST", "/objectives/run"): "no-render",
+    ("POST", "/objectives/tasks/decide"): "no-render",
+    ("GET", "/operations/notifications"): "renderOperations",
+    ("POST", "/operations/notifications/read"): "no-render",
+    ("POST", "/operations/notifications/clear"): "no-render",
+    ("POST", "/operations/notifications/preferences"): "no-render",
+    ("POST", "/operations/tick"): "no-render",
+    # Phase 31: the skill library has an API/CLI surface in this build. No panel
+    # claims to render these bodies, so every row is declared non-render rather
+    # than promising a control the frontend does not have.
+    ("GET", "/skills"): "no-render",
+    ("GET", "/skills/catalog"): "no-render",
+    ("GET", "/skills/search"): "no-render",
+    ("GET", "/skills/evidence"): "no-render",
+    ("GET", "/skills/{skill_id}"): "no-render",
+    ("POST", "/skills/acquire"): "no-render",
+    ("POST", "/skills/validate"): "no-render",
+    ("POST", "/skills/adapt"): "no-render",
+    ("POST", "/skills/compose"): "no-render",
+    ("POST", "/skills/compose/execute"): "no-render",
+    ("POST", "/skills/execute"): "no-render",
+    ("POST", "/skills/resume"): "no-render",
+    ("POST", "/skills/promote"): "no-render",
+    ("POST", "/skills/deprecate"): "no-render",
+    ("POST", "/skills/rollback"): "no-render",
     ("POST", "/automation/run-due"): "no-render",
     ("GET", "/audit"): "no-render",
     ("GET", "/audit/entries"): "no-render",
@@ -468,6 +788,31 @@ ROUTE_CONSUMERS: dict[tuple[str, str], str] = {
     ("POST", "/rlvr/runs/evaluate"): "no-render",
     ("GET", "/rlvr/runs/{run_id}/checkpoints"): "no-render",
     ("GET", "/rlvr/runs/{run_id}"): "no-render",
+    # Phase 27: infrastructure surfaces with no web panel yet (API/CLI only).
+    ("GET", "/continual/status"): "no-render",
+    ("GET", "/continual/overview"): "no-render",
+    ("GET", "/continual/experiences"): "no-render",
+    ("GET", "/continual/experiences/{experience_id}"): "no-render",
+    ("DELETE", "/continual/experiences/{experience_id}"): "no-render",
+    ("POST", "/continual/feedback"): "no-render",
+    ("GET", "/continual/signals"): "no-render",
+    ("GET", "/continual/strategies"): "no-render",
+    ("GET", "/continual/proposals"): "no-render",
+    ("POST", "/continual/proposals"): "no-render",
+    ("POST", "/continual/proposals/{proposal_id}/validate"): "no-render",
+    ("POST", "/continual/proposals/{proposal_id}/promote"): "no-render",
+    ("POST", "/continual/strategies/{strategy_id}/rollback"): "no-render",
+    ("POST", "/continual/recommend"): "no-render",
+    ("POST", "/continual/benchmark"): "no-render",
+    # Phase 28: coordination surfaces with no web panel yet (API/CLI only).
+    ("GET", "/collaboration/status"): "no-render",
+    ("GET", "/collaboration/overview"): "no-render",
+    ("POST", "/collaboration/plan"): "no-render",
+    ("POST", "/collaboration/run"): "no-render",
+    ("GET", "/collaboration/tasks"): "no-render",
+    ("GET", "/collaboration/tasks/{task_id}"): "no-render",
+    ("POST", "/collaboration/tasks/{task_id}/cancel"): "no-render",
+    ("POST", "/collaboration/tasks/{task_id}/resume"): "no-render",
 }
 
 # Markers that are not renderer function names (allowed non-render roles).

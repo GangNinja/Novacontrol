@@ -238,9 +238,12 @@ class TaskDeletionTests(unittest.TestCase):
 
 
 class ExploreFollowsBrainModeTests(unittest.IsolatedAsyncioTestCase):
-    """Explore synthesis must mirror the Chat brain in EVERY mode: scratch
-    means local templates (no provider), cloud means the cloud provider, and
-    the mode switch must invalidate the report cache (no stale synthesis)."""
+    """Explore uses a model only when one was CHOSEN.
+
+    `auto` and `scratch` are local-first for research: a detected Ollama is an
+    offer, not a decision. `llm` and `cloud` hand Explore the selected provider,
+    and every mode switch invalidates the report cache (no stale synthesis).
+    """
 
     def _app(self):
         import os
@@ -280,10 +283,12 @@ class ExploreFollowsBrainModeTests(unittest.IsolatedAsyncioTestCase):
             fake = _Fake()
             app.brain.completion_provider = fake
             app._sync_explore_provider()
-            self.assertEqual(self._explore_provider(app), "fake-local")
+            # auto stays LOCAL: the model appearing is not a request to use it
+            # for minutes of research.
+            self.assertIsNone(self._explore_provider(app))
 
-            # Scratch -> llm must come back to the SAME model (the local slot
-            # re-arms through the brain's set_local_provider swap path).
+            # Chosen llm mode is the only way a model reaches Explore, and
+            # scratch -> llm comes back to the SAME model.
             app.brain.set_local_provider(fake)
             app.set_brain_mode("scratch")
             app.set_brain_mode("llm")
@@ -335,8 +340,8 @@ class ExploreFollowsBrainModeTests(unittest.IsolatedAsyncioTestCase):
                 async def complete(self, messages, **kwargs):
                     return "ok"
 
-            app.brain.completion_provider = _Fake()
-            app._sync_explore_provider()
+            app.brain.set_local_provider(_Fake())
+            app.set_brain_mode("llm")
             first = await app.explore.research(request)
 
             # Same request, same brain -> cached (same id).

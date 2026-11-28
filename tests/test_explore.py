@@ -850,10 +850,10 @@ class ExploreSearchRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(report.sources), 1)
         # No SEARCH warning: the retry recovered, so this is not a degraded
         # report. (A synthesis note may still be present — this service has no
-        # model connected, and the report says so rather than implying that
-        # the template digest was written by one.)
+        # model connected, and the report names the local engine that assembled
+        # the answer rather than implying a model wrote it.)
         self.assertFalse([w for w in report.warnings if "usable web results" in w])
-        self.assertTrue(any("No model is connected" in w for w in report.warnings))
+        self.assertTrue(any("local evidence engine" in w for w in report.warnings))
         self.assertEqual(report.provider_status, "online")
 
     async def test_permanent_failure_still_reports_offline(self) -> None:

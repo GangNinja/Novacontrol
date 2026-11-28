@@ -28,6 +28,14 @@ class MemoryRepository(Protocol):
     async def cleanup_expired(self) -> int:
         """Remove expired memory records and return the deletion count."""
 
+    async def list_records(
+        self, namespace: str, prefix: str = ""
+    ) -> Sequence[MemoryRecord]:
+        """List records in one namespace, optionally keyed by a prefix."""
+
+    async def delete_record(self, namespace: str, key: str) -> bool:
+        """Delete one record and report whether it existed."""
+
 
 class InMemoryMemoryStore:
     """Fast process-local memory repository."""
@@ -82,6 +90,20 @@ class InMemoryMemoryStore:
         for key in expired:
             del self._records[key]
         return len(expired)
+
+    async def list_records(
+        self, namespace: str, prefix: str = ""
+    ) -> Sequence[MemoryRecord]:
+        return tuple(
+            record
+            for (record_namespace, key), record in sorted(self._records.items())
+            if record_namespace == namespace
+            and key.startswith(prefix)
+            and not record.is_expired()
+        )
+
+    async def delete_record(self, namespace: str, key: str) -> bool:
+        return self._records.pop((namespace, key), None) is not None
 
 
 class SqliteMemoryStore:
@@ -181,6 +203,44 @@ class SqliteMemoryStore:
             )
             return cursor.rowcount
 
+    async def list_records(
+        self, namespace: str, prefix: str = ""
+    ) -> Sequence[MemoryRecord]:
+        with self._connection() as connection:
+            if prefix:
+                rows = connection.execute(
+                    """
+                    select id, namespace, key, value_json, text, metadata_json, importance,
+                           created_at, updated_at, expires_at
+                    from memory_records
+                    where namespace = ? and key like ? escape '\\'
+                    """,
+                    (namespace, _like_prefix(prefix)),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    select id, namespace, key, value_json, text, metadata_json, importance,
+                           created_at, updated_at, expires_at
+                    from memory_records
+                    where namespace = ?
+                    """,
+                    (namespace,),
+                ).fetchall()
+        return tuple(
+            record
+            for record in (_row_to_record(row) for row in rows)
+            if not record.is_expired()
+        )
+
+    async def delete_record(self, namespace: str, key: str) -> bool:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "delete from memory_records where namespace = ? and key = ?",
+                (namespace, key),
+            )
+            return cursor.rowcount > 0
+
     def _ensure_schema(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connection() as connection:
@@ -218,6 +278,12 @@ class SqliteMemoryStore:
                 connection.commit()
             finally:
                 connection.close()
+
+
+def _like_prefix(prefix: str) -> str:
+    """Escape LIKE wildcards so a record prefix is literal, not a pattern."""
+    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return escaped + "%"
 
 
 def _score(record: MemoryRecord, query: str) -> float:

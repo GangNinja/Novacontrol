@@ -153,7 +153,6 @@ class VisionController:
         read-only toward the desktop.
         """
         from novacontrol.application_helpers import ApprovedApprovalGateway
-        from novacontrol.core.security import DenyByDefaultApprovalGateway
         from novacontrol.desktop.models import DesktopAction, DesktopActionType
 
         action = DesktopAction(
@@ -162,11 +161,12 @@ class VisionController:
             description="Capture the current screen for vision analysis.",
             parameters={"save_path": save_path},
         )
-        self.desktop.approval_gateway = ApprovedApprovalGateway()
-        try:
-            result = await self.desktop.execute_action(action)
-        finally:
-            self.desktop.approval_gateway = DenyByDefaultApprovalGateway()
+        # Per-action approval, never a controller-wide swap: this call can run
+        # inside a computer-operation session whose approved gateway must
+        # survive the capture.
+        result = await self.desktop.execute_action(
+            action, approval_gateway=ApprovedApprovalGateway()
+        )
         output: dict[str, Any] = {
             "screenshot": save_path,
             "captured": result.status.value == "completed",
@@ -290,18 +290,15 @@ class VisionController:
         """
         self._guard_label(label)
         from novacontrol.application_helpers import ApprovedApprovalGateway
-        from novacontrol.core.security import DenyByDefaultApprovalGateway
         from novacontrol.desktop.models import DesktopWorkflow
 
         plan = self.desktop.plan_vision_click(label)
         workflow: DesktopWorkflow = plan
         if not workflow.actions:
             raise ValueError("Vision click plan produced no action.")
-        self.desktop.approval_gateway = ApprovedApprovalGateway()
-        try:
-            result = await self.desktop.execute_action(workflow.actions[0])
-        finally:
-            self.desktop.approval_gateway = DenyByDefaultApprovalGateway()
+        result = await self.desktop.execute_action(
+            workflow.actions[0], approval_gateway=ApprovedApprovalGateway()
+        )
         output: dict[str, Any] = {
             "action": "guided_click",
             "label": label,

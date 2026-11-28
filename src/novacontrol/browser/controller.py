@@ -51,6 +51,7 @@ class PlaywrightBrowserRunner:
         self.timeout_ms = timeout_ms
         self._playwright: Any | None = None
         self._browser: Any | None = None
+        self._context: Any | None = None
         self._page: Any | None = None
 
     @classmethod
@@ -76,6 +77,26 @@ class PlaywrightBrowserRunner:
             return await self._screenshot(action)
         if action.type is BrowserActionType.CLICK:
             return await self._click(action)
+        if action.type is BrowserActionType.TYPE:
+            return await self._type(action)
+        if action.type is BrowserActionType.SCROLL:
+            return await self._scroll(action)
+        if action.type is BrowserActionType.GO_BACK:
+            return await self._go_back(action)
+        if action.type is BrowserActionType.PRESS_KEY:
+            return await self._press_key(action)
+        if action.type is BrowserActionType.DOWNLOAD:
+            return await self._download(action)
+        if action.type is BrowserActionType.UPLOAD:
+            return await self._upload(action)
+        if action.type is BrowserActionType.TAB_NEW:
+            return await self._tab_new(action)
+        if action.type is BrowserActionType.TAB_SWITCH:
+            return await self._tab_switch(action)
+        if action.type is BrowserActionType.TAB_CLOSE:
+            return await self._tab_close(action)
+        if action.type is BrowserActionType.TAB_LIST:
+            return await self._tab_list(action)
         if action.type is BrowserActionType.WAIT_FOR:
             return await self._wait_for(action)
         if action.type is BrowserActionType.EVALUATE_JS:
@@ -88,6 +109,7 @@ class PlaywrightBrowserRunner:
         if self._playwright is not None:
             await self._playwright.stop()
         self._playwright = None
+        self._context = None
         self._browser = None
         self._page = None
 
@@ -101,7 +123,8 @@ class PlaywrightBrowserRunner:
 
         self._playwright = await async_playwright().start()
         self._browser = await self._playwright.chromium.launch(headless=self.headless)
-        self._page = await self._browser.new_page()
+        self._context = await self._browser.new_context()
+        self._page = await self._context.new_page()
         return self._page
 
     async def _extract(self, action: BrowserAction) -> Mapping[str, Any]:
@@ -189,6 +212,13 @@ class PlaywrightBrowserRunner:
         for selector, value in fields.items():
             await page.fill(str(selector), str(value))
             filled.append(str(selector))
+        if action.parameters.get("submit"):
+            submit_selector = str(action.parameters.get("submit_selector", ""))
+            if submit_selector:
+                await page.click(submit_selector, timeout=self.timeout_ms)
+            else:
+                await page.keyboard.press("Enter")
+            await page.wait_for_load_state("domcontentloaded", timeout=self.timeout_ms)
         return {"adapter": "playwright", "url": page.url, "filled": filled}
 
     async def _test_web_app(self, action: BrowserAction) -> Mapping[str, Any]:
@@ -223,6 +253,189 @@ class PlaywrightBrowserRunner:
             "status_code": status_code,
         }
 
+    async def _type(self, action: BrowserAction) -> Mapping[str, Any]:
+        page = await self._ensure_page()
+        selector = str(action.parameters.get("selector") or action.target)
+        text = str(action.parameters.get("text", ""))
+        clear = bool(action.parameters.get("clear", True))
+        if clear:
+            await page.fill(selector, text, timeout=self.timeout_ms)
+        else:
+            await page.locator(selector).press_sequentially(str(text), timeout=self.timeout_ms)
+        if action.parameters.get("submit"):
+            await page.press(selector, "Enter", timeout=self.timeout_ms)
+            await page.wait_for_load_state("domcontentloaded", timeout=self.timeout_ms)
+        return {"adapter": "playwright", "action": "type", "selector": selector, "url": page.url, "text_length": len(text)}
+
+    async def _scroll(self, action: BrowserAction) -> Mapping[str, Any]:
+        page = await self._ensure_page()
+        delta = int(action.parameters.get("delta_y", 0))
+        target = str(action.target or "page")
+        if target not in ("page", "current_page", "body") and action.parameters.get("selector"):
+            await page.locator(str(action.parameters["selector"])).hover(timeout=self.timeout_ms)
+        await page.mouse.wheel(0, delta)
+        return {"adapter": "playwright", "action": "scroll", "delta_y": delta, "url": page.url}
+
+    async def _go_back(self, action: BrowserAction) -> Mapping[str, Any]:
+        page = await self._ensure_page()
+        response = await page.go_back(wait_until="domcontentloaded", timeout=self.timeout_ms)
+        snapshot = await self._page_snapshot(page, status_code=_response_status(response))
+        return {**snapshot, "action": "go_back"}
+
+    async def _press_key(self, action: BrowserAction) -> Mapping[str, Any]:
+        page = await self._ensure_page()
+        key = str(action.parameters.get("key") or action.target)
+        await page.keyboard.press(key)
+        await page.wait_for_timeout(int(action.parameters.get("wait_ms", 100)))
+        return {"adapter": "playwright", "action": "press_key", "key": key, "url": page.url}
+
+    async def _upload(self, action: BrowserAction) -> Mapping[str, Any]:
+        page = await self._ensure_page()
+        selector = str(action.parameters.get("selector") or action.target)
+        files = action.parameters.get("files", [])
+        if isinstance(files, str):
+            files = [files]
+        await page.set_input_files(selector, [str(path) for path in files], timeout=self.timeout_ms)
+        return {"adapter": "playwright", "action": "upload", "selector": selector, "count": len(files), "url": page.url}
+
+    async def _download(self, action: BrowserAction) -> Mapping[str, Any]:
+        """Click a download control and save the file to the requested path.
+
+        A download is a real filesystem write, so success is not the click
+        returning: the browser's own download object must produce a file, and
+        the result reports its resolved path and byte count. A missing path
+        stays a failure rather than being reported as a completed download.
+        """
+        from pathlib import Path
+
+        page = await self._ensure_page()
+        selector = str(action.parameters.get("selector") or action.target)
+        save_path = Path(str(action.parameters.get("save_path") or "browser_download.bin")).expanduser()
+        if not save_path.is_absolute():
+            save_path = Path.cwd() / save_path
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        async with page.expect_download(timeout=self.timeout_ms) as info:
+            await page.click(selector, timeout=self.timeout_ms)
+        download = await info.value
+        await download.save_as(str(save_path))
+        if not save_path.is_file() or save_path.stat().st_size <= 0:
+            raise RuntimeError(f"The browser reported a download, but no file was written to {save_path}")
+        return {
+            "adapter": "playwright",
+            "action": "download",
+            "selector": selector,
+            "url": page.url,
+            "path": str(save_path.resolve()),
+            "suggested_filename": str(getattr(download, "suggested_filename", "") or ""),
+            "exists": True,
+            "size_bytes": save_path.stat().st_size,
+        }
+
+    # -- tabs and windows ----------------------------------------------------
+
+    def _tab_context(self) -> Any | None:
+        if self._context is not None:
+            return self._context
+        return getattr(self._page, "context", None)
+
+    def _tab_pages(self) -> list[Any]:
+        context = self._tab_context()
+        if context is None:
+            return []
+        return list(getattr(context, "pages", []) or [])
+
+    async def _tab_index(self, action: BrowserAction, pages: list[Any]) -> int:
+        if not pages:
+            raise ValueError("No browser tabs are open.")
+        current = next((index for index, page in enumerate(pages) if page is self._page), 0)
+        raw = str(action.parameters.get("index", action.target or "")).strip().lower()
+        if raw in ("", "current"):
+            return current
+        if raw == "first":
+            return 0
+        if raw == "last":
+            return len(pages) - 1
+        if raw == "next":
+            return (current + 1) % len(pages)
+        if raw.isdigit():
+            index = int(raw)
+            if 0 <= index < len(pages):
+                return index
+            raise ValueError(f"Tab index {index} is out of range (0-{len(pages) - 1}).")
+        for index, page in enumerate(pages):
+            try:
+                title = str(await page.title())
+            except Exception:
+                title = ""
+            if raw in f"{title} {getattr(page, 'url', '')}".lower():
+                return index
+        raise ValueError(f"No browser tab matched {action.target!r}.")
+
+    async def _tab_new(self, action: BrowserAction) -> Mapping[str, Any]:
+        await self._ensure_page()
+        context = self._tab_context()
+        if context is None:
+            raise RuntimeError("The browser has no tab context.")
+        page = await context.new_page()
+        self._page = page
+        target = str(action.parameters.get("url") or action.target or "").strip()
+        if target.startswith(("http://", "https://", "file://")):
+            await page.goto(target, wait_until="domcontentloaded", timeout=self.timeout_ms)
+        return {
+            **(await self._page_snapshot(page)),
+            "action": "tab_new",
+            "tab_count": len(self._tab_pages()),
+        }
+
+    async def _tab_switch(self, action: BrowserAction) -> Mapping[str, Any]:
+        pages = self._tab_pages()
+        index = await self._tab_index(action, pages)
+        page = pages[index]
+        await page.bring_to_front()
+        self._page = page
+        return {
+            **(await self._page_snapshot(page)),
+            "action": "tab_switch",
+            "tab_index": index,
+            "tab_count": len(pages),
+        }
+
+    async def _tab_close(self, action: BrowserAction) -> Mapping[str, Any]:
+        pages = self._tab_pages()
+        index = await self._tab_index(action, pages)
+        page = pages[index]
+        context = self._tab_context()
+        if context is None:
+            raise RuntimeError("The browser has no tab context.")
+        was_active = page is self._page
+        await page.close()
+        remaining = [item for item in pages if item is not page]
+        if was_active and remaining:
+            self._page = remaining[min(index, len(remaining) - 1)]
+        elif not remaining:
+            self._page = await context.new_page()
+        return {
+            **(await self._page_snapshot(self._page)),
+            "action": "tab_close",
+            "closed_index": index,
+            "tab_count": len(remaining) if remaining else 1,
+        }
+
+    async def _tab_list(self, _action: BrowserAction) -> Mapping[str, Any]:
+        tabs: list[dict[str, Any]] = []
+        for index, page in enumerate(self._tab_pages()):
+            try:
+                title = str(await page.title())
+            except Exception:
+                title = ""
+            tabs.append({
+                "index": index,
+                "url": str(getattr(page, "url", "")),
+                "title": title,
+                "active": page is self._page,
+            })
+        return {"adapter": "playwright", "action": "tab_list", "tabs": tabs, "count": len(tabs)}
+
     async def _screenshot(self, action: BrowserAction) -> Mapping[str, Any]:
         """Take a screenshot of the current page."""
         page = await self._ensure_page()
@@ -241,11 +454,16 @@ class PlaywrightBrowserRunner:
         }
 
     async def _click(self, action: BrowserAction) -> Mapping[str, Any]:
-        """Click an element on the page."""
+        """Click an element on the page, with button and click-count control."""
         page = await self._ensure_page()
         selector = action.target
         timeout = int(action.parameters.get("timeout_ms", self.timeout_ms))
-        await page.click(selector, timeout=timeout)
+        await page.click(
+            selector,
+            timeout=timeout,
+            button=str(action.parameters.get("button", "left")),
+            click_count=max(1, min(3, int(action.parameters.get("click_count", 1)))),
+        )
         return {
             "adapter": "playwright",
             "action": "click",
@@ -449,8 +667,12 @@ def _requires_approval(action_type: BrowserActionType) -> bool:
     return action_type in {
         BrowserActionType.NAVIGATE,
         BrowserActionType.FILL_FORM,
+        BrowserActionType.TYPE,
         BrowserActionType.DOWNLOAD,
         BrowserActionType.TEST_WEB_APP,
+        BrowserActionType.UPLOAD,
+        BrowserActionType.TAB_NEW,
+        BrowserActionType.TAB_CLOSE,
     }
 
 

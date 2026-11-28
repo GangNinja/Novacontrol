@@ -75,6 +75,21 @@ class MemoryManager:
         results = await self.retrieve(namespace, query, limit=limit)
         return await self.summarizer.summarize(tuple(result.record for result in results))
 
+    async def list_records(
+        self, namespace: MemoryNamespace | str, *, prefix: str = ""
+    ) -> Sequence[MemoryRecord]:
+        """List live records in one namespace.
+
+        The structured personal-knowledge layer stores its records as JSON
+        MemoryRecords in this same repository. It needs the complete set to
+        rebuild its index at boot, not a query-limited slice.
+        """
+        return await self.repository.list_records(str(namespace), prefix)
+
+    async def forget(self, namespace: MemoryNamespace | str, key: str) -> bool:
+        """Delete one record; returns whether it existed."""
+        return await self.repository.delete_record(str(namespace), key)
+
     async def cleanup(self) -> int:
         return await self.repository.cleanup_expired()
 

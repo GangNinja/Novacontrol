@@ -960,7 +960,7 @@ class Phase14ApplicationTests(unittest.IsolatedAsyncioTestCase):
             "RLVR",
         ):
             self.assertIn(name, components)
-        self.assertEqual(len(report["components"]), 25)
+        self.assertEqual(len(report["components"]), 34)
         for row in report["components"]:
             self.assertIn(row["status"], {state.value for state in HealthState})
             self.assertTrue(row["message"])

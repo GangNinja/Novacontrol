@@ -465,7 +465,10 @@ class StageLoopTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             NovaControlApplication.novaforge_policy_names(),
-            ("ready", "stages", "fixed"),
+            # "model" was registered later (ModelDecisionPolicy); this assertion
+            # pins the registry exactly, so it has to follow it -- it is not a
+            # rename check that can be relaxed.
+            ("ready", "stages", "fixed", "model"),
         )
 
 

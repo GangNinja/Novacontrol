@@ -1382,7 +1382,11 @@ class ServiceTests(unittest.TestCase):
         self.assertTrue(self.service.set_recording(True))
 
     def test_retention_removes_old_rows_from_every_store(self) -> None:
-        now = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
+        # Anchored on the REAL clock: retention prunes against utcnow(), so a
+        # fixed calendar date turns this into a time bomb -- once today passed
+        # 2026-09-30 + retention_days (30), the "fresh" row was pruned too and
+        # the test expected 1 while the service correctly removed 2.
+        now = datetime.now(UTC)
         self.service.record(make_trajectory(timestamp=(now - timedelta(days=90)).isoformat()))
         self.service.record(
             make_trajectory(

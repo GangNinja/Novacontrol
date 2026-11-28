@@ -237,5 +237,38 @@ class RemainingModuleTests(unittest.IsolatedAsyncioTestCase):
             llm_mod._ollama_cache = old_cache
 
 
+class SkillFacadeImportContractTests(unittest.TestCase):
+    """The skills package facade exposes the callable-registry API it always had.
+
+    Phase 31 rewrote ``skills/__init__.py`` for the durable catalog and dropped
+    four re-exports that ``skills/models.py`` still advertises as preserved, so
+    ``from novacontrol.skills import SkillInvocation`` failed at import time and
+    took this whole module (and the full-suite collection) down with it. The
+    facade must expose the SAME objects — a copy or an alias would be a second
+    definition of a public type.
+    """
+
+    def test_the_callable_registry_surface_is_exported_from_the_package(self) -> None:
+        from novacontrol import skills
+        from novacontrol.skills import models, registry
+
+        for name in ("SkillSchema", "SkillInvocation", "SkillResult", "SkillStatus"):
+            self.assertIs(getattr(skills, name), getattr(models, name), name)
+            self.assertIn(name, skills.__all__)
+        for name in ("FunctionSkill", "SkillRegistry"):
+            self.assertIs(getattr(skills, name), getattr(registry, name), name)
+            self.assertIn(name, skills.__all__)
+
+    def test_every_exported_name_resolves_without_duplicates(self) -> None:
+        # The contract is that every advertised name resolves (and is unique).
+        # Ordering is not a contract: the pre-Phase-31 list was never sorted
+        # (``SkillReliability`` precedes ``SkillRegistry``).
+        from novacontrol import skills
+
+        self.assertEqual(len(skills.__all__), len(set(skills.__all__)))
+        missing = [name for name in skills.__all__ if not hasattr(skills, name)]
+        self.assertEqual(missing, [])
+
+
 if __name__ == "__main__":
     unittest.main()

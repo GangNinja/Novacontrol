@@ -14,8 +14,25 @@ rather than beside it:
   reach them with no second dispatch mechanism.
 """
 
+from novacontrol.agents.analysis import DataAnalysisAgent
 from novacontrol.agents.base import SpecializedAgent, build_default_agents
 from novacontrol.agents.bus import AgentMessageBus
+from novacontrol.agents.collaboration import (
+    CollaborationEngine,
+    CollaborationMode,
+    CollaborationPlan,
+    CollaborationPolicy,
+    CollaborationStatus,
+    CollaborationSubtask,
+    CollaborationTask,
+    ConflictRecord,
+    HardwareSchedule,
+    ProviderCapabilities,
+    ProviderPreflight,
+    SubtaskResult,
+    SubtaskStatus,
+    TokenLedger,
+)
 from novacontrol.agents.coordinator import CoordinatorAgent
 from novacontrol.agents.developer import (
     CodeSearchResult,
@@ -59,6 +76,7 @@ from novacontrol.agents.research import (
     detect_conflicts,
 )
 from novacontrol.agents.runtime import AgentModule
+from novacontrol.agents.verification import VerificationAgent
 
 __all__ = [
     "STAGE_ORDER",
@@ -73,11 +91,24 @@ __all__ = [
     "AgentTaskStatus",
     "Citation",
     "Claim",
+    "CollaborationEngine",
+    "CollaborationMode",
+    "CollaborationPlan",
+    "CollaborationPolicy",
+    "CollaborationStatus",
+    "CollaborationSubtask",
+    "CollaborationTask",
+    "ConflictRecord",
+    "HardwareSchedule",
+    "ProviderCapabilities",
+    "ProviderPreflight",
+    "TokenLedger",
     "ClaimKind",
     "CodeSearchResult",
     "CommandResult",
     "Conflict",
     "CoordinatorAgent",
+    "DataAnalysisAgent",
     "DeveloperAgent",
     "PipelineStep",
     "RecoveryPlan",
@@ -93,7 +124,10 @@ __all__ = [
     "StepOutcome",
     "StepStatus",
     "SubprocessRunner",
+    "SubtaskResult",
+    "SubtaskStatus",
     "TestReport",
+    "VerificationAgent",
     "ToolGrant",
     "build_default_agents",
     "detect_conflicts",

@@ -128,6 +128,11 @@ class FocusRingCssContractTests(unittest.TestCase):
         rules = [r for r in _focus_rules(self.css) if ":focus-visible" in r[0]]
         self.assertTrue(rules, "no :focus-visible rules found")
         for selector, body in rules:
+            # A decorative ::before/::after rule cannot carry the element's ring --
+            # the element's own :focus-visible rule is what this loop must check.
+            parts = [part.strip() for part in selector.split(",") if part.strip()]
+            if parts and all(part.endswith(("::before", "::after")) for part in parts):
+                continue
             self.assertIn("outline", body, f"{selector.strip()}: focus rule is missing an outline")
             self.assertNotIn("outline: none", body)
 

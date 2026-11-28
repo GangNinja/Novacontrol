@@ -219,6 +219,13 @@ def parse_phone_command(command: str) -> tuple[str, str]:
     for verb in ("text", "sms", "message"):
         if lower.startswith(f"{verb} "):
             return "text", stripped[len(verb) + 1:].strip()
+    # "send a hi msg to mom on whatsapp" / "msg mom on telegram saying hi":
+    # the shared messaging grammar reads the verb and its object itself, so the
+    # whole command travels as the argument (slicing the verb here would leave
+    # an orphaned article in the body).
+    for verb in ("send ", "msg ", "dm "):
+        if lower.startswith(verb):
+            return "text", stripped
     if "screenshot" in lower:
         return "screenshot", ""
     for verb in ("call ", "dial "):

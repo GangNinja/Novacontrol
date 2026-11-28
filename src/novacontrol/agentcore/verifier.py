@@ -37,6 +37,11 @@ class Expectation:
     url_contains: str = ""                     # browser URL fragment
     min_elements: int = 0                      # at least this many interactive elements
     requires_observed_change: bool = False     # the UI must differ from before the action
+    # D12: the (handle, pid) identity of the window the objective named. When
+    # set, a PASS also requires the fresh observation to have bound that SAME
+    # window — an action that reported success against another window fails.
+    target_identity: tuple[int, int] | None = None
+    target_title: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -46,6 +51,8 @@ class Expectation:
             "url_contains": self.url_contains,
             "min_elements": self.min_elements,
             "requires_observed_change": self.requires_observed_change,
+            "target_identity": list(self.target_identity) if self.target_identity else None,
+            "target_title": self.target_title,
         }
 
 
@@ -104,6 +111,40 @@ class Verifier:
                     f"Forbidden text is visible: {absent!r}",
                     evidence,
                     confidence=0.9,
+                )
+
+        # D12: an action on an objective-named window is verified against THAT
+        # window. A fresh observation whose bound target is missing, ambiguous or
+        # a different handle/pid means the input may have gone elsewhere, and a
+        # successful API return cannot override that.
+        if expectation.target_identity is not None:
+            target = (ui_state.metadata or {}).get("target") if ui_state is not None else None
+            target_dict: dict[str, Any] = target if isinstance(target, dict) else {}
+            raw_ref = target_dict.get("ref")
+            ref: dict[str, Any] = raw_ref if isinstance(raw_ref, dict) else {}
+            try:
+                observed_identity = (int(ref.get("handle") or 0), int(ref.get("pid") or 0))
+            except (TypeError, ValueError):
+                observed_identity = (0, 0)
+            evidence["target"] = target_dict or None
+            same_target = (
+                target_dict.get("status") == "bound"
+                and observed_identity == tuple(expectation.target_identity)
+            )
+            if not same_target:
+                intended = expectation.target_title or "the intended window"
+                return VerificationResult(
+                    VerificationStatus.FAIL,
+                    expectation.description,
+                    (
+                        f"The intended target {intended!r} "
+                        f"(handle/pid {tuple(expectation.target_identity)}) is not the "
+                        f"window observed after the action (status "
+                        f"{target_dict.get('status')!r}, handle/pid {observed_identity}). "
+                        "The input cannot be attributed to the intended application."
+                    ),
+                    evidence,
+                    confidence=0.95,
                 )
 
         # Presence checks.

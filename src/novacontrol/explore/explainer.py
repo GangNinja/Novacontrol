@@ -79,12 +79,13 @@ class ResearchExplainer:
         # best of it, and the highlights and key points take the next best, so
         # the same sentence never appears twice on one report page.
         evidence = build_evidence(ask, frame, clean_sources)
-        llm_answer = await try_llm_synthesis(
+        synthesis = await try_llm_synthesis(
             self._completion_provider, topic, frame, clean_sources,
             prior_topics=request.prior_topics,
             question=ask,
             focus=plan.focus if plan else "",
         )
+        llm_answer = synthesis.answer
         spent: tuple[str, ...]
         if llm_answer:
             # A written answer is prose, not quoted sentences, so nothing in the
@@ -94,7 +95,17 @@ class ResearchExplainer:
             answer, spent = local_answer(evidence, clean_sources, topic=topic, question=ask)
         if not answer:
             answer = _offline_fallback(frame)
-        warnings = (*warnings, *self._synthesis_notes(bool(llm_answer), clean_sources, bool(evidence.has_page_text)))
+        # A deliberate skip carries its own reason; the generic "the brain
+        # returned nothing" note would be a lie about what happened.
+        if synthesis.skipped_reason:
+            warnings = (*warnings, synthesis.skipped_reason)
+        else:
+            warnings = (
+                *warnings,
+                *self._synthesis_notes(
+                    bool(llm_answer), clean_sources, bool(evidence.has_page_text)
+                ),
+            )
 
         # Every surface below the answer takes a DISJOINT slice of the same
         # ranked pool, in the order the reader meets them: the answer first, then
@@ -153,14 +164,15 @@ class ResearchExplainer:
             )
         if read_pages:
             return (
-                "No model is connected, so this answer is assembled from the sources' own "
-                "sentences. Connect Ollama or a cloud model in Settings for a written "
-                "synthesis.",
+                "This answer is assembled by the local evidence engine from the sources' "
+                "own sentences. To have a model write it, switch the brain to LLM or "
+                "Cloud.",
             )
         return (
-            "No model is connected and the source pages could not be read, so this is a "
-            "digest of search summaries rather than an answer. Connect Ollama or a cloud "
-            "model in Settings, or try again.",
+            "The source pages could not be read, so this is a digest of search summaries "
+            "rather than a researched answer. It was assembled by the local evidence "
+            "engine; switch the brain to LLM or Cloud for a model-written synthesis, or "
+            "try again.",
         )
 
 

@@ -28,6 +28,91 @@ This keeps the core stable as future capabilities such as robotics, simulation, 
 - `ProjectContext` / `ProjectDetector`: the code project the user is standing in, read from the workspace and never written to
 - `SpecialistPipeline` / `SpecialistAgent`: the one stage loop every specialized agent runs (`NLU → Context → Decision → Planner → Tool Selection → Execution → Verification → Recovery`), with the developer and research agents written as stage hooks on it
 
+## Self-Management Control Plane
+
+Phase 34's `novacontrol.self_management` sits **over** the existing layers rather than beside them. `HealthCollector` runs the application's `DiagnosticManager` roster and adds live probes for the event bus, API/UI assets, agents, memory, workers, workflows, computer operation and the hardware governor. `diagnose()` turns probe results, measured durations, recent failure events and resource readings into evidence-labelled findings. `IncidentManager` stores durable incidents, `RecoveryManager` executes only registered, permission-checked, timeout/attempt/cooldown/window-bounded handlers and verifies each with a live probe, `MaintenanceService` is confined to the application's temp/cache/log roots, and `ConfigurationManager` versions and validates the persisted settings body. Every operation writes to the existing audit trail; Phase 30 supplies autonomy levels and notification dedupe; Phase 27 receives verified recovery evidence as advisory learning; Phase 28 can be asked for a non-authoritative diagnostic second opinion; Phase 32 memory and Phase 33 provider health are read through their existing services. The service has no source-code, dependency, permission, safety-policy or deployment mutation path.
+
+## Business Opportunity Validation
+
+Phase 35's `novacontrol.business` is a consumer of existing seams, not a second
+platform. `BusinessOpportunityService` stores evidence-first opportunities in the
+JSON state store, calls the injected Explore provider for research, publishes
+business events through the shared EventBus, writes decisions through the shared
+AuditLogger, reads measured RAM/CPU/GPU from the HardwareMonitor used by the
+resource governor, and ingests the final report through KnowledgeManager. A
+single read-only `BusinessValidationAgent` is registered in the existing
+AgentRegistry; the eight phase responsibilities remain deterministic modules
+inside the package. Deterministic financial, feasibility, scoring and verdict
+engines mean validation does not require loading a model. Source provenance,
+stale-source handling, missing inputs and assumption labelling are enforced in
+the domain model and by the verdict rules; no external experiment or financial
+transaction is executed by the service.
+
+## Product Development & Launch Pipeline
+
+Phase 36's `novacontrol.product` is one consumer of Phase 35, the agent registry,
+the JSON state store, the event bus, audit, memory, knowledge, hardware readings
+and the capability runtime. `ProductService` owns one durable `ProductProject`
+per accepted opportunity and coordinates PRD/revision/approval, planning and
+dependencies, architecture/ADRs, verified task execution, workspace writes, QA
+gates, defects, release artifacts and launch-readiness evaluation. Development
+tasks traverse `AgentTask`/`AgentRegistry`; an agent response is advisory until
+verified evidence arrives. Files are confined to a path-safe, secret-scanned,
+non-destructive workspace under `build_workspace/products/`. Requirements,
+architecture, release and launch are human decisions; `APPROVED_FOR_LAUNCH` is
+only reachable after ready readiness, approved release, passing gates and named
+authorization, and a later gate failure invalidates it. The package adds no
+second orchestrator, database, agent registry, microservice or UI framework, and
+has no deployment, external-launch, commercial-commitment, commit or push path.
+
+## Portfolio Manager for Multiple AI-Run Ventures
+
+Phase 39's `novacontrol.portfolio` composes the existing Phase 35/36/37 readers,
+Phase 38 finance service, JSON state store, event bus, audit, memory, knowledge
+and capability runtime into one portfolio-level intelligence service. A
+`PortfolioService` owns a versioned `portfolio_management` document containing
+multiple portfolios; each venture member is a reference to an existing Phase 38
+venture plus its Phase 35/36/37 links, never a copied ledger or customer record.
+The service gates lifecycle transitions on actual source evidence, consolidates
+only with explicit sourced FX rates and periods, scores ventures with an
+explainable coverage-penalised model, assesses evidenced risks, and produces
+recommendation-only allocations, deterministic scenarios, advisory decisions,
+coordination records, stale-aware alerts and frozen 12-section reports. It adds
+no second orchestrator, database, agent registry or UI framework, and exposes no
+funds transfer, purchase, contract, campaign, external launch, ledger mutation,
+venture closure or record deletion; consequential actions require human
+approval.
+
+## Business Operations & Financial Intelligence
+
+Phase 38's `novacontrol.finops` composes the existing Phase 35/36/37 readers,
+JSON state store, event bus, audit, memory, knowledge and capability runtime into
+one venture-scoped operations/accounting service. `FinOpsService` owns one
+document per venture in `business_finance`; the ledger is append-only and all
+statements derive from posted entries. Revenue is staged and only approved actual
+expenses post; estimated/committed/projected and forecast values never become
+actuals. Corrections are reversals, closed periods are immutable, and missing
+financial inputs return explicit `NOT_CALCULABLE` metrics. No payment, purchase,
+bank change, invoice approval, external commitment or NovaMarket record is part
+of this package.
+
+## Customer Acquisition, Sales & Support
+
+Phase 37's `novacontrol.customer` is one lifecycle consumer of the Phase 36
+product record, the JSON state store, event bus, audit, memory, knowledge and
+capability runtime. `CustomerService` owns one durable `CustomerWorkspace` per
+launch-authorized product and coordinates segments/ICPs/research, lawful leads,
+explainable qualification, deals, interactions, consent-aware communications,
+support tickets grounded in approved knowledge, feedback, onboarding, success,
+retention indicators and explicit analytics. Product launch authorization is
+re-read on workspace refresh and every mutation refuses an unauthorized product.
+Leads and scores are never treated as demand or verified intent; pipeline value
+is always an estimate; unavailable CAC, revenue, satisfaction and adoption
+figures are returned explicitly unavailable. Communication is drafted, consent-
+checked from the live customer/lead record and approval-gated, with a
+disabled-by-default narrow policy and no configured sender unless one is injected. No deployment, external launch, bulk
+message, payment, refund, paid campaign or contractual commitment path exists.
+
 ## Module Boundaries
 
 Each module is expected to expose a narrow adapter to the runtime. Internal details stay private to that module.

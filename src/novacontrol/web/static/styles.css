@@ -296,6 +296,12 @@ body {
   flex-direction: column;
   gap: 4px;
   flex: 1;
+  /* The companion and the footer sit below the nav in the same column: on a
+     short window the nav becomes the part that scrolls rather than pushing
+     them out of the sidebar. */
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
 }
 
 .nav-item {
@@ -3450,6 +3456,315 @@ h1, h2, h3, h4, .eyebrow {
   .message { padding: 13px 15px; }
   .cli-output { font-size: 0.7rem; }
 }
+/* ── Extra 1 — Animated companion ──────────────────────────────
+ * The accent is a function of the companion's REAL state (data-state on the
+ * stage), so a glance at the face reads the same thing the label says. */
+.companion {
+  --companion-accent: var(--neon-cyan);
+  margin-top: 12px;
+  padding: 12px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  flex: 0 0 auto;
+  border: 1px solid var(--border-dim);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(0, 234, 255, 0.09), transparent 70%),
+    rgba(6, 17, 34, 0.7);
+  box-shadow: inset 0 0 0 1px rgba(236, 248, 255, 0.03);
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+.companion[data-state="thinking"],
+.companion[data-state="working"],
+.companion[data-state="waiting"] { --companion-accent: var(--neon-amber); }
+.companion[data-state="listening"],
+.companion[data-state="responding"],
+.companion[data-state="speaking"] { --companion-accent: var(--neon-green); }
+.companion[data-state="error"] { --companion-accent: var(--neon-pink); }
+
+.companion-face {
+  width: 118px;
+  height: 118px;
+  flex: 0 0 auto;
+  cursor: pointer;
+  border-radius: 50%;
+  transition: transform 0.3s cubic-bezier(0.22, 1, 0.36, 1), filter 0.3s ease;
+  filter: drop-shadow(0 0 14px rgba(0, 234, 255, 0.16));
+}
+.companion-face:hover { transform: scale(1.03); }
+.companion-face:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
+}
+.companion[data-state="thinking"] .companion-face,
+.companion[data-state="working"] .companion-face,
+.companion[data-state="waiting"] .companion-face,
+.companion[data-state="listening"] .companion-face,
+.companion[data-state="responding"] .companion-face,
+.companion[data-state="speaking"] .companion-face {
+  filter: drop-shadow(0 0 18px rgba(0, 234, 255, 0.3));
+}
+.companion[data-state="error"] .companion-face {
+  filter: drop-shadow(0 0 16px rgba(244, 114, 182, 0.35));
+}
+
+.companion-halo {
+  fill: none;
+  stroke: var(--companion-accent);
+  stroke-opacity: 0.2;
+  stroke-width: 1.5;
+  stroke-dasharray: 5 11;
+  transform-origin: 60px 60px;
+  animation: companionOrbit 48s linear infinite;
+}
+/* A real, faster-than-idle state reads as a faster orbit; pausing motion is a
+ * real control, so it freezes the ring rather than pretending to stop it. */
+.companion[data-state="thinking"] .companion-halo,
+.companion[data-state="working"] .companion-halo { animation-duration: 9s; }
+.companion[data-state="listening"] .companion-halo,
+.companion[data-state="speaking"] .companion-halo,
+.companion[data-state="responding"] .companion-halo { animation-duration: 16s; }
+.companion[data-state="error"] .companion-halo { animation: none; stroke-opacity: 0.4; }
+.companion[data-motion="paused"] .companion-halo { animation-play-state: paused; }
+
+@keyframes companionOrbit {
+  to { transform: rotate(360deg); }
+}
+
+.companion-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  max-width: 100%;
+}
+.companion-name {
+  font-family: var(--font-display);
+  font-size: 0.7rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-primary);
+}
+.companion-state {
+  font-family: var(--font-display);
+  font-size: 0.56rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border: 1px solid var(--border-dim);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.companion-state[data-tone="busy"] {
+  color: var(--neon-amber);
+  border-color: rgba(251, 191, 36, 0.32);
+  background: rgba(251, 191, 36, 0.1);
+}
+.companion-state[data-tone="live"] {
+  color: var(--neon-green);
+  border-color: rgba(45, 212, 191, 0.32);
+  background: rgba(45, 212, 191, 0.1);
+}
+.companion-state[data-tone="error"] {
+  color: var(--neon-pink);
+  border-color: rgba(244, 114, 182, 0.32);
+  background: rgba(244, 114, 182, 0.1);
+}
+
+.companion-detail {
+  margin: 0;
+  min-height: 0.9rem;
+  width: 100%;
+  font-size: 0.6rem;
+  line-height: 1.3;
+  text-align: center;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.companion-controls {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px;
+}
+.companion-btn {
+  font-family: var(--font-display);
+  font-size: 0.55rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 4px 7px;
+  border: 1px solid var(--border-dim);
+  border-radius: 9px;
+  background: rgba(3, 11, 24, 0.62);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+}
+.companion-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--border-hover);
+  background: rgba(0, 234, 255, 0.1);
+}
+.companion-btn:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
+}
+.companion-btn[aria-pressed="true"] {
+  color: var(--neon-amber);
+  border-color: rgba(251, 191, 36, 0.3);
+}
+
+@media (max-width: 700px) {
+  /* The phone layout turns the sidebar into a top deck, so the companion
+     becomes a compact strip instead of a tall block. */
+  .companion {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 6px 10px;
+    padding: 8px 10px;
+    margin-top: 8px;
+  }
+  .companion-face { width: 46px; height: 46px; }
+  .companion-meta { flex-direction: column; align-items: flex-start; gap: 2px; }
+  .companion-detail { flex: 1 1 100%; text-align: left; min-height: 0; }
+  .companion-controls { margin-left: auto; }
+}
+
+/* ── Explore: research history + on-demand news refresh ─────── */
+.section-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.history-count {
+  display: inline-block;
+  min-width: 16px;
+  margin-left: 4px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: rgba(0, 234, 255, 0.16);
+  color: var(--neon-cyan);
+  font-size: 0.58rem;
+  text-align: center;
+}
+.welcome-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.welcome-card-head h3 { margin: 0; }
+.trending-status {
+  margin: 8px 0 0;
+  min-height: 0.8rem;
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.explore-history {
+  margin: 0 0 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-dim);
+  border-radius: 16px;
+  background: var(--bg-card);
+}
+.explore-history[hidden] { display: none; }
+.explore-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.explore-history-head h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 0.78rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-primary);
+}
+.explore-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.explore-history-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+.explore-history-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-dim);
+  border-radius: 10px;
+  background: rgba(3, 11, 24, 0.5);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+.explore-history-main:hover {
+  border-color: var(--border-hover);
+  background: rgba(0, 234, 255, 0.08);
+}
+.explore-history-main:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
+}
+.explore-history-text {
+  font-size: 0.76rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.explore-history-meta {
+  flex: 0 0 auto;
+  font-size: 0.56rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.explore-history-delete {
+  flex: 0 0 auto;
+  padding: 0 10px;
+  border: 1px solid rgba(244, 114, 182, 0.24);
+  border-radius: 10px;
+  background: rgba(244, 114, 182, 0.08);
+  color: var(--neon-pink);
+  font-family: var(--font-display);
+  font-size: 0.56rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.explore-history-delete:hover { background: rgba(244, 114, 182, 0.18); }
+.explore-history-delete:focus-visible {
+  outline: var(--focus-ring-danger);
+  outline-offset: var(--focus-offset);
+}
+
 /* ── Routing Explorer: broad-vs-narrow classifier comparison ── */
 .routing-broad-toggle {
   margin: 14px 0 4px;
@@ -3524,4 +3839,417 @@ h1, h2, h3, h4, .eyebrow {
   color: var(--text-dim, #8ea7c6);
   font-size: 0.75rem;
   letter-spacing: 0.1em;
+}
+
+/* ── Extra 2 — Atrium: interactive isometric workspace map ─────────────
+ * The stage is a spatial map, not a picture: every object is a real button
+ * that performs the sidebar's own nav click. Hairline draws the figures; the
+ * plate, connectors, labels and live badges belong to NovaControl. */
+.iso-panel .iso-intro {
+  max-width: 66ch;
+  margin: 8px 0 0;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+.iso-panel .iso-intro code {
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+}
+
+.iso-stage {
+  --hairline-plate: #071426;
+  --hairline-hi: #b6ecff;
+  --hairline-edge: #2c5a7d;
+  --hairline-mid: #1b405e;
+  --hairline-lo: #112c45;
+  position: relative;
+  width: 100%;
+  max-width: 1240px;
+  margin: 14px auto 0;
+  aspect-ratio: 1200 / 760;
+  min-height: 540px;
+  border: 1px solid rgba(0, 234, 255, 0.14);
+  border-radius: 20px;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse at 50% 50%, rgba(0, 234, 255, 0.08), transparent 58%),
+    radial-gradient(ellipse at 50% 100%, rgba(167, 139, 250, 0.07), transparent 55%),
+    linear-gradient(180deg, rgba(5, 14, 29, 0.9), rgba(3, 9, 20, 0.96));
+  box-shadow: inset 0 0 60px rgba(0, 234, 255, 0.04);
+}
+.iso-stage::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    repeating-linear-gradient(30deg, rgba(0, 234, 255, 0.055) 0 1px, transparent 1px 48px),
+    repeating-linear-gradient(150deg, rgba(0, 234, 255, 0.055) 0 1px, transparent 1px 48px);
+  mask-image: radial-gradient(ellipse at 50% 50%, #000 20%, transparent 78%);
+  -webkit-mask-image: radial-gradient(ellipse at 50% 50%, #000 20%, transparent 78%);
+  pointer-events: none;
+}
+.iso-links {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.iso-link {
+  stroke: rgba(0, 234, 255, 0.2);
+  stroke-width: 0.9;
+  stroke-dasharray: 4 9;
+}
+
+.iso-object {
+  position: absolute;
+  left: var(--iso-x);
+  top: var(--iso-y);
+  transform: translate(-50%, -50%);
+  width: 150px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 6px 4px 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 14px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease, transform 0.2s var(--ease-out);
+}
+.iso-object::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 34px;
+  width: 104px;
+  height: 104px;
+  transform: translateX(-50%) rotate(45deg) scaleY(0.5);
+  background: linear-gradient(145deg, rgba(0, 234, 255, 0.1), rgba(167, 139, 250, 0.05));
+  border: 1px solid rgba(0, 234, 255, 0.2);
+  border-radius: 12px;
+  opacity: 0.8;
+  z-index: 0;
+  pointer-events: none;
+}
+.iso-object:hover {
+  color: var(--text-primary);
+  background: rgba(0, 234, 255, 0.045);
+  border-color: rgba(0, 234, 255, 0.22);
+}
+.iso-object:hover::before,
+.iso-object:focus-visible::before {
+  background: linear-gradient(145deg, rgba(0, 234, 255, 0.2), rgba(167, 139, 250, 0.1));
+  border-color: rgba(0, 234, 255, 0.45);
+  opacity: 1;
+}
+.iso-object:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
+  /* The keyboard tint lives HERE, not in the :hover rule: a :focus-visible rule
+     that carries no ring is what the focus-ring contract forbids, and adding a
+     ring to the shared hover rule would ring every hovered object. */
+  color: var(--text-primary);
+  background: rgba(0, 234, 255, 0.045);
+  border-color: rgba(0, 234, 255, 0.22);
+}
+
+/* Focus-ring floor for every focusable element. Without it, classless elements
+   (bare <a> source citations, <summary>, <input>) kept the browser's own 1px
+   auto outline and .cyber-input computed to "none 3px" at a tab stop -- which
+   the keyboard walk in test_focus_rings.py measures on the real controls. The
+   .source-link selector is named because the static contract walks the classes
+   the real JS creates. */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible,
+[tabindex]:focus-visible,
+.source-link:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-offset);
+}
+.iso-figure,
+.iso-label,
+.iso-state { position: relative; z-index: 1; }
+.iso-figure { width: 132px; }
+.iso-object-core { width: 184px; }
+.iso-object-core .iso-figure { width: 168px; }
+.iso-object-core::before {
+  width: 128px;
+  height: 128px;
+  bottom: 40px;
+}
+.iso-label {
+  font-family: var(--font-display);
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-primary);
+}
+.iso-state {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  line-height: 1.25;
+  color: var(--text-muted);
+  text-align: center;
+  max-width: 160px;
+  min-height: 2.4em;
+  overflow: hidden;
+}
+.iso-state[data-tone="ok"] { color: var(--neon-green); }
+.iso-state[data-tone="warn"] { color: var(--neon-amber); }
+.iso-state[data-tone="error"] { color: var(--neon-pink); }
+.iso-state[data-live="false"] { font-style: italic; opacity: 0.78; }
+
+.iso-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin-top: 10px;
+  font-size: 0.65rem;
+  color: var(--text-muted);
+}
+.iso-meta a { color: var(--text-secondary); }
+.iso-legend { display: inline-flex; align-items: center; gap: 6px; }
+.iso-legend-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--neon-green);
+  box-shadow: 0 0 6px var(--neon-green-glow);
+}
+
+@media (max-width: 1000px) {
+  .iso-stage { min-height: 500px; }
+  .iso-object { width: 136px; }
+  .iso-figure { width: 118px; }
+  .iso-object-core { width: 164px; }
+  .iso-object-core .iso-figure { width: 148px; }
+}
+
+@media (max-width: 900px) {
+  /* A spatial map cannot stay readable in a narrow column: the same objects
+     become a wrapped grid, so every workspace stays visible and operable. */
+  .iso-stage {
+    aspect-ratio: auto;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+    gap: 8px;
+    padding: 14px;
+  }
+  .iso-links { display: none; }
+  .iso-object,
+  .iso-object-core {
+    position: static;
+    transform: none;
+    width: auto;
+    min-width: 0;
+  }
+  .iso-object::before,
+  .iso-object-core::before { display: none; }
+  .iso-object .iso-figure,
+  .iso-object-core .iso-figure { width: 104px; }
+  .iso-state { max-width: none; }
+  .iso-object-core { grid-column: 1 / -1; justify-self: center; max-width: 220px; }
+}
+
+@media (max-width: 480px) {
+  .iso-stage { grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); padding: 10px; }
+  .iso-object .iso-figure { width: 88px; }
+}
+
+/* ── Extra 4 · Thinking Orbs ─────────────────────────────────
+   One spherical identity in four purposeful placements. The canvas is drawn
+   by thinking-orb.js; these rules own layout, state ink and the readable
+   activity caption. No rule here animates the orb itself — the renderer does,
+   and it pauses when the placement is offscreen or the tab is hidden. */
+
+.orb-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(176px, 218px) minmax(0, 1fr);
+  align-items: center;
+  gap: 26px;
+  margin: 0 0 16px;
+  padding: 22px 24px;
+  border: 1px solid rgba(118, 228, 255, 0.14);
+  border-radius: 18px;
+  background:
+    radial-gradient(120% 180% at 8% 50%, rgba(31, 220, 220, 0.075), transparent 54%),
+    linear-gradient(135deg, rgba(10, 27, 48, 0.82), rgba(5, 14, 30, 0.68));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035), 0 18px 50px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+}
+
+.orb-card::after {
+  content: '';
+  position: absolute;
+  inset: auto -18% -70% 32%;
+  height: 160%;
+  background: radial-gradient(closest-side, rgba(42, 245, 224, 0.055), transparent 70%);
+  pointer-events: none;
+}
+
+.orb-stage { position: relative; display: grid; place-items: center; min-width: 0; z-index: 1; }
+.thinking-orb { --orb-accent: #67f5e4; --orb-soft: #2dd4bf; position: relative; display: grid; place-items: center; flex: none; border-radius: 50%; isolation: isolate; }
+.thinking-orb::before {
+  content: '';
+  position: absolute;
+  inset: 7%;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(103, 245, 228, 0.15), rgba(45, 212, 191, 0.045) 48%, transparent 70%);
+  filter: blur(8px);
+  opacity: 0.9;
+  z-index: 0;
+}
+.thinking-orb canvas { display: block; position: relative; z-index: 1; }
+.thinking-orb--fallback::after {
+  content: '';
+  width: 58%;
+  aspect-ratio: 1;
+  border: 1px dotted var(--orb-accent);
+  border-radius: 50%;
+  box-shadow: 0 0 28px rgba(103, 245, 228, 0.18);
+}
+.thinking-orb[data-state="error"] { --orb-accent: #ff6b6b; --orb-soft: #b91c1c; }
+.thinking-orb[data-state="waiting"] { --orb-accent: #fbbf24; --orb-soft: #d97706; }
+.thinking-orb[data-state="completed"] { --orb-accent: #7dffa8; --orb-soft: #34d399; }
+.thinking-orb[data-state="unknown"] { --orb-accent: #7c93a8; --orb-soft: #475569; }
+
+.orb-size-main { width: clamp(176px, 18vw, 216px); aspect-ratio: 1; }
+.orb-size-voice { width: 74px; aspect-ratio: 1; }
+.orb-size-compact { width: 48px; aspect-ratio: 1; }
+.orb-size-task { width: 44px; aspect-ratio: 1; }
+
+.orb-copy { position: relative; z-index: 1; min-width: 0; }
+.orb-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 9px;
+  color: #8aa6b8;
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+.orb-live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--neon-cyan, #2af5e0);
+  box-shadow: 0 0 0 3px rgba(42, 245, 224, 0.11), 0 0 12px rgba(42, 245, 224, 0.5);
+  animation: orbLivePulse 2.6s ease-in-out infinite;
+}
+.orb-title {
+  margin: 0 0 7px;
+  font-family: var(--font-display);
+  font-size: clamp(1.28rem, 2.2vw, 1.62rem);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  color: var(--text-primary);
+}
+.orb-title span { color: var(--neon-cyan, #2af5e0); }
+.orb-desc { margin: 0 0 12px; max-width: 58ch; color: var(--text-secondary); font-size: 0.82rem; line-height: 1.55; }
+.orb-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 9px;
+  border: 1px solid rgba(118, 228, 255, 0.18);
+  border-radius: 999px;
+  background: rgba(42, 245, 224, 0.06);
+  color: #8ae9e0;
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.orb-status::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; box-shadow: 0 0 7px currentColor; }
+.orb-status.small { font-size: 0.54rem; padding: 3px 7px; }
+.orb-status[data-tone="idle"] { color: #7d93a6; border-color: rgba(125, 147, 166, 0.2); background: rgba(125, 147, 166, 0.06); }
+.orb-status[data-tone="muted"] { color: #93a4b5; border-color: rgba(147, 164, 181, 0.2); background: rgba(147, 164, 181, 0.06); }
+.orb-status[data-tone="ok"] { color: #7dffa8; border-color: rgba(125, 255, 168, 0.24); background: rgba(125, 255, 168, 0.07); }
+.orb-status[data-tone="warn"] { color: #fbbf24; border-color: rgba(251, 191, 36, 0.25); background: rgba(251, 191, 36, 0.07); }
+.orb-status[data-tone="error"] { color: #ff8b8b; border-color: rgba(255, 107, 107, 0.28); background: rgba(255, 107, 107, 0.08); }
+
+.voice-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 14px; }
+.voice-orb-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 250px;
+  padding: 8px 12px 8px 8px;
+  border: 1px solid rgba(118, 228, 255, 0.13);
+  border-radius: 13px;
+  background: rgba(10, 24, 43, 0.5);
+}
+.voice-orb-copy { display: grid; gap: 2px; min-width: 0; }
+.voice-orb-label { color: var(--text-primary); font-size: 0.78rem; font-weight: 600; }
+.voice-orb-desc { color: var(--text-secondary); font-size: 0.68rem; line-height: 1.4; max-width: 30ch; }
+.voice-orb-card .orb-status { justify-self: start; margin-top: 2px; }
+.voice-strip .voice-status { margin-bottom: 0; }
+
+.orb-compact {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 18px;
+  padding: 10px 13px;
+  border: 1px solid rgba(118, 228, 255, 0.12);
+  border-radius: 13px;
+  background: rgba(10, 24, 43, 0.42);
+}
+.orb-compact-copy { display: grid; gap: 1px; min-width: 0; flex: 1; }
+.orb-compact-label { color: var(--text-primary); font-size: 0.8rem; font-weight: 600; }
+.orb-compact-desc { color: var(--text-secondary); font-size: 0.7rem; line-height: 1.4; }
+.orb-compact .orb-status { flex: none; }
+
+.task-orb { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; padding: 14px 16px; }
+.task-orb-copy { flex: 1; min-width: 0; }
+.task-orb-copy .eyebrow { margin: 0 0 3px; }
+.task-orb-copy h3 { margin: 0 0 3px; font-size: 0.95rem; letter-spacing: 0.01em; }
+.task-orb-copy p:last-child { margin: 0; color: var(--text-secondary); font-size: 0.72rem; line-height: 1.45; }
+.task-orb .orb-status { flex: none; }
+
+@keyframes orbLivePulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
+
+@media (max-width: 900px) {
+  .orb-card { grid-template-columns: 150px minmax(0, 1fr); gap: 18px; padding: 18px; }
+  .orb-size-main { width: 150px; }
+}
+
+@media (max-width: 700px) {
+  .orb-card { grid-template-columns: 1fr; justify-items: start; gap: 12px; }
+  .orb-stage { justify-self: center; }
+  .orb-size-main { width: 164px; }
+  .orb-desc { font-size: 0.78rem; }
+  .voice-orb-card { min-width: 0; flex: 1 1 100%; }
+  .voice-strip .voice-status { margin-bottom: 0; }
+  .orb-compact { align-items: flex-start; }
+  .orb-compact .orb-status { display: none; }
+  .task-orb { align-items: flex-start; }
+}
+
+@media (max-width: 480px) {
+  .orb-card { padding: 15px; border-radius: 14px; }
+  .orb-size-main { width: 148px; }
+  .orb-size-voice { width: 62px; }
+  .orb-size-compact { width: 42px; }
+  .orb-size-task { width: 38px; }
+  .orb-title { font-size: 1.16rem; }
+  .voice-orb-desc { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .orb-live-dot { animation: none; }
 }

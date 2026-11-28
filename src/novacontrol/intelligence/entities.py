@@ -183,7 +183,10 @@ class ApplicationExtractor:
         value = " ".join(correct_token(token, self.vocabulary) for token in normalized.split())
         # Only claim the entity when it actually names something known: the
         # caller's own prefix stripping is more precise for unknown targets.
-        tokens = [token for token in value.split() if token in self.vocabulary]
+        # De-duplicate: the corrected text repeats a name ("gmail gmail")
+        # whenever the same app is spoken twice in one command, and that
+        # joined string then matched no app at the executor.
+        tokens = list(dict.fromkeys(token for token in value.split() if token in self.vocabulary))
         if not tokens:
             return {}
         return {"application": tokens[0] if len(tokens) == 1 else " ".join(tokens)}

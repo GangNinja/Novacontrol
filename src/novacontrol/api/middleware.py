@@ -49,6 +49,16 @@ class RateLimitMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        # The page shell and its assets are not API capacity. Counting them
+        # against the budget let the UI's own polling 429 the scripts it then
+        # needed: a lazily-imported module failed to load after a short burst,
+        # and a reload of "/" could be refused as well. API routes stay
+        # limited; only GET/HEAD for the page and /static/ bypass the counter.
+        method = scope.get("method", "GET")
+        path = scope.get("path", "")
+        if method in ("GET", "HEAD") and (path == "/" or path.startswith("/static/")):
+            await self.app(scope, receive, send)
+            return
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
         client_ip = headers.get("x-forwarded-for", "").split(",")[0].strip() or "unknown"
         client = scope.get("client")

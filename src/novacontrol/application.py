@@ -14,7 +14,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from contextvars import ContextVar
@@ -25,13 +25,19 @@ from novacontrol.agents import (
     STAGE_ORDER,
     AgentModule,
     AgentRegistry,
+    AgentRole,
     AgentTask,
+    CollaborationEngine,
+    CollaborationPlan,
+    CollaborationPolicy,
     CoordinatorAgent,
+    DataAnalysisAgent,
     DeveloperAgent,
     ResearchAgent,
     RunnableAgent,
     SpecialistPipeline,
     SpecializedAgent,
+    VerificationAgent,
     build_default_agents,
 )
 from novacontrol.agents.developer import recognise_test_command
@@ -83,6 +89,7 @@ from novacontrol.brain import BrainDecision, BrainIntent, BrainRequest, NovaBrai
 from novacontrol.brain.brain import looks_like_research_question
 from novacontrol.brain.scratch import scratchable_intent
 from novacontrol.browser import BrowserAutomationController, BrowserAutomationModule, PlaywrightBrowserRunner
+from novacontrol.computer import ComputerOperationHistory, ComputerOperator, DeviceRegistry, probe_displays
 from novacontrol.core.activity import RecentActivityLog
 from novacontrol.core.buglog import BugLog
 from novacontrol.core.chat_transcript import ChatTranscriptStore
@@ -92,6 +99,7 @@ from novacontrol.core.runtime import EventDrivenRuntime
 from novacontrol.core.security import (
     DenyByDefaultApprovalGateway,
     PermissionScope,
+    RiskLevel as OperationalRiskLevel,
 )
 from novacontrol.desktop import DesktopAutomationController, DesktopAutomationModule, LocalDesktopRunner
 from novacontrol.desktop.capture import capture_supported_here
@@ -197,7 +205,20 @@ from novacontrol.knowledge import (
     ProjectDetector,
     knowledge_tools,
 )
-from novacontrol.memory import MemoryManager, MemoryModule, MemoryNamespace, SqliteMemoryStore
+from novacontrol.memory import (
+    KnowledgeAccess,
+    KnowledgeCategory,
+    KnowledgeKind,
+    KnowledgePrivacy,
+    KnowledgeRetention,
+    KnowledgeSource,
+    MemoryManager,
+    MemoryModule,
+    MemoryNamespace,
+    PersonalKnowledgeService,
+    SqliteMemoryStore,
+    remember_explicit_text,
+)
 from novacontrol.models import (
     KeepAliveSettings,
     ModelCapability,
@@ -206,6 +227,13 @@ from novacontrol.models import (
     ModelProbeSnapshot,
     ModelProfile,
     ModelRegistry,
+)
+from novacontrol.models.adaptive import (
+    AdaptiveModelRouter,
+    ModelEndpoint,
+    ProviderKind,
+    ProviderRecord,
+    RoutingPreferences,
 )
 from novacontrol.novaforge.actions import ScreenInput
 from novacontrol.novaforge.launcher import (
@@ -221,12 +249,14 @@ from novacontrol.novaforge.launcher import (
 )
 from novacontrol.novaforge import (
     ClosedLoopRunner,
+    DecisionSeer,
     FixedKeyPolicy,
     HarnessReadyPolicy,
     HarnessStagesPolicy,
     LoopLimits,
     LoopResult,
     MissionValidationError,
+    ModelDecisionPolicy,
     NovaForgeBenchmarkLab,
     NovaForgeCoach,
     NovaForgeEvaluationLab,
@@ -242,7 +272,24 @@ from novacontrol.novaforge import (
     trial_rows,
     vision_timeout_from_environment,
 )
+from novacontrol.operations import (
+    DEFAULT_TASK_SCOPE,
+    AutonomyLevel,
+    NotificationKind,
+    ObjectiveKind,
+    OperationTask,
+    OperationsService,
+    TaskKind,
+    TaskOutcome,
+)
 from novacontrol.persistence import JsonStateStore
+from novacontrol.continual import (
+    ContinualLearningEngine,
+    InMemoryContinualLearningStore,
+    JsonContinualLearningStore,
+    StepEvidence,
+)
+from novacontrol.continual.benchmark import LearningBenchmark
 from novacontrol.phone import PhoneControlController, PhoneControlModule
 from novacontrol.planning import (
     AgentLoop,
@@ -327,8 +374,46 @@ from novacontrol.plugins import PluginManager, PluginMarketplaceModule
 from novacontrol.projects import ProjectManager
 from novacontrol.scheduler import InMemoryScheduler
 from novacontrol.self_improvement import CodeChange, SelfImprovementEngine
+from novacontrol.self_management import (
+    AutonomyMode,
+    ConfigurationManager,
+    HealthCollector,
+    IncidentManager,
+    MaintenanceService,
+    RecoveryAction,
+    RecoveryManager,
+    RecoveryRegistry,
+    SelfManagementService,
+)
+from novacontrol.business import BusinessOpportunityService
+from novacontrol.business.agent import build_business_agent
+from novacontrol.product import ProductModule, ProductService, build_product_agent
+from novacontrol.customer import (
+    CustomerModule,
+    CustomerService,
+    build_customer_agent,
+)
+from novacontrol.finops import (
+    FinanceModule,
+    FinOpsService,
+    build_finance_agent,
+)
+from novacontrol.portfolio import (
+    PortfolioModule,
+    PortfolioService,
+    build_portfolio_agent,
+)
 from novacontrol.settings import BRAIN_MODES, SettingsManager
-from novacontrol.skills import SkillRegistry
+from novacontrol.skills import (
+    DEFAULT_SKILL_SCOPE,
+    Skill,
+    SkillObservation,
+    SkillRegistry,
+    SkillService,
+    SkillStep,
+    SkillStepKind,
+    StepOutcome,
+)
 from novacontrol.tasks import TaskCenter, TaskRecordStatus
 from novacontrol.telemetry.hardware import HardwareTelemetry
 
@@ -1332,10 +1417,107 @@ def _world_learning_view(world: Any) -> dict[str, Any]:
         return {}
 
 
+class _PipelineSkillProvider:
+    """Adapts this application's ONE ``SkillService`` to the specialist pipeline.
+
+    The pipeline needs two answers — which validated skill matches a goal, and
+    run this one — and both are the service's own. Keeping the adapter in the
+    composition root means the agents package never imports the skills package,
+    and there is no second catalog, registry, executor or permission table for
+    skills: a specialist selecting a skill is selecting from the same library a
+    person manages over ``/skills``.
+    """
+
+    def __init__(self, application: "NovaControlApplication") -> None:
+        self._application = application
+
+    def select(
+        self,
+        goal: str,
+        *,
+        inputs: Mapping[str, Any] | None = None,
+        skill: str = "",
+        limit: int = 5,
+    ) -> tuple[Mapping[str, Any], ...]:
+        service = getattr(self._application, "skill_service", None)
+        if service is None:
+            return ()
+        try:
+            if skill:
+                rows: list[Any] = [self._resolve(service, skill)]
+            else:
+                rows = list(service.retrieve(goal, inputs=inputs, limit=limit))
+        except Exception:
+            return ()
+        out: list[Mapping[str, Any]] = []
+        for row in rows:
+            if row is None:
+                continue
+            if isinstance(row, Mapping):
+                out.append(dict(row))
+            elif hasattr(row, "to_dict"):
+                out.append(dict(row.to_dict()))
+        return tuple(out)
+
+    @staticmethod
+    def _resolve(service: Any, selector: str) -> dict[str, Any] | None:
+        """One explicitly requested skill, by id or by name.
+
+        Explicitly naming a skill does not skip the library's checks: the
+        compatibility, lifecycle and permission gates still run when it is
+        executed, and a refusal is reported as one.
+        """
+        wanted = str(selector or "").strip().lower()
+        if not wanted:
+            return None
+        for entry in service.catalog.all():
+            if wanted in (entry.id.lower(), entry.name.lower()):
+                return {
+                    "skill_id": entry.id,
+                    "name": entry.name,
+                    "version": entry.version,
+                    "score": 1.0,
+                    "lifecycle": entry.lifecycle.value,
+                    "compatible": True,
+                    "reasons": ["requested explicitly by the task"],
+                    "missing_inputs": [],
+                    "missing_capabilities": [],
+                }
+        return None
+
+    async def execute(
+        self,
+        skill_id: str,
+        *,
+        goal: str,
+        inputs: Mapping[str, Any],
+        version: int | None = None,
+    ) -> Mapping[str, Any]:
+        service = getattr(self._application, "skill_service", None)
+        if service is None:
+            return {"status": "blocked", "reason": "no skill service is wired"}
+        result = await service.execute(
+            skill_id,
+            inputs=inputs,
+            goal=goal,
+            version=version,
+        )
+        if isinstance(result, Mapping):
+            return dict(result)
+        return {
+            "status": "failed",
+            "reason": "the skill service returned no execution result",
+        }
+
+
 class NovaControlApplication:
     """Runnable local composition of NovaControl services."""
 
     _DEFAULT_DATA_DIR = Path("data")
+    #: Set by the HTTP factory when this application serves an API; left None in
+    #: an embedded process so the health check can honestly report SKIPPED.
+    api_surface: Any | None = None
+    api_server_started: bool = False
 
     def __init__(self, *, data_dir: str | Path | None = None) -> None:
         # Configuration is read ONCE, at construction, and the layers below are
@@ -1426,7 +1608,7 @@ class NovaControlApplication:
         self.brain = NovaBrain(
             completion_provider=build_llm_provider_from_environment(),
             ollama_reprobe=self._ollama_reprobe,
-            on_provider_upgrade=lambda provider: self._sync_explore_provider(),
+            on_provider_upgrade=self._handle_provider_upgrade,
         )
         if boot_cloud is not None:
             self.brain.set_cloud_provider(boot_cloud)
@@ -1439,6 +1621,13 @@ class NovaControlApplication:
         self.chat_transcript = ChatTranscriptStore(self.state_store)
         memory_store = SqliteMemoryStore(self.data_dir / "memory.sqlite3")
         self.memory = MemoryManager(memory_store)
+        # Phase 32: the structured personal knowledge layer shares this SAME
+        # manager and SQLite file. It keeps an in-process query index and
+        # rebuilds it from the long-term namespace on boot; it is not a second
+        # memory system and it owns no separate persistence.
+        self.personal_memory = PersonalKnowledgeService(
+            self.memory, publish=self._personal_event
+        )
         self.self_improvement = SelfImprovementEngine(Path.cwd())
         # Explore publishes its progress on the ONE app-wide bus, so a single
         # activity channel (/events/stream) sees research steps live instead of
@@ -1540,6 +1729,13 @@ class NovaControlApplication:
             if self.state_store is not None
             else TaskCenter()
         )
+        # Phase 27: continual learning and self-improvement. Built from the
+        # SAME state store every other subsystem persists through, announced on
+        # the SAME bus. It observes work the existing layers already did; it
+        # plans nothing, executes nothing and verifies nothing.
+        self.continual = self._build_continual_learning()
+        self._last_learning: dict[str, str] = {}
+        self._continual_suggestion: dict[str, Any] = {}
         self._improvement_previews: dict[str, dict[str, Any]] = {}
         # Server-side approval tokens: token -> {"command", "plan", "expires_at"}. Minted by
         # plan_desktop_command and consumed once by execute_desktop_command. A client can never
@@ -1642,6 +1838,31 @@ class NovaControlApplication:
             advisor=self.governor,
             max_resident_models=self.config.resources.max_resident_models,
         )
+        # ── Phase 33: adaptive model and compute intelligence ─────────────
+        # ONE router over the SAME manager, profiles, monitor, benchmark and
+        # Phase 27 learning engine. It adds selection/fallback/learning; it
+        # does not discover models, probe hardware or load weights itself.
+        # Only ACTUALLY configured endpoints are registered at boot (the live
+        # local brain model and the live cloud model) — a declaration is not an
+        # installed model, and a catalogue that lists phantom installs is worse
+        # than one with nothing in it.
+        self.model_router = AdaptiveModelRouter(
+            self.model_manager,
+            benchmark=self.benchmark,
+            monitor=self.hardware_monitor,
+            learning=self.continual,
+            preferences=RoutingPreferences(
+                allow_cloud=self.brain.cloud_allowed,
+                max_concurrency=max(1, int(self.config.resources.max_resident_models) or 2),
+            ),
+            store=self.state_store,
+            adapter_resolver=self._router_adapter,
+            include_declared=False,
+        )
+        self._router_cloud_provider_id = ""
+        self._router_cloud_model = ""
+        self._router_catalog_refreshed_at = 0.0
+        self._sync_model_router()
         # ── Phase 6: the vision pipeline ─────────────────────────────────
         # ONE manager owns "what is in this image?": OCR first (cheap and
         # deterministic), the model only when the text cannot answer it, and a
@@ -2052,6 +2273,77 @@ class NovaControlApplication:
         # work, and nothing is left running after a stop.
         self._automation_ticker: asyncio.Task[None] | None = None
         self._automation_ticks = 0
+        # ── Phase 30: persistent objectives and personal operations ─────────
+        # The service composes the layers above rather than replacing them: it
+        # schedules nothing itself (the ticker below calls it), executes nothing
+        # itself (its executor is this application's request path), and decides
+        # authority nowhere else (the SAME ``self.risk`` the tool executor gates
+        # on). The default task scope is declared beside the code that carries a
+        # task out, so a task cannot run under an undeclared grant.
+        self.risk.declare(
+            DEFAULT_TASK_SCOPE,
+            risk_level=RiskLevel.LOW,
+            requires_confirmation=False,
+            reversible=True,
+            destructive=False,
+            external_side_effect=False,
+        )
+        self.operations = OperationsService.from_dict(
+            (
+                self.state_store.read("operations")
+                if self.state_store is not None
+                else {}
+            )
+            or {},
+            permissions=self.risk,
+            enabled=bool(self.config.automation.enabled),
+        )
+        self.operations.subscribe(
+            execute_task=self._execute_operation_task,
+            reassess_task=self._reassess_operation_task,
+            publish=self._operations_event,
+            persist=self.persist,
+        )
+        self._operations_ticker: asyncio.Task[None] | None = None
+        self._operations_ticks = 0
+        # ── Phase 31: transferable, general-purpose skills ─────────────────
+        # One service over ONE catalog, persisted through the SAME store and
+        # announced on the SAME bus. It owns no execution engine: every step is
+        # handed to ``_execute_skill_step`` below, which routes through the
+        # application's existing request, tool, desktop and browser paths. The
+        # scope a skill step runs under is declared here, beside the code that
+        # carries it out, exactly like the Phase 30 task scope above.
+        self.risk.declare(
+            DEFAULT_SKILL_SCOPE,
+            risk_level=RiskLevel.LOW,
+            requires_confirmation=False,
+            reversible=True,
+            destructive=False,
+            external_side_effect=False,
+        )
+        self.skill_service = SkillService.from_dict(
+            (
+                self.state_store.read("skills")
+                if self.state_store is not None
+                else {}
+            )
+            or {},
+            permissions=self.risk,
+            learning=self.continual,
+            environment=(
+                "windows"
+                if sys.platform.startswith("win")
+                else "darwin"
+                if sys.platform == "darwin"
+                else "linux"
+            ),
+            available_tools=lambda: tuple(
+                entry.tool.name for entry in self.tools.list()
+            ),
+            execute_step=self._execute_skill_step,
+            persist=self.persist,
+            publish=self._skills_event,
+        )
         # ── Phase 15: trajectories, evaluation and reward ──────────────────
         # An OBSERVER of the lifecycle this file already publishes, not another
         # execution path: the recorder subscribes to the SAME event bus a few
@@ -2182,10 +2474,17 @@ class NovaControlApplication:
                 # audit measured — a loop that observed nothing, six times per
                 # run, while reporting honestly that it could not verify.
                 window_probe=self._perception_window_probe,
+                window_details_probe=self._perception_window_details,
                 screenshot_provider=self._perception_screen_capture,
                 screen_text_reader=self._perception_screen_text,
+                display_probe=probe_displays,
             ),
-            actions=ActionEngine(browser_runner=self.browser.runner, desktop_runner=self.desktop.runner),
+            actions=ActionEngine(
+                browser_runner=self.browser.runner,
+                browser_controller=self.browser,
+                desktop_runner=self.desktop.runner,
+                desktop_controller=self.desktop,
+            ),
             planner=AdaptivePlanner(),
             verifier=Verifier(),
             recovery=RecoveryEngine(knowledge=self._agentic_knowledge),
@@ -2195,6 +2494,22 @@ class NovaControlApplication:
             research_fn=self._agentic_research,
             persist_fn=self._agentic_persist,
             event_bus=self.event_bus,
+        )
+        self.computer = ComputerOperator(
+            orchestrator=self.agentic,
+            perception=self.agentic.perception,
+            history=ComputerOperationHistory(self.state_store),
+            devices=DeviceRegistry(
+                desktop_runner=self.desktop.runner,
+                browser_runner=self.browser.runner,
+                phone_status=self.phone.status,
+            ),
+            permissions=self.risk,
+            interpreter=self.agentic.interpreter,
+            planner=self.agentic.planner,
+            desktop_runner=self.desktop.runner,
+            desktop_controller=self.desktop,
+            browser_controller=self.browser,
         )
 
         # ── Specialized agents (Phase 12) ────────────────────────────
@@ -2220,8 +2535,24 @@ class NovaControlApplication:
             provider=self.explore,
             pipeline=self._specialist_pipeline,
         )
-        for specialist in (self.developer_agent, self.research_agent):
+        self.data_analysis_agent = DataAnalysisAgent(
+            root=Path.cwd(), pipeline=self._specialist_pipeline
+        )
+        self.verification_agent = VerificationAgent(
+            root=Path.cwd(), pipeline=self._specialist_pipeline
+        )
+        for specialist in (
+            self.developer_agent,
+            self.research_agent,
+            self.data_analysis_agent,
+            self.verification_agent,
+        ):
             self._install_specialist(specialist)
+        # Phase 28: coordination sits ABOVE the registry. The engine hands each
+        # subtask to one of the specialists above, so no second agent loop and
+        # no second planner exists; it only schedules, shares declared context,
+        # resolves conflicts and aggregates verified evidence.
+        self.collaboration = self._build_collaboration()
 
         # Last boot step: re-apply any persisted vision model so element
         # location uses it immediately (no restart, no UI round-trip).
@@ -2273,6 +2604,10 @@ class NovaControlApplication:
         # service above now exists).
         self._apply_execution_mode()
         self._register_diagnostics()
+        # Phase 34: the components the Phase 14 roster did not yet name. They
+        # report live observations from the same services; no process is started
+        # just to answer a check.
+        self._register_phase34_diagnostics()
         # Phase 15: point the recorder at the operator's current choice and
         # apply the configured retention once, at boot.
         self.apply_evaluation_settings()
@@ -2291,6 +2626,57 @@ class NovaControlApplication:
         # critique policy, dry-run, checkpoint cap), so this deployment's idea
         # of what may count as evidence is in place before anything is verified.
         self.apply_rlvr_settings()
+        # Phase 34: the ONE operational control plane over the diagnostic roster,
+        # the audit trail, the permission layer and the durable state store. It
+        # is constructed after every service it observes, and it adds no second
+        # health registry or recovery runner.
+        self.self_management = self._build_self_management()
+        # Phase 35: business opportunity validation sits on the SAME Explore,
+        # knowledge, state, event and audit seams as the rest of the platform.
+        # It runs no external action of its own and cannot set a verdict without
+        # the evidence rules in the service.
+        self.business_opportunities = self._build_business_opportunities()
+        # One advisory specialist in the EXISTING registry. The eight phase
+        # responsibilities stay deterministic service modules; this agent only
+        # reads and summarises recorded evidence through the same service.
+        self.agent_registry.register(build_business_agent(self.business_opportunities))
+        # Phase 36: validated Phase 35 opportunities become one durable product
+        # project each. Tasks execute through the SAME AgentRegistry above; the
+        # product agent is advisory and cannot approve or launch anything.
+        self.product_pipeline = self._build_product_pipeline()
+        self.agent_registry.register(build_product_agent(self.product_pipeline))
+        self.runtime.register_module(ProductModule(self.product_pipeline))
+        # Phase 37: customer acquisition, sales and support over launch-authorized
+        # Phase 36 products. Outbound communication has no sender unless one is
+        # injected explicitly; the default is an honest not_configured result.
+        self.customer_growth = self._build_customer_growth()
+        self.agent_registry.register(build_customer_agent(self.customer_growth))
+        self.runtime.register_module(CustomerModule(self.customer_growth))
+        # Phase 38: venture operations and financial intelligence over the
+        # existing state, event, audit, memory and Phase 35/36/37 seams. It
+        # records and analyses money; it cannot move it.
+        self.business_finance = self._build_business_finance()
+        self.agent_registry.register(build_finance_agent(self.business_finance))
+        self.runtime.register_module(FinanceModule(self.business_finance))
+        # Phase 39: portfolio registry and intelligence over the SAME Phase 35–38
+        # services. It stores references, never a second ledger, and cannot move
+        # funds, change a finalized entry or execute a strategic decision.
+        self.portfolio_manager = self._build_portfolio_manager()
+        self.agent_registry.register(build_portfolio_agent(self.portfolio_manager))
+        self.runtime.register_module(PortfolioModule(self.portfolio_manager))
+        self._self_management_ticker: asyncio.Task[Any] | None = None
+        self._self_management_cycles = 0
+        try:
+            _self_management_interval = float(
+                os.getenv("NOVACONTROL_SELF_MANAGEMENT_INTERVAL", "30")
+            )
+        except (TypeError, ValueError):
+            _self_management_interval = 30.0
+        # Monitoring is periodic, not a tight loop: a five-second floor keeps a
+        # misconfigured environment from turning health probes into a hot loop.
+        self._self_management_interval = max(
+            5.0, min(_self_management_interval, 3600.0)
+        )
 
     # --- Brain mode (local scratch ↔ local LLM) ---
 
@@ -2330,9 +2716,24 @@ class NovaControlApplication:
             pass  # persistence failures never break a running task
 
     async def run_agentic_task(self, request: str) -> dict[str, Any]:
-        """Run the full agentic loop for a natural-language goal."""
+        """Run the full agentic loop and capture its verified evidence.
+
+        The orchestrator already records per-step verifier results and a final
+        verdict. Those are the only fields used here: a bare action success is
+        not a completed task, so an agentic run with no final verification stays
+        partial/unverified in the learning corpus.
+        """
+        learning_started = time.perf_counter()
         state = await self.agentic.run_task(request)
-        return state.to_dict()
+        payload = state.to_dict()
+        try:
+            self._capture_agentic_learning(
+                payload,
+                elapsed_ms=(time.perf_counter() - learning_started) * 1000.0,
+            )
+        except Exception:
+            pass
+        return payload
 
     # --- Specialized agents (Phase 12) ---
 
@@ -2356,6 +2757,11 @@ class NovaControlApplication:
             tools=self.tools,
             knowledge=self.knowledge_engine,
             event_bus=self.event_bus,
+            # Phase 31 → Phase 28: a specialist that has no procedure of its
+            # own now selects a validated skill from the ONE library instead of
+            # reporting nothing to do. The library is the same one `/skills`
+            # manages; this adds no second registry or executor.
+            skills=_PipelineSkillProvider(self),
         )
 
     def _install_specialist(self, agent: RunnableAgent) -> None:
@@ -2426,12 +2832,144 @@ class NovaControlApplication:
     def agentic_knowledge(self) -> dict[str, Any]:
         return self._agentic_knowledge.to_dict()
 
+    # --- Phase 29: universal computer and device operation -----------------
+
+    async def computer_status(self) -> dict[str, Any]:
+        """Live device availability, the supervisor state and history counts."""
+        report = await self.computer.devices.discover()
+        return {
+            **self.computer.status(),
+            "devices": report.to_dict(),
+            "supported_operations": list(report.supported_operations),
+            "focused_loop": [
+                "observe", "interpret", "plan", "act", "observe", "verify", "recover",
+            ],
+        }
+
+    async def computer_observe(self, *, include_semantic: bool = True) -> dict[str, Any]:
+        """Read-only observation through the same perception engine the loop uses."""
+        return await self.computer.observe(include_semantic=include_semantic)
+
+    async def plan_computer_task(self, objective: str) -> dict[str, Any]:
+        """Prepare a plan and mint the token that authorises its execution."""
+        plan = await self.computer.plan(objective)
+        personal = await self.personal_memory.context_for(
+            objective, access=self._personal_access(), budget_tokens=220
+        )
+        plan["personal_context"] = personal.text
+        plan["personal_context_hits"] = [hit.to_dict() for hit in personal.hits]
+        token = self._mint_approval(str(plan["objective"]), plan)
+        plan["approval"] = {
+            "required": bool(plan.get("requires_confirmation", False)),
+            "token": token,
+            "single_use": True,
+            "ttl_seconds": self.approval_ttl_seconds,
+            "note": "Execution requires this exact objective and this server-minted token.",
+        }
+        return plan
+
+    async def execute_computer_task(
+        self,
+        objective: str,
+        *,
+        approval_token: str,
+        context: Mapping[str, Any] | None = None,
+        correlation_id: str = "",
+    ) -> dict[str, Any]:
+        """Execute a planned computer objective under a single-use token.
+
+        The token is consumed before any input is sent, so a replayed request
+        cannot re-run a task. Phase 27 receives the same state evidence as the
+        ordinary agentic path; the operation history is written by the operator.
+        """
+        self._consume_approval(approval_token, objective)
+        learning_started = time.perf_counter()
+        run_context = dict(context or {})
+        personal = await self.personal_memory.context_for(
+            objective, access=self._personal_access(), budget_tokens=220
+        )
+        if personal.text:
+            run_context.setdefault("personal_knowledge", personal.text)
+            run_context.setdefault(
+                "personal_knowledge_ids", [hit.record.id for hit in personal.hits]
+            )
+        result = await self.computer.run(
+            objective,
+            context=run_context,
+            approved=True,
+            correlation_id=correlation_id,
+        )
+        try:
+            self._capture_agentic_learning(
+                result.state,
+                elapsed_ms=(time.perf_counter() - learning_started) * 1000.0,
+            )
+        except Exception:
+            pass
+        return result.to_dict()
+
+    async def stop_computer_task(self, task_id: str = "") -> dict[str, Any]:
+        """Emergency stop: no new input, and every held key/button is released."""
+        return await self.computer.emergency_stop() if not task_id else await self.computer.cancel(task_id)
+
+    def computer_history(self, *, limit: int = 20, status: str = "") -> dict[str, Any]:
+        return {
+            "summary": self.computer.history.summary(),
+            "records": self.computer.history.list(limit=limit, status=status),
+            "stores_screenshots": False,
+            "stores_secrets": False,
+        }
+
+    def clear_computer_history(self) -> dict[str, Any]:
+        return {"removed": self.computer.history.clear()}
+
+    def resolve_computer_reference(
+        self,
+        text: str,
+        *,
+        ui_state: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Resolve a contextual phrase against the supplied or last observed UI."""
+        state = None
+        if ui_state is not None:
+            try:
+                from novacontrol.agentcore import UiState
+
+                elements = []
+                for item in ui_state.get("elements", []) or []:
+                    if not isinstance(item, Mapping):
+                        continue
+                    from novacontrol.agentcore import UiElement
+
+                    elements.append(
+                        UiElement(
+                            id=str(item.get("id", "")),
+                            type=str(item.get("type", "other")),
+                            text=str(item.get("text", "")),
+                            location=tuple(item["location"]) if item.get("location") else None,
+                            selector=str(item.get("selector", "")),
+                        )
+                    )
+                state = UiState(
+                    application=str(ui_state.get("application", "")),
+                    window=str(ui_state.get("window", "")),
+                    url=str(ui_state.get("url", "")),
+                    elements=tuple(elements),
+                    raw_text=str(ui_state.get("raw_text", "")),
+                    metadata=dict(ui_state.get("metadata", {}) or {}),
+                )
+            except Exception:
+                state = None
+        return self.computer.resolve(text, ui_state=state).to_dict()
+
     def set_brain_mode(self, mode: str) -> dict[str, Any]:
-        """Hot-swap the chat brain between auto, llm, and scratch.
+        """Hot-swap the chat brain between auto, llm, scratch, and cloud.
 
         The brain is the source of truth for which provider runs; the setting is
-        mirrored here so the choice survives restarts, and Explore's synthesizer
-        follows the brain so "scratch" is local everywhere, not just in Chat.
+        mirrored here so the choice survives restarts. Explore follows a model
+        only when one was CHOSEN (`llm`/`cloud`); `auto` and `scratch` keep the
+        built-in evidence engine, so a detected Ollama is never spent on
+        research unless the user asked for it.
         """
         if mode not in BRAIN_MODES:
             raise ValueError(
@@ -2439,22 +2977,31 @@ class NovaControlApplication:
             )
         self.brain.set_mode(mode)
         self._sync_explore_provider()
+        self._sync_model_router()
         self.settings.update(brain_mode=mode)
         self.persist()
         return self.brain_status()
 
     def _sync_explore_provider(self) -> None:
-        """Point Explore's synthesizer at the brain's live provider.
+        """Point Explore's synthesizer at the LOCAL engine unless a model was chosen.
 
-        Mirrors the brain mode EXACTLY: scratch (Echo) passes None so the
-        synthesizer uses its local template path rather than trying an LLM
-        call on Echo (which try_llm_synthesis would skip anyway — passing None
-        keeps the two layers in lockstep by construction). llm/auto/cloud pass
-        the brain's live provider as-is, so Chat and Explore always speak with
-        the same voice. Report caching is keyed on the synthesis provider, so
-        a mode switch never serves a report synthesized by the OLD brain.
+        `auto` is local-first for research: a detected Ollama (or a configured
+        cloud key) is an offer, not a decision. Explore hands its planning and
+        synthesis to a model only in the explicitly chosen `llm` or `cloud`
+        modes — the modes where the user has accepted the model's latency.
+        `scratch`, `auto`, and an unconfigured model all pass None, which is the
+        built-in evidence engine the app is designed around. Chat keeps its own
+        auto behaviour; this function decides Explore only.
+
+        Report caching is keyed on the synthesis provider, so a mode switch
+        never serves a report synthesized by the OLD brain.
         """
-        provider = None if self.brain.provider_name == "scratch" else self.brain.completion_provider
+        chosen = self.brain.mode in {"llm", "cloud"}
+        provider = (
+            self.brain.completion_provider
+            if chosen and self.brain.provider_name != "scratch"
+            else None
+        )
         self.explore.explainer.set_completion_provider(provider)
         set_explore_cache_provider(self.explore, provider)
 
@@ -2559,6 +3106,7 @@ class NovaControlApplication:
             return self.brain_status()
         self.brain.set_local_provider(provider)
         self._sync_explore_provider()
+        self._sync_model_router()
         self.persist()
         return self.brain_status()
 
@@ -2627,6 +3175,7 @@ class NovaControlApplication:
         # and all.
         self.brain.set_cloud_provider(provider)
         self._sync_explore_provider()
+        self._sync_model_router()
         self.persist()
         return self.brain_status()
 
@@ -2636,6 +3185,7 @@ class NovaControlApplication:
             self._cloud_llm_store.write("cloud_llm", {})
         self.brain.set_cloud_provider(None)
         self._sync_explore_provider()
+        self._sync_model_router()
         self.persist()
         return self.brain_status()
 
@@ -2842,9 +3392,19 @@ class NovaControlApplication:
 
     async def start(self) -> None:
         await self.runtime.start()
+        try:
+            await self.personal_memory.load()
+        except Exception:
+            # A memory index that cannot be rebuilt is reported by status(); it
+            # must not prevent the rest of the application from starting.
+            self.personal_memory.last_error = "personal knowledge index could not be loaded"
         self._start_automation_ticker()
+        self._start_operations_ticker()
+        self._start_self_management_ticker()
 
     async def stop(self) -> None:
+        self._stop_self_management_ticker()
+        self._stop_operations_ticker()
         self._stop_automation_ticker()
         # NovaForge sessions go first: stopping one releases held input through
         # the verified path while the desktop worker is still alive, and writes
@@ -2880,6 +3440,9 @@ class NovaControlApplication:
         # A run that finished but was never written is a result nobody can
         # reproduce tomorrow.
         self.generalization.close()
+        # A running computer task must stop before its runner does: stop the
+        # supervisor first so no action can be started against a closing worker.
+        await self.computer.close()
         # The desktop capture worker is a long-lived process: closing it here is
         # what keeps "a reusable capture resource" from becoming "a stray
         # PowerShell nobody remembers starting".
@@ -2901,6 +3464,14 @@ class NovaControlApplication:
         # Phase 13: a stored schedule outlives the process — a task approved
         # today still runs tomorrow, with its failure count and its run history.
         self.state_store.write("automation_tasks", self.automation_engine.to_dict())
+        # Phase 30: objectives, verified checkpoints, progress and notification
+        # state outlive the process. This is what makes a resume a resume rather
+        # than a fresh start.
+        self.state_store.write("operations", self.operations.to_dict())
+        # Phase 31: the catalog, its evidence and its checkpoints survive too.
+        # A validated skill that vanished on restart would make every transfer
+        # a fresh acquisition, which is the thing this phase exists to avoid.
+        self.state_store.write("skills", self.skill_service.to_dict())
         self.state_store.write("tasks", self.tasks.to_dict())
         self.state_store.write("settings", self.settings.to_dict())
         # Phase 22: the world survives a restart — versions, transitions and
@@ -2911,6 +3482,13 @@ class NovaControlApplication:
         # learned rules. One key per objective, so a corrupt record costs only the
         # objective it belongs to.
         self.learning.save()
+        # Phase 27: the bounded learning corpus survives too — experiences,
+        # derived signals, strategy versions and open proposals.
+        self.continual.flush()
+        # Phase 28: the collaboration task graph survives too. Every wave already
+        # flushes completed subtasks; this is the final snapshot for a task that
+        # was still running when the process stopped.
+        self.collaboration.flush()
         # Phase 24: the goals survive too — their stated conditions, asserted
         # initial state, budgets and the decomposition each was planned from. One
         # key per goal, so a corrupt record costs only the goal it belongs to. A
@@ -2959,6 +3537,316 @@ class NovaControlApplication:
         "vision": BrainIntent.VISION,
     }
 
+    # ── Phase 33: adaptive routing surface ──────────────────────────────
+
+    def _router_adapter(self, endpoint: ModelEndpoint) -> object | None:
+        """Build the real completion adapter for an endpoint, on demand.
+
+        A local endpoint is served by the SAME Ollama provider constructor the
+        brain uses, pinned to that endpoint's model. A cloud endpoint uses the
+        live provider object the user installed. No key is read or returned
+        here, and a provider that is not actually configured yields ``None``
+        rather than an object that would fail later.
+        """
+        record = self.model_router.providers.get(endpoint.provider_id)
+        if record is None:
+            return None
+        if record.kind is ProviderKind.LOCAL:
+            if ollama_disabled():
+                return None
+            return build_ollama_provider(model=endpoint.model)
+        if self.brain.cloud_provider_name and self.brain.cloud_provider_name == endpoint.provider_id:
+            return self.brain._cloud_provider
+        if getattr(self, "_router_cloud_provider_id", "") == endpoint.provider_id:
+            return self.brain._cloud_provider
+        return None
+
+    def _attach_model_router(self) -> None:
+        """Keep the brain's optional router attached to the live catalogue.
+
+        Boot order and lazy upgrades both matter here: a persisted scratch mode
+        leaves the brain on Echo at boot, and a later switch to llm/auto (or a
+        lazy Ollama upgrade) must not keep answering through the old provider
+        while the router sits idle.
+        """
+        if getattr(self, "model_router", None) is None or getattr(self, "brain", None) is None:
+            return
+        if self.brain.model_configured and self.model_router.executable():
+            self.brain.set_model_router(self.model_router)
+        else:
+            self.brain.set_model_router(None)
+
+    def _handle_provider_upgrade(self, provider: object) -> None:
+        """One callback for a lazy local-model upgrade.
+
+        Explore and adaptive routing both hold their own provider references;
+        updating only one leaves Chat routed while research still uses the old
+        provider (or the reverse).
+        """
+        del provider  # the provider is already installed on the brain
+        self._sync_explore_provider()
+        self._sync_model_router()
+
+    def _sync_model_router(self) -> None:
+        """Register only the endpoints that are live and configured right now.
+
+        The catalogue is deliberately not filled with every declaration in the
+        configuration: a declaration says what a model WOULD be able to do, not
+        that it is installed or that its provider can be reached today. Runtime
+        discovery can add installed models through
+        :meth:`AdaptiveModelRouter.sync_local_models` once the manager has
+        actually probed them.
+        """
+        router = self.model_router
+        provider_id = str(self.model_manager.provider_name() or "ollama").lower()
+        # In explicit cloud mode the brain's active provider is the cloud model;
+        # registering its name under the LOCAL provider would send cloud traffic
+        # to the local runtime (and make a local-only route look available).
+        local_model = (
+            self.brain.model_name
+            if self.brain.model_configured and self.brain.mode != "cloud"
+            else ""
+        )
+        if local_model:
+            router.register_provider(
+                ProviderRecord(
+                    provider_id=provider_id,
+                    label=f"{provider_id} (local)",
+                    kind=ProviderKind.LOCAL,
+                    models=(local_model,),
+                    notes="local runtime; provider charge is zero",
+                )
+            )
+            profiles: list[ModelProfile] = [
+                self.model_manager.registry.profile_for(local_model, provider=provider_id)
+            ]
+            # Discover the REST of the installed local models as well, not just
+            # the chat brain: a vision model that is already pulled must be
+            # selectable for an image task without becoming the chat brain.
+            # The runtime is asked at most once every 30 s on this sync path.
+            discovered_live = False
+            if not ollama_disabled() and (time.monotonic() - self._router_catalog_refreshed_at) > 30:
+                try:
+                    self.model_manager.refresh_capabilities()
+                    discovered = list(self.model_manager.discover())
+                    if discovered:
+                        profiles = discovered
+                        discovered_live = True
+                    self._router_catalog_refreshed_at = time.monotonic()
+                except Exception:
+                    pass
+            for profile in profiles:
+                if not str(profile.name).strip():
+                    continue
+                modalities = ["text"]
+                if ModelCapability.VISION in profile.capabilities:
+                    modalities.append("image")
+                router.register_endpoint(
+                    ModelEndpoint(
+                        provider_id=provider_id,
+                        model=profile.name,
+                        profile=replace(profile, provider=profile.provider or provider_id),
+                        family="",
+                        input_modalities=tuple(modalities),
+                        context_length=profile.context_length,
+                        pricing_per_1m_input=0.0,
+                        pricing_per_1m_output=0.0,
+                        metadata_source="runtime-reported"
+                        if profile.runtime_confirmed
+                        else "declared"
+                        if profile.declared
+                        else "inferred",
+                    )
+                )
+            if discovered_live:
+                # The runtime answered, so models missing from its answer are
+                # gone from selection too (not merely hidden from the list).
+                router.prune_local_models(provider_id, {profile.name for profile in profiles})
+        stored = (
+            self._cloud_llm_store.read("cloud_llm")
+            if self._cloud_llm_store is not None
+            else {}
+        )
+        preset_id = str(stored.get("provider", "") or "")
+        cloud_model = str(stored.get("model", "") or "") or str(
+            getattr(self.brain._cloud_provider, "model", "") or ""
+        )
+        provider_key = (
+            f"cloud:{preset_id}"
+            if preset_id and cloud_model and self.brain.cloud_provider_name
+            else ""
+        )
+        previous_cloud = getattr(self, "_router_cloud_provider_id", "")
+        previous_cloud_model = getattr(self, "_router_cloud_model", "")
+        # Do not remove and re-add the SAME cloud provider on every sync: that
+        # would erase its measured health and the user's enable/disable switch.
+        if previous_cloud and previous_cloud != provider_key:
+            router.remove_provider(previous_cloud)
+            previous_cloud = ""
+            previous_cloud_model = ""
+            self._router_cloud_provider_id = ""
+            self._router_cloud_model = ""
+        if provider_key:
+            preset = get_cloud_preset(preset_id) or {}
+            if previous_cloud == provider_key and previous_cloud_model != cloud_model:
+                # The model changed inside the same provider: replace only the
+                # stale endpoint, keeping provider health and the user switch.
+                router.remove_endpoint(provider_key, previous_cloud_model)
+            router.register_cloud_model(
+                provider_id=provider_key,
+                model=cloud_model,
+                label=str(preset.get("label") or preset_id),
+                adapter=self.brain._cloud_provider,
+                base_url=str(preset.get("base_url") or ""),
+                limitations=("capabilities not reported; text-only transport",),
+            )
+            self._router_cloud_provider_id = provider_key
+            self._router_cloud_model = cloud_model
+        elif previous_cloud:
+            router.remove_provider(previous_cloud)
+            self._router_cloud_provider_id = ""
+            self._router_cloud_model = ""
+        # A privacy mode can close the cloud slot; a user preference can close
+        # it too. Sync must not silently re-open a switch the user closed.
+        router.preferences = replace(
+            router.preferences,
+            allow_cloud=bool(self.brain.cloud_allowed and router.preferences.allow_cloud),
+        )
+        self._attach_model_router()
+
+    def _agent_model_assignment(
+        self,
+        role: Any,
+        goal: str,
+        context: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """Phase 33/28: the model a role's subtask should use, with evidence.
+
+        The role selects a task SHAPE (coding, research, document analysis,
+        planning, device work); the router then selects by capability and
+        measured evidence exactly as it does for chat. Agent context never
+        grants a capability by itself.
+        """
+        role_name = str(getattr(role, "value", role) or "").lower()
+        shapes = {
+            "coding": ("debug this failing test in the project", False),
+            "debug": ("debug this failing test in the project", False),
+            "testing": ("debug this failing test and verify the fix", False),
+            "verification": ("review the implementation and verify the result", False),
+            "research": ("research and compare sources for this question", False),
+            "data_analysis": ("analyse this document and summarise the findings", False),
+            "documentation": ("summarise this document and write the overview", False),
+            "review": ("review this document and identify problems", False),
+            "planning": ("plan a complex multi-step project", False),
+            "browser": ("navigate to the page and extract its content", True),
+            "desktop_automation": ("open the application and perform the action", True),
+        }
+        text, needs_tools = shapes.get(role_name, (goal or "answer the request", False))
+        try:
+            decision = self.model_router.route(
+                f"{text}. {goal}".strip(),
+                local_only=not self.brain.cloud_allowed,
+                requires_tools=needs_tools,
+                record=False,
+            )
+        except Exception:
+            return None
+        if not decision.found:
+            return None
+        return {
+            **decision.to_dict(),
+            "assigned_role": role_name,
+            "context_keys": sorted(str(key) for key in context)[:12],
+        }
+
+    def adaptive_model_status(self) -> dict[str, Any]:
+        """Providers, endpoints, preferences, measured health and last route."""
+        self._sync_model_router()
+        return self.model_router.status()
+
+    def model_routing_history(self, limit: int = 20) -> dict[str, Any]:
+        return self.model_router.routing_history(limit)
+
+    def route_model(
+        self,
+        text: str,
+        *,
+        has_image: bool = False,
+        local_only: bool = False,
+        requires_tools: bool = False,
+        requires_structured_output: bool = False,
+        latency_sensitivity: str = "",
+    ) -> dict[str, Any]:
+        """The selection for one request, including rejected candidates."""
+        self._sync_model_router()
+        started = time.perf_counter()
+        decision = self.model_router.route(
+            text,
+            has_image=has_image,
+            local_only=local_only or not self.brain.cloud_allowed,
+            requires_tools=requires_tools,
+            requires_structured_output=requires_structured_output,
+            latency_sensitivity=latency_sensitivity,
+        )
+        return {
+            **decision.to_dict(),
+            "selection_ms": round((time.perf_counter() - started) * 1000.0, 3),
+        }
+
+    async     def route_model_complete(
+        self,
+        text: str,
+        *,
+        messages: list[Mapping[str, str]] | None = None,
+        timeout_seconds: float | None = None,
+        local_only: bool = False,
+        **provider_kwargs: Any,
+    ) -> dict[str, Any]:
+        """Execute one routed completion with the real adapters and fallbacks."""
+        self._sync_model_router()
+        body = list(messages or [{"role": "user", "content": text}])
+        started = time.perf_counter()
+        restricted = bool(local_only or not self.brain.cloud_allowed)
+        outcome = await self.model_router.complete(
+            body,
+            text=text,
+            local_only=restricted,
+            timeout_seconds=timeout_seconds,
+            **provider_kwargs,
+        )
+        return {
+            **outcome.to_dict(),
+            "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 3),
+            "provider_switched": bool(outcome.fallback_used),
+            "local_only": restricted,
+        }
+
+    def configure_model_routing(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Apply real routing controls (cost, latency, concurrency, preference)."""
+        changes = dict(payload)
+        if changes.get("allow_cloud") is True and not self.brain.cloud_allowed:
+            raise ValueError(
+                "privacy mode does not allow cloud routing; enable cloud in Privacy first"
+            )
+        return self.model_router.configure_preferences(**changes)
+
+    def set_model_provider_enabled(self, provider_id: str, enabled: bool) -> dict[str, Any]:
+        return self.model_router.set_provider_enabled(provider_id, enabled)
+
+    def model_routing_policy(self) -> dict[str, Any]:
+        return {
+            "proposal": self.model_router.propose_policy(),
+            "active": self.model_router.status()["policy"],
+            "performance": self.model_router.performance(),
+            "history": self.model_router.observations(limit=25),
+        }
+
+    def activate_model_routing_policy(self) -> dict[str, Any]:
+        return self.model_router.activate_policy()
+
+    def rollback_model_routing_policy(self) -> dict[str, Any]:
+        return self.model_router.rollback_policy()
+
     # ── Model + hardware lifecycle ──────────────────────────────────────
 
     async def model_status(self) -> dict[str, Any]:
@@ -3001,6 +3889,9 @@ class NovaControlApplication:
             "selections": await asyncio.to_thread(
                 self._model_routing_report, snapshot=probes
             ),
+            # Phase 33: provider/endpoint catalogue and selection controls are
+            # part of the same model readout, not a separate management plane.
+            "routing": self.adaptive_model_status(),
         }
 
     def _vision_pipeline_report(self) -> dict[str, Any]:
@@ -3211,6 +4102,18 @@ class NovaControlApplication:
         nothing attached is read as the plain question it is. The vision
         handler then reads THAT image instead of taking a screenshot.
         """
+        # Phase 27: a correction at the start of a request is feedback about the
+        # PREVIOUS one, so it is applied before this request is understood.
+        self._detect_learning_correction(text)
+        personal_context = await self.personal_memory.context_for(
+            text, access=KnowledgeAccess.user(), budget_tokens=300
+        )
+        learning_started = time.perf_counter()
+        self._continual_suggestion = (
+            self.continual.recommend(text).to_dict()
+            if self.continual.enabled and self.config.continual.capture_requests
+            else {}
+        )
         await self.memory.remember(
             MemoryNamespace.CONVERSATION,
             f"request-{len((await self.memory.retrieve(MemoryNamespace.CONVERSATION, '', limit=100)))}",
@@ -3219,7 +4122,15 @@ class NovaControlApplication:
         attached = str(image or "").strip()
         request = BrainRequest(
             text=text,
-            context={**self.status(), **({"image": attached} if attached else {})},
+            context={
+                **self.status(),
+                **({"image": attached} if attached else {}),
+                **(
+                    {"personal_knowledge_context": personal_context.text}
+                    if personal_context.text
+                    else {}
+                ),
+            },
         )
         task = self.tasks.create(text, kind="ask")
         self.tasks.update(task.id, TaskRecordStatus.RUNNING, progress=0.1)
@@ -3459,6 +4370,10 @@ class NovaControlApplication:
                 ),
             }
             response = await self.brain.shape_response(request, decision, payload)
+        # Phase 27: a suggestion is ADVISORY and travels beside the answer with
+        # its evidence ids and confidence. It is never rewritten into the answer.
+        if self._continual_suggestion and self._continual_suggestion.get("source") != "none":
+            payload = {**payload, "continual_learning": dict(self._continual_suggestion)}
         self.tasks.update(task.id, TaskRecordStatus.COMPLETED, progress=1.0, result=response.to_dict())
         await self._announce(
             EventType.TASK_COMPLETED.value,
@@ -3489,6 +4404,20 @@ class NovaControlApplication:
             route=route or decision.intent.value,
             payload=payload,
         )
+        # Phase 27: capture AFTER the response is shaped, so a learning defect
+        # can cost evidence but never the request that produced it.
+        if self.continual.enabled and self.config.continual.capture_requests:
+            try:
+                self._capture_request_learning(
+                    text=text,
+                    route=route or decision.intent.value,
+                    intent=decision.intent.value,
+                    payload=payload,
+                    elapsed_ms=(time.perf_counter() - learning_started) * 1000.0,
+                    correlation=correlation,
+                )
+            except Exception:
+                pass
         return ApplicationResponse(route, decision.intent.value, response.summary, payload)
 
     def _record_request(
@@ -3954,6 +4883,766 @@ class NovaControlApplication:
         correlation = str(fields.pop("correlation_id", "") or "")
         self._announce_soon(type_, correlation_id=correlation, **fields)
 
+    # ── Phase 27: continual learning and self-improvement ────────────────
+    #
+    # Everything below is a thin door onto ``self.continual``. The engine owns
+    # the lifecycle; this layer validates what a caller can get wrong (a blank
+    # goal, an unknown id, a promotion without validation) and returns records
+    # the engine produced. Nothing here plans, executes or edits code.
+
+    _CONTINUAL_CORRECTION_MARKERS = (
+        "no,", "no ", "that's wrong", "thats wrong", "that is wrong",
+        "wrong", "incorrect", "i meant", "not that", "instead",
+        "you typed", "that was wrong",
+    )
+
+    def _build_continual_learning(self) -> ContinualLearningEngine:
+        settings = self.config.continual
+        store: Any = InMemoryContinualLearningStore()
+        if self.state_store is not None and settings.persist:
+            store = JsonContinualLearningStore(self.state_store)
+        engine = ContinualLearningEngine(
+            store=store,
+            enabled=settings.enabled,
+            persist=settings.persist,
+            max_experiences=settings.max_experiences,
+            min_support=settings.min_support,
+            min_confidence=settings.min_confidence,
+            auto_learn=settings.auto_learn,
+            auto_promote=settings.auto_promote,
+            auto_rollback=settings.auto_rollback,
+            retention_days=settings.retention_days,
+            observer=self._continual_event,
+        )
+        self._continual_restore_report: dict[str, Any] = {}
+        if settings.enabled and settings.persist:
+            self._continual_restore_report = engine.restore()
+        return engine
+
+    # --- Multi-agent collaboration (Phase 28) ---
+
+    def _build_collaboration(self) -> CollaborationEngine:
+        """Build the collaboration engine over the agents this application owns.
+
+        The engine is deliberately given the existing registry, the app-wide
+        event bus and the Phase 27 learning engine. It gets no permission table
+        of its own and no executor: a subtask reaches a tool only through its
+        agent's ordinary SpecialistPipeline.
+        """
+        settings = self.config.collaboration
+        policy = CollaborationPolicy(
+            enabled=settings.enabled,
+            persist=settings.persist,
+            capture_learning=settings.capture_learning,
+            max_concurrency=settings.max_concurrency,
+            max_subtasks=settings.max_subtasks,
+            max_tasks=settings.max_tasks,
+            max_retries=settings.max_retries,
+            default_timeout_seconds=settings.default_timeout_seconds,
+            rate_limit_backoff_seconds=settings.rate_limit_backoff_seconds,
+            rate_limit_backoff_max_seconds=settings.rate_limit_backoff_max_seconds,
+            token_budget=settings.token_budget,
+            hardware_aware=settings.hardware_aware,
+            sequential_fallback=settings.sequential_fallback,
+        )
+        engine = CollaborationEngine(
+            self.agent_registry,
+            policy=policy,
+            event_bus=self.event_bus,
+            store=self.state_store if settings.persist else None,
+            learning=self.continual,
+            authorize_pipeline=lambda: self._build_specialist_pipeline(authorize=True),
+            provider_getter=lambda: self.brain.completion_provider,
+            hardware_governor=self.governor,
+            source="application",
+            model_assigner=self._agent_model_assignment,
+        )
+        self._collaboration_restore_report: dict[str, Any] = {}
+        if settings.enabled and settings.persist:
+            self._collaboration_restore_report = engine.restore()
+        return engine
+
+    def collaboration_status(self) -> dict[str, Any]:
+        return {
+            **dict(self.collaboration.status()),
+            "restored": dict(getattr(self, "_collaboration_restore_report", {})),
+        }
+
+    def collaboration_overview(self) -> dict[str, Any]:
+        return dict(self.collaboration.overview())
+
+    def collaboration_plan(
+        self,
+        objective: str,
+        *,
+        context: Mapping[str, Any] | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        return self.collaboration.plan(
+            objective, context=context, force=force
+        ).to_dict()
+
+    async def run_collaboration(
+        self,
+        objective: str,
+        *,
+        context: Mapping[str, Any] | None = None,
+        authorize: bool = False,
+        idempotency_key: str = "",
+    ) -> dict[str, Any]:
+        task = await self.collaboration.run(
+            objective,
+            context=context,
+            authorize=authorize,
+            idempotency_key=idempotency_key,
+            source="api",
+        )
+        return task.to_dict()
+
+    def collaboration_tasks(
+        self, *, status: str = "", limit: int = 20, offset: int = 0
+    ) -> dict[str, Any]:
+        return self.collaboration.tasks(status=status, limit=limit, offset=offset)
+
+    def collaboration_task(self, task_id: str) -> dict[str, Any]:
+        return self.collaboration.task(task_id).to_dict()
+
+    def cancel_collaboration(self, task_id: str) -> dict[str, Any]:
+        return self.collaboration.cancel(task_id).to_dict()
+
+    async def resume_collaboration(
+        self, task_id: str, *, authorize: bool = False
+    ) -> dict[str, Any]:
+        return (
+            await self.collaboration.resume(task_id, authorize=authorize)
+        ).to_dict()
+
+    def _continual_event(self, event_type: str, payload: Mapping[str, Any]) -> None:
+        """Relay one learning event onto the application's ONE event bus."""
+        names = {
+            "learning.experience_recorded": EventType.CONTINUAL_EXPERIENCE_RECORDED,
+            "learning.strategy_proposed": EventType.CONTINUAL_STRATEGY_PROPOSED,
+            "learning.strategy_validated": EventType.CONTINUAL_STRATEGY_VALIDATED,
+            "learning.strategy_promoted": EventType.CONTINUAL_STRATEGY_PROMOTED,
+            "learning.strategy_rolled_back": EventType.CONTINUAL_STRATEGY_ROLLED_BACK,
+            "learning.feedback_recorded": EventType.CONTINUAL_FEEDBACK_RECORDED,
+        }
+        type_ = names.get(str(event_type))
+        if type_ is None:
+            return
+        fields = dict(payload)
+        correlation = str(fields.pop("correlation_id", "") or "")
+        self._announce_soon(type_, correlation_id=correlation, **fields)
+
+    def _continual_task_kind(self, route: str) -> str:
+        mapping = {
+            "desktop_automation": "desktop.command",
+            "browser_automation": "browser.command",
+            "phone_control": "phone.command",
+            "planning": "plan.workflow",
+            "explore": "research.explore",
+            "chat": "chat.answer",
+            "memory": "knowledge.memory",
+            "agent": "agent.task",
+            "agentic": "agentic.task",
+            "game_launch": "game.launch",
+            "vision": "vision.analysis",
+        }
+        return mapping.get(str(route or ""), f"route.{route or 'unknown'}")
+
+    def _continual_steps(
+        self, payload: Mapping[str, Any]
+    ) -> tuple[list[StepEvidence], dict[str, Any], list[str], int]:
+        """Turn a handler payload into step evidence, without inventing any.
+
+        Only executed results become completed/failed steps. A plan that was
+        never executed has no results, so its actions are recorded as SKIPPED and
+        the run cannot be classified as a success.
+        """
+        workflow = payload.get("workflow") if isinstance(payload, Mapping) else None
+        actions: list[Any] = []
+        if isinstance(workflow, Mapping) and isinstance(workflow.get("actions"), list):
+            actions = list(workflow["actions"])
+        elif isinstance(payload.get("actions"), list):
+            actions = list(payload["actions"])
+        results = payload.get("execution_results")
+        if not isinstance(results, list):
+            results = []
+        by_id: dict[str, Mapping[str, Any]] = {}
+        for result in results:
+            if isinstance(result, Mapping):
+                key = str(result.get("action_id") or result.get("id") or "")
+                if key:
+                    by_id[key] = result
+        steps: list[StepEvidence] = []
+        for index, action in enumerate(actions):
+            if not isinstance(action, Mapping):
+                continue
+            action_id = str(action.get("id") or f"action-{index + 1}")
+            result = by_id.get(action_id, {})
+            status = str(
+                result.get("status", "") or ("skipped" if not results else "unknown")
+            ).strip().lower()
+            if status not in {"completed", "failed", "skipped", "denied"}:
+                status = "unknown"
+            output = result.get("output")
+            if not isinstance(output, Mapping):
+                output = {}
+            verified = result.get("verified", output.get("verified"))
+            raw_attempts = result.get("attempts", output.get("attempts", 1))
+            try:
+                attempts = max(1, int(raw_attempts))
+            except (TypeError, ValueError):
+                attempts = 1
+            try:
+                duration_ms = max(0.0, float(result.get("duration_ms", output.get("duration_ms", 0.0)) or 0.0))
+            except (TypeError, ValueError):
+                duration_ms = 0.0
+            steps.append(
+                StepEvidence(
+                    step_id=action_id,
+                    kind=str(action.get("type", "") or ""),
+                    target=str(action.get("target", "") or ""),
+                    tool=str(action.get("tool", "") or ""),
+                    status=status,
+                    verified=verified if isinstance(verified, bool) else None,
+                    error=str(result.get("error", "") or ""),
+                    attempts=attempts,
+                    duration_ms=duration_ms,
+                )
+            )
+        retries = sum(max(0, step.attempts - 1) for step in steps)
+        verification: dict[str, Any] = {}
+        errors: list[str] = []
+        if results:
+            failed = [
+                result
+                for result in results
+                if isinstance(result, Mapping)
+                and str(result.get("status", "") or "").strip().lower()
+                in {"failed", "error", "denied"}
+            ]
+            if failed:
+                verification = {
+                    "passed": False,
+                    "status": "failed",
+                    "source": "tool",
+                    "reason": f"{len(failed)} executed action(s) failed",
+                }
+                errors = [
+                    str(result.get("error", "") or "action failed") for result in failed
+                ]
+            elif steps and all(step.verified is True for step in steps):
+                verification = {
+                    "passed": True,
+                    "status": "passed",
+                    "source": "tool",
+                    "reason": "every executed action was verified",
+                }
+        return steps, verification, errors, retries
+
+    def _capture_request_learning(
+        self,
+        *,
+        text: str,
+        route: str,
+        intent: str,
+        payload: Mapping[str, Any],
+        elapsed_ms: float,
+        correlation: str,
+    ) -> dict[str, Any]:
+        steps, verification, errors, retries = self._continual_steps(payload)
+        device = {
+            "desktop_automation": "desktop",
+            "browser_automation": "browser",
+            "phone_control": "phone",
+        }.get(str(route or ""), "local")
+        evidence = self.continual.capture(
+            text,
+            task_kind=self._continual_task_kind(route),
+            source="request",
+            route=str(route or ""),
+            intent=str(intent or ""),
+            context={
+                "device": device,
+                "app": "",
+                "brain_mode": str(getattr(self.brain, "mode", "") or ""),
+            },
+            steps=steps,
+            verification=verification,
+            errors=errors,
+            latency_ms=elapsed_ms,
+            retries=retries,
+            correlation_id=correlation,
+        )
+        result = self.continual.record(evidence)
+        self._last_learning = {
+            "experience_id": evidence.experience_id,
+            "goal": str(text)[:300],
+            "task_kind": evidence.task_kind,
+        }
+        return result
+
+    def _capture_execution_learning(
+        self,
+        *,
+        command: str,
+        device: str,
+        payload: Mapping[str, Any],
+        elapsed_ms: float,
+        correlation: str,
+    ) -> dict[str, Any]:
+        """Record one REAL device execution, after it already ran.
+
+        This is the path that makes learning about tasks rather than chat: a
+        desktop/browser/phone workflow reaches this method with the results the
+        controller produced. The evidence is captured from those results only,
+        so an execution with no verifier is recorded honestly as partial or
+        failed — never as a success because the response looked fine. A learning
+        defect is contained here; the executed workflow has already returned to
+        its caller.
+        """
+        if not (self.continual.enabled and self.config.continual.capture_requests):
+            return {"recorded": False, "reason": "continual capture is disabled"}
+        routes = {
+            "desktop": "desktop_automation",
+            "browser": "browser_automation",
+            "phone": "phone_control",
+        }
+        route = routes.get(str(device or ""), "desktop_automation")
+        steps, verification, errors, retries = self._continual_steps(payload)
+        evidence = self.continual.capture(
+            command,
+            task_kind=self._continual_task_kind(route),
+            source="execution",
+            route=route,
+            intent=route,
+            context={
+                "device": str(device or "desktop"),
+                "app": "",
+                "family": str(payload.get("family", "") or ""),
+                "brain_mode": str(getattr(self.brain, "mode", "") or ""),
+            },
+            steps=steps,
+            verification=verification,
+            errors=errors,
+            latency_ms=elapsed_ms,
+            retries=retries,
+            correlation_id=correlation,
+        )
+        result = self.continual.record(evidence)
+        self._last_learning = {
+            "experience_id": evidence.experience_id,
+            "goal": str(command)[:300],
+            "task_kind": evidence.task_kind,
+        }
+        return result
+
+    def _capture_agentic_learning(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        elapsed_ms: float,
+    ) -> dict[str, Any]:
+        """Record one completed agentic loop from its real state, not its prose.
+
+        ``AgentTaskState`` carries the plan, executed actions and the verifier's
+        per-step/final results. A step is completed only when its action
+        returned AND its verifier did not fail; it is verified only when the
+        verifier passed. An exhausted plan with successful actions but no final
+        verification is therefore PARTIAL, never a fabricated success.
+        """
+        if not (self.continual.enabled and self.config.continual.capture_requests):
+            return {"recorded": False, "reason": "continual capture is disabled"}
+        goal = str(payload.get("goal", "") or "").strip()
+        if not goal:
+            return {"recorded": False, "reason": "the agentic run has no goal"}
+        plan_by_id: dict[str, Mapping[str, Any]] = {}
+        raw_plan = payload.get("plan")
+        if isinstance(raw_plan, list):
+            for entry in raw_plan:
+                if isinstance(entry, Mapping):
+                    plan_id = str(entry.get("id", "") or "")
+                    if plan_id:
+                        plan_by_id[plan_id] = entry
+        verification_map = payload.get("verification")
+        if not isinstance(verification_map, Mapping):
+            verification_map = {}
+        pass_states = {"pass", "passed", "verified", "ok", "succeeded", "true"}
+        fail_states = {"fail", "failed", "error", "rejected", "false"}
+        steps: list[StepEvidence] = []
+        raw_actions = payload.get("actions")
+        if isinstance(raw_actions, list):
+            for index, action in enumerate(raw_actions):
+                if not isinstance(action, Mapping):
+                    continue
+                step_id = str(action.get("step_id", "") or f"step-{index + 1}")
+                plan_step = plan_by_id.get(step_id, {})
+                check = verification_map.get(f"step:{step_id}")
+                check_status = ""
+                if isinstance(check, Mapping):
+                    check_status = str(check.get("status", "") or "").strip().lower()
+                success = bool(action.get("success"))
+                status = "completed" if success else "failed"
+                if check_status in fail_states:
+                    status = "failed"
+                verified = (
+                    True
+                    if check_status in pass_states
+                    else False
+                    if check_status in fail_states
+                    else None
+                )
+                detail = str(action.get("detail", "") or "")
+                steps.append(
+                    StepEvidence(
+                        step_id=step_id,
+                        kind=str(
+                            plan_step.get("kind", "")
+                            or action.get("action", "")
+                            or ""
+                        ),
+                        target=str(action.get("target", "") or ""),
+                        tool=str(action.get("action", "") or ""),
+                        status=status,
+                        verified=verified,
+                        error=detail if status == "failed" else "",
+                        attempts=1,
+                    )
+                )
+        final = verification_map.get("final")
+        final_status = ""
+        final_passed: bool | None = None
+        final_reason = ""
+        if isinstance(final, Mapping):
+            final_status = str(final.get("status", "") or "").strip().lower()
+            final_reason = str(final.get("reason", "") or "")
+            raw_passed = final.get("passed")
+            if isinstance(raw_passed, bool):
+                final_passed = raw_passed
+        verification: dict[str, Any] = {}
+        if final_passed is True or final_status in pass_states:
+            verification = {
+                "passed": True,
+                "status": final_status or "passed",
+                "source": "agentic_verifier",
+                "reason": final_reason or "the agentic verifier observed the expected result",
+            }
+        elif final_passed is False or final_status in fail_states:
+            verification = {
+                "passed": False,
+                "status": final_status or "failed",
+                "source": "agentic_verifier",
+                "reason": final_reason or "the agentic verifier did not observe the expected result",
+            }
+        elif str(payload.get("status", "") or "").strip().lower() == "failed":
+            verification = {
+                "passed": False,
+                "status": "failed",
+                "source": "agentic_loop",
+                "reason": "the agentic loop ended failed",
+            }
+        raw_errors = payload.get("errors")
+        errors = (
+            [str(item) for item in raw_errors if str(item).strip()]
+            if isinstance(raw_errors, list)
+            else []
+        )
+        raw_recoveries = payload.get("recoveries")
+        recoveries: list[str] = []
+        if isinstance(raw_recoveries, list):
+            for item in raw_recoveries:
+                text = ""
+                if isinstance(item, Mapping):
+                    text = str(
+                        item.get("diagnosis", "")
+                        or item.get("strategy_text", "")
+                        or item.get("strategy", "")
+                        or ""
+                    )
+                else:
+                    text = str(item or "")
+                if text.strip():
+                    recoveries.append(text[:300])
+        interpretation = payload.get("interpretation")
+        required_tools: list[str] = []
+        if isinstance(interpretation, Mapping):
+            raw_tools = interpretation.get("required_tools")
+            if isinstance(raw_tools, list):
+                required_tools = [str(tool) for tool in raw_tools if str(tool).strip()]
+        device = next(
+            (name for name in ("browser", "desktop", "phone") if name in required_tools),
+            "local",
+        )
+        evidence = self.continual.capture(
+            goal,
+            task_kind="agentic.task",
+            source="execution",
+            route="agentic",
+            intent="agentic",
+            context={
+                "device": device,
+                "app": "",
+                "required_tools": required_tools,
+                "brain_mode": str(getattr(self.brain, "mode", "") or ""),
+            },
+            steps=steps,
+            verification=verification,
+            errors=errors,
+            recoveries=recoveries,
+            latency_ms=elapsed_ms,
+            retries=len(recoveries),
+            correlation_id=str(payload.get("task_id", "") or ""),
+        )
+        result = self.continual.record(evidence)
+        self._last_learning = {
+            "experience_id": evidence.experience_id,
+            "goal": goal[:300],
+            "task_kind": evidence.task_kind,
+        }
+        return result
+
+    def _capture_verified_game_launch_learning(
+        self,
+        *,
+        command: str,
+        payload: Mapping[str, Any],
+        elapsed_ms: float,
+    ) -> dict[str, Any]:
+        """Record a game launch ONLY after the launcher verified process + window.
+
+        A launch request, a returned process, or a window probe that never found
+        the game is not evidence of a completed launch. The game service's own
+        ``launch_verified`` stage is the gate, and its verification text becomes
+        the evidence reason; no step is invented for a plan that never ran.
+        """
+        if not (self.continual.enabled and self.config.continual.capture_requests):
+            return {"recorded": False, "reason": "continual capture is disabled"}
+        stages = payload.get("stages")
+        if not isinstance(stages, Mapping) or stages.get("launch_verified") is not True:
+            return {"recorded": False, "reason": "the launch was not verified"}
+        game = payload.get("game")
+        game_map = game if isinstance(game, Mapping) else {}
+        launch = game_map.get("launch")
+        launch_map = launch if isinstance(launch, Mapping) else {}
+        target = str(
+            payload.get("target", "")
+            or launch_map.get("name", "")
+            or command
+        )
+        launch_id = str(launch_map.get("launch_id", "") or "")
+        verification_text = str(
+            launch_map.get("verification", "")
+            or "the launcher verified a new process and its window"
+        )
+        raw_attempt = game_map.get("attempt", 1)
+        try:
+            attempt = max(1, int(raw_attempt))
+        except (TypeError, ValueError):
+            attempt = 1
+        evidence = self.continual.capture(
+            command,
+            task_kind="game.launch",
+            source="execution",
+            route="game_launch",
+            intent="game_launch",
+            context={
+                "device": "desktop",
+                "app": "game_launcher",
+                "game": target,
+                "launch_id": launch_id,
+                "brain_mode": str(getattr(self.brain, "mode", "") or ""),
+            },
+            steps=[
+                StepEvidence(
+                    step_id=f"game-launch:{launch_id or target}",
+                    kind="game_launch",
+                    target=target,
+                    tool="game_launcher",
+                    status="completed",
+                    verified=True,
+                    attempts=attempt,
+                )
+            ],
+            verification={
+                "passed": True,
+                "status": "passed",
+                "source": "game_launcher",
+                "reason": verification_text,
+            },
+            latency_ms=elapsed_ms,
+            retries=max(0, attempt - 1),
+            correlation_id=launch_id,
+        )
+        result = self.continual.record(evidence)
+        self._last_learning = {
+            "experience_id": evidence.experience_id,
+            "goal": str(command)[:300],
+            "task_kind": evidence.task_kind,
+        }
+        return result
+
+    def _continual_plan_suggestion(
+        self, command: str, task_kind: str, device: str
+    ) -> dict[str, Any]:
+        """The advisory suggestion a device plan carries, or {}.
+
+        A plan is the planner's decision, so a suggestion rides BESIDE it under
+        ``continual`` with its evidence ids and ``adapt_targets``. It never
+        rewrites the planned workflow: the existing planner still owns the plan
+        and the existing executor still runs it.
+        """
+        if not (self.continual.enabled and self.config.continual.capture_requests):
+            return {}
+        try:
+            recommendation = self.continual.recommend(
+                command, task_kind=task_kind, context={"device": device, "app": ""}
+            ).to_dict()
+        except Exception:
+            return {}
+        return recommendation if recommendation.get("source") != "none" else {}
+
+    def _detect_learning_correction(self, text: str) -> None:
+        """A short "no, I meant …" is feedback about the PREVIOUS execution."""
+        last = getattr(self, "_last_learning", None) or {}
+        experience_id = str(last.get("experience_id", "") or "")
+        if not experience_id:
+            return
+        lower = str(text or "").strip().lower()
+        if not lower or len(lower) > 200:
+            return
+        if not any(lower.startswith(marker) for marker in self._CONTINUAL_CORRECTION_MARKERS):
+            return
+        try:
+            self.continual.feedback(experience_id, "negative", note=str(text)[:200])
+        except (KeyError, ValueError):
+            return
+        finally:
+            self._last_learning = {}
+
+    # -- Phase 27: the HTTP surface's application side --------------------
+
+    def continual_status(self) -> dict[str, Any]:
+        return {
+            **dict(self.continual.status()),
+            "restored": dict(getattr(self, "_continual_restore_report", {})),
+        }
+
+    def continual_overview(self) -> dict[str, Any]:
+        return dict(self.continual.overview())
+
+    def continual_experiences(
+        self,
+        *,
+        task_kind: str = "",
+        outcome: str = "",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        return dict(
+            self.continual.experiences(
+                task_kind=task_kind, outcome=outcome, limit=limit, offset=offset
+            )
+        )
+
+    def continual_experience(self, experience_id: str) -> dict[str, Any]:
+        return dict(self.continual.experience(experience_id))
+
+    def continual_delete_experience(self, experience_id: str) -> dict[str, Any]:
+        return dict(self.continual.delete(experience_id))
+
+    def continual_feedback(self, body: Mapping[str, Any]) -> dict[str, Any]:
+        experience_id = str(body.get("experience_id", "") or "").strip()
+        verdict = str(body.get("verdict", "") or "").strip()
+        if not experience_id:
+            raise ValueError("feedback needs an 'experience_id'")
+        if not verdict:
+            raise ValueError("feedback needs a 'verdict' (positive or negative)")
+        return dict(
+            self.continual.feedback(
+                experience_id, verdict, note=str(body.get("note", "") or "")
+            )
+        )
+
+    def continual_signals(
+        self, *, task_kind: str = "", direction: str = ""
+    ) -> dict[str, Any]:
+        return dict(self.continual.signals(task_kind=task_kind, direction=direction))
+
+    def continual_strategies(self) -> dict[str, Any]:
+        return dict(self.continual.strategies())
+
+    def continual_proposals(self, *, status: str = "") -> dict[str, Any]:
+        return dict(self.continual.proposals(status=status))
+
+    def continual_propose(self, body: Mapping[str, Any]) -> dict[str, Any]:
+        proposal = self.continual.propose(str(body.get("task_kind", "") or ""))
+        if proposal is None:
+            return {
+                "proposed": False,
+                "reason": (
+                    "no proposal: this needs at least "
+                    f"{self.config.continual.min_support} distinct verified successes "
+                    "of the same step shape for a task kind"
+                ),
+            }
+        return {"proposed": True, "proposal": proposal}
+
+    def continual_validate(self, proposal_id: str) -> dict[str, Any]:
+        return dict(self.continual.validate(proposal_id))
+
+    def continual_promote(self, proposal_id: str, *, reason: str = "") -> dict[str, Any]:
+        return dict(self.continual.promote(proposal_id, reason=reason))
+
+    def continual_rollback(self, strategy_id: str, *, reason: str = "") -> dict[str, Any]:
+        wanted = str(strategy_id or "").strip()
+        record = next(
+            (
+                row
+                for row in self.continual.strategies()["strategies"]
+                if row["strategy_id"] == wanted
+            ),
+            None,
+        )
+        if record is None:
+            raise KeyError(f"no strategy {wanted!r}")
+        result = self.continual.rollback(str(record["task_kind"]), reason=reason)
+        if result is None:
+            raise ValueError("this strategy has no previous version to restore")
+        return dict(result)
+
+    def continual_recommend(self, body: Mapping[str, Any]) -> dict[str, Any]:
+        goal = str(body.get("goal", "") or "").strip()
+        if not goal:
+            raise ValueError("a recommendation needs a 'goal'")
+        context = body.get("context")
+        return self.continual.recommend(
+            goal,
+            task_kind=str(body.get("task_kind", "") or ""),
+            context=context if isinstance(context, Mapping) else {},
+        ).to_dict()
+
+    def continual_benchmark(self, body: Mapping[str, Any]) -> dict[str, Any]:
+        """Run the repeatable benchmark on an ISOLATED engine.
+
+        The benchmark writes its own experience, so it must never pollute the
+        live corpus: a measured run would otherwise become evidence for the very
+        strategies it is measuring.
+        """
+        requested = body.get("tasks", self.config.continual.benchmark_tasks)
+        try:
+            tasks = int(requested)
+        except (TypeError, ValueError):
+            tasks = self.config.continual.benchmark_tasks
+        tasks = max(2, min(12, tasks))
+        engine = ContinualLearningEngine(
+            store=InMemoryContinualLearningStore(),
+            auto_save_seconds=0.0,
+            min_support=self.config.continual.min_support,
+            min_confidence=self.config.continual.min_confidence,
+        )
+        return LearningBenchmark(engine, task_count=tasks).run()
+
     # -- Phase 23: interactive learning's application surface ----------------
 
     # Every method here is a THIN door onto the manager: it validates what a
@@ -4385,7 +6074,13 @@ class NovaControlApplication:
         describer = self._build_novaforge_vision() if describe else None
         return ObservationBuilder(
             probe=manager.window_probe,
-            capture=manager.capture_frame if manager.capture_supported else None,
+            # Pinned by the session's own HANDLE, never by the title alone: a
+            # window whose title merely contains the game's name (a browser tab
+            # playing the game, measured) would otherwise supply the pixels that
+            # a decision is made from.
+            capture=(
+                manager.capture_frame_for_observation if manager.capture_supported else None
+            ),
             ocr=ScreenTextReader(read_text=reader) if reader is not None else None,
             # When wired, the describer reports its own availability, so an
             # absent model is a REPORTED reason rather than a missing seam and
@@ -4450,6 +6145,12 @@ class NovaControlApplication:
         "ready": HarnessReadyPolicy,
         "stages": HarnessStagesPolicy,
         "fixed": FixedKeyPolicy,
+        # The only policy whose action is NOT a rule this build's author wrote:
+        # it shows a vision model the target's own frame and the operator's
+        # objective, and sends the ONE bounded action the model chooses. The
+        # session's objective and the live viewer are attached per run, so this
+        # factory is a placeholder until ``_build_model_policy`` configures it.
+        "model": ModelDecisionPolicy,
     }
 
     @classmethod
@@ -4462,6 +6163,8 @@ class NovaControlApplication:
         policy: str = "ready",
         limits: LoopLimits | None = None,
         cancel: asyncio.Event | None = None,
+        session_id: str = "",
+        objective: str = "",
     ) -> ClosedLoopRunner:
         """One runner per run: its observation history must not outlive a run.
 
@@ -4470,23 +6173,94 @@ class NovaControlApplication:
         policy NAME is explicit: a typo must not fall back to another policy
         and quietly report a different experiment than the one requested.
         """
-        factory = self._NOVAFORGE_POLICIES.get(str(policy or "ready"))
+        name = str(policy or "ready")
+        factory = self._NOVAFORGE_POLICIES.get(name)
         if factory is None:
             raise ValueError(
                 f"Unknown decision policy {policy!r}; installed policies are "
                 + ", ".join(sorted(self._NOVAFORGE_POLICIES))
                 + "."
             )
+        policy_object = (
+            self._build_model_policy(session_id=session_id, objective=objective)
+            if name == "model"
+            else factory()
+        )
         return ClosedLoopRunner(
             gateway=self.novaforge,
-            # No model call inside the bounded loop: see the describe= note on
-            # _build_novaforge_observations. The measurements it needs (window
-            # title, OCR, frame freshness) are all direct evidence.
+            # No model call inside the bounded OBSERVATION: see the describe= note
+            # on _build_novaforge_observations. A model-backed POLICY makes its
+            # own call, with the loop's own decision bound, from the frame the
+            # observation carries.
             observations=self._build_novaforge_observations(describe=False),
-            policy=factory(),
+            policy=policy_object,
             limits=limits,
             cancel=cancel,
         )
+
+    def _build_model_policy(self, *, session_id: str = "", objective: str = "") -> ModelDecisionPolicy:
+        """The model-backed policy, bound to THIS run's objective and live viewer.
+
+        The objective is the operator's own words — the loop's request first, then
+        the session's mission — because that text is what the model is asked to
+        make progress on. The viewer is the process's live vision provider, so
+        installing a different VLM changes what NovaForge decides without
+        changing this policy.
+        """
+        record = self.novaforge.get(session_id) if session_id else None
+        mission = getattr(record, "mission", None)
+        text = str(objective or getattr(mission, "objective", "") or "").strip()
+        criteria = str(getattr(mission, "success_criteria", "") or "").strip()
+        provider = self.vision_manager.provider
+        label = " ".join(
+            part
+            for part in (
+                str(getattr(provider, "name", "") or ""),
+                str(getattr(provider, "model", "") or ""),
+            )
+            if part
+        )
+        return ModelDecisionPolicy(
+            objective=text,
+            success_criteria=criteria,
+            decide=self._novaforge_decision_seer(),
+            viewer_label=label or "the configured vision provider",
+            unavailable_reason=(
+                ""
+                if text
+                else "This run has no objective text, so there is nothing for the model to "
+                "decide toward. Give the session or the run an objective."
+            ),
+        )
+
+    def _novaforge_decision_seer(self) -> DecisionSeer:
+        """``(prompt, image_path) -> the model's answer``, from the LIVE provider.
+
+        Bounded by the same deadline the rest of the vision path uses, so a model
+        that stops answering cannot hold the loop (the loop also has its own
+        decision bound). A provider failure RAISES: ``ModelDecisionPolicy`` turns
+        that into a reported refusal, which is different from an empty answer.
+        """
+
+        async def see(prompt: str, image_path: str) -> str:
+            provider = self.vision_manager.provider
+            if provider is None:
+                raise RuntimeError("no vision provider is configured")
+            if not bool(getattr(provider, "available", False)):
+                raise RuntimeError(
+                    f"the vision provider ({getattr(provider, 'name', 'none')}) cannot see images"
+                )
+            # STRUCTURED, because this is a decision and not a description: the
+            # loop needs one parseable action. On a local reasoning VLM the
+            # prose path spends its whole budget thinking and returns nothing
+            # (measured: 163 s, empty answer), while the structured path skips
+            # the reasoning and answers in 78 s.
+            return await asyncio.wait_for(
+                provider.see(prompt=prompt, image_path=image_path, structured=True),
+                timeout=vision_timeout_from_environment(),
+            )
+
+        return see
 
     def _novaforge_policy_capability(self, name: str) -> dict[str, Any]:
         """One installed policy's truthful capability row.
@@ -4497,7 +6271,9 @@ class NovaControlApplication:
         """
         factory = self._NOVAFORGE_POLICIES[name]
         try:
-            policy = factory()
+            policy = (
+                self._build_model_policy() if name == "model" else factory()
+            )
             data = (
                 dict(policy.capability())
                 if hasattr(policy, "capability")
@@ -4562,7 +6338,26 @@ class NovaControlApplication:
         data = dict(payload or {})
         if self.novaforge.get(session_id) is None:
             raise KeyError(session_id)
+        policy_name = str(data.get("policy") or "ready").strip()
+        if policy_name not in self._NOVAFORGE_POLICIES:
+            raise MissionValidationError(
+                [
+                    f"Unknown policy {policy_name!r}; choose one of "
+                    + ", ".join(sorted(self._NOVAFORGE_POLICIES))
+                    + "."
+                ]
+            )
         defaults = LoopLimits()
+        # A model-backed policy needs a decision budget that can cover ONE
+        # inference, or the loop stops a decision that was still being made. It
+        # defaults to the vision path's own deadline plus a margin, and a caller
+        # may state its own (bounded by LoopLimits). A deterministic policy pays
+        # nothing for a model call, so it keeps the tight default.
+        default_decision_timeout = (
+            vision_timeout_from_environment() + 15.0
+            if policy_name == "model"
+            else defaults.decision_timeout_seconds
+        )
         raw_actions = data.get("max_actions")
         raw_deadline = data.get("deadline_seconds")
         try:
@@ -4578,19 +6373,25 @@ class NovaControlApplication:
             raise MissionValidationError(
                 ["max_actions must be a whole number and deadline_seconds a number."]
             ) from exc
-        limits = LoopLimits(max_actions=max_actions, deadline_seconds=deadline)
+        raw_decision = data.get("decision_timeout_seconds")
+        try:
+            decision_timeout = (
+                default_decision_timeout
+                if raw_decision in (None, "")
+                else float(raw_decision)
+            )
+        except (TypeError, ValueError) as exc:
+            raise MissionValidationError(
+                ["decision_timeout_seconds must be a number."]
+            ) from exc
+        limits = LoopLimits(
+            max_actions=max_actions,
+            deadline_seconds=deadline,
+            decision_timeout_seconds=decision_timeout,
+        )
         problems = limits.errors()
         if problems:
             raise MissionValidationError(problems)
-        policy_name = str(data.get("policy") or "ready").strip()
-        if policy_name not in self._NOVAFORGE_POLICIES:
-            raise MissionValidationError(
-                [
-                    f"Unknown policy {policy_name!r}; choose one of "
-                    + ", ".join(sorted(self._NOVAFORGE_POLICIES))
-                    + "."
-                ]
-            )
         if session_id in self._novaforge_loops:
             raise SessionConflictError(
                 "A closed loop is already running for this session; cancel it first."
@@ -4599,7 +6400,11 @@ class NovaControlApplication:
         self._novaforge_loops[session_id] = cancel
         try:
             runner = self._build_novaforge_loop(
-                policy=policy_name, limits=limits, cancel=cancel
+                policy=policy_name,
+                limits=limits,
+                cancel=cancel,
+                session_id=session_id,
+                objective=str(data.get("objective") or ""),
             )
             result = await runner.run(
                 session_id,
@@ -4780,6 +6585,19 @@ class NovaControlApplication:
             "cancelled": True,
             "reason": "The loop will stop before its next action, not mid-action.",
         }
+
+    async def _perception_window_details(self) -> list[dict[str, Any]] | None:
+        """Window geometry/ownership/state for the perception engine.
+
+        The title-only probe remains for compatibility; this richer seam is
+        what supplies observed element coordinates and minimized/foreground
+        state without inventing either.
+        """
+        probe = getattr(self.desktop.runner, "window_details", None)
+        if probe is None:
+            return None
+        details = await probe()
+        return list(details) if details is not None else None
 
     async def _perception_window_probe(self) -> list[str] | None:
         """Visible windows, for the agentic perception engine's probe seam.
@@ -5876,6 +7694,11 @@ class NovaControlApplication:
             "registry": manager.registry_report(),
             "telemetry": manager.telemetry.to_dict(),
             "active_tasks": list(manager.active_models()),
+            "routing": {
+                "providers": len(self.model_router.providers.all()),
+                "models": len(self.model_router.endpoints()),
+                "policy": self.model_router.status()["policy"],
+            },
         }
 
     def tools_status(self) -> dict[str, Any]:
@@ -6377,6 +8200,1061 @@ class NovaControlApplication:
             raise
         except Exception:  # one broken automation must not kill the scheduler
             return []
+
+    # ── Phase 31: transferable, general-purpose skills ─────────────────────
+
+    def _personal_event(self, type_: EventType | str, **payload: Any) -> None:
+        """Publish a personal-knowledge event from the service's sync seams."""
+        self._announce_soon(type_, **payload)
+
+    def _skills_event(self, type_: EventType | str, **payload: Any) -> None:
+        """Publish a skill-lifecycle event from the service's sync seams."""
+        self._announce_soon(type_, **payload)
+
+    def _skill_device_outcome(
+        self, result: Mapping[str, Any], label: str
+    ) -> StepOutcome:
+        """Read a desktop/browser execution result as a verified step outcome.
+
+        A device run is verified only when it reported at least one executed
+        action and EVERY action completed. A plan that never ran, or one whose
+        actions reported waiting/denied/failed, is not a success.
+        """
+        rows = [
+            row
+            for row in (result.get("execution_results") or ())
+            if isinstance(row, Mapping)
+        ]
+        summary = str(result.get("summary") or "")[:300]
+        if not rows:
+            return StepOutcome(
+                False,
+                detail=summary,
+                error=(
+                    str(result.get("error") or "")
+                    or f"{label} reported no executed action"
+                ),
+            )
+        failures = [
+            str(row.get("error") or row.get("status") or "failed")
+            for row in rows
+            if str(row.get("status")) != "completed"
+        ]
+        evidence = tuple(
+            str((row.get("output") or {}).get("summary") or row.get("status"))[:200]
+            for row in rows
+        )
+        return StepOutcome(
+            verified=not failures,
+            detail=summary or "device actions completed",
+            evidence=evidence[:5],
+            error="; ".join(failures)[:300],
+        )
+
+    async def _execute_skill_step(
+        self,
+        step: SkillStep,
+        inputs: Mapping[str, Any],
+        context: Mapping[str, Any],
+    ) -> StepOutcome | None:
+        """Carry out one skill step through the application's existing paths.
+
+        This is deliberately a ROUTER, not a second engine. A tool step goes
+        through the approval-gated ToolExecutor; a request or verification step
+        goes through ``handle_request`` (intent → decision → plan → permission →
+        execution → verification); a desktop/browser step goes through the SAME
+        plan-then-token execution path a typed command uses; an agent step goes
+        through the existing research/developer pipelines. A step whose route
+        cannot be established is refused rather than reported as done.
+        """
+        rendered = step.render(inputs)
+        if step.kind is SkillStepKind.TOOL and step.tool:
+            try:
+                registered = self.tools.get(step.tool)
+            except KeyError:
+                return StepOutcome(
+                    False,
+                    detail=rendered,
+                    error=f"Tool {step.tool!r} is not registered on this installation",
+                )
+            arguments = {
+                parameter.name: inputs[parameter.name]
+                for parameter in registered.schema.parameters
+                if parameter.name in inputs
+            }
+            tool_result = await self.tool_executor.execute(
+                ToolRequest(
+                    tool_name=step.tool,
+                    arguments=arguments,
+                    reason=rendered,
+                )
+            )
+            verified = tool_result.status is ToolStatus.COMPLETED
+            return StepOutcome(
+                verified=verified,
+                detail=f"{step.tool}: {tool_result.status.value}",
+                evidence=(rendered,) if verified else (),
+                error=(tool_result.error or "") if not verified else "",
+                # Declared skill outputs are bound from this data. Only keys the
+                # skill declares are carried by SkillService, so a tool's full
+                # payload does not leak into a composed workflow by accident.
+                data=dict(tool_result.output) if isinstance(tool_result.output, Mapping) else {},
+            )
+        if step.kind is SkillStepKind.AGENT:
+            tool = (step.tool or "research").strip().lower()
+            if tool in ("research", "researcher", "research-agent"):
+                report = await self.research_task(rendered)
+                sources = tuple(str(item) for item in (report.get("sources") or ()))
+                overview = str(
+                    report.get("overview") or report.get("summary") or ""
+                )
+                verified = bool(sources) and bool(overview)
+                return StepOutcome(
+                    verified,
+                    detail=overview[:300],
+                    evidence=sources[:5] if verified else (),
+                    error="" if verified else "the research report carried no sourced evidence",
+                    data=(
+                        {"overview": overview, "sources": list(sources)}
+                        if verified
+                        else {}
+                    ),
+                )
+            if tool in ("developer", "coding", "developer-agent", "coding-agent"):
+                developer_result = await self.developer_task(rendered, authorize=False)
+                status = str(developer_result.get("status", ""))
+                verified = status in ("completed", "passed", "success", "verified")
+                detail = str(developer_result.get("summary") or status)[:300]
+                return StepOutcome(
+                    verified,
+                    detail=detail,
+                    evidence=(detail,) if verified and detail else (),
+                    error="" if verified else f"the developer pipeline reported {status or 'no status'}",
+                    data={"summary": detail} if verified and detail else {},
+                )
+            return StepOutcome(
+                False,
+                error=f"agent kind {step.tool!r} is not a skill step this build can run",
+            )
+        if step.kind is SkillStepKind.DESKTOP:
+            if not bool(context.get("approved")):
+                # ``None`` is the service's "approval before any step ran"
+                # signal: it records a checkpoint and waits instead of
+                # counting an unstarted action as a failure.
+                return None
+            plan = self.plan_desktop_command(rendered)
+            token = str((plan.get("approval") or {}).get("token") or "")
+            if not token:
+                return StepOutcome(False, error="the desktop plan produced no approval token")
+            desktop_result = await self.execute_desktop_command(
+                rendered, approval_token=token
+            )
+            return self._skill_device_outcome(desktop_result, "desktop plan")
+        if step.kind is SkillStepKind.BROWSER:
+            if not bool(context.get("approved")):
+                return None
+            plan = self.plan_browser_command(rendered)
+            token = str((plan.get("approval") or {}).get("token") or "")
+            if not token:
+                return StepOutcome(False, error="the browser plan produced no approval token")
+            browser_result = await self.execute_browser_command(
+                rendered, approval_token=token
+            )
+            return self._skill_device_outcome(browser_result, "browser plan")
+        # A request, or a verification with no independently registered tool,
+        # travels the ordinary request pipeline. Its own verifier decides.
+        try:
+            response = await self.handle_request(rendered)
+        except Exception as exc:
+            return StepOutcome(
+                False, error=f"{type(exc).__name__}: {exc}"
+            )
+        payload = response.payload if isinstance(response.payload, Mapping) else {}
+        state = payload.get("state")
+        state = state if isinstance(state, Mapping) else {}
+        status = str(payload.get("status", ""))
+        summary = str(getattr(response, "summary", "") or "")[:300]
+        if status in ("waiting_for_approval", "not_an_action") or payload.get("approval"):
+            return StepOutcome(
+                False,
+                detail=summary,
+                error="the request pipeline needs approval before this step can verify",
+            )
+        verified = bool(state.get("verified", False)) or status == "completed"
+        if getattr(response, "route", "") == "explore":
+            verified = verified or (
+                bool(payload.get("overview")) and bool(payload.get("sources"))
+            )
+        return StepOutcome(
+            verified,
+            detail=summary,
+            evidence=(summary,) if verified and summary else (),
+            error="" if verified else "the request pipeline did not verify this step",
+        )
+
+    # ── Phase 30: persistent objectives and personal operations ─────────────
+
+    def _operations_event(self, type_: EventType | str, **payload: Any) -> None:
+        """Publish an operations event from the service's synchronous seams.
+
+        The payload is validated HERE, where the mistake would be, exactly like
+        the scheduling events beside it.
+        """
+        self._announce_soon(type_, **payload)
+
+    async def _execute_operation_task(self, task: OperationTask) -> TaskOutcome:
+        """Run one objective task through the application's ordinary pipeline.
+
+        There is no second execution path: the instruction travels intent →
+        decision → plan → tool selection → permission → execution → verification,
+        exactly like a typed sentence. Two things are added: a loop guard (an
+        instruction that still states a schedule would create an automation
+        instead of doing the work), and the strict reading of the pipeline's own
+        verdict — a task is verified only when the pipeline says so, or when it
+        reports a completed agent run or a sourced research report. Anything
+        else is an unverified run, which the service records as a failure.
+        """
+        if parse_schedule(task.instruction) is not None:
+            return TaskOutcome(
+                verified=False,
+                error=(
+                    "the instruction still states a schedule, so running it would "
+                    "create an automation instead of doing the work"
+                ),
+            )
+        agent = task.agent.strip().lower()
+        if agent:
+            delegated = await self._delegate_operation_task(task, agent)
+            if delegated is not None:
+                return delegated
+        try:
+            response = await self.handle_request(task.instruction)
+        except Exception as exc:  # a pipeline that raised is an unverified run
+            return TaskOutcome(
+                verified=False, error=f"{type(exc).__name__}: {exc}"
+            )
+        payload = response.payload if isinstance(response.payload, Mapping) else {}
+        state = payload.get("state")
+        state = state if isinstance(state, Mapping) else {}
+        status = str(payload.get("status", ""))
+        route = str(getattr(response, "route", "") or "")
+        summary = str(getattr(response, "summary", "") or "")
+        if status in ("waiting_for_approval", "not_an_action") or payload.get("approval"):
+            if task.approved:
+                executed = await self._run_approved_operation_plan(
+                    task, route=route, payload=payload
+                )
+                if executed is not None:
+                    return executed
+            return TaskOutcome(
+                verified=False,
+                needs_approval=True,
+                detail=summary[:300] or "the action needs approval before it can run",
+            )
+        failures = [
+            str(row.get("error", {}).get("message") or row.get("status"))
+            for row in (state.get("steps") or {}).values()
+            if isinstance(row, Mapping) and str(row.get("status")) == "failed"
+        ]
+        verified = bool(state.get("verified", False)) or status == "completed"
+        if route == "explore":
+            verified = verified or bool(payload.get("overview")) and bool(
+                payload.get("sources")
+            )
+        if failures:
+            return TaskOutcome(
+                verified=False,
+                detail=summary[:300],
+                error="; ".join(failures)[:300],
+            )
+        return TaskOutcome(
+            verified=verified,
+            detail=summary[:300],
+            evidence=(summary[:300],) if verified and summary else (),
+            # A verified pipeline PASS covers the instruction as a whole, so the
+            # declared steps it names are recorded as verified by that verdict.
+            steps=tuple(task.steps) if verified else (),
+        )
+
+    async def _run_approved_operation_plan(
+        self,
+        task: OperationTask,
+        *,
+        route: str,
+        payload: Mapping[str, Any],
+    ) -> TaskOutcome | None:
+        """Execute a plan whose approval the TASK already carries.
+
+        A plan endpoint mints a single-use token because a typed command needs a
+        person to approve it. An operation task can BE that approval: the service
+        only reaches this executor after its autonomy and permission checks, and
+        a sensitive task only after its own recorded approval. The task then
+        consumes the token it just minted through the SAME public executor a
+        person's Approve button uses — no second execution path and no bypass.
+
+        Returns ``None`` when there is nothing to execute (no token, or a route
+        with no approved-plan executor), so the caller keeps its honest
+        ``needs_approval`` answer. Verification is the controller's: every
+        action must report ``completed``, which for an app launch means the
+        window actually appeared, not that a keystroke was sent.
+        """
+        approval = payload.get("approval")
+        token = str(approval.get("token") or "") if isinstance(approval, Mapping) else ""
+        if not token:
+            return None
+        executors = {
+            "desktop_automation": getattr(self, "execute_desktop_command", None),
+            "browser_automation": getattr(self, "execute_browser_command", None),
+        }
+        executor = executors.get(route)
+        if executor is None:
+            return None
+        try:
+            executed = await executor(task.instruction, approval_token=token)
+        except Exception as exc:  # a refused or failed execution is unverified
+            return TaskOutcome(
+                verified=False, error=f"{type(exc).__name__}: {exc}"
+            )
+        rows = [
+            row
+            for row in (executed.get("execution_results") or [])
+            if isinstance(row, Mapping)
+        ]
+        if not rows:
+            return TaskOutcome(
+                verified=False,
+                error="the approved plan reported no executed action",
+            )
+        failures = [
+            f"{row.get('status')}: {row.get('error') or row.get('output')}"
+            for row in rows
+            if str(row.get("status")) != "completed"
+        ]
+        if failures:
+            return TaskOutcome(verified=False, error="; ".join(failures)[:400])
+        evidence = tuple(
+            str((row.get("output") or {}).get("summary") or row.get("status"))[:200]
+            for row in rows
+        )
+        return TaskOutcome(
+            verified=True,
+            detail=str(executed.get("summary") or "")[:300],
+            evidence=evidence[:5],
+            steps=tuple(task.steps),
+        )
+
+    async def _delegate_operation_task(
+        self, task: OperationTask, agent: str
+    ) -> TaskOutcome | None:
+        """Dispatch a task to a SPECIALIST agent (Phase 28), or return ``None``.
+
+        This chooses which existing pipeline carries the work out; it does not
+        start a second one. The specialist's own verifier decides whether it
+        passed, and the operations service folds that verdict back into the SAME
+        task record — which is what keeps one objective one coherent state. A
+        write that the developer pipeline refuses comes back as needing
+        approval, never as a completed task.
+        """
+        if agent.startswith("skill:"):
+            skill_id = task.agent.split(":", 1)[1].strip()
+            if not skill_id:
+                return TaskOutcome(
+                    verified=False,
+                    error="agent 'skill:' names no skill id",
+                )
+            metadata = task.metadata if isinstance(task.metadata, Mapping) else {}
+            inputs = metadata.get("skill_inputs")
+            inputs = inputs if isinstance(inputs, Mapping) else {}
+            raw_version = metadata.get("skill_version")
+            try:
+                version = int(raw_version) if raw_version not in (None, "") else None
+            except (TypeError, ValueError):
+                version = None
+            environment = str(metadata.get("skill_environment") or "")
+            # A task that was parked for approval must RESUME the skill run that
+            # stopped at the checkpoint. Starting a fresh execution would replay
+            # the steps that already ran, which is exactly the duplicate side
+            # effect a checkpoint exists to prevent.
+            resumable = ""
+            if task.approved:
+                candidates = [
+                    row
+                    for row in self.skill_service.executions.values()
+                    if row.skill_id == skill_id
+                    and row.goal == task.instruction
+                    and row.status != "completed"
+                    and (version is None or row.version == version)
+                ]
+                if candidates:
+                    resumable = max(
+                        candidates, key=lambda row: row.started_at
+                    ).id
+            if resumable:
+                result = await self.skill_service.resume(
+                    resumable, approved=True
+                )
+            else:
+                result = await self.skill_service.execute(
+                    skill_id,
+                    inputs=inputs,
+                    goal=task.instruction,
+                    approved=task.approved,
+                    version=version,
+                    environment=environment,
+                )
+            status = str(result.get("status", ""))
+            if status == "waiting_approval":
+                return TaskOutcome(
+                    verified=False,
+                    needs_approval=True,
+                    detail=str(result.get("reason") or "the skill needs approval")[:300],
+                )
+            verified = status == "completed" and bool(result.get("verified"))
+            evidence = tuple(
+                str(row.get("detail") or row.get("instruction") or "")[:200]
+                for row in (result.get("results") or ())
+                if isinstance(row, Mapping) and row.get("verified")
+            )
+            return TaskOutcome(
+                verified=verified,
+                detail=str(
+                    result.get("reason")
+                    or ("skill execution verified" if verified else status)
+                )[:300],
+                evidence=evidence[:5],
+                steps=tuple(task.steps) if verified else (),
+                error=(
+                    ""
+                    if verified
+                    else str(
+                        result.get("reason")
+                        or result.get("error")
+                        or f"skill execution reported {status or 'no status'}"
+                    )[:300]
+                ),
+            )
+        if agent in ("research", "researcher", "research-agent"):
+            report = await self.research_task(task.instruction)
+            sources = tuple(str(item) for item in (report.get("sources") or ()))
+            overview = str(report.get("overview") or report.get("summary") or "")
+            verified = bool(sources) and bool(overview)
+            return TaskOutcome(
+                verified=verified,
+                detail=overview[:300] or "research completed without a report",
+                evidence=sources[:5],
+                steps=tuple(task.steps) if verified else (),
+                error=(
+                    ""
+                    if verified
+                    else "the research report carried no sourced evidence"
+                ),
+            )
+        if agent in ("developer", "coding", "developer-agent", "coding-agent"):
+            result = await self.developer_task(task.instruction, authorize=False)
+            status = str(result.get("status", ""))
+            if status in ("denied", "refused", "blocked", "waiting_for_approval"):
+                return TaskOutcome(
+                    verified=False,
+                    needs_approval=True,
+                    detail=str(
+                        result.get("summary") or result.get("reason") or status
+                    )[:300],
+                )
+            verified = status in ("completed", "passed", "success", "verified")
+            detail = str(result.get("summary") or status)[:300]
+            return TaskOutcome(
+                verified=verified,
+                detail=detail,
+                evidence=(detail,) if verified and detail else (),
+                steps=tuple(task.steps) if verified else (),
+                error=(
+                    ""
+                    if verified
+                    else f"the developer pipeline reported {status or 'no status'}"
+                ),
+            )
+        return None
+
+    async def _reassess_operation_task(
+        self, task: OperationTask
+    ) -> tuple[bool, str]:
+        """Re-check conditions before a resumed task executes anything.
+
+        This is a STATE re-assessment, not a replay: the objective must still be
+        active, the task must still be runnable, its dependencies must still be
+        complete, and any path the task declared as a precondition must still
+        exist. Work that depended on a live window or a remote page re-checks it
+        in its own plan; this hook refuses to start anything on the assumption
+        that yesterday's conditions still hold.
+        """
+        try:
+            objective = self.operations.manager.get(task.objective_id)
+        except KeyError:
+            return False, "the objective no longer exists"
+        if objective.status.value != "active":
+            return False, f"the objective is {objective.status.value}"
+        try:
+            current = objective.task(task.id)
+        except KeyError:
+            return False, "the task is no longer part of the objective"
+        if current.state.value not in ("ready", "running"):
+            return False, f"the task is {current.state.value}"
+        for dependency in current.depends_on:
+            try:
+                state = objective.task(dependency).state.value
+            except KeyError:
+                return False, "a dependency is no longer part of the objective"
+            if state != "completed":
+                return False, f"dependency {dependency} is {state}"
+        required_path = str(current.metadata.get("requires_path", "")).strip()
+        if required_path and not Path(required_path).expanduser().exists():
+            return False, f"the required path no longer exists: {required_path}"
+        return True, "state, dependencies and declared preconditions still hold"
+
+    @staticmethod
+    def _operation_deadline(value: Any) -> datetime | None:
+        if value in (None, ""):
+            return None
+        if isinstance(value, datetime):
+            return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        parsed = datetime.fromisoformat(str(value))
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+    def operations_status(self) -> dict[str, Any]:
+        ticker = self._operations_ticker
+        return {
+            **self.operations.status(),
+            "ticks": max(self.operations.ticks, self._operations_ticks),
+            "ticker_running": bool(ticker is not None and not ticker.done()),
+            "tick_seconds": max(5.0, float(self.config.automation.tick_seconds)),
+        }
+
+    def operations_objectives(self) -> list[dict[str, Any]]:
+        return [objective.to_dict() for objective in self.operations.manager.objectives()]
+
+    def create_objective(
+        self,
+        title: str,
+        outcome: str,
+        *,
+        kind: str = "personal",
+        autonomy: str = "approval",
+        priority: int = 50,
+        deadline: Any = None,
+        completion_criteria: Any = (),
+        tags: Any = (),
+        owner: str = "operator",
+    ) -> dict[str, Any]:
+        objective = self.operations.create_objective(
+            title,
+            outcome,
+            kind=ObjectiveKind(str(kind)),
+            autonomy=AutonomyLevel(str(autonomy)),
+            priority=int(priority),
+            deadline=self._operation_deadline(deadline),
+            completion_criteria=tuple(completion_criteria or ()),
+            tags=tuple(tags or ()),
+            owner=owner,
+        )
+        self.persist()
+        return objective.to_dict()
+
+    def update_objective(self, objective_id: str, **changes: Any) -> dict[str, Any]:
+        if "deadline" in changes:
+            changes["deadline"] = self._operation_deadline(changes["deadline"])
+        objective = self.operations.update_objective(objective_id, **changes)
+        self.persist()
+        return objective.to_dict()
+
+    def delete_objective(self, objective_id: str) -> dict[str, Any]:
+        objective = self.operations.delete_objective(objective_id)
+        self.persist()
+        return {"status": "deleted", "objective_id": objective.id}
+
+    def control_objective(
+        self,
+        objective_id: str,
+        action: str,
+        *,
+        reason: str = "",
+        priority: int | None = None,
+        deadline: Any = None,
+        autonomy: str = "",
+    ) -> dict[str, Any]:
+        """Pause, resume, cancel, prioritize, re-deadline or re-level one objective."""
+        if action == "pause":
+            objective = self.operations.pause_objective(objective_id, reason=reason)
+        elif action == "resume":
+            result = self.operations.resume_objective(objective_id)
+            self.persist()
+            return result
+        elif action == "cancel":
+            objective = self.operations.cancel_objective(objective_id, reason=reason)
+        elif action == "prioritize":
+            if priority is None:
+                raise ValueError("prioritize needs a priority from 0 to 100.")
+            objective = self.operations.update_objective(
+                objective_id, priority=int(priority)
+            )
+        elif action == "deadline":
+            objective = self.operations.update_objective(
+                objective_id, deadline=self._operation_deadline(deadline)
+            )
+        elif action == "autonomy":
+            if not autonomy:
+                raise ValueError("autonomy needs a level.")
+            objective = self.operations.update_objective(
+                objective_id, autonomy=AutonomyLevel(str(autonomy))
+            )
+        else:
+            raise ValueError(f"Unknown objective action: {action}")
+        self.persist()
+        return objective.to_dict()
+
+    def add_objective_task(
+        self,
+        objective_id: str,
+        title: str,
+        instruction: str,
+        *,
+        kind: str = "request",
+        priority: int = 50,
+        due_at: Any = None,
+        scheduled_for: Any = None,
+        depends_on: Any = (),
+        steps: Any = (),
+        sensitive: bool = False,
+        approval_scope: str = "",
+        agent: str = "",
+        recurrence: str = "",
+        metadata: Any = None,
+    ) -> dict[str, Any]:
+        schedule = parse_schedule(recurrence) if recurrence else None
+        if recurrence and schedule is None:
+            raise ValueError(
+                'The recurrence states no readable schedule: say when it repeats '
+                '("every Monday at 9", "every 2 hours").'
+            )
+        _, task = self.operations.add_task(
+            objective_id,
+            title,
+            instruction,
+            kind=TaskKind(str(kind)),
+            priority=int(priority),
+            due_at=self._operation_deadline(due_at),
+            scheduled_for=self._operation_deadline(scheduled_for),
+            depends_on=tuple(depends_on or ()),
+            steps=tuple(steps or ()),
+            sensitive=bool(sensitive),
+            approval_scope=approval_scope,
+            agent=agent,
+            recurrence=schedule,
+            metadata=metadata if isinstance(metadata, Mapping) else {},
+        )
+        self.persist()
+        return task.to_dict()
+
+    def add_objective_milestone(
+        self,
+        objective_id: str,
+        title: str,
+        *,
+        task_ids: Any = (),
+        due_at: Any = None,
+    ) -> dict[str, Any]:
+        _, milestone = self.operations.add_milestone(
+            objective_id,
+            title,
+            task_ids=tuple(task_ids or ()),
+            due_at=self._operation_deadline(due_at),
+        )
+        self.persist()
+        return milestone.to_dict()
+
+    async def run_objective(self, objective_id: str) -> dict[str, Any]:
+        result = await self.operations.run_objective(objective_id)
+        self.persist()
+        return result
+
+    # ── Phase 31: skill library surface ──────────────────────────────────
+
+    def skills_status(self) -> dict[str, Any]:
+        """The library's evidence-derived state, not a promise about quality."""
+        return self.skill_service.status()
+
+    def skills_catalog(self) -> dict[str, Any]:
+        """Every stored version, plus the evidence that put it there."""
+        rows = []
+        for skill in self.skill_service.catalog.all():
+            versions = self.skill_service.catalog.versions(skill.id)
+            rows.append(
+                {
+                    **skill.to_dict(),
+                    "versions": [
+                        {
+                            "version": item.version,
+                            "lifecycle": item.lifecycle.value,
+                            "parent_version": item.parent_version,
+                        }
+                        for item in versions
+                    ],
+                }
+            )
+        return {
+            "status": self.skill_service.status(),
+            "skills": rows,
+            "evidence": [
+                row.to_dict()
+                for row in self.skill_service.evidence[-100:]
+            ],
+            "adaptation_failures": [
+                dict(row) for row in self.skill_service.adaptation_failures[-50:]
+            ],
+        }
+
+    def skill_detail(
+        self, skill_id: str, version: int | None = None
+    ) -> dict[str, Any]:
+        skill = self.skill_service.catalog.get(skill_id, version)
+        return {
+            "skill": skill.to_dict(),
+            "versions": [
+                item.to_dict()
+                for item in self.skill_service.catalog.versions(skill_id)
+            ],
+            "executions": [
+                row.to_dict()
+                for row in self.skill_service.executions.values()
+                if row.skill_id == skill_id
+            ][-20:],
+        }
+
+    def retrieve_skills(
+        self,
+        goal: str,
+        *,
+        environment: str = "",
+        inputs: Mapping[str, Any] | None = None,
+        limit: int = 8,
+        include_incompatible: bool = False,
+    ) -> dict[str, Any]:
+        hits = self.skill_service.retrieve(
+            goal,
+            environment=environment,
+            inputs=inputs,
+            limit=limit,
+            include_incompatible=include_incompatible,
+        )
+        return {
+            "goal": goal,
+            "matches": [hit.to_dict() for hit in hits],
+            "count": len(hits),
+        }
+
+    async def retrieve_skills_with_context(
+        self,
+        goal: str,
+        *,
+        environment: str = "",
+        inputs: Mapping[str, Any] | None = None,
+        limit: int = 8,
+        include_incompatible: bool = False,
+    ) -> dict[str, Any]:
+        """Phase 31 retrieval with Phase 32 context kept alongside the matches.
+
+        Skill definitions and personal knowledge remain distinct entities: the
+        context is returned as evidence for the caller, never merged into a
+        stored skill or used to grant a tool the skill did not declare.
+        """
+        result = self.retrieve_skills(
+            goal,
+            environment=environment,
+            inputs=inputs,
+            limit=limit,
+            include_incompatible=include_incompatible,
+        )
+        context = await self.personal_memory.context_for(
+            goal, access=self._personal_access(), budget_tokens=220
+        )
+        result["personal_context"] = context.text
+        result["personal_context_tokens"] = context.tokens
+        result["personal_context_hits"] = [
+            hit.to_dict() for hit in context.hits
+        ]
+        return result
+
+    def _skill_observations(
+        self, goal: str, rows: Any
+    ) -> list[SkillObservation]:
+        parsed: list[SkillObservation] = []
+        for item in rows or ():
+            if isinstance(item, SkillObservation):
+                parsed.append(item)
+                continue
+            if not isinstance(item, Mapping):
+                continue
+            steps = tuple(
+                step
+                for step in (
+                    SkillStep.from_dict(row)
+                    for row in (item.get("steps") or ())
+                )
+                if step is not None
+            )
+            if not steps:
+                continue
+            parsed.append(
+                SkillObservation(
+                    goal=str(item.get("goal") or goal),
+                    steps=steps,
+                    verified=bool(item.get("verified", False)),
+                    environment=str(item.get("environment") or ""),
+                    inputs=dict(item.get("inputs") or {}),
+                    tools=tuple(str(tool) for tool in (item.get("tools") or ())),
+                    duration_ms=float(item.get("duration_ms", 0.0) or 0.0),
+                    source=str(item.get("source") or "execution"),
+                    agent=str(item.get("agent") or ""),
+                )
+            )
+        return parsed
+
+    def acquire_skill(
+        self,
+        goal: str,
+        observations: Any,
+        *,
+        name: str = "",
+        description: str = "",
+        category: str = "",
+        demonstrated: bool = False,
+        requested_by: str = "operator",
+        origin_agent: str = "",
+    ) -> dict[str, Any]:
+        from novacontrol.skills import SkillCategory
+
+        chosen = None
+        if category:
+            try:
+                chosen = SkillCategory(str(category))
+            except ValueError as exc:
+                raise ValueError(f"Unknown skill category: {category}") from exc
+        result = self.skill_service.acquire(
+            goal,
+            self._skill_observations(goal, observations),
+            name=name,
+            description=description,
+            category=chosen,
+            demonstrated=demonstrated,
+            requested_by=requested_by,
+            origin_agent=origin_agent,
+        )
+        return result.to_dict()
+
+    def validate_skill(
+        self, skill_id: str, version: int | None = None
+    ) -> dict[str, Any]:
+        return self.skill_service.validate(skill_id, version).to_dict()
+
+    def adapt_skill(
+        self,
+        skill_id: str,
+        *,
+        goal: str,
+        inputs: Mapping[str, Any] | None = None,
+        environment: str = "",
+        target_map: Mapping[str, str] | None = None,
+        requested_by: str = "operator",
+        version: int | None = None,
+    ) -> dict[str, Any]:
+        return self.skill_service.adapt(
+            skill_id,
+            goal=goal,
+            inputs=inputs,
+            environment=environment,
+            target_map=target_map,
+            requested_by=requested_by,
+            version=version,
+        ).to_dict()
+
+    def compose_skills(
+        self,
+        objective: str,
+        skill_ids: Any,
+        *,
+        inputs_by_skill: Mapping[str, Mapping[str, Any]] | None = None,
+        environment: str = "",
+        versions: Mapping[str, int] | None = None,
+    ) -> dict[str, Any]:
+        ids = tuple(str(item) for item in (skill_ids or ()))
+        if not ids:
+            raise ValueError("A composition needs at least one skill id.")
+        return self.skill_service.compose(
+            objective,
+            ids,
+            inputs_by_skill=inputs_by_skill,
+            environment=environment,
+            versions=versions,
+        ).to_dict()
+
+    async def execute_skill(
+        self,
+        skill_id: str,
+        *,
+        inputs: Mapping[str, Any] | None = None,
+        goal: str = "",
+        approved: bool = False,
+        version: int | None = None,
+        environment: str = "",
+    ) -> dict[str, Any]:
+        return await self.skill_service.execute(
+            skill_id,
+            inputs=inputs,
+            goal=goal,
+            approved=approved,
+            version=version,
+            environment=environment,
+        )
+
+    async def execute_composed_skills(
+        self,
+        objective: str,
+        skill_ids: Any,
+        *,
+        inputs_by_skill: Mapping[str, Mapping[str, Any]] | None = None,
+        environment: str = "",
+        approved: bool = False,
+    ) -> dict[str, Any]:
+        """Execute a composed plan through the same SkillService gate."""
+        ids = tuple(str(item) for item in (skill_ids or ()))
+        if not ids:
+            raise ValueError("A composition needs at least one skill id.")
+        result = await self.skill_service.compose_and_execute(
+            objective,
+            ids,
+            inputs_by_skill=inputs_by_skill,
+            environment=environment,
+            approved=approved,
+        )
+        self.persist()
+        return result
+
+    async def resume_skill(
+        self, execution_id: str, *, approved: bool = False
+    ) -> dict[str, Any]:
+        return await self.skill_service.resume(
+            execution_id, approved=approved
+        )
+
+    def promote_skill(
+        self, skill_id: str, version: int | None = None
+    ) -> dict[str, Any]:
+        promoted = self.skill_service.promote(skill_id, version)
+        self.persist()
+        return promoted.to_dict()
+
+    def deprecate_skill(
+        self, skill_id: str, reason: str = "", version: int | None = None
+    ) -> dict[str, Any]:
+        return self.skill_service.deprecate(
+            skill_id, version, reason=reason
+        ).to_dict()
+
+    def rollback_skill(self, skill_id: str, version: int) -> dict[str, Any]:
+        return self.skill_service.rollback(skill_id, version).to_dict()
+
+    def decide_operation_task(
+        self,
+        objective_id: str,
+        task_id: str,
+        action: str,
+        *,
+        by: str = "operator",
+        reason: str = "",
+    ) -> dict[str, Any]:
+        task = self.operations.decide_task(
+            objective_id, task_id, action=action, by=by, reason=reason
+        )
+        self.persist()
+        return task.to_dict()
+
+    async def run_operations_tick(self) -> dict[str, Any]:
+        result = await self.operations.tick()
+        self.persist()
+        return result
+
+    def operations_notifications(
+        self, *, unread_only: bool = False, limit: int = 50
+    ) -> dict[str, Any]:
+        rows = self.operations.notifications.list(
+            unread_only=unread_only, limit=limit
+        )
+        return {
+            "notifications": [row.to_dict() for row in rows],
+            "unread": self.operations.notifications.unread_count,
+            "preferences": self.operations.notifications.preferences(),
+        }
+
+    def acknowledge_operation_notification(self, notification_id: str) -> dict[str, Any]:
+        notification = self.operations.notifications.acknowledge(notification_id)
+        self.persist()
+        return notification.to_dict()
+
+    def acknowledge_all_operation_notifications(self) -> dict[str, Any]:
+        changed = self.operations.notifications.acknowledge_all()
+        self.persist()
+        return {"status": "acknowledged", "changed": changed}
+
+    def clear_operation_notifications(self) -> dict[str, Any]:
+        removed = self.operations.notifications.clear()
+        self.persist()
+        return {"status": "cleared", "removed": removed}
+
+    def configure_operation_notifications(
+        self,
+        *,
+        enabled_kinds: Any = None,
+        dedupe_window_seconds: float | None = None,
+        muted: bool | None = None,
+    ) -> dict[str, Any]:
+        preferences = self.operations.notifications.configure(
+            enabled_kinds=None if enabled_kinds is None else tuple(enabled_kinds),
+            dedupe_window_seconds=dedupe_window_seconds,
+            muted=muted,
+        )
+        self.persist()
+        return preferences
+
+    def _start_operations_ticker(self) -> None:
+        """Start the Phase 30 background pass. Idempotent, disabled-aware."""
+        if self._operations_ticker is not None and not self._operations_ticker.done():
+            return
+        if not self.operations.enabled or not self.config.automation.enabled:
+            return
+        self._operations_ticker = asyncio.get_running_loop().create_task(
+            self._operations_loop()
+        )
+
+    def _stop_operations_ticker(self) -> None:
+        ticker = self._operations_ticker
+        self._operations_ticker = None
+        if ticker is not None and not ticker.done():
+            ticker.cancel()
+
+    async def _operations_loop(self) -> None:
+        interval = max(5.0, float(self.config.automation.tick_seconds))
+        while True:
+            await asyncio.sleep(interval)
+            await self._operations_tick()
+
+    async def _operations_tick(self) -> dict[str, Any]:
+        """One background pass. A failure is recorded, never fatal to the loop."""
+        self._operations_ticks += 1
+        try:
+            return await self.operations.tick()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return {}
 
     # -- audit surfaces --------------------------------------------------------
 
@@ -8345,6 +11223,9 @@ class NovaControlApplication:
         # synthesized by the cloud provider the execution mode just closed
         # (Chat would be local while Explore kept reaching out).
         self._sync_explore_provider()
+        # The router applies the SAME cloud switch: a closed slot cannot be
+        # reached through a fallback chain either.
+        self._sync_model_router()
         return {
             "mode": self.privacy.mode.value,
             "cloud_allowed": allowed,
@@ -8662,6 +11543,16 @@ class NovaControlApplication:
 
         def model_manager() -> DiagnosticResult:
             status = self.model_manager.runtime_status()
+            if not status.reachable:
+                return row(
+                    "Model manager",
+                    HealthState.DEGRADED,
+                    "the local model runtime is not reachable",
+                    remediation="start the local runtime, then retry provider reconnect",
+                    active_model=status.active_model,
+                    resident=list(status.loaded_models),
+                    available_ram_bytes=status.available_memory_bytes,
+                )
             return row(
                 "Model manager",
                 HealthState.OK,
@@ -9118,6 +12009,994 @@ class NovaControlApplication:
 
         self.diagnostics.register("RLVR", rlvr, category="systems")
 
+    # ── Phase 34: trustworthy self-management ────────────────────────────
+
+    def _register_phase34_diagnostics(self) -> None:
+        """Register the operational components the Phase 14 roster did not name.
+
+        These are live probes, not labels: the event-bus check performs a real
+        publish round trip, the worker checks read the ticker tasks, the memory
+        check reads the personal index's last load error, and the hardware check
+        reads the governor's measured assessment. A component that is embedded
+        without an HTTP server reports SKIPPED rather than pretending a server
+        is running.
+        """
+
+        def row(
+            name: str,
+            status: HealthState,
+            message: str,
+            *,
+            remediation: str = "",
+            **metadata: Any,
+        ) -> DiagnosticResult:
+            return DiagnosticResult(
+                component=name,
+                status=status,
+                message=message,
+                remediation=remediation,
+                metadata=dict(metadata),
+            )
+
+        async def event_bus() -> DiagnosticResult:
+            try:
+                result = await self.event_bus.emit(
+                    "self_management.health_probe",
+                    source="self-management",
+                    probe="health",
+                )
+            except Exception as exc:
+                return row(
+                    "Event bus",
+                    HealthState.FAILING,
+                    f"the event bus could not publish a probe: {type(exc).__name__}",
+                    remediation="inspect the event bus and its subscribers",
+                )
+            if result.failed:
+                return row(
+                    "Event bus",
+                    HealthState.DEGRADED,
+                    f"the probe published but {result.failed} subscriber(s) failed",
+                    remediation="inspect the failing subscriber named by the bus",
+                    delivered=result.delivered,
+                    failed=result.failed,
+                )
+            return row(
+                "Event bus",
+                HealthState.OK,
+                "a probe event completed its publish round trip",
+                delivered=result.delivered,
+            )
+
+        def api_server() -> DiagnosticResult:
+            surface = getattr(self, "api_surface", None)
+            if surface is None:
+                return row(
+                    "API server",
+                    HealthState.SKIPPED,
+                    "this process is embedded without an HTTP application",
+                )
+            routes = len(getattr(surface, "routes", ()))
+            started = bool(getattr(self, "api_server_started", False))
+            if not started:
+                return row(
+                    "API server",
+                    HealthState.DEGRADED,
+                    f"{routes} route(s) declared but the HTTP startup signal has not arrived",
+                    remediation="start the API server or inspect its startup hook",
+                    routes=routes,
+                )
+            return row(
+                "API server",
+                HealthState.OK,
+                f"the HTTP surface is started with {routes} declared route(s)",
+                routes=routes,
+            )
+
+        def desktop_interface() -> DiagnosticResult:
+            static_dir = Path(__file__).resolve().parents[0] / "web" / "static"
+            index = static_dir / "index.html"
+            if not index.is_file():
+                return row(
+                    "Desktop interface",
+                    HealthState.FAILING,
+                    f"the interface entry point is missing: {index}",
+                    remediation="restore the web/static assets from the installation",
+                )
+            scripts = len(tuple((static_dir / "js").glob("*.js")))
+            return row(
+                "Desktop interface",
+                HealthState.OK,
+                f"the interface assets are readable ({scripts} module(s))",
+                static_dir=str(static_dir),
+                scripts=scripts,
+            )
+
+        def agent_execution() -> DiagnosticResult:
+            agents = self.agent_registry.list()
+            if not agents:
+                return row(
+                    "Agent execution",
+                    HealthState.DEGRADED,
+                    "no agents are registered",
+                    remediation="install the specialist agents this build expects",
+                )
+            return row(
+                "Agent execution",
+                HealthState.OK,
+                f"{len(agents)} agent(s) are registered and runnable",
+                agents=[agent.name for agent in agents],
+            )
+
+        def memory_services() -> DiagnosticResult:
+            snapshot = self.personal_memory.snapshot()
+            error = str(snapshot.get("last_error", "") or "")
+            if error:
+                return row(
+                    "Memory services",
+                    HealthState.FAILING,
+                    f"the personal memory service reported: {error}",
+                    remediation="reload the memory index; stored records are preserved",
+                    records=snapshot.get("records", 0),
+                )
+            return row(
+                "Memory services",
+                HealthState.OK,
+                f"the personal memory index is loaded with {snapshot.get('records', 0)} record(s)",
+                records=snapshot.get("records", 0),
+            )
+
+        def background_workers() -> DiagnosticResult:
+            tickers = {
+                "automation": getattr(self, "_automation_ticker", None),
+                "operations": getattr(self, "_operations_ticker", None),
+            }
+            expected = []
+            if self.config.automation.enabled:
+                expected.append("automation")
+            if getattr(self.operations, "enabled", False):
+                expected.append("operations")
+            if not expected:
+                return row(
+                    "Background workers",
+                    HealthState.SKIPPED,
+                    "background work is disabled by configuration",
+                )
+            stopped = [
+                name
+                for name in expected
+                if (ticker := tickers.get(name)) is None or ticker.done()
+            ]
+            if stopped:
+                return row(
+                    "Background workers",
+                    HealthState.DEGRADED,
+                    "background worker(s) are not running: " + ", ".join(stopped),
+                    remediation="restart the approved background worker",
+                    stopped=stopped,
+                )
+            return row(
+                "Background workers",
+                HealthState.OK,
+                "the configured background loops are running",
+                workers=expected,
+                operations_ticks=getattr(self, "_operations_ticks", 0),
+                automation_ticks=getattr(self, "_automation_ticks", 0),
+            )
+
+        def scheduled_workflows() -> DiagnosticResult:
+            if not self.config.automation.enabled:
+                return row(
+                    "Scheduled workflows",
+                    HealthState.SKIPPED,
+                    "scheduled workflows are disabled by configuration",
+                )
+            report = self.automation_engine.to_dict()
+            tasks = report.get("tasks", ()) if isinstance(report, Mapping) else ()
+            count = len(tasks) if isinstance(tasks, (list, tuple)) else 0
+            return row(
+                "Scheduled workflows",
+                HealthState.OK,
+                f"the workflow store is readable with {count} scheduled task(s)",
+                tasks=count,
+            )
+
+        def computer_operation() -> DiagnosticResult:
+            status = self.computer.status()
+            if not status.get("closed_loop"):
+                return row(
+                    "Computer operation",
+                    HealthState.DEGRADED,
+                    "the computer-operation supervisor is not reporting its closed loop",
+                    remediation="inspect the computer operator before starting a task",
+                )
+            return row(
+                "Computer operation",
+                HealthState.OK,
+                f"the supervisor is available with {status.get('active_count', 0)} active task(s)",
+                active=status.get("active_count", 0),
+                busy=bool(status.get("busy", False)),
+                emergency_stops=status.get("emergency_stops", 0),
+            )
+
+        def hardware_manager() -> DiagnosticResult:
+            report = self.governor.report()
+            assessment = report.get("assessment", {})
+            level = str(assessment.get("level", "unknown"))
+            reasons = [str(item) for item in assessment.get("reasons", ())]
+            if level == "critical":
+                return row(
+                    "Hardware manager",
+                    HealthState.FAILING,
+                    "the resource governor reports a critical machine reading",
+                    remediation="; ".join(reasons) or "release memory before starting heavy work",
+                    level=level,
+                    reasons=reasons,
+                )
+            if level == "tight":
+                return row(
+                    "Hardware manager",
+                    HealthState.DEGRADED,
+                    "the resource governor reports a tight machine reading",
+                    remediation="; ".join(reasons),
+                    level=level,
+                    reasons=reasons,
+                )
+            return row(
+                "Hardware manager",
+                HealthState.OK,
+                "the resource governor reports an ample reading",
+                level=level,
+                reasons=reasons,
+            )
+
+        self.diagnostics.register("Event bus", event_bus, category="core")
+        self.diagnostics.register("API server", api_server, category="platform")
+        self.diagnostics.register("Desktop interface", desktop_interface, category="platform")
+        self.diagnostics.register("Agent execution", agent_execution, category="systems")
+        self.diagnostics.register("Memory services", memory_services, category="data")
+        self.diagnostics.register("Background workers", background_workers, category="systems")
+        self.diagnostics.register("Scheduled workflows", scheduled_workflows, category="systems")
+        self.diagnostics.register("Computer operation", computer_operation, category="systems")
+        self.diagnostics.register("Hardware manager", hardware_manager, category="hardware")
+
+    def _self_management_metrics(self) -> dict[str, Any]:
+        """The machine/queue readings the diagnosis layer uses, all measured."""
+        free = self.hardware_monitor.available_ram_bytes()
+        cpu = self.hardware_monitor.cpu_percent()
+        operation_report = self.operations.status().get("report", {})
+        try:
+            import psutil
+
+            process_rss = int(psutil.Process().memory_info().rss)
+        except Exception:
+            process_rss = None
+        return {
+            "free_ram_bytes": free,
+            "critical_ram_bytes": int(self.config.resources.critical_free_ram_mb) * 1024 * 1024,
+            "cpu_percent": cpu,
+            "max_cpu_percent": float(self.config.resources.max_cpu_percent),
+            "queue_depth": int(operation_report.get("ready", 0) or 0)
+            + int(operation_report.get("waiting_approval", 0) or 0),
+            "background_tasks": int(getattr(self, "_automation_ticks", 0))
+            + int(getattr(self, "_operations_ticks", 0)),
+            "process_rss_bytes": process_rss,
+        }
+
+    def _self_management_audit(self, **fields: Any) -> Any:
+        """Write a recovery/maintenance record to the SAME audit trail."""
+        return self.audit.record(**fields)
+
+    def _self_management_notify(self, **fields: Any) -> Any:
+        """Mirror a new incident into the Phase 30 notification centre."""
+        return self.operations.notifications.notify(
+            NotificationKind.MONITORED_CHANGE,
+            str(fields.get("title", "NovaControl incident")),
+            str(fields.get("body", "")),
+            severity=str(fields.get("severity", "warning")),
+            dedupe_key=str(fields.get("dedupe_key", "")),
+            evidence=tuple(str(item) for item in fields.get("evidence", ())),
+        )
+
+    def _self_management_learning(self, payload: Mapping[str, Any]) -> Any:
+        """Record one verified recovery as Phase 27 evidence (advisory only)."""
+        verified = bool(payload.get("verified", False))
+        outcome = str(payload.get("status", ""))
+        evidence = self.continual.capture(
+            goal=f"recover {payload.get('component', 'component')}: {payload.get('title', '')}",
+            task_kind="self_management_recovery",
+            source="self_management",
+            route="recovery",
+            context={
+                "incident_id": str(payload.get("incident_id", "")),
+                "action_id": str(payload.get("action_id", "")),
+                "automatic": bool(payload.get("automatic", False)),
+                "diagnosis_confidence": str(payload.get("confidence", "unknown")),
+                "severity": str(payload.get("severity", "warning")),
+            },
+            verification={
+                "passed": verified,
+                "status": "passed" if verified else "failed",
+                "reason": str(payload.get("detail", ""))[:500],
+                "source": "live_component_probe",
+            },
+            errors=[] if verified else [str(payload.get("detail", outcome))[:500]],
+            recoveries=[str(payload.get("action_id", ""))] if verified else [],
+            attempts=1 if verified else 2,
+            feedback="",
+            verdict=outcome,
+        )
+        return self.continual.record(evidence)
+
+    async def _self_management_agent_advice(
+        self, component: str, evidence: Sequence[str]
+    ) -> Mapping[str, Any]:
+        """Optional Phase 28 second opinion; it can never authorize a recovery."""
+        agent = self.agent_registry.first_by_role(AgentRole.DEBUG)
+        if agent is None:
+            return {"available": False, "reason": "no debug agent is registered"}
+        task = AgentTask(
+            goal=(
+                f"Diagnose the degraded NovaControl component {component}. "
+                "Use only the supplied evidence and recommend investigation steps; do not execute changes."
+            ),
+            role=AgentRole.DEBUG,
+            metadata={
+                "component": component,
+                "evidence": list(evidence)[:10],
+                "advisory_only": True,
+                "authority": "central_permission_layer",
+            },
+        )
+        response = await agent.handle_task(task)
+        return {
+            "available": True,
+            "agent": agent.name,
+            "role": agent.role.value,
+            "report": response.to_dict(),
+            "advisory_only": True,
+            "authority": "advisory only; central permission layer retains recovery authority",
+        }
+
+    def _self_management_learning_advice(self, goal: str) -> Mapping[str, Any]:
+        try:
+            return self.continual.recommend(goal, task_kind="self_management_recovery").to_dict()
+        except Exception:
+            return {}
+
+    async def _apply_self_management_configuration(
+        self, payload: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Apply a validated settings snapshot through the application's seams."""
+        self.settings = SettingsManager.from_dict(dict(payload))
+        current = self.settings.settings
+        self.privacy.update(
+            controls=PrivacyControls(
+                allow_cloud=current.privacy_allow_cloud,
+                allow_external_search=current.privacy_allow_external_search,
+                allow_external_tools=current.privacy_allow_external_tools,
+                allow_telemetry=current.privacy_allow_telemetry,
+                allow_remote_model=current.privacy_allow_remote_model,
+                sensitive_data_redaction=current.audit_redact_sensitive,
+            ),
+            mode=current.execution_mode,
+        )
+        self._apply_execution_mode()
+        self.brain.set_mode(current.brain_mode)
+        self._sync_explore_provider()
+        self._sync_model_router()
+        self.apply_audit_settings()
+        self.apply_evaluation_settings()
+        self.apply_training_settings()
+        self.apply_preference_settings()
+        self.apply_rlhf_settings()
+        self.apply_rlvr_settings()
+        self._persist_settings()
+        return self.settings.to_dict()
+
+    def _build_business_opportunities(self) -> BusinessOpportunityService:
+        """Compose Phase 35 over Explore, knowledge, state and audit.
+
+        Research is the EXISTING Explore service, not a second research stack.
+        The resource snapshot is read from the same hardware monitor the model
+        manager uses, so a feasibility claim and a load decision measure one
+        machine. No heavyweight model is loaded to validate an opportunity.
+        """
+
+        async def research(query: str, limit: int) -> list[dict[str, Any]]:
+            report = await self.explore.research(
+                ExploreRequest(
+                    topic=query,
+                    depth="deep",
+                    include_videos=False,
+                    max_sources=max(1, min(10, int(limit))),
+                )
+            )
+            return [
+                {
+                    "title": source.title,
+                    "url": source.url,
+                    "snippet": source.snippet or source.content[:600],
+                    "source_type": source.source_type,
+                    "retrieved_at": report.created_at.isoformat(),
+                }
+                for source in report.sources
+            ]
+
+        def resource_snapshot() -> dict[str, Any]:
+            free = self.hardware_monitor.available_ram_bytes()
+            total = self.hardware_monitor.total_ram_bytes()
+            gpu = self.hardware_monitor.gpu()
+            cpu = self.hardware_monitor.cpu_percent()
+            return {
+                "available_ram_gb": None if free is None else round(free / (1024**3), 2),
+                "total_ram_gb": None if total is None else round(total / (1024**3), 2),
+                "cpu_percent": cpu,
+                "gpu_available": bool(gpu.get("available", False)),
+                "source": "HardwareMonitor (same readings as the resource governor)",
+            }
+
+        async def ingest(text: str, title: str) -> Any:
+            return await self.knowledge_engine.ingest_text(
+                text,
+                title=title,
+                project="business",
+            )
+
+        return BusinessOpportunityService(
+            store=self.state_store,
+            research=research,
+            audit=self._self_management_audit,
+            publish=lambda type_, payload: self._announce_soon(type_, **dict(payload)),
+            knowledge=ingest,
+            resource_snapshot=resource_snapshot,
+            actor="operator",
+        )
+
+    def _product_resource_snapshot(self) -> dict[str, Any]:
+        free = self.hardware_monitor.available_ram_bytes()
+        total = self.hardware_monitor.total_ram_bytes()
+        gpu = self.hardware_monitor.gpu()
+        return {
+            "available_ram_gb": None if free is None else round(free / (1024**3), 2),
+            "total_ram_gb": None if total is None else round(total / (1024**3), 2),
+            "cpu_percent": self.hardware_monitor.cpu_percent(),
+            "gpu_available": bool(gpu.get("available", False)),
+            "source": "HardwareMonitor (same readings as the resource governor)",
+        }
+
+    def _probe_product_environment(self, environment: Mapping[str, Any]) -> dict[str, Any]:
+        """Validate only what is actually observable: workspace and runtime.
+
+        Dependencies and a product build are separate evidence. This probe does
+        not install anything and does not claim a build succeeded.
+        """
+        workspace = Path(str(environment.get("workspace_path", "")))
+        if not workspace.is_dir():
+            return {
+                "validated": False,
+                "scope": "workspace_and_runtime",
+                "output": "The isolated product workspace is missing.",
+            }
+        language = str(environment.get("language", "python")).lower()
+        if language in {"python", "py"}:
+            runtime = sys.executable
+            available = bool(runtime) and Path(runtime).exists()
+        elif language in {"javascript", "js", "node"}:
+            runtime = shutil.which("node") or ""
+            available = bool(runtime)
+        else:
+            runtime = ""
+            available = False
+        return {
+            "validated": bool(available),
+            "scope": "workspace_and_runtime_only",
+            "output": (
+                f"Workspace {workspace} exists; runtime {runtime or 'not found'}. "
+                "Dependencies and the product build are validated separately."
+            ),
+        }
+
+    async def _run_product_tests(
+        self,
+        *,
+        product_id: str,
+        workspace_path: str,
+        gate: Mapping[str, Any],
+        test_command: str = "",
+        timeout_seconds: float = 180.0,
+    ) -> dict[str, Any]:
+        """Run a product's pytest suite inside its isolated workspace.
+
+        Only pytest suites are executed by the built-in runner. Security,
+        dependency, lint and type-check gates are reported as not run unless the
+        operator records real evidence from those tools; a passing unit suite is
+        not relabelled as a security result.
+        """
+        del product_id
+        gate_id = str(gate.get("id", ""))
+        kind = str((gate.get("kinds") or [gate_id])[0])
+        unsupported = {
+            "security",
+            "dependency",
+            "secret_scan",
+            "static_analysis",
+            "type_check",
+            "lint",
+            "performance",
+        }
+        if gate_id in unsupported or kind in unsupported:
+            return {
+                "suite": str(gate.get("name", gate_id)),
+                "kind": kind,
+                "status": "not_run",
+                "total": 0,
+                "passed": 0,
+                "failed": 0,
+                "output": (
+                    "The built-in runner only executes pytest suites. Record the real "
+                    f"{gate_id} tool output separately; no result is fabricated here."
+                ),
+                "source": "builtin_pytest_runner",
+            }
+        root = Path(workspace_path).resolve()
+        if not root.is_dir():
+            raise ValueError("The product workspace does not exist.")
+        raw_command = test_command.strip() or "python -m pytest"
+        args = shlex.split(raw_command)
+        if not args:
+            raise ValueError("The test command is empty.")
+        first = args[0].lower()
+        if first in {"python", "python3", "py"}:
+            args[0] = sys.executable
+        elif first in {"pytest", "pytest.exe"}:
+            args = [sys.executable, "-m", "pytest", *args[1:]]
+        if args[:3] != [sys.executable, "-m", "pytest"]:
+            return {
+                "suite": str(gate.get("name", gate_id)),
+                "kind": kind,
+                "status": "not_run",
+                "total": 0,
+                "passed": 0,
+                "failed": 0,
+                "output": "The built-in runner accepts only `python -m pytest` commands.",
+                "source": "builtin_pytest_runner",
+            }
+        unsafe = [
+            arg
+            for arg in args[3:]
+            if ".." in arg
+            or arg.startswith(("/", "\\"))
+            or re.match(r"^[A-Za-z]:", arg)
+            or arg.startswith(("--rootdir", "--confcutdir", "--basetemp", "-c", "-p"))
+        ]
+        if unsafe:
+            raise ValueError("The test command points outside the isolated workspace.")
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),
+            "TEMP": os.environ.get("TEMP", ""),
+            "TMP": os.environ.get("TMP", ""),
+            "PYTHONPATH": str(root),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "NOVACONTROL_DISABLE_OLLAMA": "1",
+        }
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            cwd=str(root),
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        try:
+            raw_output, _ = await asyncio.wait_for(
+                proc.communicate(), timeout=max(5.0, min(float(timeout_seconds), 600.0))
+            )
+        except TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            return {
+                "suite": str(gate.get("name", gate_id)),
+                "kind": kind,
+                "status": "error",
+                "total": 0,
+                "passed": 0,
+                "failed": 0,
+                "output": "The product test command exceeded its time budget.",
+                "source": "builtin_pytest_runner",
+            }
+        output = (raw_output or b"").decode("utf-8", errors="replace")[-12000:]
+        passed_match = re.search(r"(\d+) passed", output)
+        failed_match = re.search(r"(\d+) failed", output)
+        error_match = re.search(r"(\d+) error", output)
+        passed = int(passed_match.group(1)) if passed_match else 0
+        failed = int(failed_match.group(1)) if failed_match else 0
+        errors = int(error_match.group(1)) if error_match else 0
+        total = passed + failed + errors
+        if proc.returncode == 5 or total == 0:
+            status = "not_run"
+        elif proc.returncode == 0 and failed == 0 and errors == 0:
+            status = "passed"
+        else:
+            status = "failed"
+        return {
+            "suite": str(gate.get("name", gate_id)),
+            "kind": kind,
+            "status": status,
+            "total": total,
+            "passed": passed,
+            "failed": failed + errors,
+            "skipped": 0,
+            "command": raw_command,
+            "output": output,
+            "source": "builtin_pytest_runner",
+        }
+
+    def _build_customer_growth(self) -> CustomerService:
+        """Compose Phase 37 over the Phase 36 product reader and shared seams."""
+        return CustomerService(
+            store=self.state_store,
+            products=self.product_pipeline.detail,
+            publish=lambda type_, payload: self._announce_soon(type_, **dict(payload)),
+            audit=self.audit.record,
+            memory=lambda **kwargs: self.memory.remember(MemoryNamespace.PROJECT, **kwargs),
+            knowledge=lambda text, title: self.knowledge_engine.ingest_text(
+                text, title=title, project="customer"
+            ),
+            actor="operator",
+        )
+
+    def _build_portfolio_manager(self) -> PortfolioService:
+        """Compose Phase 39 over existing venture, product, customer and finance readers."""
+        return PortfolioService(
+            store=self.state_store,
+            finance=self.business_finance,
+            products=self.product_pipeline.detail,
+            opportunities=self.business_opportunities.detail,
+            customers=self.customer_growth.detail,
+            publish=lambda type_, payload: self._announce_soon(type_, **dict(payload)),
+            audit=self.audit.record,
+            memory=lambda **kwargs: self.memory.remember(MemoryNamespace.PROJECT, **kwargs),
+            knowledge=lambda text, title: self.knowledge_engine.ingest_text(
+                text, title=title, project="portfolio"
+            ),
+            actor="operator",
+        )
+
+    def _build_business_finance(self) -> FinOpsService:
+        """Compose Phase 38 over existing state and read-only Phase 35/36/37 links."""
+        return FinOpsService(
+            store=self.state_store,
+            customers=self.customer_growth.detail,
+            products=self.product_pipeline.detail,
+            opportunities=self.business_opportunities.detail,
+            publish=lambda type_, payload: self._announce_soon(type_, **dict(payload)),
+            audit=self.audit.record,
+            memory=lambda **kwargs: self.memory.remember(MemoryNamespace.PROJECT, **kwargs),
+            knowledge=lambda text, title: self.knowledge_engine.ingest_text(
+                text, title=title, project="finance"
+            ),
+            actor="operator",
+        )
+
+    def _build_product_pipeline(self) -> ProductService:
+        """Compose Phase 36 over the real Phase 35 reports and agent registry."""
+        return ProductService(
+            store=self.state_store,
+            opportunities=self.business_opportunities.detail,
+            workspace_root=Path.cwd() / self.BUILD_WORKSPACE_DIRNAME / "products",
+            agent_registry=self.agent_registry,
+            test_runner=self._run_product_tests,
+            environment_probe=self._probe_product_environment,
+            resource_snapshot=self._product_resource_snapshot,
+            publish=lambda type_, payload: self._announce_soon(type_, **dict(payload)),
+            audit=self.audit.record,
+            memory=lambda **kwargs: self.memory.remember(MemoryNamespace.PROJECT, **kwargs),
+            knowledge=lambda text, title: self.knowledge_engine.ingest_text(
+                text, title=title, project="product"
+            ),
+            actor="operator",
+            max_parallel=4,
+        )
+
+    def _build_self_management(self) -> SelfManagementService:
+        """Compose Phase 34 from the services already constructed above."""
+        health = HealthCollector(
+            self.diagnostics,
+            metrics=self._self_management_metrics,
+            event_bus=self.event_bus,
+        )
+        incidents = IncidentManager(
+            store=self.state_store,
+            publisher=lambda type_, **payload: self._announce_soon(type_, **payload),
+            redactor=lambda value: self.audit.redactor.redact_value(value)[0],
+        )
+        configuration = ConfigurationManager(
+            self.state_store,
+            lambda: self.settings.to_dict(),
+        )
+        if not configuration.versions():
+            configuration.snapshot(note="boot baseline")
+        maintenance = MaintenanceService(
+            self.data_dir,
+            # Maintenance only needs the serialisable report; passing the
+            # ConfigReport object made `dict(...)` fail silently inside preview.
+            config_report=lambda: configuration.report().to_dict(),
+        )
+        registry = RecoveryRegistry()
+
+        async def verify_configuration(incident: Any) -> dict[str, Any]:
+            report = self.self_management.configuration.report()
+            return {
+                "healthy": report.valid,
+                "status": "ok" if report.valid else "failing",
+                "detail": "the restored configuration validates"
+                if report.valid
+                else "; ".join(report.issues),
+                "component": "Configuration",
+                "active_version": report.active_version,
+            }
+
+        async def verify(component: str) -> dict[str, Any]:
+            result = await self.diagnostics.check(component)
+            return {
+                "healthy": result.status.healthy,
+                "status": result.status.value,
+                "detail": result.message,
+                "component": component,
+            }
+
+        def verifier_for(name: str) -> Any:
+            async def verify_component(incident: Any) -> dict[str, Any]:
+                return await verify(name)
+
+            return verify_component
+
+        async def restart_workers(incident: Any) -> dict[str, Any]:
+            self._start_automation_ticker()
+            self._start_operations_ticker()
+            await asyncio.sleep(0)
+            return {
+                "automation": self._automation_ticker is not None
+                and not self._automation_ticker.done(),
+                "operations": self._operations_ticker is not None
+                and not self._operations_ticker.done(),
+            }
+
+        async def reconnect_provider(incident: Any) -> dict[str, Any]:
+            status = self.model_manager.runtime_status()
+            provider_id = str(self.model_manager.provider_name() or "ollama").lower()
+            if status.reachable:
+                self.model_router.providers.mark_recovered(provider_id)
+                self._sync_model_router()
+            return {
+                "provider": provider_id,
+                "reachable": bool(status.reachable),
+                "detail": (
+                    "provider answered its status probe"
+                    if status.reachable
+                    else "provider is still unreachable; it cannot be restarted from here"
+                ),
+            }
+
+        async def reload_memory(incident: Any) -> dict[str, Any]:
+            await self.personal_memory.load()
+            return self.personal_memory.snapshot()
+
+        async def restore_config(incident: Any) -> dict[str, Any]:
+            report = self.self_management.configuration.report()
+            target = next((row for row in report.versions if row.known_good), None)
+            if target is None:
+                raise RuntimeError("no known-good configuration snapshot is available")
+            applied = await self._apply_self_management_configuration(target.settings)
+            return {"restored_from": target.version, "settings": applied}
+
+        self.risk.declare(
+            "self_management.restart-scheduler",
+            risk_level=RiskLevel.LOW,
+            requires_confirmation=False,
+            reversible=True,
+            destructive=False,
+            external_side_effect=False,
+        )
+        self.risk.declare(
+            "self_management.restart-background-workers",
+            risk_level=RiskLevel.LOW,
+            requires_confirmation=False,
+            reversible=True,
+            destructive=False,
+            external_side_effect=False,
+        )
+        self.risk.declare(
+            "self_management.reconnect-model-manager",
+            risk_level=RiskLevel.LOW,
+            requires_confirmation=False,
+            reversible=True,
+            destructive=False,
+            external_side_effect=False,
+        )
+        self.risk.declare(
+            "self_management.reconnect-provider",
+            risk_level=RiskLevel.LOW,
+            requires_confirmation=False,
+            reversible=True,
+            destructive=False,
+            external_side_effect=False,
+        )
+        self.risk.declare(
+            "self_management.reload-memory",
+            risk_level=RiskLevel.MEDIUM,
+            requires_confirmation=True,
+            reversible=True,
+            destructive=False,
+            external_side_effect=False,
+        )
+        self.risk.declare(
+            "self_management.restore-known-good-config",
+            risk_level=RiskLevel.MEDIUM,
+            requires_confirmation=True,
+            reversible=True,
+            destructive=False,
+            external_side_effect=False,
+        )
+        registry.register(
+            RecoveryAction(
+                id="restart-scheduler",
+                component="Scheduler",
+                title="Restart the scheduled-work loop",
+                description="Start the application's existing automation ticker if it is stopped.",
+                risk=OperationalRiskLevel.LOW,
+                automatic=True,
+                requires_approval=False,
+                timeout_seconds=5.0,
+                cooldown_seconds=60.0,
+                impact="Due scheduled work resumes; stored tasks and checkpoints are untouched.",
+            ),
+            restart_workers,
+            lambda incident: verify("Scheduler"),
+        )
+        registry.register(
+            RecoveryAction(
+                id="restart-background-workers",
+                component="Background workers",
+                title="Restart background workers",
+                description="Start the existing automation and operations loops if stopped.",
+                risk=OperationalRiskLevel.LOW,
+                automatic=True,
+                requires_approval=False,
+                timeout_seconds=5.0,
+                cooldown_seconds=60.0,
+                impact="Persistent operations resume; task checkpoints are preserved.",
+            ),
+            restart_workers,
+            lambda incident: verify("Background workers"),
+        )
+        for component, action_id in (
+            ("Ollama", "reconnect-provider"),
+            ("Model manager", "reconnect-provider"),
+        ):
+            if component == "Model manager":
+                action_id = "reconnect-model-manager"
+            registry.register(
+                RecoveryAction(
+                    id=action_id,
+                    component=component,
+                    title="Reconnect the local model provider",
+                    description="Re-probe the existing runtime and clear its cooling-down health state if it answers.",
+                    risk=OperationalRiskLevel.LOW,
+                    automatic=True,
+                    requires_approval=False,
+                    timeout_seconds=8.0,
+                    cooldown_seconds=120.0,
+                    impact="Future model requests can use the provider; no model is downloaded or loaded.",
+                ),
+                reconnect_provider,
+                verifier_for(component),
+            )
+        for component, action_id in (
+            ("Memory services", "reload-memory"),
+            ("Context", "reload-context"),
+        ):
+            self.risk.declare(
+                f"self_management.{action_id}",
+                risk_level=RiskLevel.MEDIUM,
+                requires_confirmation=True,
+                reversible=True,
+                destructive=False,
+                external_side_effect=False,
+            )
+            registry.register(
+                RecoveryAction(
+                    id=action_id,
+                    component=component,
+                    title="Reload the memory index",
+                    description="Re-read the existing personal knowledge index; no records are deleted.",
+                    risk=OperationalRiskLevel.MEDIUM,
+                    automatic=False,
+                    requires_approval=True,
+                    timeout_seconds=30.0,
+                    cooldown_seconds=300.0,
+                    impact="Memory recall is rebuilt from the stored data; a failed reload escalates.",
+                ),
+                reload_memory,
+                verifier_for(component),
+            )
+        registry.register(
+            RecoveryAction(
+                id="restore-known-good-config",
+                component="Configuration",
+                title="Restore the latest known-good configuration",
+                description="Apply a validated settings snapshot and record it as a new version.",
+                risk=OperationalRiskLevel.MEDIUM,
+                automatic=False,
+                requires_approval=True,
+                timeout_seconds=30.0,
+                cooldown_seconds=300.0,
+                impact="Runtime settings return to the last valid snapshot; invalid history is preserved.",
+            ),
+            restore_config,
+            verify_configuration,
+        )
+        recovery = RecoveryManager(
+            registry,
+            incidents,
+            permissions=self.risk,
+            audit=self._self_management_audit,
+            publisher=lambda type_, **payload: self._announce_soon(type_, **payload),
+            # Manual approvals work out of the box; no action runs without an
+            # explicit operator approval until the mode is raised to automatic.
+            mode=AutonomyMode.CONTROLLED,
+            max_actions_per_window=4,
+            window_seconds=900.0,
+        )
+        return SelfManagementService(
+            health=health,
+            incidents=incidents,
+            recovery=recovery,
+            maintenance=maintenance,
+            configuration=configuration,
+            policy_store=self.state_store,
+            audit=self._self_management_audit,
+            notify=self._self_management_notify,
+            apply_configuration=self._apply_self_management_configuration,
+            learning=self._self_management_learning,
+            learning_advice=self._self_management_learning_advice,
+            agent_advice=self._self_management_agent_advice,
+        )
+
+    def _start_self_management_ticker(self) -> None:
+        """Start the bounded Phase 34 monitor loop. Idempotent."""
+        if self._self_management_ticker is not None and not self._self_management_ticker.done():
+            return
+        self._self_management_ticker = asyncio.get_running_loop().create_task(
+            self._self_management_loop()
+        )
+
+    def _stop_self_management_ticker(self) -> None:
+        ticker = self._self_management_ticker
+        self._self_management_ticker = None
+        if ticker is not None and not ticker.done():
+            ticker.cancel()
+
+    async def _self_management_loop(self) -> None:
+        """Monitor on a slow cadence; one bad pass never stops the loop."""
+        interval = self._self_management_interval
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self.self_management.monitor()
+                self._self_management_cycles += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                continue
+
+    async def self_management_health(self) -> dict[str, Any]:
+        return await self.self_management.health_check(explain=True)
+
+    def self_management_status(self) -> dict[str, Any]:
+        return self.self_management.status()
+
     def _record_audit(
         self,
         *,
@@ -9234,22 +13113,46 @@ class NovaControlApplication:
     async def _handle_memory(self, request: BrainRequest, text: str) -> tuple[str, dict[str, Any]]:
         # Teach path: "remember this/that: …" stores the fact as durable
         # KNOWLEDGE, not just conversation history — so the Learn tab's
-        # "what did I teach you" recall works across sessions.
-        for marker in ("remember this:", "remember that:", "remember:"):
-            if marker in text.lower():
-                fact = text.split(marker, 1)[-1].strip()
-                if fact:
-                    taught = await self.teach_knowledge(fact, source="chat")
-                    return "memory", {
-                        "mode": "memory_store",
-                        "message": taught["message"],
-                        "memory": taught["memory"],
-                        "results": [],
-                    }
-        # Recall path: search taught knowledge first, then conversation memory.
+        # "what did I teach you" recall works across sessions. The SAME explicit
+        # request also feeds the Phase 32 structured model with provenance.
+        extracted = remember_explicit_text(text)
+        if extracted is not None:
+            fact, category, kind = extracted
+            taught = await self.teach_knowledge(fact, source="chat")
+            personal = await self.personal_memory.remember(
+                fact,
+                category=category,
+                kind=kind,
+                source_type=KnowledgeSource.USER,
+                source="chat",
+            )
+            return "memory", {
+                "mode": "memory_store",
+                "message": taught["message"],
+                "memory": taught["memory"],
+                "personal": personal.to_dict(),
+                "results": [],
+            }
+        # Recall path: structured personal knowledge first (it carries validity,
+        # confidence and provenance), then taught facts and conversation text.
+        personal_hits = await self.personal_memory.retrieve(
+            text, access=KnowledgeAccess.user(), limit=3
+        )
         taught = await self.list_knowledge(text, limit=3)
         conversation = await self.memory.retrieve(MemoryNamespace.CONVERSATION, text, limit=5)
         results = [r.record.to_dict() | {"score": r.score} for r in conversation]
+        if personal_hits:
+            best = personal_hits[0]
+            return "memory", {
+                "mode": "memory_recall",
+                "message": (
+                    f"From personal knowledge ({best.record.category.value}, "
+                    f"{best.record.confidence:.2f} confidence): {best.record.content}"
+                ),
+                "personal": [hit.to_dict() for hit in personal_hits],
+                "facts": taught["facts"],
+                "results": results,
+            }
         if taught["facts"]:
             # Surface the best taught fact directly when it clearly matches.
             best = taught["facts"][0]
@@ -9262,8 +13165,9 @@ class NovaControlApplication:
                 }
         return "memory", {
             "mode": "memory_recall",
-            "message": "I don't have taught knowledge matching that yet — use the Learn tab or say 'remember this: …'.",
+            "message": "I don't have personal or taught knowledge matching that yet — use the Learn tab or say 'remember this: …'.",
             "facts": [],
+            "personal": [],
             "results": results,
         }
 
@@ -9271,8 +13175,27 @@ class NovaControlApplication:
         project = self.projects.create_project(text[:60], description=text)
         return "project", project.to_dict()
 
-    async def _handle_agent(self, _request: BrainRequest, text: str) -> tuple[str, dict[str, Any]]:
-        response = await self.coordinator.delegate(AgentTask(text), self.agent_registry)
+    async def _handle_agent(self, request: BrainRequest, text: str) -> tuple[str, dict[str, Any]]:
+        # Agents receive a NARROW view: private and sensitive records are
+        # excluded by KnowledgeAccess.agent(), and the project named in the
+        # request scopes the retrieval further. The result is carried as task
+        # metadata so a specialist can see exactly what was retrieved.
+        project = str(request.context.get("project", "") or "")
+        allowed = await self.personal_memory.retrieve(
+            text, access=KnowledgeAccess.agent(project=project), limit=5
+        )
+        metadata = {
+            "personal_knowledge": [hit.to_dict() for hit in allowed],
+            "personal_knowledge_access": {
+                "audience": "agent",
+                "project": project,
+                "private_excluded": True,
+                "sensitive_excluded": True,
+            },
+        }
+        response = await self.coordinator.delegate(
+            AgentTask(text, metadata=metadata), self.agent_registry
+        )
         return "agent", response.to_dict()
 
     # ── Deterministic and vision surfaces ─────────────────────────────────
@@ -9836,6 +13759,139 @@ class NovaControlApplication:
         facts = [result.record.to_dict() | {"score": result.score} for result in results]
         return {"mode": "knowledge_list", "facts": facts, "count": len(facts)}
 
+    # -- Phase 32: structured personal knowledge -----------------------------
+
+    def _personal_access(self, *, project: str = "", sensitive: bool = False) -> KnowledgeAccess:
+        return KnowledgeAccess.user(project=project, allow_sensitive=sensitive)
+
+    async def personal_status(self) -> dict[str, Any]:
+        """Structured knowledge counts, categories, privacy and load state."""
+        return await self.personal_memory.status()
+
+    async def personal_remember(self, content: str, **fields: Any) -> dict[str, Any]:
+        """Acquire one record with its source, kind and provenance stated."""
+        result = await self.personal_memory.remember(content, **fields)
+        # A detected contradiction is a real, inspectable outcome: refusing it
+        # would throw away the incoming record and hide the conflict. Only a
+        # malformed/refused write raises here.
+        if result.action in {"rejected", "failed"}:
+            raise ValueError("; ".join(result.reasons) or "the knowledge record was refused")
+        return result.to_dict()
+
+    async def personal_search(
+        self,
+        query: str = "",
+        *,
+        project: str = "",
+        entity: str = "",
+        category: str = "",
+        kind: str = "",
+        limit: int = 10,
+        include_unverified: bool = False,
+        include_historical: bool = False,
+        include_contradicted: bool = False,
+        include_expired: bool = False,
+        include_sensitive: bool = False,
+        expand_relations: bool = True,
+    ) -> dict[str, Any]:
+        """Contextual retrieval; the default excludes historical and unverified rows."""
+        hits = await self.personal_memory.retrieve(
+            query,
+            access=self._personal_access(project=project, sensitive=include_sensitive),
+            limit=limit,
+            project=project,
+            entity=entity,
+            categories=tuple(
+                item.strip() for item in category.split(",") if item.strip()
+            ),
+            kinds=tuple(item.strip() for item in kind.split(",") if item.strip()),
+            include_unverified=include_unverified,
+            include_historical=include_historical,
+            include_contradicted=include_contradicted,
+            include_expired=include_expired,
+            expand_relations=expand_relations,
+        )
+        return {
+            "mode": "personal_knowledge_search",
+            "query": query,
+            "hits": [hit.to_dict() for hit in hits],
+            "count": len(hits),
+        }
+
+    async def personal_inspect(self, record_id: str) -> dict[str, Any]:
+        # Explicit control by id is an owner action; bulk search still requires
+        # the include_sensitive opt-in, so sensitive records never appear
+        # incidentally.
+        return await self.personal_memory.inspect(
+            record_id, access=self._personal_access(sensitive=True)
+        )
+
+    async def personal_correct(
+        self, record_id: str, content: str, *, reason: str = ""
+    ) -> dict[str, Any]:
+        result = await self.personal_memory.correct(
+            record_id,
+            content,
+            reason=reason,
+            access=self._personal_access(sensitive=True),
+        )
+        if not result.ok:
+            raise ValueError("; ".join(result.reasons) or "the correction was refused")
+        return result.to_dict()
+
+    async def personal_delete(self, record_id: str, *, reason: str = "") -> dict[str, Any]:
+        deleted = await self.personal_memory.delete(
+            record_id, reason=reason, access=self._personal_access(sensitive=True)
+        )
+        return {"deleted": deleted, "record_id": record_id}
+
+    async def personal_export(self, *, include_sensitive: bool = False) -> dict[str, Any]:
+        return await self.personal_memory.export(include_sensitive=include_sensitive)
+
+    async def personal_consolidate(self) -> dict[str, Any]:
+        return (
+            await self.personal_memory.consolidate(access=self._personal_access())
+        ).to_dict()
+
+    async def personal_cleanup(self) -> dict[str, Any]:
+        return await self.personal_memory.cleanup()
+
+    async def personal_resolve(
+        self, record_id: str, *, keep: bool = True, reason: str = ""
+    ) -> dict[str, Any]:
+        result = await self.personal_memory.resolve_conflict(
+            record_id,
+            keep=keep,
+            reason=reason,
+            access=self._personal_access(sensitive=True),
+        )
+        if not result.ok:
+            raise ValueError("; ".join(result.reasons) or "the conflict could not be resolved")
+        return result.to_dict()
+
+    async def personal_relate(
+        self,
+        source_id: str,
+        predicate: str,
+        *,
+        target_id: str = "",
+        target_label: str = "",
+        target_type: str = "entity",
+        confidence: float = 0.6,
+    ) -> dict[str, Any]:
+        relation = await self.personal_memory.relate(
+            source_id,
+            predicate,
+            target_id=target_id,
+            target_label=target_label,
+            target_type=target_type,
+            confidence=confidence,
+            access=self._personal_access(sensitive=True),
+        )
+        if relation is None:
+            raise ValueError("the relation source or target was not found")
+        return relation.to_dict()
+
     # -- Phase 11: local knowledge and project awareness ----------------------
 
     async def search_knowledge(self, query: str, *, limit: int = 5) -> dict[str, Any]:
@@ -10348,6 +14404,61 @@ class NovaControlApplication:
         self._pending_approvals.pop(token, None)
         return cast(dict[str, Any], record["plan"])
 
+    def _compose_with_nlp_entities(self, command: str, workflow: Any) -> Any:
+        """Let the language layer fill a compose step's app, recipient and message.
+
+        The desktop parser reads the phrasing; the NLP entity layer is the one
+        place that names an APPLICATION, a CONTACT and a MESSAGE. When it is
+        confident about any of them, that reading wins over the parser's guess.
+        It can only refine a step that is already a draft — never turn an
+        unrelated command into one — and every access is guarded so a language
+        reading can never fail planning.
+        """
+        try:
+            understood = self.intelligence.understand(command)
+            entities = dict(getattr(understood.intent, "entities", {}) or {})
+        except Exception:
+            return workflow
+        if not entities:
+            return workflow
+        app = " ".join(dict.fromkeys(str(entities.get("application") or "").split())).strip().lower()
+        contact = str(entities.get("contact") or entities.get("recipient") or "").strip()
+        message = str(entities.get("message") or "").strip()
+        if not (app or contact or message):
+            return workflow
+        from novacontrol.desktop.models import DesktopAction as _DA
+        from novacontrol.desktop.models import DesktopActionType as _DAT
+        from novacontrol.desktop.models import DesktopWorkflow as _DW
+
+        actions: list[Any] = []
+        changed = False
+        for action in workflow.actions:
+            if action.type is _DAT.COMPOSE_MESSAGE:
+                parameters = dict(action.parameters)
+                # Only fill what the parser left empty: the parser sees the
+                # chain context, so a value it got from the sentence wins.
+                if app and not parameters.get("app"):
+                    parameters["app"] = app
+                if message and not parameters.get("message"):
+                    parameters["message"] = message
+                actions.append(
+                    _DA(
+                        type=action.type,
+                        target=action.target or contact,
+                        description=(
+                            f"Draft a {app} message to '{action.target or contact}' (you press Send)"
+                            if app and not dict(action.parameters).get("app")
+                            else action.description
+                        ),
+                        parameters=parameters,
+                        id=action.id,
+                    )
+                )
+                changed = True
+            else:
+                actions.append(action)
+        return _DW(name=workflow.name, actions=tuple(actions), id=workflow.id) if changed else workflow
+
     def plan_desktop_command(self, command: str) -> dict[str, Any]:
         """Parse a JARVIS command into a workflow, mint an approval token, and return the plan.
 
@@ -10368,6 +14479,7 @@ class NovaControlApplication:
         from novacontrol.desktop.models import DesktopWorkflow as _DW
 
         combined, actions_descriptions, first_target = self.desktop.plan_command(command)
+        combined = self._compose_with_nlp_entities(command, combined)
         native_failed = any(
             action.type is _DAT.EXECUTE_SCRIPT for action in combined.actions
         )
@@ -10431,6 +14543,9 @@ class NovaControlApplication:
             "approval": {"required": True, "approved": False, "message": "Review the actions before running them on your computer."},
             "workflow": combined.to_dict(),
         }
+        suggestion = self._continual_plan_suggestion(command, "desktop.command", "desktop")
+        if suggestion:
+            plan["continual"] = suggestion
         plan["approval"]["token"] = self._mint_approval(command, plan)
         return plan
 
@@ -10716,6 +14831,7 @@ class NovaControlApplication:
             )
         self._consume_approval(approval_token, command)
         _kind, name = game_request(command)
+        learning_started = time.perf_counter()
         try:
             result = await self.games.launch(name or command)
         except RuntimeError as exc:
@@ -10767,7 +14883,7 @@ class NovaControlApplication:
             summary = f"{target} started but the launch is NOT verified: {reason}"
         else:
             summary = f"{target} was not started: {reason}"
-        return {
+        response = {
             "route": "game_launch",
             "status": result.get("status"),
             "command": command,
@@ -10790,6 +14906,15 @@ class NovaControlApplication:
             "game": result,
             "observation": self._game_observation_state(),
         }
+        try:
+            self._capture_verified_game_launch_learning(
+                command=command,
+                payload=response,
+                elapsed_ms=(time.perf_counter() - learning_started) * 1000.0,
+            )
+        except Exception:
+            pass
+        return response
 
     async def close_game_launch(self, *, launch_id: str = "") -> dict[str, Any]:
         """Close ONLY the instance this process started, and confirm it exited."""
@@ -10961,6 +15086,9 @@ class NovaControlApplication:
             "approval": {"required": True, "approved": False, "message": "Review the browser actions before running them."},
             "workflow": combined.to_dict(),
         }
+        suggestion = self._continual_plan_suggestion(command, "browser.command", "browser")
+        if suggestion:
+            plan["continual"] = suggestion
         plan["approval"]["token"] = self._mint_approval(command, plan)
         return plan
 
@@ -11006,6 +15134,7 @@ class NovaControlApplication:
         serialized workflow via _workflow_from_plan, execute under auto-approval (a server-minted
         token was already validated), then mark the plan executed.
         """
+        learning_started = time.perf_counter()
         plan = self._consume_approval(approval_token, command)
         # The token's plan records which device family minted it. The caller
         # dispatches by brain intent, but the inline Approve button posts
@@ -11059,6 +15188,19 @@ class NovaControlApplication:
                 plan["search_answer"] = answer
         if succeeded:
             self._record_activity("command", "Command executed", command)
+        # Phase 27: the workflow has ALREADY executed. Record what it actually
+        # did (and did not verify) without letting a learning defect surface to
+        # the caller that approved it.
+        try:
+            self._capture_execution_learning(
+                command=command,
+                device=str(plan.get("family", "") or "desktop"),
+                payload=plan,
+                elapsed_ms=(time.perf_counter() - learning_started) * 1000.0,
+                correlation=correlation_id,
+            )
+        except Exception:
+            pass
         return plan
 
     def _record_activity(self, type_: str, title: str, detail: str = "") -> None:
@@ -11133,6 +15275,9 @@ class NovaControlApplication:
             "bridge": status.to_dict(),
             "workflow": workflow.to_dict(),
         }
+        suggestion = self._continual_plan_suggestion(command, "phone.command", "phone")
+        if suggestion:
+            plan["continual"] = suggestion
         if status.available:
             # A paired device can really be driven, so execution must be approval-gated
             # like desktop/browser: mint a token only the server can validate.
@@ -11261,6 +15406,18 @@ class NovaControlApplication:
             # where that claim came from, the lifecycle policy in force, and how
             # many selections and loads have gone each way.
             "models": self.models_status(),
+            # Phase 34: the operational control plane. This is a cached health
+            # snapshot and stored incident/config state; polling status never
+            # runs a probe. The explicit health/diagnostics controls do that.
+            "self_management": self.self_management_status(),
+            # Phase 35: counts and limits only. Evidence and reports stay on
+            # their own authenticated routes; the status poll never runs
+            # research or an assessment.
+            "business_opportunities": self.business_opportunities.status(),
+            "product_pipeline": self.product_pipeline.status(),
+            "customer_growth": self.customer_growth.status(),
+            "business_finance": self.business_finance.status(),
+            "portfolio_manager": self.portfolio_manager.status(),
             "scheduled_tasks": len(self.scheduler.tasks()),
             "tracked_tasks": len(self.tasks.list()),
             # Trimmed views (no `result` blobs — a completed /ask embeds whole
@@ -11278,6 +15435,17 @@ class NovaControlApplication:
             ],
             "projects": len(self.projects.list_projects()),
             "automation_workflows": len(self.automation.list_workflows()),
+            # Phase 30: the persistent board — objective/task counts, the tick
+            # posture and the last monitoring conclusions. Read from the
+            # service's own records; nothing here probes a model or a disk.
+            "persistent_operations": self.operations.status(),
+            # Phase 31: what the skill library holds, with evidence-derived
+            # reliability. Read from the service's own records; this probes no
+            # model, disk or network.
+            "skill_library": self.skill_service.status(),
+            # Phase 32: the structured personal knowledge model. Counts come
+            # from the loaded index; no content is exposed on the status poll.
+            "personal_knowledge": self.personal_memory.snapshot(),
             "desktop_available": True,
             "browser_available": True,
             "desktop_runner": type(self.desktop.runner).__name__,
@@ -11321,6 +15489,17 @@ class NovaControlApplication:
             # table with its honest states. Read from the manager's own records;
             # nothing here probes a model or invents a score.
             "generalization": self.generalization_status(),
+            # Phase 27: what this build has learned from executed evidence —
+            # counts by outcome and kind, active strategy versions with measured
+            # performance, open proposals, and the boundaries it never crosses.
+            "continual_learning": self.continual_status(),
+            # Phase 28: what coordination can do right now — the policy, the
+            # registered roles, the task counts and the honest boundaries.
+            "collaboration": self.collaboration_status(),
+            # Phase 29: the computer operator's live supervisor state, the
+            # redacted history counts and the honest device/loop posture. Full
+            # device probing is the async `/computer/status` route.
+            "computer": self.computer.status(),
             "phone_bridge": self.phone.status().to_dict(),
             "settings": self.settings.to_dict(),
             # Global Intelligence Layer: interpretation health + the capability

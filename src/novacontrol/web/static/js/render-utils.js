@@ -41,6 +41,20 @@ function render(targetId, data, type = "generic") {
   else if (type === "workflow") renderWorkflow(target, data);
   else if (type === "learn") renderLearning(target, data);
   else if (type === "health") renderHealth(target, data);
+  else if (type === "selfManagement") renderSelfManagement(target, data);
+  else if (type === "business") renderBusinessOpportunities(target, data);
+  else if (type === "product") renderProductProject(target, data);
+  else if (type === "productList") renderProductList(target, data);
+  else if (type === "customer") renderCustomerWorkspace(target, data);
+  else if (type === "customerGrowth") renderCustomerGrowth(target, data);
+  else if (type === "customerTicket") renderCustomerTicket(target, data);
+  else if (type === "customerSales") renderCustomerSalesBrief(target, data);
+  else if (type === "financeList") renderFinanceList(target, data);
+  else if (type === "financeDetail") renderFinanceDetail(target, data);
+  else if (type === "financeDashboard") renderFinanceDashboard(target, data);
+  else if (type === "portfolioList") renderPortfolioList(target, data);
+  else if (type === "portfolioDetail") renderPortfolioDetail(target, data);
+  else if (type === "portfolioDashboard") renderPortfolioDashboard(target, data);
   else if (type === "phoneStatus") renderPhoneStatus(target, data);
   else if (type === "settings") renderSettingsResult(target, data);
   else if (type === "visionClick" && data && data.action === "guided_click") renderVisionClickResult(target, data);
@@ -61,14 +75,27 @@ async function run(targetId, type, task, buttonId, options = {}) {
   const family = activityFamily(type);
   const correlationId = options.correlationId || newCorrelationId();
   if (family) registerActivitySlot(correlationId, family, targetId);
+  // The companion reflects THIS run: a real operation started, and the state
+  // it earns afterwards is the one this run actually produced.
+  if (window.NovaCompanion) window.NovaCompanion.onRunStart(type, options.loadingText || "");
+  if (window.NovaActivity) window.NovaActivity.runStart(type, { loadingText: options.loadingText || "", correlationId });
   try {
     const data = await task();
     await drainProgressSteps(); // let fast runs still show each stage visibly
     render(targetId, data, type);
+    if (window.NovaCompanion) {
+      // A plan awaiting approval is a real, named stop — the companion says so
+      // rather than calling the request "complete".
+      const waiting = Boolean(data) && (data.status === "waiting_for_approval" || data.status === "waiting_for_phone_bridge");
+      window.NovaCompanion.onRunResult(type, { waiting });
+      if (window.NovaActivity) window.NovaActivity.runResult(type, { waiting });
+    }
     showToast(options.successToast || "Action completed");
     if (options.onSuccess) options.onSuccess(data);
   } catch (error) {
     renderError(targetId, error);
+    if (window.NovaCompanion) window.NovaCompanion.onRunError(String((error && error.message) || error));
+    if (window.NovaActivity) window.NovaActivity.runError(String((error && error.message) || error));
     if (options.onError) options.onError(error);
   } finally {
     if (family) releaseActivitySlot(correlationId);
@@ -163,24 +190,59 @@ function connectActivitySource() {
     activitySource.addEventListener("command.completed", onCompletedActivity);
     activitySource.addEventListener("explore.completed", onCompletedActivity);
     activitySource.addEventListener("learn.completed", onCompletedActivity);
+    // Extra 4: the same SSE frames drive the four Thinking Orbs. The adapter
+    // normalizes them once; placements only read the adapter. No second bus,
+    // no second connection, and no new backend event types.
+    const ORB_EVENT_TYPES = [
+      "intent.detected", "context.resolved", "decision.created", "plan.created",
+      "task.started", "task.paused", "task.resumed", "task.cancelled", "task.completed", "task.failed",
+      "tool.selected", "tool.started", "tool.completed", "tool.failed",
+      "verification.started", "verification.completed", "recovery.started", "recovery.completed",
+      "explore.progress", "explore.completed", "command.progress", "command.completed", "learn.completed",
+    ];
+    ORB_EVENT_TYPES.forEach((type) => activitySource.addEventListener(type, onOrbActivityEvent));
     // (Re)seed from the journal whenever the channel (re)opens — EventSource
     // auto-reconnect after a drop backfills anything missed while offline.
-    activitySource.onopen = () => { if (typeof loadActivityFromServer === "function") loadActivityFromServer(); };
+    activitySource.onopen = () => {
+      if (window.NovaActivity) window.NovaActivity.setTransport("connected");
+      if (typeof loadActivityFromServer === "function") loadActivityFromServer();
+    };
+    activitySource.onerror = () => {
+      // EventSource reconnects by itself; the adapter says so instead of
+      // leaving a stale "Working" orb on screen during the gap.
+      if (window.NovaActivity) window.NovaActivity.setTransport("reconnecting", "Reconnecting to the live activity channel…");
+    };
   } catch (_) {
     activitySource = null;
   }
 }
 
+function onOrbActivityEvent(event) {
+  if (!window.NovaActivity) return;
+  let data = {};
+  try { data = JSON.parse(event.data); } catch (_) { return; }
+  window.NovaActivity.ingest(String(event.type || ""), data);
+}
+
 function onCompletedActivity(event) {
   let data = {};
   try { data = JSON.parse(event.data); } catch (_) { return; }
+  if (window.NovaActivity) window.NovaActivity.ingest(String(event.type || ""), data);
   if (typeof recordActivityFromEvent === "function") recordActivityFromEvent(data);
+  // App-wide completion: the companion reports work that finished in ANY
+  // client, because the activity channel is the application's own.
+  if (window.NovaCompanion) {
+    window.NovaCompanion.onCompleted(String(event.type || "").split(".")[0] || "task");
+  }
 }
 
 function onActivityEvent(event) {
   let data = {};
   try { data = JSON.parse(event.data); } catch (_) { return; }
   const family = String(event.type || "").split(".")[0];
+  // The live step is real work in progress, whoever started it, so the
+  // companion shows it even when no panel owns the frame.
+  if (window.NovaCompanion) window.NovaCompanion.onProgress(data);
   const slot = activitySlotForEvent(family, data.correlation_id);
   if (!slot) return;
   appendLiveStep(slot.targetId, data.detail || data.step || "");

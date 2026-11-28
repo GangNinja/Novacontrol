@@ -708,6 +708,267 @@ function renderHealth(target, data) {
   target.appendChild(list);
 }
 
+/* ── Phase 34: trustworthy self-management ──────────────────── */
+
+function renderSelfManagementRecommendation(target, data) {
+  const incident = data.incident || {};
+  const actions = data.actions || [];
+  target.appendChild(el("p", "summary", `Recovery options for ${incident.component || "component"} — ${String(incident.state || "unknown").toUpperCase()}`));
+  target.appendChild(el("p", "muted", data.note || "Recommendations are not execution."));
+  if (!actions.length) {
+    target.appendChild(el("article", "info-card", "No registered recovery action exists for this component. Investigate or escalate instead."));
+    return;
+  }
+  actions.forEach((action) => {
+    const card = el("article", "info-card");
+    card.appendChild(el("h4", "", `${action.title || action.id} — ${String(action.risk || "").toUpperCase()} risk`));
+    card.appendChild(el("p", "", `${action.id} · ${action.available ? "available" : "unavailable"} · ${action.approval_required ? "approval required" : "no approval required"}`));
+    card.appendChild(el("p", "", action.description || ""));
+    card.appendChild(el("p", "muted", `Impact: ${action.impact || "not stated"} · attempts ${action.attempts ?? 0}/${action.max_attempts ?? "?"}${action.cooldown_seconds_remaining ? ` · cooldown ${action.cooldown_seconds_remaining}s` : ""}`));
+    if (action.reason) card.appendChild(el("p", "muted", action.reason));
+    target.appendChild(card);
+  });
+  if (data.learning && Object.keys(data.learning).length) {
+    const learning = el("article", "info-card");
+    learning.appendChild(el("h4", "", "Learning advice (advisory only)"));
+    Object.entries(data.learning).forEach(([key, value]) => learning.appendChild(el("p", "muted", `${label(key)}: ${typeof value === "object" ? JSON.stringify(value) : value}`)));
+    target.appendChild(learning);
+  }
+}
+
+function renderSelfManagementInvestigation(target, data) {
+  const diagnosis = data.diagnosis || {};
+  const incident = data.incident || {};
+  target.appendChild(el("p", "summary", `${diagnosis.title || incident.title || "Finding"} — ${String(diagnosis.confidence || "unknown").toUpperCase()}`));
+  const card = el("article", "info-card");
+  card.appendChild(el("h4", "", `${incident.component || diagnosis.component || "component"} (${String(incident.state || "").toUpperCase()})`));
+  card.appendChild(el("p", "", diagnosis.cause || incident.impact || ""));
+  if (diagnosis.impact) card.appendChild(el("p", "muted", `Impact: ${diagnosis.impact}`));
+  if (diagnosis.rationale) card.appendChild(el("p", "muted", `Why: ${diagnosis.rationale}`));
+  (data.evidence || diagnosis.evidence || []).slice(0, 8).forEach((row) => card.appendChild(el("p", "muted", `• ${row}`)));
+  (diagnosis.recommendations || []).slice(0, 6).forEach((row) => card.appendChild(el("p", "muted", `→ ${row}`)));
+  target.appendChild(card);
+  const advisory = data.agent_advice || {};
+  if (Object.keys(advisory).length) {
+    const agent = el("article", "info-card");
+    agent.appendChild(el("h4", "", "Specialist second opinion (advisory only)"));
+    agent.appendChild(el("p", "", advisory.available ? `${advisory.agent || "debug agent"} (${advisory.role || "debug"})` : (advisory.reason || "No advice available")));
+    agent.appendChild(el("p", "muted", data.authority || "It cannot authorize recovery."));
+    target.appendChild(agent);
+  }
+}
+
+function renderSelfManagementRecovery(target, data) {
+  const incident = data.incident || {};
+  const verification = data.verification || {};
+  target.appendChild(el("p", "summary", `${data.ok ? "Recovery verified" : "Recovery did not verify"} — ${data.action?.title || data.action?.id || "action"}`));
+  const card = el("article", "info-card");
+  card.appendChild(el("h4", "", `${incident.component || "component"} (${String(incident.state || "unknown").toUpperCase()})`));
+  card.appendChild(el("p", "", `${data.status || "unknown"} · ${data.detail || verification.detail || "no detail"}`));
+  card.appendChild(el("p", "muted", `Verified: ${data.verified ? "yes" : "no"} · probe: ${verification.component || "not reported"} (${verification.status || "unknown"})`));
+  target.appendChild(card);
+}
+
+function renderSelfManagementMaintenance(target, data) {
+  const items = data.items || [];
+  target.appendChild(el("p", "summary", `${data.mode === "preview" ? "Maintenance preview" : "Maintenance run"} — ${items.length} item(s), ${data.changed_files ?? 0} changed, ${data.removed_bytes ?? 0} byte(s) reclaimed.`));
+  if (data.approved_by) target.appendChild(el("p", "muted", `Approved by ${data.approved_by}.`));
+  (data.errors || []).forEach((error) => target.appendChild(el("p", "muted", `Error: ${error}`)));
+  const list = el("div", "health-list");
+  items.forEach((item) => {
+    const row = el("div", "list-item");
+    row.appendChild(el("strong", "", `${item.kind || "maintenance"} — ${item.action || "inspect"}`));
+    row.appendChild(el("span", `pill ${item.protected ? "warn" : item.status === "done" ? "ok" : "warn"}`, String(item.status || "proposed").toUpperCase()));
+    row.appendChild(el("p", "", item.target || ""));
+    row.appendChild(el("p", "muted", item.detail || ""));
+    list.appendChild(row);
+  });
+  target.appendChild(list);
+  if (data.skipped && data.skipped.length) {
+    target.appendChild(el("p", "muted", `${data.skipped.length} protected/skipped item(s) were not changed.`));
+  }
+}
+
+function renderSelfManagementSnapshot(target, data) {
+  const version = data.version || {};
+  target.appendChild(el("p", "summary", `Configuration snapshot v${version.version ?? "?"} recorded — ${version.known_good ? "known-good" : "INVALID"}`));
+  const card = el("article", "info-card");
+  card.appendChild(el("h4", "", version.note || "Configuration version"));
+  card.appendChild(el("p", "", `Checksum ${String(version.checksum || "").slice(0, 12)}…`));
+  const report = data.report || {};
+  card.appendChild(el("p", "muted", `Current configuration is ${report.valid ? "valid" : "INVALID"}; ${(report.versions || []).length} stored version(s).`));
+  target.appendChild(card);
+}
+
+function renderSelfManagementConfigRestore(target, data) {
+  const restored = data.restored_from || {};
+  const recorded = data.recorded_version || {};
+  target.appendChild(el("p", "summary", `Restored configuration v${restored.version ?? "?"} as new version v${recorded.version ?? "?"}`));
+  const config = data.configuration || {};
+  const health = data.health || {};
+  const card = el("article", "info-card");
+  card.appendChild(el("h4", "", `Configuration is ${config.valid ? "valid" : "INVALID"}`));
+  (config.issues || []).forEach((issue) => card.appendChild(el("p", "muted", issue)));
+  card.appendChild(el("p", "muted", `Configuration probe: ${health.status || "not run"} — ${health.message || ""}`));
+  target.appendChild(card);
+}
+
+function renderSelfManagement(target, data) {
+  if (!data) {
+    target.appendChild(el("p", "muted", "No result was returned."));
+    return;
+  }
+  if (data.restored_from && data.recorded_version) {
+    renderSelfManagementConfigRestore(target, data);
+    return;
+  }
+  if (Object.prototype.hasOwnProperty.call(data, "ok") && data.incident && data.action) {
+    renderSelfManagementRecovery(target, data);
+    return;
+  }
+  if (data.diagnosis && data.incident) {
+    renderSelfManagementInvestigation(target, data);
+    return;
+  }
+  if (Array.isArray(data.actions) && data.incident) {
+    renderSelfManagementRecommendation(target, data);
+    return;
+  }
+  if (data.mode && Array.isArray(data.items)) {
+    renderSelfManagementMaintenance(target, data);
+    return;
+  }
+  if (data.version && data.report) {
+    renderSelfManagementSnapshot(target, data);
+    return;
+  }
+  if (data && Array.isArray(data.incidents) && !data.health && !data.open_incidents) {
+    const rows = data.incidents;
+    target.appendChild(el("p", "summary", `${rows.length} stored incident(s) — ${String(data.report?.open ?? 0)} open.`));
+    if (!rows.length) target.appendChild(el("p", "muted", "No incidents have been recorded yet."));
+    rows.forEach((incident) => {
+      const card = el("article", "info-card");
+      card.appendChild(el("h4", "", `${incident.title || incident.component} (${incident.severity || "warning"})`));
+      card.appendChild(el("p", "", `${incident.component} · ${incident.state} · cause ${String(incident.cause_confidence || "unknown").toUpperCase()}`));
+      card.appendChild(el("p", "muted", `${incident.detected_at || ""}${incident.resolved_at ? ` → ${incident.resolved_at}` : ""}`));
+      if (incident.impact) card.appendChild(el("p", "muted", incident.impact));
+      (incident.recovery_attempts || []).slice(-3).forEach((attempt) =>
+        card.appendChild(el("p", "muted", `• ${attempt.action_id}: ${attempt.outcome || attempt.status}`))
+      );
+      target.appendChild(card);
+    });
+    return;
+  }
+  const health = data.health || null;
+  const recovery = data.recovery || {};
+  const config = data.configuration || {};
+  const summary = health
+    ? `Overall ${String(health.overall || "unknown").toUpperCase()} — ${(health.components || []).length} component(s), ${health.duration_ms ?? 0} ms`
+    : "No live health pass has run in this session; stored incidents and configuration are shown below.";
+  target.appendChild(el("p", "summary", summary));
+  if (health) {
+    const cards = el("div", "card-grid");
+    const metrics = health.metrics || {};
+    const metricNames = {
+      free_ram_bytes: "Free RAM",
+      critical_ram_bytes: "Critical RAM floor",
+      process_rss_bytes: "Process RSS",
+      cpu_percent: "CPU",
+      max_cpu_percent: "CPU ceiling",
+      queue_depth: "Queue depth",
+      background_tasks: "Background tasks",
+    };
+    const metricText = (key, value) => {
+      const number = Number(value);
+      if (/_bytes$/.test(key) && Number.isFinite(number)) {
+        return `${(number / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+      }
+      if (/_percent$/.test(key) && Number.isFinite(number)) return `${number}%`;
+      return String(value);
+    };
+    Object.entries(metrics)
+      .filter(([, value]) => value !== null && value !== undefined)
+      .slice(0, 8)
+      .forEach(([key, value]) => {
+        const card = el("article", "info-card");
+        card.appendChild(el("h4", "", metricNames[key] || label(key)));
+        card.appendChild(el("p", "", metricText(key, value)));
+        cards.appendChild(card);
+      });
+    target.appendChild(cards);
+    const unhealthy = (health.components || []).filter((row) => row.status !== "ok" && row.status !== "skipped");
+    const listed = (unhealthy.length ? unhealthy : health.components || []).slice(0, 10);
+    const list = el("div", "health-list");
+    listed.forEach((row) => {
+      const item = el("div", "list-item");
+      item.appendChild(el("strong", "", `${row.component} (${row.category || "component"})`));
+      item.appendChild(el("span", `pill ${row.status === "ok" ? "ok" : "warn"}`, String(row.status || "unknown").toUpperCase()));
+      item.appendChild(el("p", "", row.message || ""));
+      list.appendChild(item);
+    });
+    target.appendChild(list);
+  }
+
+  const policy = el("article", "info-card");
+  policy.appendChild(el("h4", "", "Autonomy policy"));
+  policy.appendChild(el("p", "", `Mode: ${String(recovery.mode || "recommend")}${recovery.paused ? " — PAUSED" : ""}`));
+  policy.appendChild(el("p", "muted", `Window budget: ${String(recovery.max_actions_per_window ?? "?")} action(s) per ${String(recovery.window_seconds ?? "?")} s. ${String(recovery.note || "")}`));
+  target.appendChild(policy);
+
+  const incidents = (data.open_incidents || data.incidents || []).slice(0, 8);
+  if (incidents.length) {
+    const heading = el("h4", "", "Open incidents");
+    target.appendChild(heading);
+    incidents.forEach((incident) => {
+      const card = el("article", "info-card");
+      card.appendChild(el("h4", "", `${incident.title || incident.component} (${incident.severity || "warning"})`));
+      card.appendChild(el("p", "", `${incident.component} · ${incident.state} · cause ${String(incident.cause_confidence || "unknown").toUpperCase()}`));
+      if (incident.impact) card.appendChild(el("p", "muted", incident.impact));
+      (incident.evidence || []).slice(0, 4).forEach((evidence) => card.appendChild(el("p", "muted", `• ${evidence}`)));
+      target.appendChild(card);
+    });
+  } else {
+    target.appendChild(el("p", "muted", "No open incidents."));
+  }
+
+  const pending = (data.pending_approvals || []).slice(0, 6);
+  if (pending.length) {
+    const approvals = el("article", "info-card");
+    approvals.appendChild(el("h4", "", "Approval-gated actions"));
+    pending.forEach((row) => {
+      approvals.appendChild(
+        el("p", "muted", `${row.component || "component"} → ${row.action?.title || row.action?.id || "action"}`)
+      );
+    });
+    target.appendChild(approvals);
+  }
+
+  (data.diagnoses || []).slice(0, 6).forEach((finding) => {
+    const card = el("article", "info-card");
+    card.appendChild(el("h4", "", `${finding.title} — ${String(finding.confidence || "unknown").toUpperCase()}`));
+    card.appendChild(el("p", "", finding.cause || ""));
+    (finding.evidence || []).slice(0, 4).forEach((evidence) => card.appendChild(el("p", "muted", `• ${evidence}`)));
+    (finding.recommendations || []).slice(0, 4).forEach((action) => card.appendChild(el("p", "muted", `→ ${action}`)));
+    target.appendChild(card);
+  });
+
+  const cfg = el("article", "info-card");
+  cfg.appendChild(el("h4", "", "Configuration integrity"));
+  cfg.appendChild(el("p", "", `${config.valid ? "Valid" : "INVALID"} · checksum ${String(config.checksum || "").slice(0, 12)}… · active v${String(config.active_version ?? "none")}`));
+  (config.issues || []).forEach((issue) => cfg.appendChild(el("p", "muted", issue)));
+  cfg.appendChild(el("p", "muted", `${(config.versions || []).length} stored version(s); known-good rollback is available where marked.`));
+  target.appendChild(cfg);
+
+  const last = data.maintenance && data.maintenance.last;
+  if (last) {
+    const m = el("article", "info-card");
+    m.appendChild(el("h4", "", `Last maintenance — ${last.mode}`));
+    m.appendChild(el("p", "", `${last.changed_files} file(s), ${last.removed_bytes} byte(s) reclaimed, ${last.skipped.length} skipped`));
+    (last.errors || []).slice(0, 3).forEach((error) => m.appendChild(el("p", "muted", error)));
+    target.appendChild(m);
+  }
+}
+
 /* ── Settings Rendering ─────────────────────────────────────── */
 
 function renderSettingsResult(target, data) {
@@ -740,6 +1001,187 @@ function renderGeneric(target, data) {
   card.appendChild(el("h4", "", "Result"));
   card.appendChild(el("p", "", textForSpeech(data)));
   target.appendChild(card);
+}
+
+/* ── Phase 33: adaptive model & compute routing ────────────────────────────
+
+   Renders the LIVE catalogue read from GET /models/routing: provider health,
+   configured endpoints, the last selection and its rationale, routing limits
+   and the learned policy. Every control below is posted to a real route; a
+   provider row is not shown as enabled unless the server says it is. */
+function renderModelRouting(status) {
+  const container = byId("modelRoutingStatus");
+  if (!container) return;
+  const data = status || {};
+  const providers = Array.isArray(data.providers) ? data.providers : [];
+  const models = Array.isArray(data.models) ? data.models : [];
+  const prefs = data.preferences || {};
+  const policy = data.policy || {};
+
+  clearNode(container);
+  const card = el("article", "info-card brain-card model-routing-card");
+  const head = el("div", "surface-head-row");
+  head.appendChild(el("h4", "", "Adaptive Model Routing"));
+  const statePill = el(
+    "span",
+    `pill ${data.enabled ? "ok" : "warn"}`,
+    data.enabled ? "Automatic" : "Disabled"
+  );
+  head.appendChild(statePill);
+  card.appendChild(head);
+
+  const summary = el("p", "brain-line");
+  summary.appendChild(el("span", "pill", `${providers.length} provider(s)`));
+  summary.appendChild(el("span", "pill", `${models.length} model(s)`));
+  summary.appendChild(
+    el(
+      "span",
+      `pill ${policy.active ? "ok" : ""}`,
+      policy.active ? `Policy v${policy.version}` : "Evidence-only policy"
+    )
+  );
+  card.appendChild(summary);
+
+  if (!providers.length) {
+    card.appendChild(
+      el(
+        "p",
+        "muted",
+        "No provider is configured yet. Connect Ollama or a cloud LLM in Settings; routing never invents a model."
+      )
+    );
+  }
+
+  if (providers.length) {
+    const list = el("div", "model-provider-list");
+    providers.forEach((provider) => {
+      const row = el("div", "model-provider-row");
+      const health = provider.health || {};
+      const available = provider.available === true;
+      row.appendChild(
+        el(
+          "span",
+          `pill ${available ? "ok" : provider.enabled ? "warn" : "error"}`,
+          available ? "available" : provider.enabled ? "unavailable" : "disabled"
+        )
+      );
+      row.appendChild(el("strong", "", String(provider.label || provider.provider_id || "provider")));
+      row.appendChild(
+        el(
+          "span",
+          "muted",
+          `${provider.kind || ""} · ${(provider.endpoints || []).length} model(s)` +
+            (health.last_error_kind ? ` · last failure: ${health.last_error_kind}` : "")
+        )
+      );
+      const toggle = el(
+        "button",
+        "cyber-btn small",
+        provider.enabled ? "Disable" : "Enable"
+      );
+      toggle.type = "button";
+      toggle.dataset.providerToggle = String(provider.provider_id || "");
+      toggle.dataset.providerEnabled = provider.enabled ? "false" : "true";
+      row.appendChild(toggle);
+      list.appendChild(row);
+    });
+    card.appendChild(list);
+  }
+
+  if (models.length) {
+    const modelList = el("ul", "vision-result-lines");
+    models.slice(0, 12).forEach((model) => {
+      const caps = Array.isArray(model.capabilities) ? model.capabilities.join(", ") : "";
+      modelList.appendChild(
+        el(
+          "li",
+          "",
+          `${String(model.model || "model")} · ${String(model.provider_id || "")}` +
+            (caps ? ` · ${caps}` : "") +
+            (model.context_length ? ` · ${model.context_length} ctx` : " · context unknown") +
+            (model.declared === false ? " · capabilities not declared" : "")
+        )
+      );
+    });
+    card.appendChild(modelList);
+  }
+
+  const last = data.last_route;
+  if (last) {
+    const routeBox = el("div", "model-route-result");
+    routeBox.appendChild(
+      el(
+        "p",
+        "",
+        `Last: ${String(last.route || "none")} · ${String(last.model || "no model")}` +
+          (last.provider_id ? ` via ${String(last.provider_id)}` : "")
+      )
+    );
+    (Array.isArray(last.rationale) ? last.rationale : []).slice(0, 5).forEach((reason) => {
+      routeBox.appendChild(el("p", "muted", String(reason)));
+    });
+    card.appendChild(routeBox);
+  }
+
+  const controls = el("div", "model-routing-controls");
+  const prompt = el("input", "cyber-input");
+  prompt.id = "modelRoutingPrompt";
+  prompt.type = "text";
+  prompt.placeholder = "Preview: which model would answer this task?";
+  prompt.setAttribute("aria-label", "Routing preview task");
+  controls.appendChild(prompt);
+  const preview = el("button", "cyber-btn small", "Preview routing");
+  preview.id = "modelRoutingPreviewButton";
+  preview.type = "button";
+  controls.appendChild(preview);
+  const concurrency = el("input", "cyber-input model-routing-number");
+  concurrency.id = "modelRoutingConcurrency";
+  concurrency.type = "number";
+  concurrency.min = "1";
+  concurrency.max = "8";
+  concurrency.value = String(prefs.max_concurrency || 1);
+  concurrency.setAttribute("aria-label", "Maximum concurrent model calls");
+  controls.appendChild(concurrency);
+  const cost = el("input", "cyber-input model-routing-number");
+  cost.id = "modelRoutingCostCap";
+  cost.type = "number";
+  cost.min = "0";
+  cost.step = "0.000001";
+  cost.placeholder = "no cost cap";
+  cost.value =
+    prefs.max_cost_per_request === null || prefs.max_cost_per_request === undefined
+      ? ""
+      : String(prefs.max_cost_per_request);
+  cost.setAttribute("aria-label", "Maximum estimated provider cost per request");
+  controls.appendChild(cost);
+  const apply = el("button", "cyber-btn small", "Apply limits");
+  apply.id = "modelRoutingApplyButton";
+  apply.type = "button";
+  controls.appendChild(apply);
+  card.appendChild(controls);
+
+  const policyRow = el("div", "button-row");
+  const activate = el("button", "cyber-btn small", "Activate learned policy");
+  activate.id = "modelRoutingPolicyActivate";
+  activate.type = "button";
+  const rollback = el("button", "cyber-btn small", "Roll back policy");
+  rollback.id = "modelRoutingPolicyRollback";
+  rollback.type = "button";
+  policyRow.appendChild(activate);
+  policyRow.appendChild(rollback);
+  card.appendChild(policyRow);
+  card.appendChild(
+    el(
+      "p",
+      "muted",
+      "A policy only activates after enough measured observations in a category; rollback restores the previous policy."
+    )
+  );
+
+  const previewOut = el("div", "model-routing-preview");
+  previewOut.id = "modelRoutingPreview";
+  card.appendChild(previewOut);
+  container.appendChild(card);
 }
 
 /* ── Metrics Update ─────────────────────────────────────────── */

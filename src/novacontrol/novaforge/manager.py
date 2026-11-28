@@ -1565,7 +1565,9 @@ class NovaForgeManager:
             "attempts": [],
         }
 
-    async def capture_frame(self, title: str) -> dict[str, Any]:
+    async def capture_frame(
+        self, title: str, *, handle: int | None = None
+    ) -> dict[str, Any]:
         """One FRESH frame of the window matching ``title``, cropped to it.
 
         This is the observation loop's capture seam: the same worker, the same
@@ -1573,14 +1575,36 @@ class NovaForgeManager:
         a session because an observation is not a recording. A missing window or
         a stale capture is reported as ``fresh: False`` with the reason, never
         as a just-captured frame.
+
+        ``handle`` pins the frame to ONE window, and it is the difference between
+        observing the game and observing a VIDEO of the game. A title is a
+        substring match, so on a live host a browser tab called "Supermarket
+        Together Full Game (100% Achievement Run)" matched the same request as
+        the game itself and its pixels were captured and reported as the target's
+        frame (measured, 2026-10-30). A caller that knows the window — which the
+        observation pipeline always does, because it just probed it — passes the
+        handle, and a handle that no longer resolves is a refusal rather than a
+        fall back to the title.
         """
-        try:
-            geometry = await self.geometry(title)
-        except Exception as exc:  # noqa: BLE001 - a rejected probe is a reported gap
-            return {
-                "fresh": False,
-                "reason": f"The target window could not be read: {type(exc).__name__}: {exc}.",
-            }
+        if handle:
+            geometry = await self.window_probe(int(handle))
+            if geometry is None:
+                return {
+                    "fresh": False,
+                    "reason": (
+                        f"The window 0x{int(handle):x} ({title!r}) can no longer be read, "
+                        "so no frame was captured; a same-titled window is not a "
+                        "substitute for it."
+                    ),
+                }
+        else:
+            try:
+                geometry = await self.geometry(title)
+            except Exception as exc:  # noqa: BLE001 - a rejected probe is a reported gap
+                return {
+                    "fresh": False,
+                    "reason": f"The target window could not be read: {type(exc).__name__}: {exc}.",
+                }
         if geometry is None:
             return {
                 "fresh": False,
@@ -1595,6 +1619,22 @@ class NovaForgeManager:
                 "target_issue": issue,
             }
         return await self._capture_observation_frame(target)
+
+    async def capture_frame_for_observation(self, title: str) -> dict[str, Any]:
+        """A frame of the ACTIVE session's pinned window, BY HANDLE when pinned.
+
+        The observation pipeline asks for "a frame of the target". Resolving that
+        by title alone let any window with the title in it supply the pixels, so
+        this reads the session's pinned handle first and refuses when that window
+        is gone. With no session there is no pinned window to be wrong about, and
+        the title path is what remains.
+        """
+        record = self.active()
+        target = getattr(record, "target", None) if record is not None else None
+        handle = int(getattr(target, "handle", 0) or 0) if target is not None else 0
+        if not handle:
+            return await self.capture_frame(title)
+        return await self.capture_frame(title, handle=handle)
 
     # -- NF-15: unified game observation -----------------------------------
 

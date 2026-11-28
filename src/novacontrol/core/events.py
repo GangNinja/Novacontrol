@@ -191,6 +191,30 @@ class EventType(StrEnum):
     GENERALIZATION_FAILURE_CLASSIFIED = "generalization.failure_classified"
     GENERALIZATION_LEAKAGE_DETECTED = "generalization.leakage_detected"
 
+    # -- continual learning (Phase 27) ----------------------------------------
+    # A learning event announces a DECISION about evidence, never the evidence
+    # itself: ids, kinds, counts and verdicts only. ``outcome``/``verdict`` are
+    # categories, ``support`` is a count of independent executions, and no event
+    # carries a goal, a plan body or a tool result.
+    CONTINUAL_EXPERIENCE_RECORDED = "continual.experience_recorded"
+    CONTINUAL_STRATEGY_PROPOSED = "continual.strategy_proposed"
+    CONTINUAL_STRATEGY_VALIDATED = "continual.strategy_validated"
+    CONTINUAL_STRATEGY_PROMOTED = "continual.strategy_promoted"
+    CONTINUAL_STRATEGY_ROLLED_BACK = "continual.strategy_rolled_back"
+    CONTINUAL_FEEDBACK_RECORDED = "continual.feedback_recorded"
+
+    # -- multi-agent collaboration (Phase 28) ---------------------------------
+    # A collaboration event is an ANNOUNCEMENT of coordination state: ids,
+    # counts, roles and verdicts travel. Agent outputs, shared context and
+    # message bodies do not — those belong to the task record, not a broadcast.
+    COLLABORATION_PLANNED = "collaboration.planned"
+    COLLABORATION_STARTED = "collaboration.started"
+    COLLABORATION_SUBTASK_STARTED = "collaboration.subtask_started"
+    COLLABORATION_SUBTASK_COMPLETED = "collaboration.subtask_completed"
+    COLLABORATION_CONFLICT_DETECTED = "collaboration.conflict_detected"
+    COLLABORATION_COMPLETED = "collaboration.completed"
+    COLLABORATION_FAILED = "collaboration.failed"
+
     # -- scheduled work (Phase 13) --------------------------------------------
     # ``automation_id`` is the STABLE id of the scheduled request, and ``run_id``
     # names one execution of it: a watcher that wants the schedule keys on the
@@ -216,6 +240,30 @@ class EventType(StrEnum):
     # refused it), never a person's data.
     PRIVACY_MODE_CHANGED = "privacy.mode_changed"
     PRIVACY_DENIED = "privacy.denied"
+
+    # -- persistent operations (Phase 30) -------------------------------------
+    # An operations event announces stored state, never a promise about the
+    # future: the objective id and the task id are the identities a watcher
+    # keys on, and a notification event names the notification rather than
+    # carrying its body.
+    OBJECTIVE_CREATED = "operations.objective_created"
+    OBJECTIVE_UPDATED = "operations.objective_updated"
+    OBJECTIVE_PAUSED = "operations.objective_paused"
+    OBJECTIVE_RESUMED = "operations.objective_resumed"
+    OBJECTIVE_CANCELLED = "operations.objective_cancelled"
+    OBJECTIVE_COMPLETED = "operations.objective_completed"
+    OPERATION_TASK_ADDED = "operations.task_added"
+    OPERATION_TASK_STARTED = "operations.task_started"
+    OPERATION_TASK_COMPLETED = "operations.task_completed"
+    OPERATION_TASK_FAILED = "operations.task_failed"
+    OPERATION_TASK_BLOCKED = "operations.task_blocked"
+    OPERATION_TASK_WAITING_APPROVAL = "operations.task_waiting_approval"
+    OPERATION_TASK_APPROVED = "operations.task_approved"
+    OPERATION_TASK_REJECTED = "operations.task_rejected"
+    OPERATION_TASK_RETRIED = "operations.task_retried"
+    OPERATION_TASK_CANCELLED = "operations.task_cancelled"
+    OPERATION_MILESTONE_ADDED = "operations.milestone_added"
+    OPERATION_NOTIFICATION = "operations.notification"
 
 
 #: The payload fields each lifecycle event MUST carry. Checked when an event of
@@ -325,6 +373,25 @@ EVENT_PAYLOAD_FIELDS: Mapping[EventType, tuple[str, ...]] = {
     EventType.GENERALIZATION_EVALUATION_COMPLETED: ("run_id", "status", "solved"),
     EventType.GENERALIZATION_FAILURE_CLASSIFIED: ("run_id", "task_id", "category"),
     EventType.GENERALIZATION_LEAKAGE_DETECTED: ("run_id", "reason"),
+    # Phase 27: counts and categories, never the evidence body.
+    EventType.CONTINUAL_EXPERIENCE_RECORDED: ("experience_id", "task_kind", "outcome", "verified"),
+    EventType.CONTINUAL_STRATEGY_PROPOSED: ("proposal_id", "task_kind", "support"),
+    EventType.CONTINUAL_STRATEGY_VALIDATED: ("proposal_id", "task_kind", "validated"),
+    EventType.CONTINUAL_STRATEGY_PROMOTED: ("strategy_id", "version", "task_kind"),
+    EventType.CONTINUAL_STRATEGY_ROLLED_BACK: ("strategy_id", "version", "task_kind"),
+    EventType.CONTINUAL_FEEDBACK_RECORDED: ("experience_id", "task_kind", "verdict", "outcome"),
+    EventType.COLLABORATION_PLANNED: ("task_id", "subtasks", "mode"),
+    EventType.COLLABORATION_STARTED: ("task_id", "subtasks"),
+    EventType.COLLABORATION_SUBTASK_STARTED: ("task_id", "subtask_id", "agent"),
+    EventType.COLLABORATION_SUBTASK_COMPLETED: (
+        "task_id",
+        "subtask_id",
+        "status",
+        "verified",
+    ),
+    EventType.COLLABORATION_CONFLICT_DETECTED: ("task_id", "conflicts"),
+    EventType.COLLABORATION_COMPLETED: ("task_id", "status", "verified"),
+    EventType.COLLABORATION_FAILED: ("task_id", "status"),
     # ``sources``/``chunks`` are counts of what one ingest did (an ingest may
     # cover a whole directory); ``source_id`` names the single source it was
     # about. ``status`` carries the IngestReport outcome, so a watcher sees
@@ -356,6 +423,31 @@ EVENT_PAYLOAD_FIELDS: Mapping[EventType, tuple[str, ...]] = {
     EventType.AUDIT_PRUNED: ("removed",),
     EventType.PRIVACY_MODE_CHANGED: ("mode",),
     EventType.PRIVACY_DENIED: ("action", "reason"),
+    # Phase 30: an objective/task identity plus the state that changed. A
+    # notification event names the notification and its kind, never its body.
+    EventType.OBJECTIVE_CREATED: ("objective_id", "kind", "autonomy"),
+    EventType.OBJECTIVE_UPDATED: ("objective_id", "status"),
+    EventType.OBJECTIVE_PAUSED: ("objective_id", "reason"),
+    EventType.OBJECTIVE_RESUMED: ("objective_id", "needs_reassessment"),
+    EventType.OBJECTIVE_CANCELLED: ("objective_id", "reason"),
+    EventType.OBJECTIVE_COMPLETED: ("objective_id",),
+    EventType.OPERATION_TASK_ADDED: ("objective_id", "task_id", "state"),
+    EventType.OPERATION_TASK_STARTED: ("objective_id", "task_id", "attempt"),
+    EventType.OPERATION_TASK_COMPLETED: ("objective_id", "task_id", "verified"),
+    EventType.OPERATION_TASK_FAILED: ("objective_id", "task_id", "error"),
+    EventType.OPERATION_TASK_BLOCKED: ("objective_id", "task_id", "reason"),
+    EventType.OPERATION_TASK_WAITING_APPROVAL: ("objective_id", "task_id", "reason"),
+    EventType.OPERATION_TASK_APPROVED: ("objective_id", "task_id", "approved_by"),
+    EventType.OPERATION_TASK_REJECTED: ("objective_id", "task_id", "reason"),
+    EventType.OPERATION_TASK_RETRIED: ("objective_id", "task_id"),
+    EventType.OPERATION_TASK_CANCELLED: ("objective_id", "task_id"),
+    EventType.OPERATION_MILESTONE_ADDED: ("objective_id", "milestone_id"),
+    EventType.OPERATION_NOTIFICATION: (
+        "notification_id",
+        "kind",
+        "objective_id",
+        "task_id",
+    ),
 }
 
 #: Which event a Phase 8 task state publishes when it is entered. Kept here as

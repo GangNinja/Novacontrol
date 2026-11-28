@@ -85,6 +85,8 @@ public static class NCDesktop
     [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
     [DllImport("user32.dll")] static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+    [DllImport("user32.dll")] static extern void SwitchToThisWindow(IntPtr hWnd, bool fAltTab);
     [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
     delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
@@ -100,23 +102,84 @@ public static class NCDesktop
     }
 
     public static bool IsMinimized(IntPtr hWnd) { return IsIconic(hWnd); }
+    public static bool Minimize(IntPtr hWnd) { return hWnd != IntPtr.Zero && ShowWindow(hWnd, 6); }
+    public static bool Maximize(IntPtr hWnd) { return hWnd != IntPtr.Zero && ShowWindow(hWnd, 3); }
 
     // Foreground activation, VERIFIED rather than assumed. Windows refuses
     // SetForegroundWindow from a process that does not own the current
-    // foreground window, so this thread is attached to that window's thread for
-    // the duration of the call (the documented workaround) and a released Alt
-    // tap lifts the foreground lock when the attach is not enough. The return
-    // value is an observation, not an attempt: false means the window is still
-    // not in front, which is exactly what a caller must not paper over.
-    public static bool Focus(IntPtr hWnd)
+    // foreground window, and a shell flyout (Quick settings, the Start menu, a
+    // notification banner) owns it while it is open WITHOUT yielding — every
+    // activation attempt silently fails until the flyout is dismissed. So
+    // activation is a ladder of measured attempts, and the return value is an
+    // observation: false means the window is still not in front, which is
+    // exactly what a caller must not paper over.
+    public static bool IsForeground(IntPtr hWnd)
     {
         if (hWnd == IntPtr.Zero) return false;
         IntPtr root = GetAncestor(hWnd, 2);
         if (root != IntPtr.Zero) hWnd = root;
-        if (IsIconic(hWnd)) ShowWindow(hWnd, 9);
-        IntPtr before = GetForegroundWindow();
+        IntPtr fg = GetForegroundWindow();
+        if (fg == hWnd) return true;
+        return GetAncestor(fg, 2) == hWnd;
+    }
+
+    // True when the foreground window belongs to the Windows shell's own UI
+    // (a flyout). Such a window has no title in the taskbar sense and cannot be
+    // activated away by SetForegroundWindow; it has to be dismissed first.
+    static bool IsShellFlyout(IntPtr hWnd)
+    {
+        if (hWnd == IntPtr.Zero) return false;
+        uint pid;
+        GetWindowThreadProcessId(hWnd, out pid);
+        try
+        {
+            foreach (System.Diagnostics.Process p in System.Diagnostics.Process.GetProcesses())
+            {
+                if ((uint)p.Id != pid) { p.Dispose(); continue; }
+                string name = p.ProcessName;
+                p.Dispose();
+                return name == "ShellExperienceHost" || name == "StartMenuExperienceHost"
+                    || name == "SearchHost" || name == "LockApp";
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    // The Windows task switcher ("Task Switching") is what an unpaired Alt tap
+    // opens, and it OWNS the foreground until dismissed. It is not a window the
+    // target can be raised above, so it has to be closed before activating.
+    static bool IsTaskSwitcher(IntPtr hWnd)
+    {
+        if (hWnd == IntPtr.Zero) return false;
+        StringBuilder sb = new StringBuilder(128);
+        GetClassName(hWnd, sb, sb.Capacity);
+        string cls = sb.ToString();
+        return cls == "MultitaskingViewFrame" || cls == "XamlExplorerHostIslandWindow";
+    }
+
+    // A foreground that yields to Escape: the task switcher and the shell's own
+    // transient surfaces. Named explicitly rather than "anything not ours", so
+    // a real application window is never dismissed behind the operator's back.
+    static bool IsTransientOverlay(IntPtr hWnd)
+    {
+        return IsTaskSwitcher(hWnd) || IsShellFlyout(hWnd);
+    }
+
+    static bool DismissOverlay()
+    {
+        keybd_event(0x1B, 0, 0, 0);
+        keybd_event(0x1B, 0, 2, 0);
+        System.Threading.Thread.Sleep(180);
+        return GetForegroundWindow() == IntPtr.Zero || !IsTransientOverlay(GetForegroundWindow());
+    }
+
+    // One activation attempt: attach to the CURRENT foreground thread (the
+    // documented workaround), raise the target, then ask for the foreground.
+    static bool ActivateOnce(IntPtr hWnd)
+    {
         uint unused;
-        uint otherThread = GetWindowThreadProcessId(before, out unused);
+        uint otherThread = GetWindowThreadProcessId(GetForegroundWindow(), out unused);
         uint mine = GetCurrentThreadId();
         bool attached = false;
         try
@@ -124,16 +187,78 @@ public static class NCDesktop
             if (otherThread != 0 && otherThread != mine) attached = AttachThreadInput(mine, otherThread, true);
             BringWindowToTop(hWnd);
             SetForegroundWindow(hWnd);
-            if (GetForegroundWindow() != hWnd)
-            {
-                keybd_event(0x12, 0, 0, 0);
-                keybd_event(0x12, 0, 2, 0);
-                SetForegroundWindow(hWnd);
-            }
         }
         catch { }
         finally { if (attached) { try { AttachThreadInput(mine, otherThread, false); } catch { } } }
-        return GetForegroundWindow() == hWnd;
+        return IsForeground(hWnd);
+    }
+
+    // A single "is it in front NOW" answer is not enough: activation can be
+    // granted and then taken back by a transient overlay a fraction of a second
+    // later. The caller must know the window is STILL in front after the dust
+    // settles, because the very next action is a click that lands wherever the
+    // foreground is.
+    static bool FocusStable(IntPtr hWnd)
+    {
+        if (!IsForeground(hWnd)) return false;
+        System.Threading.Thread.Sleep(140);
+        return IsForeground(hWnd);
+    }
+
+    public static bool Focus(IntPtr hWnd)
+    {
+        if (hWnd == IntPtr.Zero) return false;
+        IntPtr root = GetAncestor(hWnd, 2);
+        if (root != IntPtr.Zero) hWnd = root;
+        if (IsIconic(hWnd)) ShowWindow(hWnd, 9);
+        if (FocusStable(hWnd)) return true;
+
+        // 1. The ordinary path: attach to whatever holds the foreground.
+        if (ActivateOnce(hWnd) && FocusStable(hWnd)) return true;
+
+        // 2. A transient overlay owns the foreground and will not yield to a
+        //    raise. Dismiss it with Escape (what a person would press), then
+        //    activate.
+        IntPtr fg = GetForegroundWindow();
+        if (IsTransientOverlay(fg))
+        {
+            DismissOverlay();
+            if (FocusStable(hWnd)) return true;
+            if (ActivateOnce(hWnd) && FocusStable(hWnd)) return true;
+        }
+
+        // 3. Windows' foreground lock refuses SetForegroundWindow from a
+        //    process that is not in front — measured: with this step removed,
+        //    activation from a background process FAILED. A HELD Alt press is
+        //    the documented unlock; releasing it before the call (the old
+        //    order) is what made it useless. An unpaired Alt release is also
+        //    what leaves the task switcher in front, so a switcher that appears
+        //    afterwards is dismissed rather than reported as success.
+        keybd_event(0x12, 0, 0, 0);
+        System.Threading.Thread.Sleep(40);
+        ActivateOnce(hWnd);
+        keybd_event(0x12, 0, 2, 0);
+        System.Threading.Thread.Sleep(120);
+        if (IsTransientOverlay(GetForegroundWindow())) DismissOverlay();
+        if (FocusStable(hWnd)) return true;
+
+        // 4. SwitchToThisWindow raises a window through the shell's own
+        //    activation path, which is permitted where SetForegroundWindow is
+        //    refused.
+        try { SwitchToThisWindow(hWnd, true); } catch { }
+        System.Threading.Thread.Sleep(180);
+        if (IsTransientOverlay(GetForegroundWindow())) DismissOverlay();
+        if (FocusStable(hWnd)) return true;
+
+        // 5. Last resort: a restore cycle makes the window the most recently
+        //    activated window. Only reached when everything above was refused.
+        ShowWindow(hWnd, 6);
+        System.Threading.Thread.Sleep(180);
+        ShowWindow(hWnd, 9);
+        System.Threading.Thread.Sleep(400);
+        if (IsTransientOverlay(GetForegroundWindow())) DismissOverlay();
+        ActivateOnce(hWnd);
+        return FocusStable(hWnd);
     }
 
     public static string BoundsOf(IntPtr hWnd)
@@ -151,6 +276,10 @@ public static class NCDesktop
         return p.X + "," + p.Y;
     }
     public static void Button(uint flags) { mouse_event(flags, 0, 0, 0, 0); }
+    // Wheel input is a signed delta in the high word of dwData; the worker
+    // passes a positive/negative notch count so scrolling up and down are
+    // distinct operations, not two guesses at the same flag.
+    public static void Wheel(int delta) { mouse_event(0x0800, 0, 0, (uint)delta, 0); }
     public static void Key(ushort vk, bool down) { keybd_event((byte)vk, 0, down ? 0u : 2u, 0); }
 
     public static string Describe(IntPtr hWnd)
@@ -270,7 +399,13 @@ while ($true) {
     $parts = $line.Split(' ')
     $verb = $parts[0]
     if ($verb -eq 'move') {
-      [NCDesktop]::Move([int]$parts[1], [int]$parts[2]) | Out-Null
+      # SetCursorPos reports a refusal (a locked or non-interactive desktop, a
+      # cursor the shell is holding). Swallowing that made every later click a
+      # silent miss: the reply said "moved" while the pointer had not budged,
+      # so the caller's "the click was dispatched" was true and meaningless.
+      if (-not [NCDesktop]::Move([int]$parts[1], [int]$parts[2])) {
+        throw 'move_refused SetCursorPos reported failure; the pointer did not move'
+      }
       $out.WriteLine('ok ' + $sw.ElapsedMilliseconds + ' moved')
     } elseif ($verb -eq 'button') {
       [NCDesktop]::Button([uint32]$parts[1]) | Out-Null
@@ -278,6 +413,17 @@ while ($true) {
     } elseif ($verb -eq 'key') {
       [NCDesktop]::Key([uint16]$parts[1], ($parts[2] -eq '1')) | Out-Null
       $out.WriteLine('ok ' + $sw.ElapsedMilliseconds + ' key')
+    } elseif ($verb -eq 'scroll') {
+      [NCDesktop]::Wheel([int]$parts[1]) | Out-Null
+      $out.WriteLine('ok ' + $sw.ElapsedMilliseconds + ' scrolled')
+    } elseif ($verb -eq 'minimize') {
+      $handle = [IntPtr]::new([long]$parts[1])
+      [NCDesktop]::Minimize($handle) | Out-Null
+      $out.WriteLine('ok ' + $sw.ElapsedMilliseconds + ' minimized')
+    } elseif ($verb -eq 'maximize') {
+      $handle = [IntPtr]::new([long]$parts[1])
+      [NCDesktop]::Maximize($handle) | Out-Null
+      $out.WriteLine('ok ' + $sw.ElapsedMilliseconds + ' maximized')
     } elseif ($verb -eq 'focus') {
       $handle = [IntPtr]::new([long]$parts[1])
       $focused = [NCDesktop]::Focus($handle)
@@ -581,7 +727,18 @@ class PersistentScreenCapture:
         self.spawns += 1
         self._stderr_tail.clear()
         self._stderr_task = asyncio.create_task(self._drain_stderr())
-        banner = await self._read_line(self.startup_timeout)
+        try:
+            banner = await self._read_line(self.startup_timeout)
+        except asyncio.CancelledError:
+            # Cancelled mid-handshake. The host is alive and its ``ready WxH``
+            # banner is (or is about to be) sitting unread on the pipe, so the
+            # NEXT exchange would take that banner for its own reply. Nobody
+            # else will ever consume it: drop the half-started host and mark the
+            # pipe for a restart. ``kill`` is synchronous, so this unwinding path
+            # still performs no await.
+            self._desynced = True
+            self._abandon_process()
+            raise
         if banner is not None and banner.startswith("ready "):
             self.size = _parse_size(banner.removeprefix("ready ").strip())
             return True
@@ -607,10 +764,20 @@ class PersistentScreenCapture:
             return CaptureResult(False, path=target, error=failure)
         if reply.startswith("err "):
             return CaptureResult(False, path=target, error=reply[4:].strip(), persistent=True)
-        parts = reply.split(" ")
-        width, height = _parse_size(parts[3]) if len(parts) >= 4 else (0, 0)
-        size_bytes = int(parts[2]) if len(parts) >= 3 else 0
-        elapsed_ms = int(parts[1]) if len(parts) >= 2 else 0
+        parsed = _parse_frame_reply(reply)
+        if parsed is None:
+            # A reply this command cannot have produced -- the worker's startup
+            # banner, or another request's answer -- means the pipe is
+            # desynchronised. Restart on the next exchange and fail this frame
+            # honestly; a stray ``ready 800x600`` line used to raise ValueError
+            # here and take every observation that followed it down with it.
+            self._desynced = True
+            return CaptureResult(
+                False,
+                path=target,
+                error=f"unexpected reply from the capture worker: {reply[:120]!r}",
+            )
+        width, height, size_bytes, elapsed_ms = parsed
         self.frames += 1
         return CaptureResult(
             True,
@@ -658,10 +825,17 @@ class PersistentScreenCapture:
                 False, path=target, error=reply[4:].strip(), persistent=True,
                 source="window_surface", backend="printwindow",
             )
-        parts = reply.split(" ")
-        width, height = _parse_size(parts[3]) if len(parts) >= 4 else (0, 0)
-        size_bytes = int(parts[2]) if len(parts) >= 3 else 0
-        elapsed_ms = int(parts[1]) if len(parts) >= 2 else 0
+        parsed = _parse_frame_reply(reply)
+        if parsed is None:
+            self._desynced = True
+            return CaptureResult(
+                False,
+                path=target,
+                error=f"unexpected reply from the capture worker: {reply[:120]!r}",
+                source="window_surface",
+                backend="printwindow",
+            )
+        width, height, size_bytes, elapsed_ms = parsed
         self.frames += 1
         return CaptureResult(
             True,
@@ -874,6 +1048,22 @@ class PersistentScreenCapture:
         except Exception:  # pragma: no cover - stderr draining is best effort
             return
 
+    def _abandon_process(self) -> None:
+        """Drop the host without awaiting (the cancellation path needs it).
+
+        Only for a host that will never be trusted again: the caller has already
+        marked the worker desynchronised, so the next exchange restarts from a
+        fresh process. ``kill`` is synchronous on Windows, which is what makes
+        this legal while a task is unwinding.
+        """
+        process, self._process = self._process, None
+        task, self._stderr_task = self._stderr_task, None
+        if task is not None:
+            task.cancel()
+        if process is not None:
+            with contextlib.suppress(Exception):
+                process.kill()
+
     async def _stop_process(self) -> None:
         process = self._process
         self._process = None
@@ -898,6 +1088,30 @@ class PersistentScreenCapture:
                     await asyncio.wait_for(process.wait(), self.shutdown_grace)
         if task is not None:
             task.cancel()
+
+
+def _int_or_zero(text: str) -> int:
+    """A measurement field, never the payload: unparseable reads as 0."""
+    try:
+        return int(text)
+    except ValueError:
+        return 0
+
+
+def _parse_frame_reply(reply: str) -> tuple[int, int, int, int] | None:
+    """``ok <elapsed_ms> <size_bytes> <WxH>`` -> (w, h, size_bytes, elapsed_ms).
+
+    None when the line is not a frame acknowledgement at all. That distinction
+    matters: a reply the command cannot have produced is a desynchronised pipe,
+    which is a FAILED frame, never a successful frame with zero geometry.
+    """
+    parts = reply.split(" ")
+    if parts[0] != "ok":
+        return None
+    width, height = _parse_size(parts[3]) if len(parts) >= 4 else (0, 0)
+    size_bytes = _int_or_zero(parts[2]) if len(parts) >= 3 else 0
+    elapsed_ms = _int_or_zero(parts[1]) if len(parts) >= 2 else 0
+    return width, height, size_bytes, elapsed_ms
 
 
 def _parse_size(text: str) -> tuple[int, int]:

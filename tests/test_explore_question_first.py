@@ -15,12 +15,24 @@ re-listed keyword-matched source blurbs instead of answering the question):
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from types import SimpleNamespace
 import unittest
 
 from novacontrol.explore import ExploreRequest, ExploreService, ResearchSource
 from novacontrol.explore.explainer import ResearchExplainer
-from novacontrol.explore.planner import ResearchPlan, parse_plan, plan_research
-from novacontrol.explore.synthesizer import clean_snippet, extract_facts
+from novacontrol.explore.planner import (
+    ResearchPlan,
+    local_planning_skip_reason,
+    parse_plan,
+    plan_research,
+)
+from novacontrol.explore.query import parse_query
+from novacontrol.explore.synthesizer import (
+    clean_snippet,
+    extract_facts,
+    local_synthesis_skip_reason,
+    try_llm_synthesis,
+)
 
 from conftest import FakeVideoProvider
 
@@ -248,9 +260,9 @@ class HonestFallbackTests(unittest.IsolatedAsyncioTestCase):
             completion_provider=provider,
         )
 
-    async def test_no_model_says_so(self) -> None:
+    async def test_the_local_engine_says_it_assembled_the_answer(self) -> None:
         report = await self._service(None).research(ExploreRequest("why do cats purr"))
-        self.assertTrue(any("No model is connected" in w for w in report.warnings))
+        self.assertTrue(any("local evidence engine" in w for w in report.warnings))
 
     async def test_broken_model_names_the_failure(self) -> None:
         """A dead cloud key must be visible, not silently downgraded to blurbs."""
@@ -321,6 +333,121 @@ class DigestHygieneTests(unittest.TestCase):
         model = BrokenModel()
         explainer.set_completion_provider(model)
         self.assertIs(explainer.completion_provider, model)
+
+
+class LocalSynthesisBudgetTests(unittest.IsolatedAsyncioTestCase):
+    """A local model that cannot finish inside the budget is not waited on.
+
+    Measured failure this guards: Explore spent 106.1s in synthesis on a
+    CPU-only qwen3:8b and got HTTP 500 with no answer, and the machine's own
+    prefill rate (2,271 prompt tokens in 135s) turns the evidence block alone
+    into minutes. The model path must stay available on capable hardware, so
+    the decision comes from the provider's OWN measured timings — never from a
+    model name or a hardware guess.
+    """
+
+    class LocalModel:
+        name = "ollama"
+        model = "qwen3:8b"
+        ollama_url = "http://127.0.0.1:11434"
+        last_error = ""
+
+        def __init__(self, *, decode_rate: float, prompt_rate: float) -> None:
+            self.last_timings = {
+                "tokens_per_second": decode_rate,
+                "prompt_tokens_per_second": prompt_rate,
+            }
+            self.calls = 0
+
+        async def complete(self, messages: Sequence[Mapping[str, str]], **kwargs: object) -> str:
+            self.calls += 1
+            return "Cats purr for comfort, hunger, and pain; the vibration may also promote healing."
+
+    @staticmethod
+    def _sources() -> tuple[ResearchSource, ...]:
+        body = (
+            "Cats purr through rapid vocal fold vibration. "
+            "The purr can signal comfort, hunger, or pain. "
+        ) * 30
+        return (
+            ResearchSource(
+                "Cat purring science",
+                "https://a.example/purr",
+                "Cats purr through rapid vibration.",
+                content=body,
+            ),
+            ResearchSource(
+                "Why cats purr",
+                "https://b.example/purr",
+                "Purring can signal pain as well as comfort.",
+                content=body,
+            ),
+        )
+
+    async def test_a_slow_local_model_is_skipped_with_a_reason(self) -> None:
+        model = self.LocalModel(decode_rate=2.5, prompt_rate=16.0)
+        outcome = await try_llm_synthesis(
+            model,
+            "cats purr",
+            parse_query("why do cats purr"),
+            self._sources(),
+            question="why do cats purr",
+        )
+        self.assertIsNone(outcome.answer)
+        self.assertIn("Explore budget", outcome.skipped_reason)
+        self.assertEqual(model.calls, 0)
+
+    async def test_a_fast_local_model_still_writes_the_answer(self) -> None:
+        model = self.LocalModel(decode_rate=60.0, prompt_rate=400.0)
+        outcome = await try_llm_synthesis(
+            model,
+            "cats purr",
+            parse_query("why do cats purr"),
+            self._sources(),
+            question="why do cats purr",
+        )
+        self.assertTrue(outcome.answer)
+        self.assertEqual(outcome.skipped_reason, "")
+        self.assertEqual(model.calls, 1)
+
+    def test_the_same_budget_gates_planning(self) -> None:
+        slow = self.LocalModel(decode_rate=2.5, prompt_rate=16.0)
+        self.assertIn("Explore budget", local_planning_skip_reason(slow, "why do cats purr"))
+        fast = self.LocalModel(decode_rate=60.0, prompt_rate=400.0)
+        self.assertEqual(local_planning_skip_reason(fast, "why do cats purr"), "")
+
+    async def test_a_slow_local_model_is_not_called_for_planning_or_writing(self) -> None:
+        model = self.LocalModel(decode_rate=2.5, prompt_rate=16.0)
+        search = RecordingSearchProvider(self._sources())
+        service = ExploreService(
+            search_provider=search,
+            video_provider=FakeVideoProvider(),
+            completion_provider=model,
+            read_pages=False,
+        )
+        report = await service.research(ExploreRequest("why do cats purr"))
+        self.assertEqual(model.calls, 0)
+        self.assertTrue(report.answer)
+        self.assertIn("Explore budget", " ".join(report.warnings))
+        self.assertTrue(search.queries)
+
+    async def test_a_slow_model_never_blocks_the_explainer(self) -> None:
+        model = self.LocalModel(decode_rate=2.5, prompt_rate=16.0)
+        report = await ResearchExplainer(completion_provider=model).explain(
+            ExploreRequest("why do cats purr"),
+            self._sources(),
+            (),
+            question="why do cats purr",
+        )
+        self.assertTrue(report.answer)
+        self.assertIn("Explore budget", " ".join(report.warnings))
+        self.assertEqual(model.calls, 0)
+
+    def test_a_cloud_provider_is_never_gated(self) -> None:
+        cloud = SimpleNamespace(name="cloud", model="gpt")
+        self.assertEqual(
+            local_synthesis_skip_reason(cloud, "s" * 100, "p" * 1000, 512), ""
+        )
 
 
 if __name__ == "__main__":

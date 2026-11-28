@@ -1041,6 +1041,16 @@ class DeveloperAgent(SpecialistAgent):
             ),
         }
 
+    def availability(self) -> Mapping[str, Any]:
+        try:
+            available = self.root.is_dir()
+        except OSError:
+            available = False
+        return {
+            "available": available,
+            "reason": "" if available else f"developer root is not a directory: {self.root}",
+        }
+
     def clone(self, pipeline: SpecialistPipeline) -> DeveloperAgent:
         """This agent on another pipeline — the same workspace, another scope."""
         return DeveloperAgent(

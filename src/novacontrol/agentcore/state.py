@@ -21,6 +21,7 @@ class TaskPhase(StrEnum):
     RECOVERING = "recovering"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 @dataclass(frozen=True, slots=True)

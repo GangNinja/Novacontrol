@@ -97,10 +97,31 @@ class UiState:
         now_texts = {e.text.lower() for e in self.elements}
         added = sorted(now_texts - prev_texts)[:12]
         removed = sorted(prev_texts - now_texts)[:12]
+        previous_text = previous.raw_text or ""
+        current_text = self.raw_text or ""
+        text_changed = previous_text != current_text
+        previous_pixels = str(previous.metadata.get("screenshot_sha256", ""))
+        current_pixels = str(self.metadata.get("screenshot_sha256", ""))
         return {
             "added": added,
             "removed": removed,
             "url_changed": previous.url != self.url,
             "window_changed": previous.window != self.window,
-            "text_grew": len(self.raw_text) > len(previous.raw_text),
-        }
+            "text_grew": len(current_text) > len(previous_text),
+            "text_changed": text_changed,
+            "changed_text": _changed_lines(previous_text, current_text)[:12],
+            "screenshot_changed": bool(previous_pixels and current_pixels and previous_pixels != current_pixels),
+            "screenshot_comparable": bool(previous_pixels and current_pixels),
+            "element_count_changed": len(previous.elements) != len(self.elements),
+            "loading": bool(self.metadata.get("loading", False)),
+            "dialogs": list(self.metadata.get("dialogs", []) or []),
+            "unresponsive_windows": list(self.metadata.get("unresponsive_windows", []) or []),
+    }
+
+
+def _changed_lines(before: str, after: str) -> list[str]:
+    """Lines that appeared or disappeared between two observations."""
+    old = {line.strip() for line in before.splitlines() if line.strip()}
+    new = {line.strip() for line in after.splitlines() if line.strip()}
+    changed = sorted(new - old)[:8] + sorted(old - new)[:4]
+    return [line[:200] for line in changed]

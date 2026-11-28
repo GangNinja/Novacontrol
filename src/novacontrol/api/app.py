@@ -7,7 +7,8 @@ import hashlib
 import json
 import os
 import time
-from collections.abc import MutableMapping
+from collections.abc import Mapping, MutableMapping
+from datetime import date, datetime
 from os import PathLike
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,56 @@ from novacontrol.api.auth import ApiTokenAuthenticator
 from novacontrol.api.middleware import RateLimitMiddleware, RequestLoggingMiddleware, SecurityHeadersMiddleware
 from novacontrol.api.models import ApiSurface, AskRequest, BrainDecideRequest, CommandPlanRequest, ExploreRequest_
 from novacontrol.application import NovaControlApplication
+from novacontrol.business import (
+    BusinessConflict,
+    BusinessError,
+    DuplicateOpportunity,
+    OpportunityNotFound,
+    ResearchUnavailable,
+)
+from novacontrol.customer import (
+    CommunicationNotConfigured,
+    ConsentRequired,
+    CustomerBudgetExceeded,
+    CustomerConflict,
+    CustomerError,
+    CustomerNotFound,
+    CustomerRecordNotFound,
+    CustomerValidationError,
+    ProductNotLaunched,
+)
+from novacontrol.finops import (
+    FinOpsAuthorizationError,
+    FinOpsBudgetExceeded,
+    FinOpsConflict,
+    FinOpsError,
+    FinOpsRecordNotFound,
+    FinOpsValidationError,
+    PeriodClosed,
+    VentureNotFound,
+)
+from novacontrol.portfolio import (
+    ApprovalRequired as PortfolioApprovalRequired,
+    LifecycleGateError,
+    PortfolioAuthorizationError,
+    PortfolioConflict,
+    PortfolioError,
+    PortfolioNotFound,
+    PortfolioRecordNotFound,
+    PortfolioValidationError,
+    PortfolioVentureNotFound,
+)
+from novacontrol.product import (
+    ApprovalRequired,
+    BudgetExceeded,
+    OpportunityNotEligible,
+    ProductConflict,
+    ProductError,
+    ProductNotFound,
+    ProductValidationError,
+    QualityGateError,
+    WorkspaceError,
+)
 from novacontrol.core.events import Event
 from novacontrol.explore import ExploreRequest
 from novacontrol.explore.trending import TrendingTopicsProvider
@@ -268,6 +319,10 @@ def create_app() -> Any:
     authenticator = ApiTokenAuthenticator(os.getenv("NOVACONTROL_API_TOKEN"))
     api_surface = ApiSurface.default()
     nova = NovaControlApplication(data_dir=Path("data"))
+    # The self-management health check can report the real surface only when
+    # this process actually serves it; an embedded application leaves this
+    # unset and the check honestly reports SKIPPED.
+    nova.api_surface = api_surface
     app = FastAPI(title="NovaControl", version="0.1.0")
 
     # Middleware (order matters: last added = first executed)
@@ -292,6 +347,7 @@ def create_app() -> Any:
     @app.on_event("startup")
     async def startup() -> None:
         await nova.start()
+        nova.api_server_started = True
 
     @app.on_event("shutdown")
     async def shutdown() -> None:
@@ -350,6 +406,2991 @@ def create_app() -> Any:
         "Unavailable" rather than a plausible-looking number nobody measured.
         """
         return telemetry.payload()
+
+    # ── Phase 34: trustworthy self-management ──────────────────────────
+    #
+    # Every control calls the real service. GETs read cached/stored state; the
+    # health and diagnostics POSTs are the only routes that run the probes, so a
+    # status poll never becomes a hidden diagnostic pass.
+
+    def _self_management_exception(exc: Exception) -> HTTPException:
+        if isinstance(exc, KeyError):
+            return HTTPException(status_code=404, detail=str(exc).strip("'\""))
+        if isinstance(exc, PermissionError):
+            return HTTPException(status_code=403, detail=str(exc))
+        return HTTPException(status_code=409, detail=str(exc))
+
+    @app.get("/self-management")
+    async def self_management(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.self_management_status()
+
+    @app.post("/self-management/health")
+    async def self_management_health(
+        payload: dict[str, Any],
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        only = payload.get("only")
+        try:
+            names = (
+                tuple(str(item) for item in only if str(item).strip())
+                if isinstance(only, list)
+                else None
+            )
+            return await nova.self_management.health_check(only=names, explain=True)
+        except KeyError as exc:
+            raise _self_management_exception(exc) from exc
+
+    @app.post("/self-management/diagnose")
+    async def self_management_diagnose(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Run the roster without opening incidents; returns evidence + findings."""
+        return await nova.self_management.health_check(explain=False)
+
+    @app.get("/self-management/incidents")
+    async def self_management_incidents(
+        open_only: bool = False,
+        component: str = "",
+        limit: int = 50,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        rows = nova.self_management.incidents.list(
+            open_only=open_only, component=component, limit=max(1, min(int(limit), 200))
+        )
+        return {
+            "incidents": [row.to_dict() for row in rows],
+            "report": nova.self_management.incidents.report(),
+            "recurrence": list(nova.self_management.incidents.recurrence_groups()),
+        }
+
+    @app.get("/self-management/incidents/{incident_id}")
+    async def self_management_incident(
+        incident_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            incident = nova.self_management.incidents.get(incident_id)
+        except KeyError as exc:
+            raise _self_management_exception(exc) from exc
+        return {
+            "incident": incident.to_dict(),
+            "recommendations": [
+                dict(row) for row in nova.self_management.recovery.recommend(incident)
+            ],
+        }
+
+    @app.post("/self-management/incidents/{incident_id}/investigate")
+    async def self_management_investigate(
+        incident_id: str,
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return await nova.self_management.investigate(
+                incident_id, use_agent=bool((payload or {}).get("agent", False))
+            )
+        except KeyError as exc:
+            raise _self_management_exception(exc) from exc
+
+    @app.post("/self-management/incidents/{incident_id}/recommend")
+    async def self_management_recommend(
+        incident_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.self_management.recommend(incident_id)
+        except (KeyError, ValueError) as exc:
+            raise _self_management_exception(exc) from exc
+
+    @app.post("/self-management/incidents/{incident_id}/recover")
+    async def self_management_recover(
+        incident_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        action_id = str(payload.get("action_id", "")).strip()
+        if not action_id:
+            raise HTTPException(status_code=422, detail="action_id is required.")
+        approved = bool(payload.get("approved", False))
+        try:
+            return await nova.self_management.recover(
+                incident_id, action_id, approved=approved, approved_by=principal
+            )
+        except (KeyError, PermissionError, ValueError) as exc:
+            raise _self_management_exception(exc) from exc
+
+    @app.post("/self-management/pause")
+    async def self_management_pause(
+        payload: dict[str, Any],
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.self_management.pause(reason=str(payload.get("reason", "")))
+
+    @app.post("/self-management/resume")
+    async def self_management_resume(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.self_management.resume()
+
+    @app.post("/self-management/policy")
+    async def self_management_policy(
+        payload: dict[str, Any],
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.self_management.configure(
+                mode=payload.get("mode"),
+                paused=payload.get("paused") if isinstance(payload.get("paused"), bool) else None,
+                max_actions_per_window=payload.get("max_actions_per_window")
+                if isinstance(payload.get("max_actions_per_window"), int)
+                else None,
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/self-management/maintenance")
+    async def self_management_maintenance(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.self_management.maintenance.status()
+
+    @app.post("/self-management/maintenance/preview")
+    async def self_management_maintenance_preview(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.self_management.maintenance_preview()
+
+    @app.post("/self-management/maintenance/run")
+    async def self_management_maintenance_run(
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return await nova.self_management.maintenance_run(
+                approved=bool(payload.get("approved", False)), approved_by=principal
+            )
+        except PermissionError as exc:
+            raise _self_management_exception(exc) from exc
+
+    @app.get("/self-management/configuration")
+    async def self_management_configuration(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.self_management.configuration_report()
+
+    @app.post("/self-management/configuration/snapshot")
+    async def self_management_configuration_snapshot(
+        payload: dict[str, Any],
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.self_management.snapshot_configuration(
+            note=str(payload.get("note", ""))
+        )
+
+    @app.post("/self-management/configuration/restore")
+    async def self_management_configuration_restore(
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        raw_version = payload.get("version")
+        if not isinstance(raw_version, (int, str)) or isinstance(raw_version, bool):
+            raise HTTPException(status_code=422, detail="version must be an integer.")
+        try:
+            version = int(raw_version)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="version must be an integer.") from exc
+        try:
+            return await nova.self_management.restore_configuration(
+                version,
+                approved=bool(payload.get("approved", False)),
+                approved_by=principal,
+            )
+        except (KeyError, PermissionError, ValueError) as exc:
+            raise _self_management_exception(exc) from exc
+
+    # ── Phase 35: business opportunity and validation engine ────────────
+    #
+    # These routes call the real service and its evidence rules. No route
+    # executes an external experiment, purchase, advertisement or customer
+    # contact; approvals only record an operator decision.
+
+    def _business_exception(exc: Exception) -> HTTPException:
+        if isinstance(exc, OpportunityNotFound):
+            return HTTPException(status_code=404, detail=str(exc))
+        if isinstance(exc, DuplicateOpportunity):
+            return HTTPException(
+                status_code=409,
+                detail={"message": str(exc), "existing_id": exc.existing_id},
+            )
+        if isinstance(exc, ResearchUnavailable):
+            return HTTPException(status_code=503, detail=str(exc))
+        if isinstance(exc, BusinessConflict):
+            return HTTPException(status_code=409, detail=str(exc))
+        if isinstance(exc, BusinessError):
+            return HTTPException(status_code=422, detail=str(exc))
+        if isinstance(exc, PermissionError):
+            return HTTPException(status_code=403, detail=str(exc))
+        if isinstance(exc, (TypeError, ValueError)):
+            return HTTPException(status_code=422, detail=str(exc))
+        return HTTPException(status_code=409, detail=str(exc))
+
+    def _payload_mapping(payload: Mapping[str, Any], key: str) -> dict[str, Any] | None:
+        raw = payload.get(key)
+        if raw is None:
+            return None
+        if not isinstance(raw, Mapping):
+            raise HTTPException(status_code=422, detail=f"{key} must be an object.")
+        return dict(raw)
+
+    @app.get("/business/status")
+    async def business_status(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.business_opportunities.status()
+
+    @app.get("/business/opportunities")
+    async def business_opportunities(
+        q: str = "",
+        stage: str = "",
+        industry: str = "",
+        limit: int = 50,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.business_opportunities.list_opportunities(
+            query=q, stage=stage, industry=industry, limit=limit, offset=offset
+        )
+
+    @app.post("/business/discovery/scan")
+    async def business_discovery_scan(
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            limit = int(payload.get("limit", 5))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="limit must be an integer.") from exc
+        try:
+            return await nova.business_opportunities.scan_signals(
+                query=str(payload.get("query", "")),
+                signal_type=str(payload.get("signal_type", "market_trend")),
+                limit=limit,
+                actor=principal,
+            )
+        except BusinessError as exc:
+            raise _business_exception(exc) from exc
+
+    @app.post("/business/opportunities")
+    async def business_discover(
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            tags = payload.get("tags")
+            return nova.business_opportunities.discover(
+                title=str(payload.get("title", "")),
+                customer_problem=str(payload.get("customer_problem", "")),
+                proposed_solution=str(payload.get("proposed_solution", "")),
+                target_audience=str(payload.get("target_audience", "")),
+                industry=str(payload.get("industry", "")),
+                category=str(payload.get("category", "")),
+                description=str(payload.get("description", "")),
+                signal_type=str(payload.get("signal_type", "user_supplied")),
+                source_title=str(payload.get("source_title", "")),
+                source_url=str(payload.get("source_url", "")),
+                source_reference=str(payload.get("source_reference", "")),
+                source_publisher=str(payload.get("source_publisher", "")),
+                source_excerpt=str(payload.get("source_excerpt", "")),
+                tags=tuple(str(item) for item in tags) if isinstance(tags, list) else (),
+                actor=principal,
+            )
+        except (BusinessError, ValueError) as exc:
+            raise _business_exception(exc) from exc
+
+    @app.get("/business/opportunities/compare")
+    async def business_compare(
+        ids: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        wanted = tuple(item.strip() for item in ids.split(",") if item.strip())
+        try:
+            return nova.business_opportunities.compare(wanted)
+        except BusinessError as exc:
+            raise _business_exception(exc) from exc
+
+    @app.get("/business/opportunities/{opportunity_id}")
+    async def business_opportunity(
+        opportunity_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_opportunities.detail(opportunity_id)
+        except BusinessError as exc:
+            raise _business_exception(exc) from exc
+
+    @app.post("/business/opportunities/{opportunity_id}/research")
+    async def business_research(
+        opportunity_id: str,
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return await nova.business_opportunities.research(
+                opportunity_id, actor=principal
+            )
+        except BusinessError as exc:
+            raise _business_exception(exc) from exc
+
+    @app.post("/business/opportunities/{opportunity_id}/evidence")
+    async def business_evidence(
+        opportunity_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        raw_value = payload.get("value")
+        if raw_value is not None and not isinstance(raw_value, Mapping):
+            raise HTTPException(status_code=422, detail="value must be an object.")
+        raw_supports = payload.get("supports")
+        if raw_supports is not None and not isinstance(raw_supports, list):
+            raise HTTPException(status_code=422, detail="supports must be a list.")
+        try:
+            confidence = float(payload.get("confidence", 0.5))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="confidence must be a number.") from exc
+        try:
+            return nova.business_opportunities.add_evidence(
+                opportunity_id,
+                kind=str(payload.get("kind", "other")),
+                claim=str(payload.get("claim", "")),
+                quality=str(payload.get("quality", "assumption")),
+                source_title=str(payload.get("source_title", "")),
+                source_url=str(payload.get("source_url", "")),
+                source_reference=str(payload.get("source_reference", "")),
+                source_type=str(payload.get("source_type", "")),
+                source_excerpt=str(payload.get("source_excerpt", "")),
+                source_publisher=str(payload.get("source_publisher", "")),
+                retrieved_at=str(payload.get("retrieved_at", "")),
+                supplied_by=str(payload.get("supplied_by", "")),
+                confidence=confidence,
+                value=dict(raw_value) if isinstance(raw_value, Mapping) else None,
+                supports=tuple(str(item) for item in raw_supports)
+                if isinstance(raw_supports, list)
+                else (),
+                notes=str(payload.get("notes", "")),
+                actor=principal,
+            )
+        except BusinessError as exc:
+            raise _business_exception(exc) from exc
+
+    @app.post("/business/opportunities/{opportunity_id}/assess")
+    async def business_assess(
+        opportunity_id: str,
+        payload: dict[str, Any] | None = None,
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        data = dict(payload or {})
+        financial = _payload_mapping(data, "financial_inputs")
+        feasibility = _payload_mapping(data, "feasibility_inputs")
+        assessment = _payload_mapping(data, "assessment_inputs")
+        try:
+            return await nova.business_opportunities.assess(
+                opportunity_id,
+                financial_inputs=financial,
+                feasibility_inputs=feasibility,
+                assessment_inputs=assessment,
+                actor=principal,
+            )
+        except (BusinessError, ValueError) as exc:
+            raise _business_exception(exc) from exc
+
+    @app.post("/business/opportunities/{opportunity_id}/experiments/plan")
+    async def business_plan_experiments(
+        opportunity_id: str,
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return await nova.business_opportunities.plan_experiments(
+                opportunity_id, actor=principal
+            )
+        except (BusinessError, ValueError) as exc:
+            raise _business_exception(exc) from exc
+
+    @app.post("/business/opportunities/{opportunity_id}/evaluate")
+    async def business_evaluate(
+        opportunity_id: str,
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return await nova.business_opportunities.evaluate(
+                opportunity_id, actor=principal
+            )
+        except (BusinessError, ValueError) as exc:
+            raise _business_exception(exc) from exc
+
+    @app.post(
+        "/business/opportunities/{opportunity_id}/experiments/{experiment_id}/approval"
+    )
+    async def business_experiment_approval(
+        opportunity_id: str,
+        experiment_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        approved = payload.get("approved")
+        if not isinstance(approved, bool):
+            raise HTTPException(status_code=422, detail="approved must be true or false.")
+        try:
+            return nova.business_opportunities.approve_experiment(
+                opportunity_id,
+                experiment_id,
+                approved=approved,
+                note=str(payload.get("note", "")),
+                actor=principal,
+            )
+        except BusinessError as exc:
+            raise _business_exception(exc) from exc
+
+    @app.post(
+        "/business/opportunities/{opportunity_id}/experiments/{experiment_id}/outcome"
+    )
+    async def business_experiment_outcome(
+        opportunity_id: str,
+        experiment_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        raw_result = payload.get("result")
+        if raw_result is not None and not isinstance(raw_result, Mapping):
+            raise HTTPException(status_code=422, detail="result must be an object.")
+        try:
+            return nova.business_opportunities.record_experiment_outcome(
+                opportunity_id,
+                experiment_id,
+                outcome=str(payload.get("outcome", "")),
+                result=dict(raw_result) if isinstance(raw_result, Mapping) else None,
+                actor=principal,
+            )
+        except BusinessError as exc:
+            raise _business_exception(exc) from exc
+
+    @app.post("/business/opportunities/{opportunity_id}/pause")
+    async def business_pause(
+        opportunity_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_opportunities.pause(
+                opportunity_id, reason=str(payload.get("reason", "")), actor=principal
+            )
+        except BusinessError as exc:
+            raise _business_exception(exc) from exc
+
+    @app.post("/business/opportunities/{opportunity_id}/resume")
+    async def business_resume(
+        opportunity_id: str,
+        payload: dict[str, Any] | None = None,
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_opportunities.resume(
+                opportunity_id,
+                reason=str((payload or {}).get("reason", "")),
+                actor=principal,
+            )
+        except BusinessError as exc:
+            raise _business_exception(exc) from exc
+
+    @app.post("/business/opportunities/{opportunity_id}/reject")
+    async def business_reject(
+        opportunity_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_opportunities.reject(
+                opportunity_id, reason=str(payload.get("reason", "")), actor=principal
+            )
+        except BusinessError as exc:
+            raise _business_exception(exc) from exc
+
+    @app.post("/business/opportunities/{opportunity_id}/archive")
+    async def business_archive(
+        opportunity_id: str,
+        payload: dict[str, Any] | None = None,
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_opportunities.archive(
+                opportunity_id,
+                reason=str((payload or {}).get("reason", "")),
+                actor=principal,
+            )
+        except BusinessError as exc:
+            raise _business_exception(exc) from exc
+
+    # ── Phase 36: product development and launch pipeline ────────────────
+    # The pipeline reads only stored Phase 35 reports. Approvals are explicit
+    # authenticated human actions; no route deploys, publishes or commits.
+
+    def _product_exception(exc: Exception) -> HTTPException:
+        if isinstance(exc, ProductNotFound):
+            return HTTPException(status_code=404, detail=str(exc))
+        if isinstance(exc, ApprovalRequired):
+            return HTTPException(status_code=403, detail=str(exc))
+        if isinstance(exc, BudgetExceeded):
+            return HTTPException(status_code=429, detail=str(exc))
+        if isinstance(exc, QualityGateError):
+            return HTTPException(status_code=409, detail=str(exc))
+        if isinstance(exc, OpportunityNotEligible):
+            return HTTPException(status_code=422, detail=str(exc))
+        if isinstance(exc, WorkspaceError):
+            return HTTPException(status_code=422, detail=str(exc))
+        if isinstance(exc, ProductConflict):
+            return HTTPException(status_code=409, detail=str(exc))
+        if isinstance(exc, (ProductValidationError, ProductError)):
+            return HTTPException(status_code=422, detail=str(exc))
+        if isinstance(exc, PermissionError):
+            return HTTPException(status_code=403, detail=str(exc))
+        if isinstance(exc, (TypeError, ValueError)):
+            return HTTPException(status_code=422, detail=str(exc))
+        return HTTPException(status_code=409, detail=str(exc))
+
+    def _product_bool(payload: Mapping[str, Any], key: str) -> bool:
+        raw = payload.get(key)
+        if not isinstance(raw, bool):
+            raise HTTPException(status_code=422, detail=f"{key} must be true or false.")
+        return raw
+
+    def _product_list(payload: Mapping[str, Any], key: str) -> list[str]:
+        raw = payload.get(key)
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            return [row.strip() for row in raw.replace("\r", "").split("\n") if row.strip()]
+        if isinstance(raw, (list, tuple)):
+            return [str(row).strip() for row in raw if str(row).strip()]
+        raise HTTPException(status_code=422, detail=f"{key} must be a list of strings.")
+
+    def _product_inputs(payload: Mapping[str, Any]) -> dict[str, Any]:
+        raw = payload.get("inputs")
+        if raw is not None:
+            if not isinstance(raw, Mapping):
+                raise HTTPException(status_code=422, detail="inputs must be an object.")
+            return dict(raw)
+        return dict(payload)
+
+    @app.get("/product/status")
+    async def product_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return nova.product_pipeline.status()
+
+    @app.get("/product/projects")
+    async def product_projects(
+        q: str = "",
+        state: str = "",
+        limit: int = 50,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.product_pipeline.list_projects(
+            query=q, state=state, limit=limit, offset=offset
+        )
+
+    @app.post("/product/projects")
+    async def product_create(
+        payload: dict[str, Any], principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        raw_environment = payload.get("environment")
+        if raw_environment is not None and not isinstance(raw_environment, Mapping):
+            raise HTTPException(status_code=422, detail="environment must be an object.")
+        raw_gates = payload.get("quality_gates")
+        if raw_gates is not None and not isinstance(raw_gates, (list, tuple, str)):
+            raise HTTPException(status_code=422, detail="quality_gates must be a list.")
+        approved = payload.get("approved", False)
+        if not isinstance(approved, bool):
+            raise HTTPException(status_code=422, detail="approved must be true or false.")
+        try:
+            return await nova.product_pipeline.create_project(
+                opportunity_id=str(payload.get("opportunity_id", "")),
+                name=str(payload.get("name", "")),
+                approved=approved,
+                approval_note=str(payload.get("approval_note", "")),
+                conditions_acknowledged=tuple(_product_list(payload, "conditions_acknowledged")),
+                actor=principal,
+                release_target=str(payload.get("release_target", "local")),
+                repository=str(payload.get("repository", "")),
+                environment=dict(raw_environment) if isinstance(raw_environment, Mapping) else None,
+                quality_gates=raw_gates,
+            )
+        except (ProductError, ValueError, TypeError) as exc:
+            raise _product_exception(exc) from exc
+
+    @app.get("/product/projects/{product_id}")
+    async def product_detail(
+        product_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.product_pipeline.detail(product_id)
+        except ProductError as exc:
+            raise _product_exception(exc) from exc
+
+    @app.get("/product/projects/{product_id}/history")
+    async def product_history(
+        product_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.product_pipeline.history(product_id)
+        except ProductError as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/prd")
+    async def product_prd(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.product_pipeline.generate_prd(
+                product_id, _product_inputs(payload), actor=principal
+            )
+        except (ProductError, ValueError, TypeError) as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/prd/approval")
+    async def product_prd_approval(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        version = payload.get("version")
+        if version is not None and (isinstance(version, bool) or not isinstance(version, int)):
+            raise HTTPException(status_code=422, detail="version must be an integer.")
+        try:
+            return nova.product_pipeline.approve_requirements(
+                product_id,
+                approved=_product_bool(payload, "approved"),
+                actor=principal,
+                note=str(payload.get("note", "")),
+                version=version,
+            )
+        except (ProductError, ValueError, TypeError) as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/architecture")
+    async def product_architecture(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.product_pipeline.generate_architecture(
+                product_id, _product_inputs(payload), actor=principal
+            )
+        except (ProductError, ValueError, TypeError) as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/architecture/approval")
+    async def product_architecture_approval(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.product_pipeline.approve_architecture(
+                product_id,
+                approved=_product_bool(payload, "approved"),
+                actor=principal,
+                note=str(payload.get("note", "")),
+            )
+        except (ProductError, ValueError, TypeError) as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/plan")
+    async def product_plan(
+        product_id: str,
+        payload: dict[str, Any] | None = None,
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.product_pipeline.create_plan(
+                product_id, _product_inputs(payload or {}), actor=principal
+            )
+        except (ProductError, ValueError, TypeError) as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/plan/approval")
+    async def product_plan_approval(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.product_pipeline.approve_plan_record(
+                product_id,
+                approved=_product_bool(payload, "approved"),
+                actor=principal,
+                note=str(payload.get("note", "")),
+            )
+        except (ProductError, ValueError, TypeError) as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/development/start")
+    async def product_start_development(
+        product_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.product_pipeline.start_development(product_id, actor=principal)
+        except ProductError as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/tasks/run-ready")
+    async def product_run_ready(
+        product_id: str,
+        payload: dict[str, Any] | None = None,
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        data = dict(payload or {})
+        try:
+            limit = int(data.get("limit", 4))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="limit must be an integer.") from exc
+        try:
+            return await nova.product_pipeline.run_ready_tasks(
+                product_id, limit=limit, actor=principal
+            )
+        except ProductError as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/tasks/{task_id}/run")
+    async def product_run_task(
+        product_id: str,
+        task_id: str,
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return await nova.product_pipeline.run_task(
+                product_id, task_id, actor=principal
+            )
+        except ProductError as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/tasks/{task_id}/result")
+    async def product_task_result(
+        product_id: str,
+        task_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        raw_files = payload.get("files")
+        if raw_files is not None and not isinstance(raw_files, Mapping):
+            raise HTTPException(status_code=422, detail="files must be an object.")
+        try:
+            return nova.product_pipeline.record_task_result(
+                product_id,
+                task_id,
+                verified=_product_bool(payload, "verified"),
+                summary=str(payload.get("summary", "")),
+                evidence=tuple(_product_list(payload, "evidence")),
+                files={str(key): str(value) for key, value in raw_files.items()}
+                if isinstance(raw_files, Mapping)
+                else None,
+                actor=principal,
+            )
+        except (ProductError, ValueError, TypeError) as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/tasks/{task_id}/retry")
+    async def product_task_retry(
+        product_id: str,
+        task_id: str,
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.product_pipeline.retry_task(product_id, task_id, actor=principal)
+        except ProductError as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/environment/validate")
+    async def product_validate_environment(
+        product_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return await nova.product_pipeline.validate_environment(
+                product_id, actor=principal
+            )
+        except ProductError as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/workspace/files")
+    async def product_write_file(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            overwrite = payload.get("overwrite", False)
+            if not isinstance(overwrite, bool):
+                raise HTTPException(status_code=422, detail="overwrite must be true or false.")
+            return nova.product_pipeline.write_generated_file(
+                product_id,
+                path=_required_field(payload, "path"),
+                content=str(payload.get("content", "")),
+                expected_sha256=str(payload.get("expected_sha256", "")),
+                overwrite=overwrite,
+                actor=principal,
+            )
+        except (ProductError, ValueError, TypeError) as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/workspace/cleanup")
+    async def product_cleanup_workspace(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.product_pipeline.cleanup_workspace(
+                product_id,
+                approved=_product_bool(payload, "approved"),
+                actor=principal,
+            )
+        except ProductError as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/build")
+    async def product_build(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        raw_exit = payload.get("exit_code")
+        if isinstance(raw_exit, bool) or not isinstance(raw_exit, (int, str)):
+            raise HTTPException(status_code=422, detail="exit_code must be an integer.")
+        try:
+            exit_code = int(raw_exit)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="exit_code must be an integer.") from exc
+        try:
+            return nova.product_pipeline.record_build(
+                product_id,
+                command=_required_field(payload, "command"),
+                exit_code=exit_code,
+                output=str(payload.get("output", "")),
+                validated=_product_bool(payload, "validated"),
+                actor=principal,
+            )
+        except (ProductError, ValueError, TypeError) as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/tests")
+    async def product_record_test(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.product_pipeline.record_test(product_id, payload, actor=principal)
+        except (ProductError, ValueError, TypeError) as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/quality/run")
+    async def product_run_quality(
+        product_id: str,
+        payload: dict[str, Any] | None = None,
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        data = dict(payload or {})
+        try:
+            timeout = float(data.get("timeout_seconds", 180))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="timeout_seconds must be a number.") from exc
+        try:
+            return await nova.product_pipeline.run_quality_checks(
+                product_id,
+                gates=tuple(_product_list(data, "gates")),
+                actor=principal,
+                timeout_seconds=timeout,
+            )
+        except (ProductError, ValueError, TypeError) as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/defects")
+    async def product_open_defect(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.product_pipeline.open_defect(product_id, payload, actor=principal)
+        except (ProductError, ValueError, TypeError) as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/defects/{defect_id}/resolve")
+    async def product_resolve_defect(
+        product_id: str,
+        defect_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            verified = payload.get("verified", False)
+            if not isinstance(verified, bool):
+                raise HTTPException(status_code=422, detail="verified must be true or false.")
+            return nova.product_pipeline.resolve_defect(
+                product_id,
+                defect_id,
+                resolution=_required_field(payload, "resolution"),
+                fix_task_id=str(payload.get("fix_task_id", "")),
+                test_result_ids=tuple(_product_list(payload, "test_result_ids")),
+                verified=verified,
+                actor=principal,
+            )
+        except (ProductError, ValueError, TypeError) as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/defects/{defect_id}/reopen")
+    async def product_reopen_defect(
+        product_id: str,
+        defect_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.product_pipeline.reopen_defect(
+                product_id,
+                defect_id,
+                reason=_required_field(payload, "reason"),
+                actor=principal,
+            )
+        except (ProductError, ValueError, TypeError) as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/requirements/{requirement_id}/verify")
+    async def product_verify_requirement(
+        product_id: str,
+        requirement_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.product_pipeline.mark_requirement(
+                product_id,
+                requirement_id,
+                passed=_product_bool(payload, "passed"),
+                evidence=tuple(_product_list(payload, "evidence")),
+                actor=principal,
+            )
+        except (ProductError, ValueError, TypeError) as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/corrective-tasks")
+    async def product_corrective_tasks(
+        product_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.product_pipeline.create_corrective_tasks(
+                product_id, actor=principal
+            )
+        except ProductError as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/release")
+    async def product_release(
+        product_id: str,
+        payload: dict[str, Any] | None = None,
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        data = _product_inputs(payload or {})
+        operational = data.get("operational")
+        if operational is not None and not isinstance(operational, Mapping):
+            raise HTTPException(status_code=422, detail="operational must be an object.")
+        if isinstance(operational, Mapping):
+            data["operational"] = dict(operational)
+        try:
+            return nova.product_pipeline.prepare_release(
+                product_id, data, actor=principal
+            )
+        except (ProductError, ValueError, TypeError) as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/release/approval")
+    async def product_release_approval(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.product_pipeline.approve_release(
+                product_id,
+                release_id=_required_field(payload, "release_id"),
+                approved=_product_bool(payload, "approved"),
+                actor=principal,
+                note=str(payload.get("note", "")),
+            )
+        except (ProductError, ValueError, TypeError) as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/launch-readiness")
+    async def product_launch_readiness(
+        product_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.product_pipeline.evaluate_launch(product_id, actor=principal)
+        except ProductError as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/launch/approval")
+    async def product_launch_approval(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.product_pipeline.approve_launch(
+                product_id,
+                approved=_product_bool(payload, "approved"),
+                actor=principal,
+                note=str(payload.get("note", "")),
+            )
+        except (ProductError, ValueError, TypeError) as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/conditions/resolve")
+    async def product_resolve_condition(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.product_pipeline.resolve_condition(
+                product_id,
+                condition=_required_field(payload, "condition"),
+                evidence=tuple(_product_list(payload, "evidence")),
+                actor=principal,
+            )
+        except (ProductError, ValueError, TypeError) as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/cancel")
+    async def product_cancel(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.product_pipeline.cancel(
+                product_id, reason=str(payload.get("reason", "")), actor=principal
+            )
+        except ProductError as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/resume")
+    async def product_resume(
+        product_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.product_pipeline.resume(product_id, actor=principal)
+        except ProductError as exc:
+            raise _product_exception(exc) from exc
+
+    @app.post("/product/projects/{product_id}/archive")
+    async def product_archive(
+        product_id: str,
+        payload: dict[str, Any] | None = None,
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.product_pipeline.archive(
+                product_id,
+                reason=str((payload or {}).get("reason", "")),
+                actor=principal,
+            )
+        except ProductError as exc:
+            raise _product_exception(exc) from exc
+
+    # ── Phase 37: customer acquisition, sales and support ─────────────────
+    # Every workspace belongs to one launch-authorized Phase 36 product. The
+    # default communication sender is absent, so a send records not_configured
+    # rather than claiming delivery.
+
+    def _customer_exception(exc: Exception) -> HTTPException:
+        if isinstance(exc, (CustomerNotFound, CustomerRecordNotFound)):
+            return HTTPException(status_code=404, detail=str(exc))
+        if isinstance(exc, ProductNotLaunched):
+            return HTTPException(status_code=403, detail=str(exc))
+        if isinstance(exc, CustomerBudgetExceeded):
+            return HTTPException(status_code=429, detail=str(exc))
+        if isinstance(exc, CommunicationNotConfigured):
+            return HTTPException(status_code=503, detail=str(exc))
+        if isinstance(exc, ConsentRequired):
+            return HTTPException(status_code=409, detail=str(exc))
+        if isinstance(exc, CustomerConflict):
+            return HTTPException(status_code=409, detail=str(exc))
+        if isinstance(exc, (CustomerValidationError, ValueError, TypeError)):
+            return HTTPException(status_code=422, detail=str(exc))
+        if isinstance(exc, CustomerError):
+            return HTTPException(status_code=409, detail=str(exc))
+        return HTTPException(status_code=500, detail=str(exc))
+
+    def _customer_inputs(payload: Mapping[str, Any]) -> dict[str, Any]:
+        raw = payload.get("inputs")
+        if raw is not None:
+            if not isinstance(raw, Mapping):
+                raise HTTPException(status_code=422, detail="inputs must be an object.")
+            return dict(raw)
+        return dict(payload)
+
+    def _customer_bool(payload: Mapping[str, Any], key: str) -> bool:
+        raw = payload.get(key)
+        if not isinstance(raw, bool):
+            raise HTTPException(status_code=422, detail=f"{key} must be true or false.")
+        return raw
+
+    @app.get("/customer/status")
+    async def customer_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return nova.customer_growth.status()
+
+    @app.get("/customer/workspaces")
+    async def customer_workspaces(
+        limit: int = 50,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.customer_growth.list_workspaces(limit=limit, offset=offset)
+
+    @app.post("/customer/workspaces")
+    async def customer_workspace_create(
+        payload: dict[str, Any], principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return await nova.customer_growth.create_workspace(
+                str(payload.get("product_id", "")), actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.get("/customer/workspaces/{product_id}")
+    async def customer_workspace(
+        product_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.detail(product_id)
+        except CustomerError as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.get("/customer/workspaces/{product_id}/history")
+    async def customer_workspace_history(
+        product_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.history(product_id)
+        except CustomerError as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/refresh")
+    async def customer_workspace_refresh(
+        product_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return await nova.customer_growth.refresh_product(product_id, actor=principal)
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.get("/customer/workspaces/{product_id}/analytics")
+    async def customer_analytics(
+        product_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.analytics(product_id)
+        except CustomerError as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/segments")
+    async def customer_segment(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.add_segment(
+                product_id, _customer_inputs(payload), actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/icps")
+    async def customer_icp(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.add_icp(
+                product_id, _customer_inputs(payload), actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/research")
+    async def customer_research(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.add_research(
+                product_id, _customer_inputs(payload), actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.get("/customer/workspaces/{product_id}/customers")
+    async def customer_customers(
+        product_id: str, _principal: str = Depends(require_auth)
+    ) -> list[dict[str, Any]]:
+        try:
+            return nova.customer_growth.list_customers(product_id)
+        except CustomerError as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/customers")
+    async def customer_customer_create(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.add_customer(
+                product_id, _customer_inputs(payload), actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.get("/customer/workspaces/{product_id}/customers/{customer_id}")
+    async def customer_customer_detail(
+        product_id: str,
+        customer_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.customer_detail(product_id, customer_id)
+        except CustomerError as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/customers/{customer_id}/consent")
+    async def customer_customer_consent(
+        product_id: str,
+        customer_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.update_consent(
+                product_id, "customer", customer_id, _customer_inputs(payload), actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/customers/{customer_id}/success")
+    async def customer_customer_success(
+        product_id: str,
+        customer_id: str,
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.refresh_success(
+                product_id, customer_id, actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/customers/{customer_id}/churn")
+    async def customer_customer_churn(
+        product_id: str,
+        customer_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.mark_customer_churned(
+                product_id,
+                customer_id,
+                reason=str(payload.get("reason", "")),
+                actor=principal,
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/customers/{customer_id}/erasure")
+    async def customer_customer_erasure(
+        product_id: str,
+        customer_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.erase_customer(
+                product_id,
+                customer_id,
+                approved=_customer_bool(payload, "approved"),
+                reason=str(payload.get("reason", "")),
+                actor=principal,
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.get("/customer/workspaces/{product_id}/leads")
+    async def customer_leads(
+        product_id: str,
+        status: str = "",
+        _principal: str = Depends(require_auth),
+    ) -> list[dict[str, Any]]:
+        try:
+            return nova.customer_growth.list_leads(product_id, status=status)
+        except CustomerError as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/leads")
+    async def customer_lead_create(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.add_lead(
+                product_id, _customer_inputs(payload), actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/leads/{lead_id}/consent")
+    async def customer_lead_consent(
+        product_id: str,
+        lead_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.update_consent(
+                product_id, "lead", lead_id, _customer_inputs(payload), actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/leads/{lead_id}/qualify")
+    async def customer_lead_qualify(
+        product_id: str,
+        lead_id: str,
+        payload: dict[str, Any] | None = None,
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        data = dict(payload or {})
+        raw = data.get("inputs", data)
+        if not isinstance(raw, Mapping):
+            raise HTTPException(status_code=422, detail="qualification inputs must be an object.")
+        try:
+            return nova.customer_growth.qualify(
+                product_id, lead_id, inputs=dict(raw), actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/leads/{lead_id}/status")
+    async def customer_lead_status(
+        product_id: str,
+        lead_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.set_lead_status(
+                product_id,
+                lead_id,
+                str(payload.get("status", "")),
+                lost_reason=str(payload.get("lost_reason", "")),
+                actor=principal,
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/leads/{lead_id}/convert")
+    async def customer_lead_convert(
+        product_id: str,
+        lead_id: str,
+        payload: dict[str, Any] | None = None,
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        data = dict(payload or {})
+        raw = data.get("customer_inputs", data)
+        if not isinstance(raw, Mapping):
+            raise HTTPException(status_code=422, detail="customer_inputs must be an object.")
+        try:
+            return nova.customer_growth.convert_lead(
+                product_id, lead_id, customer_inputs=dict(raw), actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/sales/assist")
+    async def customer_sales_assist(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.assist_sales(
+                product_id,
+                lead_id=str(payload.get("lead_id", "")),
+                deal_id=str(payload.get("deal_id", "")),
+                actor=principal,
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/interactions")
+    async def customer_interaction(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.add_interaction(
+                product_id, _customer_inputs(payload), actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/deals")
+    async def customer_deal_create(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.create_deal(
+                product_id, _customer_inputs(payload), actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/deals/{deal_id}/stage")
+    async def customer_deal_stage(
+        product_id: str,
+        deal_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.move_deal(
+                product_id,
+                deal_id,
+                str(payload.get("stage", "")),
+                lost_reason=str(payload.get("lost_reason", "")),
+                realized_amount=payload.get("realized_amount"),
+                actor=principal,
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/deals/{deal_id}/proposals")
+    async def customer_deal_proposal(
+        product_id: str,
+        deal_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.add_proposal(
+                product_id, deal_id, _customer_inputs(payload), actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/deals/{deal_id}/decisions")
+    async def customer_deal_decision(
+        product_id: str,
+        deal_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.record_decision(
+                product_id, deal_id, _customer_inputs(payload), actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/policy")
+    async def customer_policy(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.set_automation_policy(
+                product_id,
+                _customer_inputs(payload),
+                actor=principal,
+                note=str(payload.get("note", "")),
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/communications")
+    async def customer_communication_draft(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.draft_communication(
+                product_id, _customer_inputs(payload), actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/communications/{communication_id}/approval")
+    async def customer_communication_approval(
+        product_id: str,
+        communication_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.approve_communication(
+                product_id,
+                communication_id,
+                approved=_customer_bool(payload, "approved"),
+                actor=principal,
+                note=str(payload.get("note", "")),
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/communications/{communication_id}/send")
+    async def customer_communication_send(
+        product_id: str,
+        communication_id: str,
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.send_communication(
+                product_id, communication_id, actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/knowledge")
+    async def customer_knowledge(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.add_knowledge(
+                product_id, _customer_inputs(payload), actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.get("/customer/workspaces/{product_id}/tickets")
+    async def customer_tickets(
+        product_id: str,
+        status: str = "",
+        _principal: str = Depends(require_auth),
+    ) -> list[dict[str, Any]]:
+        try:
+            return nova.customer_growth.list_tickets(product_id, status=status)
+        except CustomerError as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/tickets")
+    async def customer_ticket_create(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.create_ticket(
+                product_id, _customer_inputs(payload), actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.get("/customer/workspaces/{product_id}/tickets/{ticket_id}")
+    async def customer_ticket_detail(
+        product_id: str,
+        ticket_id: str,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.ticket_detail(product_id, ticket_id)
+        except CustomerError as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/tickets/{ticket_id}/triage")
+    async def customer_ticket_triage(
+        product_id: str,
+        ticket_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.triage_ticket(
+                product_id, ticket_id, _customer_inputs(payload), actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/tickets/{ticket_id}/messages")
+    async def customer_ticket_message(
+        product_id: str,
+        ticket_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.add_ticket_message(
+                product_id, ticket_id, _customer_inputs(payload), actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/tickets/{ticket_id}/status")
+    async def customer_ticket_status(
+        product_id: str,
+        ticket_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.transition_ticket(
+                product_id,
+                ticket_id,
+                str(payload.get("status", "")),
+                reason=str(payload.get("reason", "")),
+                resolution=str(payload.get("resolution", "")),
+                actor=principal,
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/tickets/{ticket_id}/assist")
+    async def customer_ticket_assist(
+        product_id: str,
+        ticket_id: str,
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.assist_ticket(
+                product_id, ticket_id, actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/feedback")
+    async def customer_feedback(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.add_feedback(
+                product_id, _customer_inputs(payload), actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/onboarding")
+    async def customer_onboarding_start(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.start_onboarding(
+                product_id, _customer_inputs(payload), actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/onboarding/{onboarding_id}")
+    async def customer_onboarding_update(
+        product_id: str,
+        onboarding_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.update_onboarding(
+                product_id, onboarding_id, _customer_inputs(payload), actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    @app.post("/customer/workspaces/{product_id}/costs")
+    async def customer_cost(
+        product_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.customer_growth.add_acquisition_cost(
+                product_id, _customer_inputs(payload), actor=principal
+            )
+        except (CustomerError, ValueError, TypeError) as exc:
+            raise _customer_exception(exc) from exc
+
+    # ── Phase 38: business operations and financial intelligence ───────────
+    # Venture isolation, append-only double-entry journals, actual/estimated/
+    # forecast separation and human approvals. No route moves money, purchases
+    # anything, changes banking details or rewrites a finalized entry.
+
+    def _finance_exception(exc: Exception) -> HTTPException:
+        if isinstance(exc, (VentureNotFound, FinOpsRecordNotFound)):
+            return HTTPException(status_code=404, detail=str(exc))
+        if isinstance(exc, FinOpsAuthorizationError):
+            return HTTPException(status_code=403, detail=str(exc))
+        if isinstance(exc, FinOpsBudgetExceeded):
+            return HTTPException(status_code=429, detail=str(exc))
+        if isinstance(exc, (PeriodClosed, FinOpsConflict)):
+            return HTTPException(status_code=409, detail=str(exc))
+        if isinstance(exc, (FinOpsValidationError, ValueError, TypeError)):
+            return HTTPException(status_code=422, detail=str(exc))
+        if isinstance(exc, FinOpsError):
+            return HTTPException(status_code=409, detail=str(exc))
+        return HTTPException(status_code=500, detail=str(exc))
+
+    def _finance_inputs(payload: Mapping[str, Any]) -> dict[str, Any]:
+        raw = payload.get("inputs")
+        if raw is not None:
+            if not isinstance(raw, Mapping):
+                raise HTTPException(status_code=422, detail="inputs must be an object.")
+            return dict(raw)
+        return dict(payload)
+
+    def _finance_date(value: str, label: str) -> date:
+        try:
+            return date.fromisoformat(str(value)[:10])
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"{label} must be an ISO date.") from exc
+
+    @app.get("/finance/status")
+    async def finance_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return nova.business_finance.status()
+
+    @app.get("/finance/ventures")
+    async def finance_ventures(
+        limit: int = 50, offset: int = 0, status: str = "", _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        return nova.business_finance.list_ventures(limit=limit, offset=offset, status=status)
+
+    @app.post("/finance/ventures")
+    async def finance_venture_create(
+        payload: dict[str, Any], principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.create_venture(_finance_inputs(payload), actor=principal)
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.get("/finance/ventures/{venture_id}")
+    async def finance_venture(
+        venture_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.detail(venture_id, actor=principal)
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.get("/finance/ventures/{venture_id}/dashboard")
+    async def finance_dashboard(
+        venture_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.dashboard(venture_id, actor=principal)
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/status")
+    async def finance_venture_status(
+        venture_id: str, payload: dict[str, Any], principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.set_operating_status(
+                venture_id, str(payload.get("status", "")), actor=principal
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/members")
+    async def finance_member(
+        venture_id: str, payload: dict[str, Any], principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.add_member(venture_id, _finance_inputs(payload), actor=principal)
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.get("/finance/ventures/{venture_id}/operations")
+    async def finance_operations(
+        venture_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.operations(venture_id, actor=principal)
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/objectives")
+    async def finance_objective(
+        venture_id: str, payload: dict[str, Any], principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.add_operational_objective(
+                venture_id, _finance_inputs(payload), actor=principal
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/tasks")
+    async def finance_task(
+        venture_id: str, payload: dict[str, Any], principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.add_operational_task(
+                venture_id, _finance_inputs(payload), actor=principal
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/tasks/{task_id}")
+    async def finance_task_update(
+        venture_id: str,
+        task_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.update_operational_task(
+                venture_id, task_id, _finance_inputs(payload), actor=principal
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/milestones")
+    async def finance_milestone(
+        venture_id: str, payload: dict[str, Any], principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.add_milestone(venture_id, _finance_inputs(payload), actor=principal)
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/workflows")
+    async def finance_workflow(
+        venture_id: str, payload: dict[str, Any], principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.add_workflow(venture_id, _finance_inputs(payload), actor=principal)
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/risks")
+    async def finance_risk(
+        venture_id: str, payload: dict[str, Any], principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.add_operational_risk(
+                venture_id, _finance_inputs(payload), actor=principal
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.get("/finance/ventures/{venture_id}/revenue")
+    async def finance_revenue_list(
+        venture_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return {"revenue": nova.business_finance.list_revenue(venture_id, actor=principal)}
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.get("/finance/ventures/{venture_id}/revenue/summary")
+    async def finance_revenue_summary(
+        venture_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.revenue_summary(venture_id, actor=principal)
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/revenue")
+    async def finance_revenue_create(
+        venture_id: str, payload: dict[str, Any], principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.add_revenue(
+                venture_id, _finance_inputs(payload), actor=principal
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/revenue/{revenue_id}/advance")
+    async def finance_revenue_advance(
+        venture_id: str,
+        revenue_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.advance_revenue(
+                venture_id, revenue_id, str(payload.get("stage", "")), actor=principal
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/revenue/{revenue_id}/refund")
+    async def finance_revenue_refund(
+        venture_id: str,
+        revenue_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.refund_revenue(
+                venture_id, revenue_id, _finance_inputs(payload), actor=principal
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.get("/finance/ventures/{venture_id}/expenses")
+    async def finance_expenses(
+        venture_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return {"expenses": nova.business_finance.list_expenses(venture_id, actor=principal)}
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/expenses")
+    async def finance_expense_create(
+        venture_id: str, payload: dict[str, Any], principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.add_expense(
+                venture_id, _finance_inputs(payload), actor=principal
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/expenses/{expense_id}/approval")
+    async def finance_expense_approval(
+        venture_id: str,
+        expense_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.approve_expense(
+                venture_id, expense_id, _finance_inputs(payload), actor=principal
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/expenses/{expense_id}/payment")
+    async def finance_expense_payment(
+        venture_id: str,
+        expense_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.pay_expense(
+                venture_id, expense_id, _finance_inputs(payload), actor=principal
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.get("/finance/ventures/{venture_id}/journal")
+    async def finance_journal(
+        venture_id: str, limit: int = 200, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.journal(venture_id, actor=principal, limit=limit)
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/journal")
+    async def finance_journal_post(
+        venture_id: str, payload: dict[str, Any], principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.post_journal(
+                venture_id, _finance_inputs(payload), actor=principal
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/journal/{journal_id}/reverse")
+    async def finance_journal_reverse(
+        venture_id: str,
+        journal_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.reverse_journal(
+                venture_id, journal_id, _finance_inputs(payload), actor=principal
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/reconciliations")
+    async def finance_reconcile(
+        venture_id: str, payload: dict[str, Any], principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.reconcile(
+                venture_id, _finance_inputs(payload), actor=principal
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/periods/close")
+    async def finance_close_period(
+        venture_id: str, payload: dict[str, Any], principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.close_period(
+                venture_id, _finance_inputs(payload), actor=principal
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.get("/finance/ventures/{venture_id}/trial-balance")
+    async def finance_trial_balance(
+        venture_id: str, as_of: str = "", principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.trial_balance(
+                venture_id, actor=principal, as_of=_finance_date(as_of, "as_of") if as_of else None
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.get("/finance/ventures/{venture_id}/statements/income")
+    async def finance_income(
+        venture_id: str, start: str = "", end: str = "", principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.income_statement(
+                venture_id,
+                actor=principal,
+                start=_finance_date(start, "start") if start else None,
+                end=_finance_date(end, "end") if end else None,
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.get("/finance/ventures/{venture_id}/statements/balance-sheet")
+    async def finance_balance_sheet(
+        venture_id: str, as_of: str = "", principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.balance_sheet(
+                venture_id, actor=principal, as_of=_finance_date(as_of, "as_of") if as_of else None
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.get("/finance/ventures/{venture_id}/statements/cash-flow")
+    async def finance_cash_flow_statement(
+        venture_id: str, start: str = "", end: str = "", principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.cash_flow(
+                venture_id,
+                actor=principal,
+                start=_finance_date(start, "start") if start else None,
+                end=_finance_date(end, "end") if end else None,
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.get("/finance/ventures/{venture_id}/statements/comparison")
+    async def finance_comparison(
+        venture_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.period_comparison(venture_id, actor=principal)
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.get("/finance/ventures/{venture_id}/cash-flow")
+    async def finance_cash_flow(
+        venture_id: str, start: str = "", end: str = "", principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        return await finance_cash_flow_statement(venture_id, start, end, principal)
+
+    @app.get("/finance/ventures/{venture_id}/working-capital")
+    async def finance_working_capital(
+        venture_id: str, as_of: str = "", principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.working_capital(
+                venture_id, actor=principal, as_of=_finance_date(as_of, "as_of") if as_of else None
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.get("/finance/ventures/{venture_id}/profitability")
+    async def finance_profitability(
+        venture_id: str, start: str = "", end: str = "", principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.profitability(
+                venture_id,
+                actor=principal,
+                start=_finance_date(start, "start") if start else None,
+                end=_finance_date(end, "end") if end else None,
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.get("/finance/ventures/{venture_id}/budgets")
+    async def finance_budgets(
+        venture_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return {"budgets": nova.business_finance.list_budgets(venture_id, actor=principal)}
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/budgets")
+    async def finance_budget_create(
+        venture_id: str, payload: dict[str, Any], principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.create_budget(
+                venture_id, _finance_inputs(payload), actor=principal
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/budgets/{budget_id}/approval")
+    async def finance_budget_approval(
+        venture_id: str,
+        budget_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.approve_budget(
+                venture_id, budget_id, _finance_inputs(payload), actor=principal
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/budgets/{budget_id}/revisions")
+    async def finance_budget_revise(
+        venture_id: str,
+        budget_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.revise_budget(
+                venture_id, budget_id, _finance_inputs(payload), actor=principal
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.get("/finance/ventures/{venture_id}/budgets/{budget_id}/report")
+    async def finance_budget_report(
+        venture_id: str, budget_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.budget_report(venture_id, budget_id, actor=principal)
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.get("/finance/ventures/{venture_id}/forecasts")
+    async def finance_forecasts(
+        venture_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return {"forecasts": nova.business_finance.list_forecasts(venture_id, actor=principal)}
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/forecasts")
+    async def finance_forecast_create(
+        venture_id: str, payload: dict[str, Any], principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.create_forecast(
+                venture_id, _finance_inputs(payload), actor=principal
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/scenarios")
+    async def finance_scenarios(
+        venture_id: str, payload: dict[str, Any], principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.scenario_analysis(
+                venture_id, _finance_inputs(payload), actor=principal
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.get("/finance/ventures/{venture_id}/alerts")
+    async def finance_alerts(
+        venture_id: str, status: str = "", principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return {"alerts": nova.business_finance.list_alerts(venture_id, actor=principal, status=status)}
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/health/refresh")
+    async def finance_health_refresh(
+        venture_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.refresh_health(venture_id, actor=principal)
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/alerts/{alert_id}/resolve")
+    async def finance_alert_resolve(
+        venture_id: str,
+        alert_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.resolve_alert(
+                venture_id, alert_id, _finance_inputs(payload), actor=principal
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.get("/finance/ventures/{venture_id}/reports")
+    async def finance_reports(
+        venture_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return {"reports": nova.business_finance.list_reports(venture_id, actor=principal)}
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    @app.post("/finance/ventures/{venture_id}/reports")
+    async def finance_report_create(
+        venture_id: str, payload: dict[str, Any], principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.business_finance.generate_management_report(
+                venture_id, _finance_inputs(payload), actor=principal
+            )
+        except (FinOpsError, ValueError, TypeError) as exc:
+            raise _finance_exception(exc) from exc
+
+    # ── Phase 39: portfolio manager for multiple AI-run ventures ───────────
+    # Portfolios reference Phase 38 ventures and read Phase 35–37 through their
+    # own services. No route transfers funds, changes a budget, archives a
+    # venture, publishes anything or applies an AI recommendation.
+
+    def _portfolio_exception(exc: Exception) -> HTTPException:
+        if isinstance(
+            exc,
+            (PortfolioNotFound, PortfolioVentureNotFound, PortfolioRecordNotFound),
+        ):
+            return HTTPException(status_code=404, detail=str(exc))
+        if isinstance(exc, PortfolioAuthorizationError):
+            return HTTPException(status_code=403, detail=str(exc))
+        if isinstance(
+            exc,
+            (PortfolioApprovalRequired, LifecycleGateError, PortfolioConflict),
+        ):
+            return HTTPException(status_code=409, detail=str(exc))
+        if isinstance(exc, (PortfolioValidationError, ValueError, TypeError)):
+            return HTTPException(status_code=422, detail=str(exc))
+        if isinstance(exc, PortfolioError):
+            return HTTPException(status_code=409, detail=str(exc))
+        return HTTPException(status_code=500, detail=str(exc))
+
+    def _portfolio_inputs(payload: Mapping[str, Any]) -> dict[str, Any]:
+        raw = payload.get("inputs")
+        if raw is not None:
+            if not isinstance(raw, Mapping):
+                raise HTTPException(status_code=422, detail="inputs must be an object.")
+            return dict(raw)
+        return dict(payload)
+
+    @app.get("/portfolio/status")
+    async def portfolio_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return nova.portfolio_manager.status()
+
+    @app.get("/portfolios")
+    async def portfolios(
+        limit: int = 50, offset: int = 0, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        return nova.portfolio_manager.list_portfolios(
+            actor=principal, limit=limit, offset=offset
+        )
+
+    @app.post("/portfolios")
+    async def portfolio_create(
+        payload: dict[str, Any], principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.create_portfolio(
+                _portfolio_inputs(payload), actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.get("/portfolios/{portfolio_id}")
+    async def portfolio_detail(
+        portfolio_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.detail(portfolio_id, actor=principal)
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.patch("/portfolios/{portfolio_id}")
+    async def portfolio_update(
+        portfolio_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.update_portfolio(
+                portfolio_id, _portfolio_inputs(payload), actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.post("/portfolios/{portfolio_id}/status")
+    async def portfolio_status_change(
+        portfolio_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.set_status(
+                portfolio_id,
+                str(_portfolio_inputs(payload).get("status") or ""),
+                approved=bool(payload.get("approved", False)),
+                actor=principal,
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.post("/portfolios/{portfolio_id}/members")
+    async def portfolio_member(
+        portfolio_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.add_member(
+                portfolio_id, _portfolio_inputs(payload), actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.post("/portfolios/{portfolio_id}/fx-rates")
+    async def portfolio_fx_rate(
+        portfolio_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.add_fx_rate(
+                portfolio_id, _portfolio_inputs(payload), actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.post("/portfolios/{portfolio_id}/monitoring")
+    async def portfolio_monitoring(
+        portfolio_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.set_monitoring(
+                portfolio_id, _portfolio_inputs(payload), actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.get("/portfolios/{portfolio_id}/ventures")
+    async def portfolio_ventures(
+        portfolio_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return {
+                "portfolio_id": portfolio_id,
+                "ventures": nova.portfolio_manager.list_ventures(
+                    portfolio_id, actor=principal
+                ),
+            }
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.post("/portfolios/{portfolio_id}/ventures")
+    async def portfolio_venture_add(
+        portfolio_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.add_venture(
+                portfolio_id, _portfolio_inputs(payload), actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.get("/portfolios/{portfolio_id}/ventures/{venture_id}")
+    async def portfolio_venture_detail(
+        portfolio_id: str,
+        venture_id: str,
+        start: str = "",
+        end: str = "",
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.venture_detail(
+                portfolio_id,
+                venture_id,
+                actor=principal,
+                start=_finance_date(start, "start") if start else None,
+                end=_finance_date(end, "end") if end else None,
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.get("/portfolios/{portfolio_id}/ventures/{venture_id}/lifecycle/evidence")
+    async def portfolio_lifecycle_evidence(
+        portfolio_id: str,
+        venture_id: str,
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.lifecycle_evidence(
+                portfolio_id, venture_id, actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.post("/portfolios/{portfolio_id}/ventures/{venture_id}/lifecycle")
+    async def portfolio_lifecycle_transition(
+        portfolio_id: str,
+        venture_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            data = _portfolio_inputs(payload)
+            return nova.portfolio_manager.transition_lifecycle(
+                portfolio_id,
+                venture_id,
+                str(data.get("target") or data.get("lifecycle_status") or ""),
+                reason=str(data.get("reason") or ""),
+                approved=bool(data.get("approved", False)),
+                actor=principal,
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.get("/portfolios/{portfolio_id}/analytics")
+    async def portfolio_analytics(
+        portfolio_id: str,
+        start: str = "",
+        end: str = "",
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.portfolio_analytics(
+                portfolio_id,
+                actor=principal,
+                start=_finance_date(start, "start") if start else None,
+                end=_finance_date(end, "end") if end else None,
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.get("/portfolios/{portfolio_id}/comparison")
+    async def portfolio_comparison(
+        portfolio_id: str,
+        start: str = "",
+        end: str = "",
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.venture_comparison(
+                portfolio_id,
+                actor=principal,
+                start=_finance_date(start, "start") if start else None,
+                end=_finance_date(end, "end") if end else None,
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.post("/portfolios/{portfolio_id}/evaluation-policies")
+    async def portfolio_evaluation_policy(
+        portfolio_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.define_evaluation_policy(
+                portfolio_id, _portfolio_inputs(payload), actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.post("/portfolios/{portfolio_id}/evaluations")
+    async def portfolio_evaluate(
+        portfolio_id: str,
+        payload: dict[str, Any],
+        start: str = "",
+        end: str = "",
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.evaluate(
+                portfolio_id,
+                _portfolio_inputs(payload),
+                actor=principal,
+                start=_finance_date(start, "start") if start else None,
+                end=_finance_date(end, "end") if end else None,
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.get("/portfolios/{portfolio_id}/ranking")
+    async def portfolio_ranking(
+        portfolio_id: str,
+        policy: str = "",
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.ranking(
+                portfolio_id, policy=policy, actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.get("/portfolios/{portfolio_id}/risks")
+    async def portfolio_risks(
+        portfolio_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.list_risks(portfolio_id, actor=principal)
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.post("/portfolios/{portfolio_id}/risks")
+    async def portfolio_risk_record(
+        portfolio_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.record_risk(
+                portfolio_id, _portfolio_inputs(payload), actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.post("/portfolios/{portfolio_id}/risks/assess")
+    async def portfolio_risk_assess(
+        portfolio_id: str,
+        start: str = "",
+        end: str = "",
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.assess_risks(
+                portfolio_id,
+                actor=principal,
+                start=_finance_date(start, "start") if start else None,
+                end=_finance_date(end, "end") if end else None,
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.post("/portfolios/{portfolio_id}/risks/{risk_id}/resolve")
+    async def portfolio_risk_resolve(
+        portfolio_id: str,
+        risk_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.resolve_risk(
+                portfolio_id, risk_id, _portfolio_inputs(payload), actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.get("/portfolios/{portfolio_id}/allocations")
+    async def portfolio_allocations(
+        portfolio_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.list_allocations(
+                portfolio_id, actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.post("/portfolios/{portfolio_id}/allocations")
+    async def portfolio_allocation_propose(
+        portfolio_id: str,
+        start: str = "",
+        end: str = "",
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.propose_allocations(
+                portfolio_id,
+                actor=principal,
+                start=_finance_date(start, "start") if start else None,
+                end=_finance_date(end, "end") if end else None,
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.post("/portfolios/{portfolio_id}/allocations/{batch_id}/decision")
+    async def portfolio_allocation_decision(
+        portfolio_id: str,
+        batch_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.decide_allocation(
+                portfolio_id, batch_id, _portfolio_inputs(payload), actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.get("/portfolios/{portfolio_id}/resources")
+    async def portfolio_resources(
+        portfolio_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            payload = nova.portfolio_manager.list_allocations(
+                portfolio_id, actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+        # Narrow the payload instead of returning it blindly: an unexpected shape
+        # is an EMPTY answer here, never a stream of arbitrary values.
+        resources = payload.get("resources") if isinstance(payload, dict) else None
+        return resources if isinstance(resources, dict) else {}
+
+    @app.post("/portfolios/{portfolio_id}/resources")
+    async def portfolio_resource_add(
+        portfolio_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.add_resource(
+                portfolio_id, _portfolio_inputs(payload), actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.post("/portfolios/{portfolio_id}/resources/{resource_id}/allocations")
+    async def portfolio_resource_allocate(
+        portfolio_id: str,
+        resource_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.allocate_resource(
+                portfolio_id, resource_id, _portfolio_inputs(payload), actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.get("/portfolios/{portfolio_id}/scenarios")
+    async def portfolio_scenarios(
+        portfolio_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.list_scenarios(
+                portfolio_id, actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.post("/portfolios/{portfolio_id}/scenarios")
+    async def portfolio_scenario_simulate(
+        portfolio_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.simulate_scenario(
+                portfolio_id, _portfolio_inputs(payload), actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.get("/portfolios/{portfolio_id}/recommendations")
+    async def portfolio_recommendations(
+        portfolio_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.list_recommendations(
+                portfolio_id, actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.post("/portfolios/{portfolio_id}/recommendations")
+    async def portfolio_recommendations_generate(
+        portfolio_id: str,
+        start: str = "",
+        end: str = "",
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.generate_recommendations(
+                portfolio_id,
+                actor=principal,
+                start=_finance_date(start, "start") if start else None,
+                end=_finance_date(end, "end") if end else None,
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.get("/portfolios/{portfolio_id}/decisions")
+    async def portfolio_decisions(
+        portfolio_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.list_decisions(
+                portfolio_id, actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.post("/portfolios/{portfolio_id}/decisions")
+    async def portfolio_decision_propose(
+        portfolio_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.propose_decision(
+                portfolio_id, _portfolio_inputs(payload), actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.post("/portfolios/{portfolio_id}/decisions/{decision_id}/approval")
+    async def portfolio_decision_approve(
+        portfolio_id: str,
+        decision_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.decide(
+                portfolio_id, decision_id, _portfolio_inputs(payload), actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.get("/portfolios/{portfolio_id}/coordination")
+    async def portfolio_coordination(
+        portfolio_id: str,
+        start: str = "",
+        end: str = "",
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.coordination(
+                portfolio_id,
+                actor=principal,
+                start=_finance_date(start, "start") if start else None,
+                end=_finance_date(end, "end") if end else None,
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.post("/portfolios/{portfolio_id}/coordination/dependencies")
+    async def portfolio_dependency_add(
+        portfolio_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.add_dependency(
+                portfolio_id, _portfolio_inputs(payload), actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.get("/portfolios/{portfolio_id}/knowledge")
+    async def portfolio_knowledge(
+        portfolio_id: str,
+        venture_id: str = "",
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.list_knowledge(
+                portfolio_id, actor=principal, venture_id=venture_id
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.post("/portfolios/{portfolio_id}/knowledge")
+    async def portfolio_knowledge_add(
+        portfolio_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.add_knowledge(
+                portfolio_id, _portfolio_inputs(payload), actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.post("/portfolios/{portfolio_id}/knowledge/{knowledge_id}/promote")
+    async def portfolio_knowledge_promote(
+        portfolio_id: str,
+        knowledge_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.promote_knowledge(
+                portfolio_id, knowledge_id, _portfolio_inputs(payload), actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.get("/portfolios/{portfolio_id}/alerts")
+    async def portfolio_alerts(
+        portfolio_id: str,
+        status: str = "",
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.list_alerts(
+                portfolio_id, status=status, actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.post("/portfolios/{portfolio_id}/alerts/refresh")
+    async def portfolio_alerts_refresh(
+        portfolio_id: str,
+        start: str = "",
+        end: str = "",
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.refresh_alerts(
+                portfolio_id,
+                actor=principal,
+                start=_finance_date(start, "start") if start else None,
+                end=_finance_date(end, "end") if end else None,
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.post("/portfolios/{portfolio_id}/alerts/{alert_id}/resolve")
+    async def portfolio_alert_resolve(
+        portfolio_id: str,
+        alert_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.resolve_alert(
+                portfolio_id, alert_id, _portfolio_inputs(payload), actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.get("/portfolios/{portfolio_id}/reports")
+    async def portfolio_reports(
+        portfolio_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.list_reports(
+                portfolio_id, actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.post("/portfolios/{portfolio_id}/reports")
+    async def portfolio_report_create(
+        portfolio_id: str,
+        payload: dict[str, Any],
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.generate_report(
+                portfolio_id, _portfolio_inputs(payload), actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.get("/portfolios/{portfolio_id}/reports/{report_id}")
+    async def portfolio_report(
+        portfolio_id: str,
+        report_id: str,
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.get_report(
+                portfolio_id, report_id, actor=principal
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.get("/portfolios/{portfolio_id}/dashboard")
+    async def portfolio_dashboard(
+        portfolio_id: str,
+        start: str = "",
+        end: str = "",
+        principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.dashboard(
+                portfolio_id,
+                actor=principal,
+                start=_finance_date(start, "start") if start else None,
+                end=_finance_date(end, "end") if end else None,
+            )
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
+
+    @app.get("/portfolios/{portfolio_id}/history")
+    async def portfolio_history(
+        portfolio_id: str, principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.portfolio_manager.history(portfolio_id, actor=principal)
+        except (PortfolioError, ValueError, TypeError) as exc:
+            raise _portfolio_exception(exc) from exc
 
     @app.get("/system/harden")
     async def system_harden() -> dict[str, Any]:
@@ -632,6 +3673,131 @@ def create_app() -> Any:
         """Release one model, or every resident model when none is named."""
         return await nova.unload_model(str(payload.get("model", "")))
 
+    # ── Phase 33: adaptive model and compute routing ─────────────────────
+    # These are the management doors over the SAME model manager and running
+    # providers. Selection is pure local reasoning; completion calls an already
+    # configured provider and can therefore spend its quota, so both are
+    # authenticated like every other model operation.
+    @app.get("/models/routing")
+    async def models_routing(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Providers, endpoints, health, preferences, policy and last route."""
+        return nova.adaptive_model_status()
+
+    @app.post("/models/routing/route")
+    async def models_routing_route(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Select a model for one task and show the eligible/rejected reasons."""
+        text = str(payload.get("text") or payload.get("request") or "").strip()
+        if not text:
+            raise HTTPException(status_code=422, detail="A 'text' or 'request' is required.")
+        try:
+            return nova.route_model(
+                text,
+                has_image=bool(payload.get("image") or payload.get("has_image")),
+                local_only=bool(payload.get("local_only", False)),
+                requires_tools=bool(payload.get("requires_tools", False)),
+                requires_structured_output=bool(
+                    payload.get("requires_structured_output", False)
+                ),
+                latency_sensitivity=str(payload.get("latency_sensitivity") or ""),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/models/routing/complete")
+    async def models_routing_complete(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Execute one routed completion, recording attempts and fallbacks.
+
+        This can call a paid provider the user has ALREADY configured. It never
+        installs a provider, reads a key from the request or activates a service.
+        """
+        text = str(payload.get("text") or payload.get("request") or "").strip()
+        if not text:
+            raise HTTPException(status_code=422, detail="A 'text' or 'request' is required.")
+        raw_timeout = payload.get("timeout_seconds")
+        timeout: float | None = None
+        if raw_timeout is not None:
+            try:
+                timeout = float(raw_timeout)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=422, detail="timeout_seconds must be a number.") from exc
+            if timeout <= 0 or timeout > 600:
+                raise HTTPException(
+                    status_code=422, detail="timeout_seconds must be between 0 and 600."
+                )
+        messages = payload.get("messages")
+        return await nova.route_model_complete(
+            text,
+            messages=messages if isinstance(messages, list) else None,
+            timeout_seconds=timeout,
+            local_only=bool(payload.get("local_only", False)),
+        )
+
+    @app.post("/models/routing/config")
+    async def models_routing_config(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Change real routing limits and preferences."""
+        try:
+            return nova.configure_model_routing(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/models/routing/providers")
+    async def models_routing_provider(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Enable or disable one provider for automatic selection."""
+        provider_id = str(payload.get("provider_id") or "").strip()
+        if not provider_id:
+            raise HTTPException(status_code=422, detail="provider_id is required.")
+        if not isinstance(payload.get("enabled"), bool):
+            raise HTTPException(status_code=422, detail="enabled must be true or false.")
+        try:
+            return nova.set_model_provider_enabled(provider_id, bool(payload["enabled"]))
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/models/routing/history")
+    async def models_routing_history(
+        limit: int = 20, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Recent routing decisions and measured observations."""
+        return {
+            **nova.model_routing_history(limit),
+            "observations": nova.model_router.observations(limit=limit),
+        }
+
+    @app.get("/models/routing/policy")
+    async def models_routing_policy(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """The learned-policy proposal and the evidence it would rest on."""
+        return nova.model_routing_policy()
+
+    @app.post("/models/routing/policy/activate")
+    async def models_routing_policy_activate(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Activate a validated policy; the previous one is kept for rollback."""
+        try:
+            return nova.activate_model_routing_policy()
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/models/routing/policy/rollback")
+    async def models_routing_policy_rollback(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Restore the policy that was active before the last activation."""
+        try:
+            return nova.rollback_model_routing_policy()
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @app.post("/chat/clear")
     async def chat_clear(_principal: str = Depends(require_auth)) -> dict[str, Any]:
         """Wipe the conversation: server memory AND the shared transcript."""
@@ -769,6 +3935,189 @@ def create_app() -> Any:
     @app.post("/knowledge/recall")
     async def knowledge_recall(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
         return await nova.list_knowledge(str(payload.get("query", "")), limit=int(payload.get("limit", 20)))
+
+    # ── Phase 32: personal knowledge ─────────────────────────────────
+    # These routes are the user-control surface for the structured model. The
+    # service already owns provenance, validity, privacy and history; these
+    # handlers only translate HTTP input and refuse malformed requests.
+
+    @app.get("/memory/personal/status")
+    async def personal_knowledge_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return await nova.personal_status()
+
+    @app.get("/memory/personal")
+    async def personal_knowledge_search(
+        query: str = "",
+        project: str = "",
+        entity: str = "",
+        category: str = "",
+        kind: str = "",
+        limit: int = 10,
+        include_unverified: bool = False,
+        include_historical: bool = False,
+        include_contradicted: bool = False,
+        include_expired: bool = False,
+        include_sensitive: bool = False,
+        expand_relations: bool = True,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return await nova.personal_search(
+            query,
+            project=project,
+            entity=entity,
+            category=category,
+            kind=kind,
+            limit=max(1, min(int(limit), 100)),
+            include_unverified=include_unverified,
+            include_historical=include_historical,
+            include_contradicted=include_contradicted,
+            include_expired=include_expired,
+            include_sensitive=include_sensitive,
+            expand_relations=expand_relations,
+        )
+
+    @app.post("/memory/personal")
+    async def personal_knowledge_remember(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        fields: dict[str, Any] = {}
+        for key in (
+            "subject",
+            "predicate",
+            "category",
+            "kind",
+            "source_type",
+            "source",
+            "project",
+            "confidence",
+            "privacy",
+            "retention",
+            "ttl_seconds",
+            "metadata",
+        ):
+            if key in payload and payload[key] not in (None, ""):
+                fields[key] = payload[key]
+        for key in ("verified", "correction"):
+            if key in payload:
+                fields[key] = bool(payload[key])
+        if isinstance(payload.get("entities"), list):
+            fields["entities"] = [str(item) for item in payload["entities"]]
+        if isinstance(payload.get("supersedes"), list):
+            fields["supersedes"] = [str(item) for item in payload["supersedes"]]
+        for key in ("valid_from", "valid_until"):
+            raw = str(payload.get(key, "") or "").strip()
+            if raw:
+                try:
+                    fields[key] = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                except ValueError as exc:
+                    raise HTTPException(status_code=422, detail=f"{key} must be an ISO timestamp") from exc
+        if isinstance(fields.get("metadata"), str):
+            try:
+                fields["metadata"] = json.loads(fields["metadata"])
+            except json.JSONDecodeError as exc:
+                raise HTTPException(status_code=422, detail="metadata must be a JSON object") from exc
+        try:
+            result = await nova.personal_remember(
+                _required_field(payload, "content"), **fields
+            )
+            if result.get("action") == "conflict":
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "a contradiction was detected; resolve it explicitly",
+                        "result": result,
+                    },
+                )
+            return result
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/memory/personal/export")
+    async def personal_knowledge_export(
+        include_sensitive: bool = False,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return await nova.personal_export(include_sensitive=include_sensitive)
+
+    @app.post("/memory/personal/consolidate")
+    async def personal_knowledge_consolidate(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return await nova.personal_consolidate()
+
+    @app.post("/memory/personal/cleanup")
+    async def personal_knowledge_cleanup(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return await nova.personal_cleanup()
+
+    @app.post("/memory/personal/relations")
+    async def personal_knowledge_relate(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return await nova.personal_relate(
+                _required_field(payload, "source_id"),
+                _required_field(payload, "predicate"),
+                target_id=str(payload.get("target_id", "") or ""),
+                target_label=str(payload.get("target_label", "") or ""),
+                target_type=str(payload.get("target_type", "entity") or "entity"),
+                confidence=float(payload.get("confidence", 0.6) or 0.6),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/memory/personal/{record_id}")
+    async def personal_knowledge_inspect(
+        record_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        result = await nova.personal_inspect(record_id)
+        if not result.get("found"):
+            raise HTTPException(status_code=404, detail="knowledge record not found")
+        return result
+
+    @app.post("/memory/personal/{record_id}/correct")
+    async def personal_knowledge_correct(
+        record_id: str,
+        payload: dict[str, Any],
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return await nova.personal_correct(
+                record_id,
+                _required_field(payload, "content"),
+                reason=str(payload.get("reason", "") or ""),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/memory/personal/{record_id}/delete")
+    async def personal_knowledge_delete(
+        record_id: str,
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        result = await nova.personal_delete(
+            record_id, reason=str((payload or {}).get("reason", "") or "")
+        )
+        if not result.get("deleted"):
+            raise HTTPException(status_code=404, detail="knowledge record not found")
+        return result
+
+    @app.post("/memory/personal/{record_id}/resolve")
+    async def personal_knowledge_resolve(
+        record_id: str,
+        payload: dict[str, Any],
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return await nova.personal_resolve(
+                record_id,
+                keep=bool(payload.get("keep", True)),
+                reason=str(payload.get("reason", "") or ""),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post("/train")
     async def train(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
@@ -2682,6 +6031,158 @@ def create_app() -> Any:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    # ── Phase 27: continual learning and self-improvement ────────────────
+    #
+    # Read surfaces answer what evidence exists and what was learned from it;
+    # write surfaces are the human doors (feedback, proposal review, rollback,
+    # a benchmark run). Nothing here executes a task or edits code.
+
+    @app.get("/continual/status")
+    async def continual_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """What continual learning holds and will never do, with restore report."""
+        return nova.continual_status()
+
+    @app.get("/continual/overview")
+    async def continual_overview(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """The phase's capability table, honest limits and live policy."""
+        return nova.continual_overview()
+
+    @app.get("/continual/experiences")
+    async def continual_experiences(
+        task_kind: str = "",
+        outcome: str = "",
+        limit: int = 50,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Recorded executions, newest first, filterable by kind and outcome."""
+        return nova.continual_experiences(
+            task_kind=task_kind, outcome=outcome, limit=limit, offset=offset
+        )
+
+    @app.get("/continual/experiences/{experience_id}")
+    async def continual_experience(
+        experience_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """One execution record with its steps, verification and outcome reasons."""
+        try:
+            return nova.continual_experience(experience_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.delete("/continual/experiences/{experience_id}")
+    async def continual_delete_experience(
+        experience_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Forget one recorded execution; derived signals are recomputed."""
+        try:
+            return nova.continual_delete_experience(experience_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/continual/feedback")
+    async def continual_feedback(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """A person's verdict on one execution; negative reclassifies it."""
+        try:
+            return nova.continual_feedback(payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/continual/signals")
+    async def continual_signals(
+        task_kind: str = "",
+        direction: str = "",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Statements derived from evidence, with support and provenance."""
+        return nova.continual_signals(task_kind=task_kind, direction=direction)
+
+    @app.get("/continual/strategies")
+    async def continual_strategies(
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Every strategy version, its status, provenance and measured stats."""
+        return nova.continual_strategies()
+
+    @app.get("/continual/proposals")
+    async def continual_proposals(
+        status: str = "", _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Strategy proposals, separated from validated and promoted work."""
+        return nova.continual_proposals(status=status)
+
+    @app.post("/continual/proposals")
+    async def continual_propose(
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Propose a template from distinct verified successes (never invents one)."""
+        return nova.continual_propose(payload or {})
+
+    @app.post("/continual/proposals/{proposal_id}/validate")
+    async def continual_validate(
+        proposal_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Validate against executed evidence; a refusal lists every reason."""
+        try:
+            return nova.continual_validate(proposal_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/continual/proposals/{proposal_id}/promote")
+    async def continual_promote(
+        proposal_id: str,
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Promote a VALIDATED proposal; keeps the version it replaced."""
+        body = payload or {}
+        try:
+            return nova.continual_promote(proposal_id, reason=str(body.get("reason", "")))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/continual/strategies/{strategy_id}/rollback")
+    async def continual_rollback(
+        strategy_id: str,
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Restore the previous version of a strategy."""
+        body = payload or {}
+        try:
+            return nova.continual_rollback(strategy_id, reason=str(body.get("reason", "")))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/continual/recommend")
+    async def continual_recommend(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Advisory suggestion for a goal, with evidence ids and confidence."""
+        try:
+            return nova.continual_recommend(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/continual/benchmark")
+    async def continual_benchmark(
+        payload: dict[str, Any] | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Run the isolated baseline → learn → compare benchmark."""
+        return nova.continual_benchmark(payload or {})
+
     @app.get("/learning/metrics")
     async def learning_metrics(_principal: str = Depends(require_auth)) -> dict[str, Any]:
         """What the experiments actually produced, inconclusive results included.
@@ -3350,6 +6851,170 @@ def create_app() -> Any:
     async def agent_knowledge(_principal: str = Depends(require_auth)) -> dict[str, Any]:
         return nova.agentic_knowledge()
 
+    # ── Phase 29: universal computer and device operation ───────────────
+    @app.get("/computer/status")
+    async def computer_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Live devices, supported operations, supervisor and history state."""
+        return await nova.computer_status()
+
+    @app.get("/computer/devices")
+    async def computer_devices(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """The device/capability registry, including unsupported and unknown."""
+        status = await nova.computer_status()
+        devices = status.get("devices")
+        return dict(devices) if isinstance(devices, dict) else {}
+
+    @app.post("/computer/observe")
+    async def computer_observe(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Read-only observation: screen, OCR/DOM elements, windows and devices."""
+        return await nova.computer_observe(include_semantic=bool(payload.get("include_semantic", True)))
+
+    @app.post("/computer/plan")
+    async def computer_plan(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Plan a computer objective and mint its single-use approval token."""
+        try:
+            return await nova.plan_computer_task(_required_field(payload, "objective"))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/computer/run")
+    async def computer_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Execute a planned computer objective with its server-minted token."""
+        try:
+            return await nova.execute_computer_task(
+                _required_field(payload, "objective"),
+                approval_token=_required_field(payload, "approval_token"),
+                context=payload.get("context") if isinstance(payload.get("context"), dict) else {},
+                correlation_id=str(payload.get("correlation_id", "") or ""),
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/computer/stop")
+    async def computer_stop(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Emergency stop: no next action, and held keys/buttons are released."""
+        return await nova.stop_computer_task(str(payload.get("task_id", "") or ""))
+
+    @app.get("/computer/history")
+    async def computer_history(
+        limit: int = 20,
+        status: str = "",
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Redacted persisted operation history; no screenshots or secrets."""
+        return nova.computer_history(limit=limit, status=status)
+
+    @app.post("/computer/history/clear")
+    async def computer_history_clear(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return nova.clear_computer_history()
+
+    @app.post("/computer/reference")
+    async def computer_reference(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Resolve "Save button", "go back" or "continue" against observation/history."""
+        ui_state = payload.get("ui_state")
+        return nova.resolve_computer_reference(
+            _required_field(payload, "text"),
+            ui_state=ui_state if isinstance(ui_state, dict) else None,
+        )
+
+    # ── Phase 28: multi-agent collaboration ─────────────────────────────
+    @app.get("/collaboration/status")
+    async def collaboration_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """Coordination policy, registered roles, task counts and restore report."""
+        return nova.collaboration_status()
+
+    @app.get("/collaboration/overview")
+    async def collaboration_overview(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        """The phase's architecture, capabilities and honest limitations."""
+        return nova.collaboration_overview()
+
+    @app.post("/collaboration/plan")
+    async def collaboration_plan(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Decide whether the objective benefits from collaboration, and how it splits."""
+        context = payload.get("context")
+        try:
+            return nova.collaboration_plan(
+                _required_field(payload, "objective"),
+                context=context if isinstance(context, dict) else {},
+                force=bool(payload.get("force", False)),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/collaboration/run")
+    async def collaboration_run(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Run a collaboration; completed and verified work is reported separately."""
+        context = payload.get("context")
+        try:
+            return await nova.run_collaboration(
+                _required_field(payload, "objective"),
+                context=context if isinstance(context, dict) else {},
+                authorize=bool(payload.get("authorize", False)),
+                idempotency_key=str(payload.get("idempotency_key", "") or ""),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/collaboration/tasks")
+    async def collaboration_tasks(
+        status: str = "",
+        limit: int = 20,
+        offset: int = 0,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.collaboration_tasks(status=status, limit=limit, offset=offset)
+
+    @app.get("/collaboration/tasks/{task_id}")
+    async def collaboration_task(
+        task_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.collaboration_task(task_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/collaboration/tasks/{task_id}/cancel")
+    async def collaboration_cancel(
+        task_id: str, _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.cancel_collaboration(task_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/collaboration/tasks/{task_id}/resume")
+    async def collaboration_resume(
+        task_id: str,
+        authorize: bool = False,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return await nova.resume_collaboration(task_id, authorize=authorize)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     # ── Phase 13: scheduled automations and the audit trail ─────────────────
     #
     # Scheduling stores a request and its schedule; it runs nothing. Execution
@@ -3440,6 +7105,466 @@ def create_app() -> Any:
     async def automation_run_due(_principal: str = Depends(require_auth)) -> dict[str, Any]:
         """Run everything that is due, exactly as the scheduler's own tick would."""
         return {"runs": await nova.run_due_automations()}
+
+    # -- Phase 30: persistent objectives and personal operations --------------
+    # Every control here reaches a real state change in the operations service;
+    # none of them executes work directly. Running work is /objectives/run and
+    # the background tick, and both pass the SAME permission gate.
+
+    @app.get("/operations")
+    async def operations_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return nova.operations_status()
+
+    @app.get("/objectives")
+    async def objectives_list(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return {"objectives": nova.operations_objectives()}
+
+    @app.post("/objectives")
+    async def objectives_create(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        try:
+            return nova.create_objective(
+                _required_field(payload, "title"),
+                _required_field(payload, "outcome"),
+                kind=str(payload.get("kind", "personal")),
+                autonomy=str(payload.get("autonomy", "approval")),
+                priority=int(payload.get("priority", 50)),
+                deadline=payload.get("deadline"),
+                completion_criteria=payload.get("completion_criteria", ()),
+                tags=payload.get("tags", ()),
+                owner=str(payload.get("owner", "operator")),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/objectives/update")
+    async def objectives_update(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        objective_id = str(payload.get("objective_id") or payload.get("id") or "").strip()
+        if not objective_id:
+            raise HTTPException(status_code=422, detail="objective_id is required.")
+        changes = {
+            key: value
+            for key, value in payload.items()
+            if key not in ("objective_id", "id")
+        }
+        try:
+            return nova.update_objective(objective_id, **changes)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/objectives/delete")
+    async def objectives_delete(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        objective_id = str(payload.get("objective_id") or payload.get("id") or "").strip()
+        if not objective_id:
+            raise HTTPException(status_code=422, detail="objective_id is required.")
+        try:
+            return nova.delete_objective(objective_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/objectives/control")
+    async def objectives_control(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        objective_id = str(payload.get("objective_id") or payload.get("id") or "").strip()
+        action = str(payload.get("action", "")).strip()
+        if not objective_id or not action:
+            raise HTTPException(
+                status_code=422, detail="objective_id and action are required."
+            )
+        try:
+            return nova.control_objective(
+                objective_id,
+                action,
+                reason=str(payload.get("reason", "")),
+                priority=(
+                    int(payload["priority"])
+                    if payload.get("priority") is not None
+                    else None
+                ),
+                deadline=payload.get("deadline"),
+                autonomy=str(payload.get("autonomy", "")),
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/objectives/tasks")
+    async def objectives_add_task(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        objective_id = str(payload.get("objective_id") or payload.get("id") or "").strip()
+        if not objective_id:
+            raise HTTPException(status_code=422, detail="objective_id is required.")
+        try:
+            return nova.add_objective_task(
+                objective_id,
+                _required_field(payload, "title"),
+                _required_field(payload, "instruction"),
+                kind=str(payload.get("kind", "request")),
+                priority=int(payload.get("priority", 50)),
+                due_at=payload.get("due_at"),
+                scheduled_for=payload.get("scheduled_for"),
+                depends_on=payload.get("depends_on", ()),
+                steps=payload.get("steps", ()),
+                sensitive=bool(payload.get("sensitive", False)),
+                approval_scope=str(payload.get("approval_scope", "")),
+                agent=str(payload.get("agent", "")),
+                recurrence=str(payload.get("recurrence", "")),
+                metadata=payload.get("metadata") or None,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/objectives/milestones")
+    async def objectives_add_milestone(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        objective_id = str(payload.get("objective_id") or payload.get("id") or "").strip()
+        if not objective_id:
+            raise HTTPException(status_code=422, detail="objective_id is required.")
+        try:
+            return nova.add_objective_milestone(
+                objective_id,
+                _required_field(payload, "title"),
+                task_ids=payload.get("task_ids", ()),
+                due_at=payload.get("due_at"),
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/objectives/run")
+    async def objectives_run(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        objective_id = str(payload.get("objective_id") or payload.get("id") or "").strip()
+        if not objective_id:
+            raise HTTPException(status_code=422, detail="objective_id is required.")
+        try:
+            return await nova.run_objective(objective_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/objectives/tasks/decide")
+    async def objectives_decide_task(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        objective_id = str(payload.get("objective_id") or "").strip()
+        task_id = str(payload.get("task_id") or "").strip()
+        action = str(payload.get("action", "")).strip()
+        if not objective_id or not task_id or not action:
+            raise HTTPException(
+                status_code=422,
+                detail="objective_id, task_id and action are required.",
+            )
+        try:
+            return nova.decide_operation_task(
+                objective_id,
+                task_id,
+                action,
+                by=str(payload.get("by", "operator")),
+                reason=str(payload.get("reason", "")),
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/operations/notifications")
+    async def operations_notifications(
+        unread: bool = False,
+        limit: int = 50,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        return nova.operations_notifications(unread_only=unread, limit=limit)
+
+    @app.post("/operations/notifications/read")
+    async def operations_notifications_read(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        if bool(payload.get("all", False)):
+            return nova.acknowledge_all_operation_notifications()
+        notification_id = str(payload.get("id", "")).strip()
+        if not notification_id:
+            raise HTTPException(status_code=422, detail="id is required.")
+        try:
+            return nova.acknowledge_operation_notification(notification_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/operations/notifications/clear")
+    async def operations_notifications_clear(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return nova.clear_operation_notifications()
+
+    @app.post("/operations/notifications/preferences")
+    async def operations_notifications_preferences(payload: dict[str, Any], _principal: str = Depends(require_auth)) -> dict[str, Any]:
+        try:
+            return nova.configure_operation_notifications(
+                enabled_kinds=payload.get("enabled_kinds"),
+                dedupe_window_seconds=(
+                    float(payload["dedupe_window_seconds"])
+                    if payload.get("dedupe_window_seconds") is not None
+                    else None
+                ),
+                muted=(
+                    bool(payload["muted"])
+                    if payload.get("muted") is not None
+                    else None
+                ),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/operations/tick")
+    async def operations_tick(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return await nova.run_operations_tick()
+
+    # -- Phase 31: transferable, general-purpose skills ----------------------–
+    # Reading is open to any authenticated caller; every mutation reaches the
+    # SAME SkillService, catalog and PermissionManager the objectives executor
+    # uses. Nothing here executes a skill without its own permission gate, and
+    # an adapted version is never silently promoted: it is executable for
+    # evaluation but validation remains an explicit act.
+
+    @app.get("/skills")
+    async def skills_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return nova.skills_status()
+
+    @app.get("/skills/catalog")
+    async def skills_catalog(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return nova.skills_catalog()
+
+    @app.get("/skills/search")
+    async def skills_search(
+        query: str,
+        environment: str = "",
+        include_incompatible: bool = False,
+        limit: int = 8,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        if not query.strip():
+            raise HTTPException(status_code=422, detail="query is required.")
+        return await nova.retrieve_skills_with_context(
+            query,
+            environment=environment,
+            limit=max(1, min(int(limit), 50)),
+            include_incompatible=include_incompatible,
+        )
+
+    @app.get("/skills/evidence")
+    async def skills_evidence(_principal: str = Depends(require_auth)) -> dict[str, Any]:
+        return {
+            "evidence": [
+                row.to_dict() for row in nova.skill_service.evidence[-200:]
+            ],
+            "adaptation_failures": [
+                dict(row) for row in nova.skill_service.adaptation_failures[-100:]
+            ],
+        }
+
+    @app.get("/skills/{skill_id}")
+    async def skills_detail(
+        skill_id: str,
+        version: int | None = None,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
+        try:
+            return nova.skill_detail(skill_id, version)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/skills/acquire")
+    async def skills_acquire(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.acquire_skill(
+                _required_field(payload, "goal"),
+                payload.get("observations", ()),
+                name=str(payload.get("name", "")),
+                description=str(payload.get("description", "")),
+                category=str(payload.get("category", "")),
+                demonstrated=bool(payload.get("demonstrated", False)),
+                requested_by=str(payload.get("requested_by", "operator")),
+                origin_agent=str(payload.get("origin_agent", "")),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/skills/validate")
+    async def skills_validate(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            version = (
+                int(payload["version"])
+                if payload.get("version") is not None
+                else None
+            )
+            return nova.validate_skill(
+                _required_field(payload, "skill_id"), version
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/skills/adapt")
+    async def skills_adapt(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.adapt_skill(
+                _required_field(payload, "skill_id"),
+                goal=_required_field(payload, "goal"),
+                inputs=payload.get("inputs") or None,
+                environment=str(payload.get("environment", "")),
+                target_map=payload.get("target_map") or None,
+                requested_by=str(payload.get("requested_by", "operator")),
+                version=(
+                    int(payload["version"])
+                    if payload.get("version") is not None
+                    else None
+                ),
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/skills/compose")
+    async def skills_compose(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.compose_skills(
+                _required_field(payload, "objective"),
+                payload.get("skill_ids", ()),
+                inputs_by_skill=payload.get("inputs_by_skill") or None,
+                environment=str(payload.get("environment", "")),
+                versions=payload.get("versions") or None,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/skills/compose/execute")
+    async def skills_compose_execute(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Run an ordered composition; each skill still passes its own gate."""
+        if payload.get("approved"):
+            raise HTTPException(
+                status_code=403,
+                detail=("A client-supplied approved flag is not authority. "
+                        "Approve through the objective/task path."),
+            )
+        try:
+            return await nova.execute_composed_skills(
+                _required_field(payload, "objective"),
+                payload.get("skill_ids", ()),
+                inputs_by_skill=payload.get("inputs_by_skill") or None,
+                environment=str(payload.get("environment", "")),
+                approved=False,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/skills/execute")
+    async def skills_execute(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        if payload.get("approved"):
+            raise HTTPException(
+                status_code=403,
+                detail=("A client-supplied approved flag is not authority. "
+                        "Approve through the objective/task path."),
+            )
+        try:
+            return await nova.execute_skill(
+                _required_field(payload, "skill_id"),
+                inputs=payload.get("inputs") or None,
+                goal=str(payload.get("goal", "")),
+                approved=False,
+                version=(
+                    int(payload["version"])
+                    if payload.get("version") is not None
+                    else None
+                ),
+                environment=str(payload.get("environment", "")),
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/skills/resume")
+    async def skills_resume(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        if payload.get("approved"):
+            raise HTTPException(
+                status_code=403,
+                detail=("A client-supplied approved flag is not authority. "
+                        "Approve through the objective/task path."),
+            )
+        return await nova.resume_skill(
+            _required_field(payload, "execution_id"),
+            approved=False,
+        )
+
+    @app.post("/skills/promote")
+    async def skills_promote(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            version = (
+                int(payload["version"])
+                if payload.get("version") is not None
+                else None
+            )
+            return nova.promote_skill(
+                _required_field(payload, "skill_id"), version
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/skills/deprecate")
+    async def skills_deprecate(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            version = (
+                int(payload["version"])
+                if payload.get("version") is not None
+                else None
+            )
+            return nova.deprecate_skill(
+                _required_field(payload, "skill_id"),
+                reason=str(payload.get("reason", "")),
+                version=version,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/skills/rollback")
+    async def skills_rollback(
+        payload: dict[str, Any], _principal: str = Depends(require_auth)
+    ) -> dict[str, Any]:
+        try:
+            return nova.rollback_skill(
+                _required_field(payload, "skill_id"),
+                int(payload["version"]),
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/audit")
     async def audit_status(_principal: str = Depends(require_auth)) -> dict[str, Any]:
@@ -5006,7 +9131,12 @@ def create_app() -> Any:
         return routed
 
     @app.get("/explore/trending")
-    async def explore_trending(count: int = 6, _principal: str = Depends(require_auth)) -> dict[str, Any]:
+    async def explore_trending(
+        count: int = 6,
+        exclude: str = "",
+        refresh: bool = False,
+        _principal: str = Depends(require_auth),
+    ) -> dict[str, Any]:
         """Current daily research topics from live top-story news.
 
         The pool refetches at most every 30 minutes and is invalidated by day;
@@ -5014,9 +9144,17 @@ def create_app() -> Any:
         different slice of what's happening in the world each visit — never a
         hardcoded list. ``exclude`` (comma-separated) lets the UI hide topics
         already shown elsewhere on the page.
+
+        ``refresh=true`` is the panel's Refresh control: it bypasses the 30-min
+        TTL so a reader can pull today's headlines on demand instead of only
+        seeing new ones after a relaunch. A refresh with the network down keeps
+        the pool it already had (see TrendingTopicsProvider.refresh).
         """
         bounded = max(1, min(count, 12))
-        return trending.topics(count=bounded)
+        if refresh:
+            trending.refresh()
+        excluded = tuple(part.strip() for part in exclude.split(",") if part.strip())
+        return trending.topics(count=bounded, exclude=excluded)
 
     @app.post("/explore")
     async def explore(payload: ExploreRequest_, _principal: str = Depends(require_auth)) -> dict[str, Any]:

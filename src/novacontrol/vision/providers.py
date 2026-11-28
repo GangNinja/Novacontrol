@@ -50,8 +50,14 @@ class VisionProvider(Protocol):
     def available(self) -> bool:
         """Whether this provider can actually see (a text model cannot)."""
 
-    async def see(self, *, prompt: str, image_path: str) -> str:
+    async def see(self, *, prompt: str, image_path: str, structured: bool = False) -> str:
         """Answer ``prompt`` about the image at ``image_path``.
+
+        ``structured`` asks for a JSON-constrained answer when the provider can
+        produce one (a caller that must parse the reply passes it; a provider
+        that cannot simply ignores it). Declared here because the protocol is
+        what a caller types against, and one real caller — the NovaForge
+        interpreter — needs a parseable action rather than prose.
 
         Raises ``VisionProviderError`` when the provider is unusable or the
         call fails — a caller must be able to tell that apart from an answer
@@ -73,8 +79,8 @@ class NullVisionProvider:
     def available(self) -> bool:
         return False
 
-    async def see(self, *, prompt: str, image_path: str) -> str:
-        del prompt, image_path
+    async def see(self, *, prompt: str, image_path: str, structured: bool = False) -> str:
+        del prompt, image_path, structured
         raise VisionProviderError("no vision model is wired")
 
 
@@ -162,13 +168,17 @@ class CompletionVisionProvider:
             raise VisionProviderError("the vision provider has no complete method")
         options: dict[str, Any] = {}
         if structured:
-            # Deliberately the COMPATIBLE surface only. ``json_mode`` would ask
-            # the local provider for Ollama's native endpoint, whose message
-            # shape is a text ``content`` plus an ``images`` list — not the
-            # OpenAI content blocks (with ``image_url``) this wrapper sends. A
-            # multimodal call must not be rerouted into a shape that cannot
-            # carry its image, so the JSON request stays on /v1.
             options["response_format"] = {"type": "json_object"}
+            # A local reasoning VLM spends its reply budget thinking and then
+            # returns an EMPTY answer — measured on qwen3-vl:4b: 163 s, no
+            # content, while the same call with the model's own soft switch
+            # answered usable JSON in 78 s. ``think: false`` on the native
+            # endpoint did NOT suppress it for this build (3,686 chars of
+            # reasoning, done_reason "length"), so the hint travels in the
+            # prompt, which is what the model actually honours.
+            hint = no_think_hint(self.model)
+            if hint:
+                prompt = f"{prompt}{hint}"
         if self._max_tokens > 0:
             options["max_tokens"] = self._max_tokens
         try:
@@ -176,6 +186,19 @@ class CompletionVisionProvider:
         except Exception as exc:  # noqa: BLE001 - classified, then reported
             raise VisionProviderError(f"vision call failed: {exc}") from exc
         return str(answer or "").strip()
+
+
+def no_think_hint(model: str) -> str:
+    """The model's own "do not reason first" switch, or an empty string.
+
+    Qwen3-family builds honour ``/no_think`` in the prompt; Ollama's
+    ``think: false`` does not reach this vision build at all (measured: 3,686
+    characters of reasoning and an empty answer with the flag set). The hint is
+    scoped to the family that documents it rather than appended to every model,
+    because it is instruction text, not a parameter.
+    """
+    name = str(model or "").strip().lower()
+    return " /no_think" if name.startswith("qwen3") else ""
 
 
 def unreadable_image_message(image_path: str) -> str:

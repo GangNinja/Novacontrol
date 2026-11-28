@@ -7,6 +7,27 @@ so a request is routed to a model by CAPABILITY and by measured resources rather
 than by a name or an assumption.
 """
 
+from novacontrol.models.adaptive import (
+    AdaptiveModelRouter,
+    AdaptiveTaskClassifier,
+    CandidateScore,
+    FailureKind,
+    ModelEndpoint,
+    ModelRole,
+    ProviderHealth,
+    ProviderKind,
+    ProviderRecord,
+    ProviderRegistry,
+    RouteAttempt,
+    RouteDecision,
+    RouteOutcome,
+    RoutingObservation,
+    RoutingPolicy,
+    RoutingPreferences,
+    TaskProfile,
+    classify_failure,
+    failure_is_retryable,
+)
 from novacontrol.models.hardware import (
     DEFAULT_HEADROOM_BYTES,
     HardwareMonitor,
@@ -39,6 +60,25 @@ from novacontrol.models.profiles import (
 
 __all__ = [
     "BASELINE",
+    "AdaptiveModelRouter",
+    "AdaptiveTaskClassifier",
+    "CandidateScore",
+    "FailureKind",
+    "ModelEndpoint",
+    "ModelRole",
+    "ProviderHealth",
+    "ProviderKind",
+    "ProviderRecord",
+    "ProviderRegistry",
+    "RouteAttempt",
+    "RouteDecision",
+    "RouteOutcome",
+    "RoutingObservation",
+    "RoutingPolicy",
+    "RoutingPreferences",
+    "TaskProfile",
+    "classify_failure",
+    "failure_is_retryable",
     "DEFAULT_HEADROOM_BYTES",
     "KNOWN_MODELS",
     "REPORTED_CAPABILITIES",

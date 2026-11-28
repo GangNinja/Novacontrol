@@ -25,6 +25,9 @@ class DesktopActionType(StrEnum):
     OPEN_FOLDER = "open_folder"
     SEARCH_START_MENU = "search_start_menu"
     WEB_SEARCH = "web_search"
+    # Search INSIDE an app that is already open (its own search box) — the
+    # distinction from WEB_SEARCH is the surface, not the query.
+    SEARCH_IN_APP = "search_in_app"
     # Vision-guided in-app action: click a labeled element on screen.
     VISION_CLICK = "vision_click"
     # Coordinate-addressed input (Phase C of the game-control audit). These are
@@ -36,6 +39,11 @@ class DesktopActionType(StrEnum):
     MOUSE_CLICK = "mouse_click"
     MOUSE_BUTTON_DOWN = "mouse_button_down"
     MOUSE_BUTTON_UP = "mouse_button_up"
+    MOUSE_SCROLL = "mouse_scroll"
+    MOUSE_DRAG = "mouse_drag"
+    WINDOW_FOCUS = "window_focus"
+    WINDOW_MINIMIZE = "window_minimize"
+    WINDOW_MAXIMIZE = "window_maximize"
     KEY_DOWN = "key_down"
     KEY_UP = "key_up"
     # Target-window geometry (bounds, client area, DPI scale, foreground state)
@@ -47,6 +55,9 @@ class DesktopActionType(StrEnum):
     APP_NAVIGATE = "app_navigate"
     # Vision-verified stop: close the most recently focused app window.
     STOP_APP = "stop_app"
+    # Draft a chat message in a desktop messaging app. Nothing is sent: the
+    # chat opens with the text typed and the user presses Send.
+    COMPOSE_MESSAGE = "compose_message"
 
 
 class DesktopActionStatus(StrEnum):

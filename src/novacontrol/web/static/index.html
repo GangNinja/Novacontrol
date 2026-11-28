@@ -38,6 +38,9 @@
           <button class="nav-item active" data-panel="homePanel" type="button" aria-label="Command">
             <span class="nav-icon" aria-hidden="true">&#9670;</span>Command
           </button>
+          <button class="nav-item" data-panel="atriumPanel" type="button" aria-label="Atrium workspace map">
+            <span class="nav-icon" aria-hidden="true">&#9636;</span>Atrium
+          </button>
           <span class="nav-section-label" aria-hidden="true">Intelligence</span>
           <button class="nav-item" data-panel="chatPanel" type="button" aria-label="Chat">
             <span class="nav-icon" aria-hidden="true">&#9672;</span>Chat
@@ -54,6 +57,27 @@
           </button>
           <button class="nav-item" data-panel="visionPanel" type="button" aria-label="Vision">
             <span class="nav-icon" aria-hidden="true">&#9673;</span>Vision
+          </button>
+          <button class="nav-item" data-panel="operationsPanel" type="button" aria-label="Persistent operations">
+            <span class="nav-icon" aria-hidden="true">&#9681;</span>Operations
+          </button>
+          <button class="nav-item" data-panel="selfManagementPanel" type="button" aria-label="Trustworthy self-management">
+            <span class="nav-icon" aria-hidden="true">&#9881;</span>Self-Management
+          </button>
+          <button class="nav-item" data-panel="businessPanel" type="button" aria-label="Business opportunities">
+            <span class="nav-icon" aria-hidden="true">&#9670;</span>Business
+          </button>
+          <button class="nav-item" data-panel="productPanel" type="button" aria-label="Product development and launch">
+            <span class="nav-icon" aria-hidden="true">&#9635;</span>Products
+          </button>
+          <button class="nav-item" data-panel="customerPanel" type="button" aria-label="Customer acquisition, sales and support">
+            <span class="nav-icon" aria-hidden="true">&#9683;</span>Customer &amp; Growth
+          </button>
+          <button class="nav-item" data-panel="financePanel" type="button" aria-label="Business operations and financial intelligence">
+            <span class="nav-icon" aria-hidden="true">&#9678;</span>Finance
+          </button>
+          <button class="nav-item" data-panel="portfolioPanel" type="button" aria-label="Portfolio manager for multiple AI-run ventures">
+            <span class="nav-icon" aria-hidden="true">&#9639;</span>Portfolio
           </button>
           <span class="nav-section-label" aria-hidden="true">NovaForge</span>
           <button class="nav-item" data-panel="novaforgePanel" type="button" aria-label="NovaForge mission control">
@@ -78,6 +102,35 @@
             <span class="nav-icon" aria-hidden="true">&#9678;</span>CLI
           </button>
         </nav>
+        <!-- Extra 1 — the animated companion. Its expression follows REAL
+             NovaControl activity (a run starting, the live activity channel,
+             a result or a failure, and voice), never a scripted animation.
+             Ambient breathing/blinking is presentation only and stops under
+             reduced motion or when motion is switched off. -->
+        <section id="companionStage" class="companion" data-state="idle" data-motion="on" data-avatar-source="built-in" aria-label="Nova companion">
+          <svg id="companionFace" class="companion-face" viewBox="0 0 120 120" role="button" tabindex="0" aria-label="Nova companion — open Chat">
+            <circle class="companion-halo" cx="60" cy="60" r="52" aria-hidden="true"></circle>
+            <g id="companionBody">
+              <ellipse id="companionHead" cx="60" cy="62" rx="34" ry="36" fill="#0b2242" stroke="#00eaff" stroke-opacity="0.55" stroke-width="1.6"></ellipse>
+              <path id="companionBrowLeft" d="M41 46 L53 44" fill="none" stroke="#9fe9ff" stroke-opacity="0.6" stroke-width="1.8" stroke-linecap="round"></path>
+              <path id="companionBrowRight" d="M67 44 L79 46" fill="none" stroke="#9fe9ff" stroke-opacity="0.6" stroke-width="1.8" stroke-linecap="round"></path>
+              <ellipse id="companionEyeLeft" cx="47" cy="56" rx="5.4" ry="6.6" fill="#00eaff"></ellipse>
+              <ellipse id="companionEyeRight" cx="73" cy="56" rx="5.4" ry="6.6" fill="#00eaff"></ellipse>
+              <path id="companionMouth" d="M52 78 Q60 80.6 68 78" fill="none" stroke="#9fe9ff" stroke-opacity="0.75" stroke-width="1.8" stroke-linecap="round"></path>
+            </g>
+          </svg>
+          <div class="companion-meta">
+            <span id="companionName" class="companion-name">Nova</span>
+            <span id="companionState" class="companion-state" data-state="idle" data-tone="idle" aria-live="polite">Idle</span>
+          </div>
+          <p id="companionDetail" class="companion-detail" title="The live step NovaControl is on"></p>
+          <div class="companion-controls">
+            <button id="companionPauseButton" type="button" class="companion-btn" aria-pressed="false" title="Pause the companion's ambient motion (breathing, blinking).">Motion on</button>
+            <button id="companionSpeakButton" type="button" class="companion-btn" title="Read the last answer aloud">Speak</button>
+            <button id="companionAvatarButton" type="button" class="companion-btn" title="Import an avatar definition exported from Bible Strong Avatar Lab">Avatar</button>
+          </div>
+          <input id="companionAvatarInput" type="file" accept=".json,application/json" hidden>
+        </section>
         <div class="sidebar-footer">
           <label for="tokenInput" class="sr-only">API token</label>
           <input id="tokenInput" type="password" autocomplete="off" placeholder="API token" class="cyber-input" aria-label="API token">
@@ -165,6 +218,32 @@
 
         </section>
 
+        <!-- Extra 2 — Atrium: an interactive isometric map of the real
+             workspaces. Every object is a button that performs the SAME nav
+             click as the sidebar; its badge reads /status and
+             /novaforge/status, and unmetered objects say what they open
+             instead of inventing a number. Hairline figures are imported
+             lazily on the first visit. -->
+        <section id="atriumPanel" class="panel iso-panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Spatial workspace</p>
+              <h2>Atrium</h2>
+              <p class="iso-intro">Every object is a real workspace. Live badges read <code>/status</code> and <code>/novaforge/status</code>; select an object, or Tab to it and press Enter, to open it.</p>
+            </div>
+            <div class="section-head-actions">
+              <span id="isoStatusSource" class="pill">reading status…</span>
+              <button id="isoRefreshButton" type="button" class="cyber-btn small">Refresh</button>
+            </div>
+          </div>
+          <div id="isoScene" class="iso-stage" role="group" aria-label="Interactive NovaControl workspace map"></div>
+          <div class="iso-meta">
+            <span id="isoArtStatus" aria-live="polite">figures load when the Atrium opens</span>
+            <span class="iso-legend"><span class="iso-legend-dot" aria-hidden="true"></span> live badge · italic = what it opens</span>
+            <span>Figures: <a href="https://github.com/lucasmarkes/hairline" target="_blank" rel="noreferrer">Hairline</a> · MIT © Lucas Marques</span>
+          </div>
+        </section>
+
         <section id="chatPanel" class="panel">
           <div class="section-head">
             <div>
@@ -194,7 +273,31 @@
               <button id="speakButton" type="button" class="cyber-btn" aria-label="Read last response aloud">Read Aloud</button>
             </div>
           </div>
-          <div id="voiceStatus" class="voice-status" aria-live="polite">Voice ready</div>
+          <!-- Extra 4 — the primary Thinking Orb. Its label, description and
+               animation are driven by the ONE activity adapter, which reads
+               the real SSE request lifecycle; it is never a decoration. -->
+          <article id="novaOrbMainCard" class="orb-card orb-card--main" data-state="idle" aria-label="Live AI activity">
+            <div class="orb-stage">
+              <div id="novaOrbMain" class="thinking-orb orb-size-main" data-size="216" data-state="idle" role="img" aria-label="Ready"></div>
+            </div>
+            <div class="orb-copy">
+              <p class="orb-eyebrow"><span class="orb-live-dot" aria-hidden="true"></span> Live AI activity</p>
+              <h3 class="orb-title">Nova is <span id="novaOrbMainLabel">Ready</span></h3>
+              <p id="novaOrbMainDesc" class="orb-desc">NovaControl is idle — send a request or start a voice session.</p>
+              <span id="novaOrbMainStatus" class="orb-status" data-tone="idle">Idle</span>
+            </div>
+          </article>
+          <div class="voice-strip">
+            <div id="novaOrbVoiceCard" class="voice-orb-card" data-state="idle">
+              <div id="novaOrbVoice" class="thinking-orb orb-size-voice" data-size="74" data-state="idle" role="img" aria-label="Voice idle"></div>
+              <div class="voice-orb-copy">
+                <span id="novaOrbVoiceLabel" class="voice-orb-label">Voice idle</span>
+                <span id="novaOrbVoiceDesc" class="voice-orb-desc">The microphone is off.</span>
+                <span id="novaOrbVoiceStatus" class="orb-status small" data-tone="idle">Idle</span>
+              </div>
+            </div>
+            <div id="voiceStatus" class="voice-status" aria-live="polite">Voice ready</div>
+          </div>
           <div class="welcome-card">
             <h3>Chat With NovaControl</h3>
             <p>Ask anything —NovaControl can help with explanations, planning, coding tasks, desktop automation, and more.</p>
@@ -220,15 +323,43 @@
               <p class="eyebrow">AI Research</p>
               <h2>Explore</h2>
             </div>
+            <div class="section-head-actions">
+              <button id="exploreHistoryButton" type="button" class="cyber-btn small" aria-expanded="false" aria-controls="exploreHistory" title="Every topic you have researched in this browser">History <span id="exploreHistoryCount" class="history-count" hidden>0</span></button>
+            </div>
+          </div>
+          <!-- Research history: the topics this browser actually searched,
+               kept in localStorage. Rows re-run a search; each row and the
+               whole list can be deleted. -->
+          <!-- Extra 4 — Explore-scoped activity. This is a view of the existing
+               research pipeline's own progress frames, not a second workflow. -->
+          <div id="novaOrbExploreCard" class="orb-compact" data-state="idle" aria-label="Research activity">
+            <div id="novaOrbExplore" class="thinking-orb orb-size-compact" data-size="48" data-state="idle" role="img" aria-label="Research idle"></div>
+            <div class="orb-compact-copy">
+              <span id="novaOrbExploreLabel" class="orb-compact-label">Research idle</span>
+              <span id="novaOrbExploreDesc" class="orb-compact-desc">No research is running.</span>
+            </div>
+            <span id="novaOrbExploreStatus" class="orb-status small" data-tone="idle">Idle</span>
+          </div>
+          <div id="exploreHistory" class="explore-history" hidden>
+            <div class="explore-history-head">
+              <h3>Research history</h3>
+              <button id="exploreHistoryClearButton" type="button" class="cyber-btn small danger">Delete all</button>
+            </div>
+            <ul id="exploreHistoryList" class="explore-history-list"></ul>
+            <p id="exploreHistoryEmpty" class="empty-hint">Nothing researched yet — searches you run are kept here.</p>
           </div>
           <div class="welcome-card">
-            <h3>Research What's Happening</h3>
+            <div class="welcome-card-head">
+              <h3>Research What's Happening</h3>
+              <button id="trendingRefreshButton" type="button" class="cyber-btn small" title="Fetch today's headlines now instead of waiting for a relaunch">Refresh news</button>
+            </div>
             <p>Live topics from today's news, refreshed through the day — or type anything. Search the web and get a synthesized answer with sources, key findings, and follow-up questions.</p>
             <div class="example-chips" id="trendingChips">
               <button class="example-chip" onclick="document.getElementById('exploreInput').value='How does photosynthesis work';document.getElementById('exploreButton').click()">How does photosynthesis work</button>
               <button class="example-chip" onclick="document.getElementById('exploreInput').value='Best programming languages for beginners';document.getElementById('exploreButton').click()">Best programming languages</button>
               <button class="example-chip" onclick="document.getElementById('exploreInput').value='Compare React vs Vue vs Svelte';document.getElementById('exploreButton').click()">React vs Vue vs Svelte</button>
             </div>
+            <p id="trendingStatus" class="trending-status" aria-live="polite"></p>
           </div>
           <div class="ai-composer top-composer">
             <label for="exploreInput" class="sr-only">Research topic</label>
@@ -347,6 +478,20 @@
             </div>
           </div>
           <div id="brainStatus" aria-live="polite"></div>
+          <!-- Phase 33: the adaptive routing surface. It reads the live
+               provider/model catalogue and posts real control changes. -->
+          <div id="modelRoutingStatus" aria-live="polite"></div>
+          <!-- Extra 4 — the task-scoped orb. It follows the newest live task /
+               tool event, and falls back to the real tracked-task snapshot. -->
+          <article id="novaOrbTaskCard" class="surface task-orb" data-state="idle" aria-label="Active task activity">
+            <div id="novaOrbTask" class="thinking-orb orb-size-task" data-size="44" data-state="idle" role="img" aria-label="No active task"></div>
+            <div class="task-orb-copy">
+              <p class="eyebrow">Active task</p>
+              <h3 id="novaOrbTaskLabel">No active task</h3>
+              <p id="novaOrbTaskDesc">Start a request to see its execution state here.</p>
+            </div>
+            <span id="novaOrbTaskStatus" class="orb-status small" data-tone="idle">Idle</span>
+          </article>
           <article class="surface">
             <div class="surface-head-row">
               <h3>Tracked Tasks</h3>
@@ -357,6 +502,898 @@
           <div id="systemOutput" class="friendly-output empty-state">
             <div class="empty-hint"><span class="empty-hint-icon">&#9881;</span> Click Health to check system status, or Harden to verify readiness</div>
           </div>
+        </section>
+
+        <section id="selfManagementPanel" class="panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Operational integrity</p>
+              <h2>Self-Management</h2>
+            </div>
+            <div class="button-row">
+              <button id="selfManagementRefreshButton" type="button" class="cyber-btn small">Refresh</button>
+              <button id="selfManagementHealthButton" type="button" class="cyber-btn small">Run Health Check</button>
+              <button id="selfManagementHistoryButton" type="button" class="cyber-btn small">View Incident History</button>
+            </div>
+          </div>
+          <p class="muted">Health comes from live component probes, not process liveness. A diagnosis is labelled confirmed, probable, possible or unknown; recovery is allowlisted, bounded and verified.</p>
+          <div id="selfManagementStatus" class="muted" aria-live="polite">Reading stored operational state…</div>
+
+          <article class="surface">
+            <h3>Incident control</h3>
+            <label class="field">
+              <span>Incident</span>
+              <select id="selfManagementIncident" class="cyber-input">
+                <option value="">Run a health check to open or find an incident</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Recommended action</span>
+              <select id="selfManagementAction" class="cyber-input">
+                <option value="">Recommend recovery to list actions</option>
+              </select>
+            </label>
+            <label class="field checkbox-field">
+              <input id="selfManagementApproved" type="checkbox">
+              <span>I approve this action where it requires approval</span>
+            </label>
+            <label class="field checkbox-field">
+              <input id="selfManagementAgentAdvisory" type="checkbox">
+              <span>Ask a debug specialist for an advisory second opinion (never authorizes recovery)</span>
+            </label>
+            <label class="field">
+              <span>Autonomy level</span>
+              <select id="selfManagementMode" class="cyber-input">
+                <option value="observe">Observe — monitor and report only</option>
+                <option value="recommend">Recommend — explain actions, execute none</option>
+                <option value="controlled" selected>Controlled — execute only approved actions</option>
+                <option value="automatic">Authorized automatic — safe registered actions only</option>
+              </select>
+            </label>
+            <div class="button-row">
+              <button id="selfManagementModeButton" type="button" class="cyber-btn small">Apply Autonomy Level</button>
+              <button id="selfManagementInvestigateButton" type="button" class="cyber-btn small">Investigate Incident</button>
+              <button id="selfManagementRecommendButton" type="button" class="cyber-btn small">Recommend Recovery</button>
+              <button id="selfManagementRecoverButton" type="button" class="cyber-btn small">Approve &amp; Recover</button>
+              <button id="selfManagementPauseButton" type="button" class="cyber-btn small danger">Pause Autonomous Recovery &amp; Maintenance</button>
+              <button id="selfManagementResumeButton" type="button" class="cyber-btn small">Resume Autonomous Recovery &amp; Maintenance</button>
+            </div>
+          </article>
+
+          <article class="surface">
+            <h3>Maintenance</h3>
+            <p class="muted">Preview first. Only allowlisted temp/cache/log paths are touched; protected files are reported and never deleted.</p>
+            <div class="button-row">
+              <button id="selfManagementMaintenancePreviewButton" type="button" class="cyber-btn small">Preview Maintenance</button>
+              <button id="selfManagementMaintenanceRunButton" type="button" class="cyber-btn small">Run Maintenance</button>
+            </div>
+            <label class="field checkbox-field">
+              <input id="selfManagementMaintenanceApproved" type="checkbox">
+              <span>I approve approval-required maintenance items</span>
+            </label>
+          </article>
+
+          <article class="surface">
+            <h3>Configuration integrity</h3>
+            <label class="field">
+              <span>Snapshot note</span>
+              <input id="selfManagementConfigNote" type="text" class="cyber-input" maxlength="200" placeholder="Why this version is known-good" autocomplete="off">
+            </label>
+            <div class="button-row">
+              <button id="selfManagementConfigSnapshotButton" type="button" class="cyber-btn small">Snapshot Configuration</button>
+            </div>
+            <label class="field">
+              <span>Restore version</span>
+              <input id="selfManagementConfigVersion" type="number" min="1" class="cyber-input" placeholder="Version number">
+            </label>
+            <label class="field checkbox-field">
+              <input id="selfManagementConfigApproved" type="checkbox">
+              <span>I approve restoring this known-good configuration</span>
+            </label>
+            <div class="button-row">
+              <button id="selfManagementConfigRestoreButton" type="button" class="cyber-btn small">Restore Known-Good Configuration</button>
+            </div>
+          </article>
+          <div id="selfManagementOutput" class="friendly-output empty-state">
+            <div class="empty-hint"><span class="empty-hint-icon">&#9881;</span> Run a health check to inspect components, incidents and recovery options</div>
+          </div>
+        </section>
+
+        <section id="businessPanel" class="panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Evidence before optimism</p>
+              <h2>Business Opportunities</h2>
+            </div>
+            <div class="button-row">
+              <button id="businessRefreshButton" type="button" class="cyber-btn small">Refresh</button>
+            </div>
+          </div>
+          <p class="muted">Opportunities are validated from sourced evidence, not from an AI recommendation. Measured data, estimates, assumptions and unavailable information are labelled separately. No experiment is executed automatically.</p>
+          <div id="businessStatus" class="muted" aria-live="polite">Reading stored opportunities…</div>
+
+          <article class="surface">
+            <h3>Find opportunities</h3>
+            <div class="card-grid">
+              <label class="field"><span>Search</span><input id="businessSearch" type="text" class="cyber-input" placeholder="Title, problem, audience…" autocomplete="off"></label>
+              <label class="field"><span>Stage</span>
+                <select id="businessStageFilter" class="cyber-input">
+                  <option value="">All stages</option>
+                  <option value="discovered">Discovered</option>
+                  <option value="researching">Researching</option>
+                  <option value="evidence_collection">Evidence collection</option>
+                  <option value="feasibility_assessment">Feasibility assessment</option>
+                  <option value="experiment_planning">Experiment planning</option>
+                  <option value="validation">Validation</option>
+                  <option value="validated">Validated</option>
+                  <option value="conditionally_validated">Conditionally validated</option>
+                  <option value="insufficient_evidence">Insufficient evidence</option>
+                  <option value="not_viable">Not viable</option>
+                  <option value="requires_further_research">Requires further research</option>
+                  <option value="paused">Paused</option>
+                  <option value="rejected">Rejected</option>
+                  <option value="archived">Archived</option>
+                </select>
+              </label>
+              <label class="field"><span>Industry</span><input id="businessIndustryFilter" type="text" class="cyber-input" placeholder="Filter by industry" autocomplete="off"></label>
+            </div>
+            <div id="businessList" class="task-list" aria-live="polite"></div>
+          </article>
+
+          <article class="surface">
+            <h3>Discover from permitted sources</h3>
+            <p class="muted">An Explore scan returns source-backed candidate signals only. It does not invent a customer problem, solution or market size; you must record the brief and its source to create an opportunity.</p>
+            <div class="card-grid">
+              <label class="field"><span>Discovery query</span><input id="businessScanQuery" type="text" class="cyber-input" maxlength="500" placeholder="e.g. agencies complaining about invoice follow-up" autocomplete="off"></label>
+              <label class="field"><span>Signal type</span>
+                <select id="businessScanSignal" class="cyber-input">
+                  <option value="market_trend">Market trend</option>
+                  <option value="customer_complaint">Customer complaint</option>
+                  <option value="industry_development">Industry development</option>
+                  <option value="technology_change">Technology change</option>
+                  <option value="emerging_market">Emerging market</option>
+                  <option value="competitor_weakness">Competitor weakness</option>
+                  <option value="operational_problem">Operational problem</option>
+                  <option value="product_gap">Product gap</option>
+                </select>
+              </label>
+            </div>
+            <div class="button-row">
+              <button id="businessScanButton" type="button" class="cyber-btn small">Scan with Explore</button>
+            </div>
+            <div id="businessScanResults" class="task-list" aria-live="polite"></div>
+          </article>
+
+          <article class="surface">
+            <h3>Record a sourced opportunity</h3>
+            <p class="muted">A discovery needs a source URL or a named brief/reference. Operator briefs are assumptions, not external market evidence.</p>
+            <div class="card-grid">
+              <label class="field"><span>Title</span><input id="businessTitle" type="text" class="cyber-input" maxlength="160" placeholder="What is the opportunity?" autocomplete="off"></label>
+              <label class="field"><span>Signal type</span>
+                <select id="businessSignal" class="cyber-input">
+                  <option value="user_supplied">Operator brief</option>
+                  <option value="market_trend">Market trend</option>
+                  <option value="customer_complaint">Customer complaint</option>
+                  <option value="industry_development">Industry development</option>
+                  <option value="technology_change">Technology change</option>
+                  <option value="emerging_market">Emerging market</option>
+                  <option value="competitor_weakness">Competitor weakness</option>
+                  <option value="operational_problem">Operational problem</option>
+                  <option value="product_gap">Product gap</option>
+                  <option value="ai_opportunity">AI opportunity</option>
+                </select>
+              </label>
+              <label class="field"><span>Customer problem</span><input id="businessProblem" type="text" class="cyber-input" maxlength="400" placeholder="The problem a real customer has" autocomplete="off"></label>
+              <label class="field"><span>Proposed solution</span><input id="businessSolution" type="text" class="cyber-input" maxlength="400" placeholder="What would solve it" autocomplete="off"></label>
+              <label class="field"><span>Target audience</span><input id="businessAudience" type="text" class="cyber-input" maxlength="240" placeholder="Who has this problem" autocomplete="off"></label>
+              <label class="field"><span>Industry</span><input id="businessIndustry" type="text" class="cyber-input" maxlength="120" placeholder="Industry" autocomplete="off"></label>
+              <label class="field"><span>Category</span><input id="businessCategory" type="text" class="cyber-input" maxlength="120" placeholder="Category" autocomplete="off"></label>
+              <label class="field"><span>Source title</span><input id="businessSourceTitle" type="text" class="cyber-input" maxlength="200" placeholder="Source or brief title" autocomplete="off"></label>
+              <label class="field"><span>Source URL</span><input id="businessSourceUrl" type="url" class="cyber-input" placeholder="https://…" autocomplete="off"></label>
+              <label class="field"><span>Source reference</span><input id="businessSourceReference" type="text" class="cyber-input" maxlength="300" placeholder="Interview, report or brief reference" autocomplete="off"></label>
+              <label class="field"><span>Description</span><input id="businessDescription" type="text" class="cyber-input" maxlength="1000" placeholder="Optional detail" autocomplete="off"></label>
+            </div>
+            <div class="button-row">
+              <button id="businessDiscoverButton" type="button" class="cyber-btn small">Record Opportunity</button>
+            </div>
+          </article>
+
+          <div id="businessDetail" class="friendly-output empty-state">
+            <div class="empty-hint"><span class="empty-hint-icon">&#9670;</span> Select an opportunity to inspect its evidence, score and validation report</div>
+          </div>
+
+          <article class="surface" id="businessEvidenceCard" hidden>
+            <h3>Add evidence</h3>
+            <p class="muted">Measured evidence needs a source. Primary customer evidence needs the person who supplied it. Severity is 1–5 in the value object. An assumption stays an assumption.</p>
+            <div class="card-grid">
+              <label class="field"><span>Kind</span>
+                <select id="businessEvidenceKind" class="cyber-input">
+                  <option value="market_size">Market size</option>
+                  <option value="market_trend">Market trend</option>
+                  <option value="demand_signal">Demand signal</option>
+                  <option value="customer_interview">Customer interview</option>
+                  <option value="customer_feedback">Customer feedback</option>
+                  <option value="competitor">Competitor</option>
+                  <option value="technical">Technical</option>
+                  <option value="operational">Operational</option>
+                  <option value="regulatory">Regulatory</option>
+                  <option value="financial">Financial</option>
+                  <option value="assumption">Assumption</option>
+                  <option value="other">Other</option>
+                </select>
+              </label>
+              <label class="field"><span>Quality</span>
+                <select id="businessEvidenceQuality" class="cyber-input">
+                  <option value="secondary">Secondary — sourced research</option>
+                  <option value="primary">Primary — supplied interview/feedback</option>
+                  <option value="estimate">Estimate — labelled model estimate</option>
+                  <option value="assumption">Assumption — not market evidence</option>
+                  <option value="synthesis">Synthesis — derived, not measured</option>
+                </select>
+              </label>
+              <label class="field"><span>Claim</span><input id="businessEvidenceClaim" type="text" class="cyber-input" maxlength="600" placeholder="What exactly does the evidence say?" autocomplete="off"></label>
+              <label class="field"><span>Source title</span><input id="businessEvidenceSourceTitle" type="text" class="cyber-input" maxlength="200" placeholder="Report, page or interview title" autocomplete="off"></label>
+              <label class="field"><span>Source URL</span><input id="businessEvidenceSourceUrl" type="url" class="cyber-input" placeholder="https://…" autocomplete="off"></label>
+              <label class="field"><span>Source reference</span><input id="businessEvidenceSourceReference" type="text" class="cyber-input" maxlength="300" placeholder="Interview transcript or document reference" autocomplete="off"></label>
+              <label class="field"><span>Supplied by</span><input id="businessEvidenceSuppliedBy" type="text" class="cyber-input" maxlength="120" placeholder="Person who supplied primary evidence" autocomplete="off"></label>
+              <label class="field"><span>Confidence (0–1)</span><input id="businessEvidenceConfidence" type="number" min="0" max="1" step="0.05" value="0.6" class="cyber-input"></label>
+              <label class="field"><span>Value JSON</span><input id="businessEvidenceValue" type="text" class="cyber-input" placeholder='{"severity": 4, "frequency": "weekly"}' autocomplete="off"></label>
+            </div>
+            <div class="button-row">
+              <button id="businessEvidenceButton" type="button" class="cyber-btn small">Add Evidence</button>
+            </div>
+          </article>
+
+          <article class="surface" id="businessAssessCard" hidden>
+            <h3>Assessment inputs</h3>
+            <p class="muted">Financial figures are modelled estimates from these inputs, not actual revenue. Leave a field blank to keep it missing. Legal blockers and dependency risks are optional lists separated by commas or new lines.</p>
+            <div class="card-grid">
+              <label class="field"><span>Currency</span><input id="businessCurrency" type="text" class="cyber-input" value="USD" maxlength="8" autocomplete="off"></label>
+              <label class="field"><span>Price per unit</span><input id="businessPrice" type="number" min="0" step="0.01" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Units per month</span><input id="businessUnits" type="number" min="0" step="0.1" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Variable cost / unit</span><input id="businessVariable" type="number" min="0" step="0.01" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Fixed monthly costs</span><input id="businessFixed" type="number" min="0" step="0.01" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Infrastructure / month</span><input id="businessInfra" type="number" min="0" step="0.01" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Marketing / month</span><input id="businessMarketing" type="number" min="0" step="0.01" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Customer acquisition cost</span><input id="businessCac" type="number" min="0" step="0.01" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Customer lifetime (months)</span><input id="businessLifetime" type="number" min="0" step="1" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Initial investment</span><input id="businessInitial" type="number" min="0" step="0.01" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Development cost</span><input id="businessDevelopment" type="number" min="0" step="0.01" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Operational score (0–1)</span><input id="businessOperational" type="number" min="0" max="1" step="0.05" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Legal score (0–1)</span><input id="businessLegal" type="number" min="0" max="1" step="0.05" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Legal blockers</span><input id="businessLegalBlockers" type="text" class="cyber-input" placeholder="e.g. licence required" autocomplete="off"></label>
+              <label class="field"><span>Required RAM (GB)</span><input id="businessRequiredRam" type="number" min="0" step="0.1" class="cyber-input" autocomplete="off"></label>
+              <label class="field checkbox-field"><input id="businessRequiresGpu" type="checkbox"><span>Requires a GPU</span></label>
+              <label class="field"><span>Technical complexity (0–1)</span><input id="businessTechnicalComplexity" type="number" min="0" max="1" step="0.05" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Execution complexity (0–1)</span><input id="businessExecutionComplexity" type="number" min="0" max="1" step="0.05" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Dependency risks</span><input id="businessDependencies" type="text" class="cyber-input" placeholder="e.g. single supplier" autocomplete="off"></label>
+              <label class="field"><span>Differentiation (0–1)</span><input id="businessDifferentiation" type="number" min="0" max="1" step="0.05" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Lifecycle reason</span><input id="businessReason" type="text" class="cyber-input" maxlength="300" placeholder="Reason for pause/reject/archive" autocomplete="off"></label>
+            </div>
+            <div class="button-row">
+              <button id="businessAssessButton" type="button" class="cyber-btn small">Run Assessment</button>
+              <button id="businessPlanButton" type="button" class="cyber-btn small">Plan Experiments</button>
+              <button id="businessEvaluateButton" type="button" class="cyber-btn small">Evaluate &amp; Report</button>
+            </div>
+          </article>
+        </section>
+
+        <section id="productPanel" class="panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Requirements to launch readiness</p>
+              <h2>Product Development</h2>
+            </div>
+            <div class="button-row">
+              <button id="productRefreshButton" type="button" class="cyber-btn small">Refresh</button>
+            </div>
+          </div>
+          <p class="muted">Only VALIDATED opportunities, or conditionally validated opportunities with a recorded human approval, can become products. Requirements, tests, release checks and launch readiness are recorded facts. Approvals are human decisions; no deploy, publication, commit or paid campaign happens here.</p>
+          <div id="productStatus" class="muted" aria-live="polite">Reading product projects…</div>
+
+          <article class="surface">
+            <h3>Import a validated opportunity</h3>
+            <div class="card-grid">
+              <label class="field"><span>Phase 35 opportunity ID</span><input id="productOpportunityId" type="text" class="cyber-input" placeholder="opp-…" autocomplete="off"></label>
+              <label class="field"><span>Product name (optional)</span><input id="productName" type="text" class="cyber-input" maxlength="120" placeholder="Uses the opportunity title when blank" autocomplete="off"></label>
+              <label class="field"><span>Release target</span>
+                <select id="productReleaseTarget" class="cyber-input">
+                  <option value="local">Local application</option>
+                  <option value="desktop">Desktop application</option>
+                  <option value="web">Web application</option>
+                  <option value="api">API service</option>
+                  <option value="container">Containerized application</option>
+                </select>
+              </label>
+              <label class="field"><span>Language/runtime</span><input id="productLanguage" type="text" class="cyber-input" value="python" autocomplete="off"></label>
+              <label class="field"><span>Build command</span><input id="productBuildCommand" type="text" class="cyber-input" placeholder="e.g. python -m compileall src" autocomplete="off"></label>
+              <label class="field"><span>Test command</span><input id="productTestCommand" type="text" class="cyber-input" value="python -m pytest" autocomplete="off"></label>
+            </div>
+            <label class="field checkbox-field"><input id="productConditionalApproval" type="checkbox"><span>I approve conditional validation conditions and accept responsibility for resolving them</span></label>
+            <label class="field"><span>Conditional approval note</span><input id="productConditionalNote" type="text" class="cyber-input" maxlength="600" placeholder="Required for conditionally validated opportunities" autocomplete="off"></label>
+            <div class="button-row">
+              <button id="productCreateButton" type="button" class="cyber-btn small">Create Product Project</button>
+            </div>
+            <div id="productList" class="task-list" aria-live="polite"></div>
+          </article>
+
+          <div id="productDetail" class="friendly-output empty-state">
+            <div class="empty-hint"><span class="empty-hint-icon">&#9635;</span> Select a product to inspect its requirements, plan, quality evidence and launch readiness</div>
+          </div>
+
+          <article class="surface" id="productPrdCard" hidden>
+            <h3>Product requirements</h3>
+            <p class="muted">Each line becomes a traceable requirement. Missing sections are listed as missing information rather than invented. The PRD needs an explicit human approval before architecture or development.</p>
+            <div class="card-grid">
+              <label class="field"><span>Vision</span><input id="productPrdVision" type="text" class="cyber-input" maxlength="400" autocomplete="off"></label>
+              <label class="field"><span>Problem statement</span><input id="productPrdProblem" type="text" class="cyber-input" maxlength="600" autocomplete="off"></label>
+              <label class="field"><span>Target users (comma separated)</span><input id="productPrdUsers" type="text" class="cyber-input" maxlength="400" autocomplete="off"></label>
+              <label class="field"><span>Personas (one per line)</span><textarea id="productPrdPersonas" class="cyber-input" rows="3"></textarea></label>
+              <label class="field"><span>User journeys (one per line)</span><textarea id="productPrdJourneys" class="cyber-input" rows="3"></textarea></label>
+              <label class="field"><span>Functional requirements (one per line)</span><textarea id="productPrdFunctional" class="cyber-input" rows="5" placeholder="Draft an invoice reminder"></textarea></label>
+              <label class="field"><span>Non-functional requirements (one per line)</span><textarea id="productPrdNonFunctional" class="cyber-input" rows="3"></textarea></label>
+              <label class="field"><span>Security requirements (one per line)</span><textarea id="productPrdSecurity" class="cyber-input" rows="3"></textarea></label>
+              <label class="field"><span>Performance requirements (one per line)</span><textarea id="productPrdPerformance" class="cyber-input" rows="3"></textarea></label>
+              <label class="field"><span>Accessibility requirements (one per line)</span><textarea id="productPrdAccessibility" class="cyber-input" rows="3"></textarea></label>
+              <label class="field"><span>Constraints (one per line)</span><textarea id="productPrdConstraints" class="cyber-input" rows="3"></textarea></label>
+              <label class="field"><span>Dependencies (one per line)</span><textarea id="productPrdDependencies" class="cyber-input" rows="3"></textarea></label>
+              <label class="field"><span>Acceptance criteria (one per line)</span><textarea id="productPrdAcceptance" class="cyber-input" rows="3"></textarea></label>
+              <label class="field"><span>Success metrics (one per line)</span><textarea id="productPrdMetrics" class="cyber-input" rows="3"></textarea></label>
+              <label class="field"><span>Explicit exclusions (one per line)</span><textarea id="productPrdExclusions" class="cyber-input" rows="3"></textarea></label>
+              <label class="field"><span>Approval / revision note</span><input id="productPrdNote" type="text" class="cyber-input" maxlength="600" placeholder="Required for approval or revision" autocomplete="off"></label>
+            </div>
+            <div class="button-row">
+              <button id="productPrdGenerateButton" type="button" class="cyber-btn small">Generate PRD</button>
+              <button id="productPrdApproveButton" type="button" class="cyber-btn small">Approve Requirements</button>
+              <button id="productPrdRevisionButton" type="button" class="cyber-btn small">Request Revision</button>
+            </div>
+          </article>
+
+          <article class="surface" id="productArchitectureCard" hidden>
+            <h3>Architecture and decisions</h3>
+            <p class="muted">Provide technical choices explicitly. The generator groups approved requirements into components but does not select a stack, database or deployment target on its own.</p>
+            <label class="field"><span>Architecture JSON</span><textarea id="productArchitectureJson" class="cyber-input" rows="10" placeholder='{"summary": "…", "technology": {"stack": "…"}, "api_contracts": [], "database_design": {}, "data_flows": [], "integrations": [], "deployment": {}, "security": {}, "scalability": {}, "observability": {}, "decisions": []}'></textarea></label>
+            <label class="field"><span>Architecture decision note</span><input id="productArchitectureNote" type="text" class="cyber-input" maxlength="600" placeholder="Required for approval" autocomplete="off"></label>
+            <div class="button-row">
+              <button id="productArchitectureGenerateButton" type="button" class="cyber-btn small">Generate Architecture</button>
+              <button id="productArchitectureApproveButton" type="button" class="cyber-btn small">Approve Architecture</button>
+              <button id="productArchitectureRejectButton" type="button" class="cyber-btn small">Reject Architecture</button>
+            </div>
+          </article>
+
+          <article class="surface" id="productPlanCard" hidden>
+            <h3>Development plan</h3>
+            <p class="muted">A blank plan derives one implementation task per approved requirement plus a verifying task per implementation. Estimates are optional and are labelled estimates; the critical path is a dependency calculation, not a promised date.</p>
+            <label class="field"><span>Plan JSON (optional tasks/milestones)</span><textarea id="productPlanJson" class="cyber-input" rows="7" placeholder='{"tasks": [], "milestones": [], "risks": []}'></textarea></label>
+            <label class="field"><span>Plan decision note</span><input id="productPlanNote" type="text" class="cyber-input" maxlength="600" placeholder="Required to approve or reject a plan" autocomplete="off"></label>
+            <div class="button-row">
+              <button id="productPlanCreateButton" type="button" class="cyber-btn small">Create Plan</button>
+              <button id="productPlanApproveButton" type="button" class="cyber-btn small">Approve Plan</button>
+              <button id="productStartDevelopmentButton" type="button" class="cyber-btn small">Start Development</button>
+              <button id="productRunReadyButton" type="button" class="cyber-btn small">Run Ready Tasks</button>
+              <button id="productCorrectiveButton" type="button" class="cyber-btn small">Create Corrective Tasks</button>
+            </div>
+          </article>
+
+          <article class="surface" id="productQualityCard" hidden>
+            <h3>Build, tests and quality gates</h3>
+            <p class="muted">A build proves compilation only. Gates pass only from recorded test results. The built-in runner executes pytest only; record security/static results from their real tools rather than relabelling a unit run.</p>
+            <div class="card-grid">
+              <label class="field"><span>Build command</span><input id="productBuildRecordCommand" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Build exit code</span><input id="productBuildExit" type="number" class="cyber-input" value="0"></label>
+              <label class="field"><span>Build output</span><input id="productBuildOutput" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field checkbox-field"><input id="productBuildValidated" type="checkbox"><span>Build command completed successfully</span></label>
+              <label class="field"><span>Quality gate</span><select id="productTestGate" class="cyber-input"></select></label>
+              <label class="field"><span>Test kind</span><input id="productTestKind" type="text" class="cyber-input" placeholder="unit" autocomplete="off"></label>
+              <label class="field"><span>Result</span>
+                <select id="productTestStatus" class="cyber-input">
+                  <option value="passed">Passed</option>
+                  <option value="failed">Failed</option>
+                  <option value="error">Error</option>
+                  <option value="not_run">Not run</option>
+                  <option value="skipped">Skipped</option>
+                </select>
+              </label>
+              <label class="field"><span>Total / passed / failed</span><input id="productTestCounts" type="text" class="cyber-input" placeholder="12 / 12 / 0" autocomplete="off"></label>
+              <label class="field"><span>Coverage (0–1, optional)</span><input id="productTestCoverage" type="number" min="0" max="1" step="0.01" class="cyber-input"></label>
+              <label class="field"><span>Command</span><input id="productTestCommandRecord" type="text" class="cyber-input" placeholder="python -m pytest" autocomplete="off"></label>
+              <label class="field"><span>Output evidence</span><textarea id="productTestOutput" class="cyber-input" rows="4"></textarea></label>
+            </div>
+            <div class="button-row">
+              <button id="productValidateEnvironmentButton" type="button" class="cyber-btn small">Validate Environment</button>
+              <button id="productBuildRecordButton" type="button" class="cyber-btn small">Record Build</button>
+              <button id="productTestRecordButton" type="button" class="cyber-btn small">Record Test Evidence</button>
+              <button id="productQualityRunButton" type="button" class="cyber-btn small">Run Pytest Quality Checks</button>
+            </div>
+          </article>
+
+          <article class="surface" id="productDefectCard" hidden>
+            <h3>Defect tracking</h3>
+            <div class="card-grid">
+              <label class="field"><span>Defect title</span><input id="productDefectTitle" type="text" class="cyber-input" maxlength="200" autocomplete="off"></label>
+              <label class="field"><span>Severity</span>
+                <select id="productDefectSeverity" class="cyber-input">
+                  <option value="low">Low</option>
+                  <option value="medium" selected>Medium</option>
+                  <option value="high">High</option>
+                  <option value="critical">Critical</option>
+                </select>
+              </label>
+              <label class="field"><span>Requirement ID (optional)</span><input id="productDefectRequirement" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Description</span><input id="productDefectDescription" type="text" class="cyber-input" maxlength="600" autocomplete="off"></label>
+            </div>
+            <div class="button-row">
+              <button id="productDefectOpenButton" type="button" class="cyber-btn small">Open Defect</button>
+            </div>
+          </article>
+
+          <article class="surface" id="productReleaseCard" hidden>
+            <h3>Release preparation</h3>
+            <p class="muted">Release preparation is blocked until every required gate passes and a build is validated. The artifact is a source bundle with notes, deployment documentation, rollback and a security checklist. No external deployment occurs.</p>
+            <div class="card-grid">
+              <label class="field"><span>Version</span><input id="productReleaseVersion" type="text" class="cyber-input" value="1.0.0" autocomplete="off"></label>
+              <label class="field"><span>Release target</span>
+                <select id="productReleaseArtifactTarget" class="cyber-input">
+                  <option value="local">Local application</option>
+                  <option value="desktop">Desktop application</option>
+                  <option value="web">Web application</option>
+                  <option value="api">API service</option>
+                  <option value="container">Containerized application</option>
+                </select>
+              </label>
+              <label class="field"><span>Release notes (optional)</span><input id="productReleaseNotes" type="text" class="cyber-input" maxlength="1000" autocomplete="off"></label>
+              <label class="field"><span>Operational JSON</span><input id="productReleaseOperational" type="text" class="cyber-input" placeholder='{"monitoring": "local logs", "recovery": "restore previous bundle"}' autocomplete="off"></label>
+              <label class="field"><span>Release approval note</span><input id="productReleaseNote" type="text" class="cyber-input" maxlength="600" placeholder="Required for release approval" autocomplete="off"></label>
+            </div>
+            <div class="button-row">
+              <button id="productPrepareReleaseButton" type="button" class="cyber-btn small">Prepare Release</button>
+            </div>
+          </article>
+
+          <article class="surface" id="productLaunchCard" hidden>
+            <h3>Launch readiness</h3>
+            <p class="muted">Readiness is an evidence assessment. APPROVED_FOR_LAUNCH requires a ready product, an approved release, passing gates and a named human authorization. It does not deploy or publish anything.</p>
+            <label class="field"><span>Launch decision note</span><input id="productLaunchNote" type="text" class="cyber-input" maxlength="600" placeholder="Required for launch approval or rejection" autocomplete="off"></label>
+            <div class="button-row">
+              <button id="productEvaluateLaunchButton" type="button" class="cyber-btn small">Evaluate Launch Readiness</button>
+              <button id="productApproveLaunchButton" type="button" class="cyber-btn small">Approve Launch</button>
+              <button id="productRejectLaunchButton" type="button" class="cyber-btn small">Reject Launch</button>
+              <button id="productCancelButton" type="button" class="cyber-btn small">Cancel Product</button>
+              <button id="productArchiveButton" type="button" class="cyber-btn small">Archive Product</button>
+            </div>
+          </article>
+        </section>
+
+        <section id="customerPanel" class="panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Acquire, sell, support and retain</p>
+              <h2>Customer &amp; Growth</h2>
+            </div>
+            <div class="button-row">
+              <button id="customerRefreshButton" type="button" class="cyber-btn small">Refresh</button>
+            </div>
+          </div>
+          <p class="muted">One customer workspace per launch-authorized Phase 36 product. Scores are explainable recommendations, pipeline value is an estimate, and no message is sent without explicit approval and a configured sender. No customer, survey, demand or revenue fact is invented here.</p>
+          <div id="customerStatus" class="muted" aria-live="polite">Reading customer workspaces…</div>
+
+          <article class="surface">
+            <h3>Open a customer workspace</h3>
+            <div class="card-grid">
+              <label class="field"><span>Phase 36 product ID</span><input id="customerProductId" type="text" class="cyber-input" placeholder="prod-…" autocomplete="off"></label>
+            </div>
+            <div class="button-row">
+              <button id="customerWorkspaceCreateButton" type="button" class="cyber-btn small">Create / Open Workspace</button>
+            </div>
+            <div id="customerWorkspaceList" class="task-list" aria-live="polite"></div>
+          </article>
+
+          <div id="customerDetail" class="friendly-output empty-state">
+            <div class="empty-hint"><span class="empty-hint-icon">&#9683;</span> Select a workspace to inspect segments, leads, pipeline, communication audit and the support inbox</div>
+          </div>
+
+          <article class="surface">
+            <h3>Segments, ICPs and research</h3>
+            <p class="muted">Record evidence separately from assumptions. Public research is never presented as direct customer validation.</p>
+            <div class="card-grid">
+              <label class="field"><span>Segment name</span><input id="customerSegmentName" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Category</span><select id="customerSegmentCategory" class="cyber-input"><option value="business">Business</option><option value="individual">Individual</option></select></label>
+              <label class="field"><span>Industry</span><input id="customerSegmentIndustry" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Company size</span><input id="customerSegmentSize" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Geography</span><input id="customerSegmentGeography" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Needs (one per line)</span><textarea id="customerSegmentNeeds" class="cyber-input" rows="3"></textarea></label>
+              <label class="field"><span>Pain points (one per line)</span><textarea id="customerSegmentPain" class="cyber-input" rows="3"></textarea></label>
+              <label class="field"><span>Evidence (one per line)</span><textarea id="customerSegmentEvidence" class="cyber-input" rows="3"></textarea></label>
+              <label class="field"><span>ICP name</span><input id="customerIcpName" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Segment ID for ICP</span><input id="customerSegmentId" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>ICP criteria (JSON)</span><textarea id="customerIcpCriteria" class="cyber-input" rows="3" placeholder='{"company_size":"10-100"}'></textarea></label>
+              <label class="field"><span>ICP needs (one per line)</span><textarea id="customerIcpNeeds" class="cyber-input" rows="3"></textarea></label>
+              <label class="field"><span>ICP evidence (one per line)</span><textarea id="customerIcpEvidence" class="cyber-input" rows="3"></textarea></label>
+              <label class="field"><span>Research title</span><input id="customerResearchTitle" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Research summary</span><textarea id="customerResearchSummary" class="cyber-input" rows="3"></textarea></label>
+              <label class="field"><span>Source URL</span><input id="customerResearchUrl" type="url" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Source reference</span><input id="customerResearchReference" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Confidence (0–1)</span><input id="customerResearchConfidence" type="number" min="0" max="1" step="0.05" class="cyber-input"></label>
+              <label class="field"><span>Verification</span><select id="customerResearchVerification" class="cyber-input"><option value="public_research">Public research</option><option value="direct_validation">Direct validation</option><option value="operator_supplied">Operator supplied</option><option value="assumption">Assumption</option></select></label>
+              <label class="field"><span>Research segment ID</span><input id="customerResearchSegment" type="text" class="cyber-input" autocomplete="off"></label>
+            </div>
+            <div class="button-row">
+              <button id="customerSegmentButton" type="button" class="cyber-btn small">Add Segment</button>
+              <button id="customerIcpButton" type="button" class="cyber-btn small">Add ICP</button>
+              <button id="customerResearchButton" type="button" class="cyber-btn small">Add Research</button>
+            </div>
+          </article>
+
+          <article class="surface">
+            <h3>Customers and leads</h3>
+            <p class="muted">Contact information must come from a lawful source. Consent is recorded per channel; a lead score is not purchase intent.</p>
+            <div class="card-grid">
+              <label class="field"><span>Customer name</span><input id="customerName" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Customer category</span><select id="customerCategory" class="cyber-input"><option value="business">Business</option><option value="individual">Individual</option></select></label>
+              <label class="field"><span>Customer segment ID</span><input id="customerSegmentAssign" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Customer email</span><input id="customerEmail" type="email" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Consent status</span><select id="customerConsent" class="cyber-input"><option value="unknown">Unknown</option><option value="granted">Granted</option><option value="withdrawn">Withdrawn</option><option value="not_required">Not required</option></select></label>
+              <label class="field"><span>Consent channels (comma separated)</span><input id="customerChannels" type="text" class="cyber-input" placeholder="email, phone" autocomplete="off"></label>
+              <label class="field"><span>Consent source</span><input id="customerConsentSource" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Contact source</span><input id="customerContactSource" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Location</span><input id="customerLocation" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Next action</span><input id="customerNextAction" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Lead name / organization</span><input id="customerLeadName" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Lead organization</span><input id="customerLeadOrg" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Lead source</span><select id="customerLeadSource" class="cyber-input"><option value="website_inquiry">Website inquiry</option><option value="voluntary_registration">Voluntary registration</option><option value="waitlist">Waitlist</option><option value="approved_referral">Approved referral</option><option value="public_directory">Public directory</option><option value="manual_import">Manual import</option><option value="approved_integration">Approved integration</option><option value="event">Event</option><option value="operator_supplied">Operator supplied</option></select></label>
+              <label class="field"><span>Lawful basis (required for directory/import)</span><input id="customerLeadLawfulBasis" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Lead segment ID</span><input id="customerLeadSegment" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Lead email</span><input id="customerLeadEmail" type="email" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Lead consent</span><select id="customerLeadConsent" class="cyber-input"><option value="unknown">Unknown</option><option value="granted">Granted</option><option value="withdrawn">Withdrawn</option><option value="not_required">Not required</option></select></label>
+              <label class="field"><span>Lead consent channels</span><input id="customerLeadChannels" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Lead consent source</span><input id="customerLeadConsentSource" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Lead qualification inputs (JSON)</span><textarea id="customerLeadScores" class="cyber-input" rows="3" placeholder='{"product_fit":4,"problem_relevance":{"score":4,"evidence":"recorded call"}}'></textarea></label>
+              <label class="field"><span>Lead next action</span><input id="customerLeadNextAction" type="text" class="cyber-input" autocomplete="off"></label>
+            </div>
+            <div class="button-row">
+              <button id="customerCreateButton" type="button" class="cyber-btn small">Add Customer</button>
+              <button id="customerLeadButton" type="button" class="cyber-btn small">Add Lead</button>
+            </div>
+          </article>
+
+          <article class="surface">
+            <h3>Pipeline and communication</h3>
+            <p class="muted">Deal values are estimates. Drafting never sends. Approval is a named, recorded decision; delivery requires a configured sender.</p>
+            <div class="card-grid">
+              <label class="field"><span>Deal lead ID</span><input id="customerDealLead" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Deal customer ID</span><input id="customerDealCustomer" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Deal name</span><input id="customerDealName" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Value</span><input id="customerDealValue" type="number" min="0" step="0.01" class="cyber-input"></label>
+              <label class="field"><span>Currency</span><input id="customerDealCurrency" type="text" maxlength="3" value="USD" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Probability (0–1)</span><input id="customerDealProbability" type="number" min="0" max="1" step="0.05" class="cyber-input"></label>
+              <label class="field"><span>Expected close</span><input id="customerDealClose" type="date" class="cyber-input"></label>
+              <label class="field"><span>Deal next action</span><input id="customerDealNext" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Objections (one per line)</span><textarea id="customerDealObjections" class="cyber-input" rows="3"></textarea></label>
+              <label class="field"><span>Communication related type</span><select id="customerCommType" class="cyber-input"><option value="customer">Customer</option><option value="lead">Lead</option></select></label>
+              <label class="field"><span>Related ID</span><input id="customerCommId" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Channel</span><select id="customerCommChannel" class="cyber-input"><option value="email">Email</option><option value="phone">Phone</option><option value="meeting">Meeting</option><option value="product_demo">Product demo</option><option value="onboarding">Onboarding</option><option value="other">Other</option></select></label>
+              <label class="field"><span>Subject</span><input id="customerCommSubject" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Message body</span><textarea id="customerCommBody" class="cyber-input" rows="4"></textarea></label>
+            </div>
+            <div class="button-row">
+              <button id="customerDealButton" type="button" class="cyber-btn small">Create Deal</button>
+              <button id="customerCommunicationButton" type="button" class="cyber-btn small">Draft Communication</button>
+            </div>
+          </article>
+
+          <article class="surface">
+            <h3>Support, feedback and onboarding</h3>
+            <p class="muted">Support assistance is grounded only in approved, verified knowledge. Sensitive account, billing, refund and contractual requests require human review.</p>
+            <div class="card-grid">
+              <label class="field"><span>Knowledge title</span><input id="customerKnowledgeTitle" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Knowledge source</span><input id="customerKnowledgeSource" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Knowledge body</span><textarea id="customerKnowledgeBody" class="cyber-input" rows="4"></textarea></label>
+              <label class="field"><span>Approved steps (one per line)</span><textarea id="customerKnowledgeSteps" class="cyber-input" rows="3"></textarea></label>
+              <label class="field checkbox-field"><input id="customerKnowledgeApproved" type="checkbox"><span>Approved product documentation</span></label>
+              <label class="field checkbox-field"><input id="customerKnowledgeVerified" type="checkbox"><span>Verified against the product</span></label>
+              <label class="field"><span>Ticket customer ID</span><input id="customerTicketCustomer" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Ticket subject</span><input id="customerTicketSubject" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Ticket description</span><textarea id="customerTicketDescription" class="cyber-input" rows="3"></textarea></label>
+              <label class="field"><span>Ticket category</span><select id="customerTicketCategory" class="cyber-input"><option value="general_inquiry">General inquiry</option><option value="technical_issue">Technical issue</option><option value="account_issue">Account issue</option><option value="billing_inquiry">Billing inquiry</option><option value="product_usage">Product usage</option><option value="feature_request">Feature request</option><option value="bug_report">Bug report</option></select></label>
+              <label class="field"><span>Priority</span><select id="customerTicketPriority" class="cyber-input"><option value="low">Low</option><option value="normal" selected>Normal</option><option value="high">High</option><option value="critical">Critical</option></select></label>
+              <label class="field"><span>Severity</span><select id="customerTicketSeverity" class="cyber-input"><option value="low">Low</option><option value="normal" selected>Normal</option><option value="high">High</option><option value="critical">Critical</option></select></label>
+              <label class="field"><span>Feedback kind</span><select id="customerFeedbackKind" class="cyber-input"><option value="complaint">Complaint</option><option value="feature_request">Feature request</option><option value="bug_report">Bug report</option><option value="satisfaction">Satisfaction</option><option value="common_question">Common question</option><option value="usage_difficulty">Usage difficulty</option><option value="churn_reason">Churn reason</option><option value="improvement_suggestion">Improvement suggestion</option></select></label>
+              <label class="field"><span>Feedback summary</span><textarea id="customerFeedbackSummary" class="cyber-input" rows="3"></textarea></label>
+              <label class="field"><span>Feedback customer ID</span><input id="customerFeedbackCustomer" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Feature</span><input id="customerFeedbackFeature" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Feedback source</span><input id="customerFeedbackSource" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Rating (1–5, optional)</span><input id="customerFeedbackRating" type="number" min="1" max="5" class="cyber-input"></label>
+              <label class="field"><span>Onboarding customer ID</span><input id="customerOnboardingCustomer" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Onboarding items (one per line)</span><textarea id="customerOnboardingItems" class="cyber-input" rows="3"></textarea></label>
+              <label class="field"><span>Next follow-up</span><input id="customerOnboardingFollowUp" type="text" class="cyber-input" autocomplete="off"></label>
+            </div>
+            <div class="button-row">
+              <button id="customerKnowledgeButton" type="button" class="cyber-btn small">Add Approved Knowledge</button>
+              <button id="customerTicketButton" type="button" class="cyber-btn small">Create Ticket</button>
+              <button id="customerFeedbackButton" type="button" class="cyber-btn small">Add Feedback</button>
+              <button id="customerOnboardingButton" type="button" class="cyber-btn small">Start Onboarding</button>
+            </div>
+          </article>
+
+          <article class="surface" id="customerTicketDetail" hidden>
+            <h3>Ticket detail</h3>
+            <div id="customerTicketDetailBody" class="muted">Select a ticket above.</div>
+          </article>
+
+          <article class="surface" id="customerSalesAssist" hidden>
+            <h3>Sales brief</h3>
+            <div id="customerSalesAssistBody" class="muted">Select a lead or deal.</div>
+          </article>
+        </section>
+
+        <section id="financePanel" class="panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Ventures, operations and money</p>
+              <h2>Business Finance</h2>
+            </div>
+            <div class="button-row">
+              <button id="financeRefreshButton" type="button" class="cyber-btn small">Refresh</button>
+            </div>
+          </div>
+          <p class="muted">One isolated ledger and reporting currency per venture. Actuals come only from posted journal entries and approved actual expenses; estimates, commitments, projections and forecasts are labelled and never treated as actuals. No payment, purchase, bank change or external financial commitment is executed here.</p>
+          <div id="financeStatus" class="muted" aria-live="polite">Reading ventures…</div>
+
+          <article class="surface">
+            <h3>Open a venture</h3>
+            <div class="card-grid">
+              <label class="field"><span>Venture name</span><input id="financeVentureName" type="text" class="cyber-input" maxlength="160" autocomplete="off"></label>
+              <label class="field"><span>Business model</span><select id="financeVentureModel" class="cyber-input"><option value="saas">SaaS</option><option value="subscription">Subscription</option><option value="digital_products">Digital products</option><option value="services">Services</option><option value="ecommerce">E-commerce</option><option value="project_based">Project-based</option><option value="other">Other</option></select></label>
+              <label class="field"><span>Reporting currency</span><input id="financeVentureCurrency" type="text" maxlength="3" value="USD" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Description</span><input id="financeVentureDescription" type="text" class="cyber-input" maxlength="400" autocomplete="off"></label>
+              <label class="field"><span>Products / services (one per line)</span><textarea id="financeVentureProducts" class="cyber-input" rows="3"></textarea></label>
+              <label class="field"><span>Linked Phase 36 product IDs (one per line)</span><textarea id="financeVentureProductIds" class="cyber-input" rows="3"></textarea></label>
+              <label class="field"><span>Phase 37 customer references (one per line)</span><textarea id="financeVentureCustomerRefs" class="cyber-input" rows="3"></textarea></label>
+            </div>
+            <div class="button-row"><button id="financeVentureCreateButton" type="button" class="cyber-btn small">Create Venture</button></div>
+            <div id="financeVentureList" class="task-list" aria-live="polite"></div>
+          </article>
+
+          <div id="financeDetail" class="friendly-output empty-state">
+            <div class="empty-hint"><span class="empty-hint-icon">&#9678;</span> Select a venture to inspect its health, operations, ledger and statements</div>
+          </div>
+          <div id="financeDashboard"></div>
+
+          <article class="surface">
+            <h3>Revenue</h3>
+            <p class="muted">Booked, invoiced, recognized and collected are distinct stages. Pipeline deals are never imported as revenue. A non-reporting currency needs a sourced conversion rate.</p>
+            <div class="card-grid">
+              <label class="field"><span>Gross amount</span><input id="financeRevenueAmount" type="number" min="0.01" step="0.01" class="cyber-input"></label>
+              <label class="field"><span>Tax</span><input id="financeRevenueTax" type="number" min="0" step="0.01" class="cyber-input"></label>
+              <label class="field"><span>Currency</span><input id="financeRevenueCurrency" type="text" maxlength="3" class="cyber-input" placeholder="reporting currency" autocomplete="off"></label>
+              <label class="field"><span>Stage</span><select id="financeRevenueStage" class="cyber-input"><option value="booked">Booked (no ledger)</option><option value="invoiced" selected>Invoiced</option><option value="recognized">Recognized</option><option value="collected">Collected</option></select></label>
+              <label class="field"><span>Transaction date</span><input id="financeRevenueDate" type="date" class="cyber-input"></label>
+              <label class="field"><span>Due date</span><input id="financeRevenueDue" type="date" class="cyber-input"></label>
+              <label class="field"><span>Product reference</span><input id="financeRevenueProduct" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Customer reference</span><input id="financeRevenueCustomer" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Invoice number</span><input id="financeRevenueInvoice" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>FX rate to reporting</span><input id="financeRevenueFx" type="number" min="0.000001" step="0.000001" class="cyber-input"></label>
+              <label class="field"><span>FX source</span><input id="financeRevenueFxSource" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field checkbox-field"><input id="financeRevenueRecurring" type="checkbox"><span>Recurring revenue</span></label>
+            </div>
+            <div class="button-row"><button id="financeRevenueButton" type="button" class="cyber-btn small">Record Revenue</button></div>
+            <div id="financeRevenueList" class="task-list" aria-live="polite"></div>
+          </article>
+
+          <article class="surface">
+            <h3>Expenses</h3>
+            <p class="muted">Actual, estimated, committed and projected expenses are separate. An actual expense enters the ledger only after approval. Recording payment does not execute one.</p>
+            <div class="card-grid">
+              <label class="field"><span>Amount</span><input id="financeExpenseAmount" type="number" min="0.01" step="0.01" class="cyber-input"></label>
+              <label class="field"><span>Category</span><select id="financeExpenseCategory" class="cyber-input"><option value="infrastructure">Infrastructure</option><option value="api_model_usage">API / model usage</option><option value="software_subscriptions">Software subscriptions</option><option value="employee_contractor">Employee / contractor</option><option value="marketing">Marketing</option><option value="sales">Sales</option><option value="hosting">Hosting</option><option value="payment_processing">Payment processing</option><option value="product_development">Product development</option><option value="administrative">Administrative</option><option value="taxes">Taxes</option><option value="other">Other</option></select></label>
+              <label class="field"><span>Type</span><select id="financeExpenseStatus" class="cyber-input"><option value="actual">Actual</option><option value="estimated">Estimated</option><option value="committed">Committed</option><option value="projected">Projected</option></select></label>
+              <label class="field"><span>Payment status</span><select id="financeExpensePayment" class="cyber-input"><option value="unpaid">Unpaid</option><option value="paid">Paid</option><option value="partial">Partial</option></select></label>
+              <label class="field"><span>Transaction date</span><input id="financeExpenseDate" type="date" class="cyber-input"></label>
+              <label class="field"><span>Vendor</span><input id="financeExpenseVendor" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Product reference</span><input id="financeExpenseProduct" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Source / support reference</span><input id="financeExpenseSource" type="text" class="cyber-input" autocomplete="off"></label>
+            </div>
+            <div class="button-row">
+              <button id="financeExpenseButton" type="button" class="cyber-btn small">Record Expense</button>
+              <input id="financeExpenseApproveId" type="text" class="cyber-input" placeholder="expense id to approve" autocomplete="off">
+              <button id="financeExpenseApproveButton" type="button" class="cyber-btn small">Approve Actual</button>
+              <button id="financeExpensePayButton" type="button" class="cyber-btn small">Record Payment</button>
+            </div>
+            <div id="financeExpenseList" class="task-list" aria-live="polite"></div>
+          </article>
+
+          <article class="surface">
+            <h3>Journal, period and budgets</h3>
+            <p class="muted">A finalized entry is never edited. Corrections are new reversal entries. A closed period refuses new postings.</p>
+            <div class="card-grid">
+              <label class="field"><span>Journal date</span><input id="financeJournalDate" type="date" class="cyber-input"></label>
+              <label class="field"><span>Memo</span><input id="financeJournalMemo" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Lines (JSON: account_code, debit, credit)</span><textarea id="financeJournalLines" class="cyber-input" rows="4" placeholder='[{"account_code":"1000","debit":100},{"account_code":"3000","credit":100}]'></textarea></label>
+              <label class="field"><span>Cash flow category</span><select id="financeJournalCashFlow" class="cyber-input"><option value="operating">Operating</option><option value="investing">Investing</option><option value="financing">Financing</option></select></label>
+              <label class="field"><span>Journal ID to reverse</span><input id="financeJournalReverseId" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Period start</span><input id="financePeriodStart" type="date" class="cyber-input"></label>
+              <label class="field"><span>Period end</span><input id="financePeriodEnd" type="date" class="cyber-input"></label>
+              <label class="field"><span>Budget name</span><input id="financeBudgetName" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Budget start</span><input id="financeBudgetStart" type="date" class="cyber-input"></label>
+              <label class="field"><span>Budget end</span><input id="financeBudgetEnd" type="date" class="cyber-input"></label>
+              <label class="field"><span>Budget lines (JSON: label, account_code, category, amount)</span><textarea id="financeBudgetLines" class="cyber-input" rows="4" placeholder='[{"label":"Infrastructure","account_code":"6300","category":"infrastructure","amount":500}]'></textarea></label>
+            </div>
+            <div class="button-row">
+              <button id="financeJournalButton" type="button" class="cyber-btn small">Post Journal</button>
+              <button id="financeJournalReverseButton" type="button" class="cyber-btn small">Reverse Entry</button>
+              <button id="financePeriodCloseButton" type="button" class="cyber-btn small">Close Period</button>
+              <button id="financeBudgetButton" type="button" class="cyber-btn small">Create Budget</button>
+              <input id="financeBudgetApproveId" type="text" class="cyber-input" placeholder="budget id" autocomplete="off">
+              <button id="financeBudgetApproveButton" type="button" class="cyber-btn small">Approve Budget</button>
+              <button id="financeBudgetReportButton" type="button" class="cyber-btn small">Budget vs Actual</button>
+            </div>
+            <div id="financeJournalList" class="task-list" aria-live="polite"></div>
+            <div id="financeBudgetList" class="task-list" aria-live="polite"></div>
+          </article>
+
+          <article class="surface">
+            <h3>Forecasts, health and management report</h3>
+            <p class="muted">Forecasts are estimates with a horizon, assumptions, sources, method, confidence and limitations. They never become actuals. Alerts require fresh observed data.</p>
+            <div class="card-grid">
+              <label class="field"><span>Horizon (months)</span><input id="financeForecastHorizon" type="number" min="1" max="36" value="6" class="cyber-input"></label>
+              <label class="field"><span>Scenario</span><select id="financeForecastScenario" class="cyber-input"><option value="conservative">Conservative</option><option value="base" selected>Base</option><option value="optimistic">Optimistic</option><option value="custom">Custom</option></select></label>
+              <label class="field"><span>Assumptions (JSON)</span><textarea id="financeForecastAssumptions" class="cyber-input" rows="3" placeholder='{"monthly_revenue_growth":0.03,"monthly_expense_growth":0.01}'></textarea></label>
+              <label class="field"><span>Report title</span><input id="financeReportTitle" type="text" class="cyber-input" autocomplete="off"></label>
+            </div>
+            <div class="button-row">
+              <button id="financeForecastButton" type="button" class="cyber-btn small">Generate Forecast</button>
+              <button id="financeScenarioButton" type="button" class="cyber-btn small">Compare Scenarios</button>
+              <button id="financeHealthButton" type="button" class="cyber-btn small">Refresh Health</button>
+              <button id="financeReportButton" type="button" class="cyber-btn small">Generate Report</button>
+            </div>
+            <div id="financeForecast" class="task-list" aria-live="polite"></div>
+            <div id="financeAlerts" class="task-list" aria-live="polite"></div>
+            <div id="financeReports" class="task-list" aria-live="polite"></div>
+          </article>
+        </section>
+
+        <section id="portfolioPanel" class="panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Multiple ventures, one portfolio</p>
+              <h2>Portfolio Management</h2>
+            </div>
+            <div class="button-row">
+              <button id="portfolioRefreshButton" type="button" class="cyber-btn small">Refresh</button>
+            </div>
+          </div>
+          <p class="muted">Portfolios reference existing Phase 38 ventures and read Phase 35–37 evidence without copying customer, product or ledger records. Consolidated values require explicit FX rates. Recommendations, scenarios and AI advice never execute a decision, transfer funds, change a budget or close a venture.</p>
+          <div id="portfolioStatus" class="muted" aria-live="polite">Reading portfolios…</div>
+
+          <article class="surface">
+            <h3>Open a portfolio</h3>
+            <div class="card-grid">
+              <label class="field"><span>Portfolio name</span><input id="portfolioName" type="text" class="cyber-input" maxlength="160" autocomplete="off"></label>
+              <label class="field"><span>Base reporting currency</span><input id="portfolioCurrency" type="text" maxlength="3" value="USD" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Description</span><input id="portfolioDescription" type="text" class="cyber-input" maxlength="400" autocomplete="off"></label>
+              <label class="field"><span>Objectives (one per line)</span><textarea id="portfolioObjectives" class="cyber-input" rows="3"></textarea></label>
+            </div>
+            <div class="button-row"><button id="portfolioCreateButton" type="button" class="cyber-btn small">Create Portfolio</button></div>
+            <div id="portfolioList" class="task-list" aria-live="polite"></div>
+          </article>
+
+          <div id="portfolioDetail" class="friendly-output empty-state">
+            <div class="empty-hint"><span class="empty-hint-icon">&#9639;</span> Select a portfolio to inspect its ventures, capital, risk and strategy</div>
+          </div>
+          <div id="portfolioDashboard"></div>
+
+          <article class="surface">
+            <h3>Register an existing venture</h3>
+            <p class="muted">A Phase 38 venture can belong to one portfolio only. Lifecycle gates read the existing Phase 35 opportunity, Phase 36 product and Phase 37 customer evidence; a proposed stage is refused when those gates are unmet.</p>
+            <div class="card-grid">
+              <label class="field"><span>Phase 38 venture ID</span><input id="portfolioVentureId" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Phase 36 product ID</span><input id="portfolioProductId" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Phase 35 opportunity ID</span><input id="portfolioOpportunityId" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Initial lifecycle</span><select id="portfolioLifecycle" class="cyber-input"><option value="OPPORTUNITY_DISCOVERY">Opportunity discovery</option><option value="VALIDATION">Validation</option><option value="PRODUCT_DEVELOPMENT">Product development</option><option value="INTERNAL_TESTING">Internal testing</option><option value="READY_FOR_LAUNCH">Ready for launch</option><option value="CUSTOMER_ACQUISITION">Customer acquisition</option><option value="OPERATING">Operating</option></select></label>
+              <label class="field"><span>Reason</span><input id="portfolioLifecycleReason" type="text" class="cyber-input" maxlength="500" autocomplete="off"></label>
+              <label class="field checkbox-field"><input id="portfolioLifecycleApproved" type="checkbox"><span>I approve this initial operating state</span></label>
+            </div>
+            <div class="button-row"><button id="portfolioVentureAddButton" type="button" class="cyber-btn small">Register Venture</button></div>
+          </article>
+
+          <article class="surface">
+            <h3>Portfolio operations</h3>
+            <p class="muted">All controls below produce assessments, recommendations or frozen snapshots. None changes a Phase 38 budget, ledger, venture lifecycle or external system.</p>
+            <div class="button-row">
+              <button id="portfolioEvaluateButton" type="button" class="cyber-btn small">Evaluate &amp; Rank</button>
+              <button id="portfolioRiskButton" type="button" class="cyber-btn small">Assess Risks</button>
+              <button id="portfolioAllocationButton" type="button" class="cyber-btn small">Propose Allocations</button>
+              <button id="portfolioAlertsButton" type="button" class="cyber-btn small">Refresh Alerts</button>
+              <button id="portfolioRecommendButton" type="button" class="cyber-btn small">Strategic Advice</button>
+            </div>
+            <div class="card-grid">
+              <label class="field"><span>Scenario type</span><select id="portfolioScenarioType" class="cyber-input"><option value="revenue_shortfall">Lower revenue</option><option value="scale_venture">Scale a venture</option><option value="launch_delay">Launch delay</option><option value="development_spend">More development spend</option><option value="reduce_opex">Reduce operating expenditure</option><option value="marketing_budget">Change marketing budget</option><option value="pause_venture">Pause a venture</option><option value="infrastructure_cost">Higher infrastructure cost</option></select></label>
+              <label class="field"><span>Target venture (blank = all)</span><input id="portfolioScenarioTarget" type="text" class="cyber-input" autocomplete="off"></label>
+              <label class="field"><span>Horizon months</span><input id="portfolioScenarioHorizon" type="number" min="1" max="36" step="1" value="12" class="cyber-input"></label>
+              <label class="field"><span>Change percent / amount</span><input id="portfolioScenarioValue" type="number" step="0.01" class="cyber-input" placeholder="e.g. 20"></label>
+              <label class="field"><span>Report period</span><select id="portfolioReportPeriod" class="cyber-input"><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly" selected>Monthly</option><option value="quarterly">Quarterly</option></select></label>
+            </div>
+            <div class="button-row">
+              <button id="portfolioScenarioButton" type="button" class="cyber-btn small">Simulate Scenario</button>
+              <button id="portfolioReportButton" type="button" class="cyber-btn small">Generate Report</button>
+            </div>
+            <div id="portfolioActivity" class="task-list" aria-live="polite"></div>
+          </article>
+        </section>
+
+        <section id="operationsPanel" class="panel">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Persistent</p>
+              <h2>Operations</h2>
+            </div>
+            <div class="button-row">
+              <button id="operationsRefreshButton" type="button" class="cyber-btn small">Refresh</button>
+              <button id="operationsTickButton" type="button" class="cyber-btn small" title="Run one monitoring and execution pass now">Run Tick</button>
+            </div>
+          </div>
+          <div id="operationsStatus" class="muted" aria-live="polite">Reading the board…</div>
+
+          <article class="surface">
+            <h3>New Objective</h3>
+            <label class="field">
+              <span>Title</span>
+              <input id="objectiveTitle" type="text" class="cyber-input" maxlength="120" placeholder="e.g. Finish the quarterly report" autocomplete="off">
+            </label>
+            <label class="field">
+              <span>Intended outcome</span>
+              <input id="objectiveOutcome" type="text" class="cyber-input" maxlength="300" placeholder="What does done look like?" autocomplete="off">
+            </label>
+            <label class="field">
+              <span>Kind</span>
+              <select id="objectiveKind" class="cyber-input">
+                <option value="personal">Personal</option>
+                <option value="academic">Academic</option>
+                <option value="professional" selected>Professional</option>
+                <option value="research">Research</option>
+                <option value="development">Development</option>
+                <option value="business">Business</option>
+                <option value="recurring">Recurring</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Autonomy</span>
+              <select id="objectiveAutonomy" class="cyber-input">
+                <option value="observe">Observe only</option>
+                <option value="recommend">Recommend only</option>
+                <option value="execute">Execute authorized work</option>
+                <option value="approval" selected>Execute; pause for sensitive actions</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Deadline <span class="muted">(ISO 8601, optional)</span></span>
+              <input id="objectiveDeadline" type="text" class="cyber-input" placeholder="2026-12-01T17:00:00+00:00" autocomplete="off">
+            </label>
+            <label class="field">
+              <span>Priority <span class="muted">(0–100)</span></span>
+              <input id="objectivePriority" type="number" min="0" max="100" value="50" class="cyber-input">
+            </label>
+            <div class="button-row">
+              <button id="objectiveCreateButton" type="button" class="cyber-btn primary">Create Objective</button>
+            </div>
+          </article>
+
+          <article class="surface">
+            <h3>Objectives</h3>
+            <div id="objectiveList" class="objective-list"></div>
+          </article>
+
+          <article class="surface">
+            <h3>Notifications</h3>
+            <div class="button-row">
+              <button id="operationsMuteButton" type="button" class="cyber-btn small">Mute notifications</button>
+              <button id="operationsNotificationsReadAll" type="button" class="cyber-btn small">Mark all read</button>
+              <button id="operationsNotificationsClear" type="button" class="cyber-btn small">Clear</button>
+            </div>
+            <div id="operationsNotifications" class="objective-notifications"></div>
+          </article>
+
+          <div id="objectiveOutput" class="result-surface"></div>
         </section>
 
         <section id="settingsPanel" class="panel">
@@ -1784,11 +2821,22 @@
     <script defer src="/static/js/render-utils.js?v=__NC_ASSET_VERSION__"></script>
     <script defer src="/static/js/render-explore.js?v=__NC_ASSET_VERSION__"></script>
     <script defer src="/static/js/render-panels.js?v=__NC_ASSET_VERSION__"></script>
+    <script defer src="/static/js/render-business.js?v=__NC_ASSET_VERSION__"></script>
+    <script defer src="/static/js/render-product.js?v=__NC_ASSET_VERSION__"></script>
+    <script defer src="/static/js/render-customer.js?v=__NC_ASSET_VERSION__"></script>
+    <script defer src="/static/js/render-finance.js?v=__NC_ASSET_VERSION__"></script>
+    <script defer src="/static/js/render-portfolio.js?v=__NC_ASSET_VERSION__"></script>
+    <script defer src="/static/js/render-operations.js?v=__NC_ASSET_VERSION__"></script>
     <script defer src="/static/js/telemetry.js?v=__NC_ASSET_VERSION__"></script>
     <script defer src="/static/js/activity.js?v=__NC_ASSET_VERSION__"></script>
     <script defer src="/static/js/routing-explorer.js?v=__NC_ASSET_VERSION__"></script>
     <script defer src="/static/js/novaforge.js?v=__NC_ASSET_VERSION__"></script>
     <script defer src="/static/js/voice.js?v=__NC_ASSET_VERSION__"></script>
+    <script defer src="/static/js/companion.js?v=__NC_ASSET_VERSION__"></script>
+    <script defer src="/static/js/isometric.js?v=__NC_ASSET_VERSION__"></script>
+    <script defer src="/static/js/activity-state.js?v=__NC_ASSET_VERSION__"></script>
+    <script defer src="/static/js/thinking-orb.js?v=__NC_ASSET_VERSION__"></script>
+    <script defer src="/static/js/orbs.js?v=__NC_ASSET_VERSION__"></script>
     <script defer src="/static/js/effects.js?v=__NC_ASSET_VERSION__"></script>
     <script defer src="/static/app.js?v=__NC_ASSET_VERSION__"></script>
     <script defer src="/static/js/nc-os.js?v=__NC_ASSET_VERSION__"></script>

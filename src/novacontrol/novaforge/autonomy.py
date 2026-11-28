@@ -1345,7 +1345,15 @@ class AutonomousSessionController:
             )
         if run.phase is AutonomyPhase.INITIALIZING and not run.objective_id:
             observation: dict[str, Any] = {}
-            for attempt in range(1, max(1, int(self.limits.observation_attempts)) + 1):
+            # Same floor/budget rule as the cycle's read: the first reading is
+            # taken against an observer this run has JUST armed, so it is the
+            # most likely of all to arrive mid-capture.
+            attempts = max(1, int(self.limits.observation_attempts))
+            deadline = self.clock() + float(self.limits.observation_timeout_seconds)
+            ceiling = self._observation_ceiling(attempts)
+            attempt = 0
+            while True:
+                attempt += 1
                 observation = await self._call(
                     self.gateway.observe_frame_once(),
                     float(self.limits.observation_timeout_seconds),
@@ -1354,9 +1362,14 @@ class AutonomousSessionController:
                 status = str(observation.get("status") or "")
                 if status == OBSERVED_STATUS:
                     break
-                if status in {OBSERVATION_BUSY_STATUS, OBSERVATION_IDLE_STATUS} and attempt < int(
-                    self.limits.observation_attempts
-                ):
+                if status == OBSERVATION_BUSY_STATUS:
+                    await self._wait_for_observation(run.session_id, status)
+                    if self.clock() >= deadline or attempt >= ceiling:
+                        break
+                    continue
+                if status == OBSERVATION_IDLE_STATUS:
+                    if attempt >= attempts:
+                        break
                     await self._wait_for_observation(run.session_id, status)
                     continue
                 failure = self._observation_failure(observation) or (
@@ -1364,6 +1377,11 @@ class AutonomousSessionController:
                     str(observation.get("reason") or "The dependency check produced no frame."),
                 )
                 return failure
+            if str(observation.get("status") or "") != OBSERVED_STATUS:
+                return (
+                    AutonomyOutcome.OBSERVATION_UNAVAILABLE,
+                    str(observation.get("reason") or "The dependency check produced no frame."),
+                )
             mismatch = self._target_mismatch(run, observation)
             if mismatch:
                 return AutonomyOutcome.SAFETY_STOP, mismatch
@@ -1514,8 +1532,20 @@ class AutonomousSessionController:
         session_id = run.session_id
         self._record(run, AutonomyPhase.OBSERVING, "Reading the target before deciding anything.")
         attempts = int(self.limits.observation_attempts)
+        # ``observation_attempts`` is a FLOOR, never the ceiling: a busy answer
+        # means a capture is ALREADY running and waiting is the correct response
+        # (a second capture is never started). Measured on a real 5.2 MP game
+        # window, one capture takes 0.9-1.6 s, so two attempts inside a single
+        # first capture ended every live run at INITIALIZING with
+        # ``observation_unavailable`` — the agent never got to decide anything.
+        # The retry therefore continues while the declared observation budget is
+        # unspent, and both bounds are passed in (never an unbounded wait).
+        deadline = self.clock() + float(self.limits.observation_timeout_seconds)
+        ceiling = self._observation_ceiling(attempts)
         last: dict[str, Any] = {}
-        for attempt in range(1, attempts + 1):
+        attempt = 0
+        while True:
+            attempt += 1
             if self._cancelled(session_id):
                 return {}, (AutonomyOutcome.SESSION_CANCELLED, "The operator cancelled during observation.")
             if attempt > 1:
@@ -1529,11 +1559,21 @@ class AutonomousSessionController:
             status = str(last.get("status") or "")
             if status == OBSERVED_STATUS:
                 break
-            if status == OBSERVATION_BUSY_STATUS or status == OBSERVATION_IDLE_STATUS:
-                # A frame is already in flight, or the observer is not sampling:
-                # waiting is the correct response — never a second capture. The
-                # wait must outlast the capture that is running, or every retry
-                # meets the same one and reports an absent observation.
+            if status == OBSERVATION_BUSY_STATUS:
+                # A capture is ALREADY running: waiting is the correct response —
+                # never a second capture — and the wait must outlast the capture
+                # that is running, or every retry meets the same one and reports
+                # an absent observation. This is the only status worth spending
+                # the observation budget on.
+                await self._wait_for_observation(session_id, status)
+                if self.clock() >= deadline or attempt >= ceiling:
+                    break
+                continue
+            if status == OBSERVATION_IDLE_STATUS:
+                # Nothing is capturing, so waiting buys nothing: the attempt floor
+                # still applies (a pause/resume race resolves in one tick).
+                if attempt >= attempts:
+                    break
                 await self._wait_for_observation(session_id, status)
                 continue
             if attempt < attempts:
@@ -1546,7 +1586,8 @@ class AutonomousSessionController:
             return {}, self._stop_for(run, cycle, failure[0], failure[1])
         if str(last.get("status") or "") != OBSERVED_STATUS:
             reason = (
-                f"No validated frame was produced in {attempts} attempt(s); the newest answer was "
+                f"No validated frame was produced in {attempt} attempt(s) over "
+                f"{float(self.limits.observation_timeout_seconds):g} s; the newest answer was "
                 f"{str(last.get('status') or 'nothing')!r} ({str(last.get('reason') or 'no reason given')})"
             )
             cycle.observation = self._observation_row(last)
@@ -2313,6 +2354,18 @@ class AutonomousSessionController:
             return
         if run.phase is not AutonomyPhase.PAUSED:
             self._record(run, AutonomyPhase.PAUSED, "The operator paused the run.")
+
+    def _observation_ceiling(self, attempts: int) -> int:
+        """How many tries the observation budget can buy, as a hard stop.
+
+        The deadline is the real bound; this ceiling keeps termination
+        deterministic on a clock that does not advance (a test double, or a
+        suspended host), so a busy observer can never spin the supervisor.
+        """
+        budget_slices = int(
+            float(self.limits.observation_timeout_seconds) / CAPTURE_IN_FLIGHT_WAIT_SECONDS
+        )
+        return max(int(attempts), int(attempts) + max(0, budget_slices))
 
     async def _wait_for_observation(self, session_id: str, status: str) -> None:
         """Wait the amount of time the observer's own answer implies."""

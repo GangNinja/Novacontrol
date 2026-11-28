@@ -1505,6 +1505,161 @@ class ModuleSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class ContinualLearningSettings:
+    """What continual learning may do on this machine. Phase 27.
+
+    These are POLICY values, not capabilities: how much executed evidence is
+    retained, how many independent verified successes a strategy needs, how
+    confident a recommendation must be before it is offered, and whether a
+    regression may restore the previous strategy version on its own.
+
+    ``capture_requests`` is the phase's live switch. With it false the engine
+    still answers questions about evidence it already holds, but the application
+    records nothing new — a deployment that wants no behavioural learning can
+    say so without disabling the read surface.
+    """
+
+    enabled: bool = True
+    persist: bool = True
+    capture_requests: bool = True
+    auto_learn: bool = True
+    auto_promote: bool = True
+    auto_rollback: bool = True
+    max_experiences: int = 500
+    min_support: int = 2
+    min_confidence: float = 0.6
+    retention_days: int = 180
+    benchmark_tasks: int = 6
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "persist": self.persist,
+            "capture_requests": self.capture_requests,
+            "auto_learn": self.auto_learn,
+            "auto_promote": self.auto_promote,
+            "auto_rollback": self.auto_rollback,
+            "max_experiences": self.max_experiences,
+            "min_support": self.min_support,
+            "min_confidence": self.min_confidence,
+            "retention_days": self.retention_days,
+            "benchmark_tasks": self.benchmark_tasks,
+        }
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "ContinualLearningSettings":
+        defaults = cls()
+        return cls(
+            enabled=_parse_bool(data.get("enabled"), default=defaults.enabled),
+            persist=_parse_bool(data.get("persist"), default=defaults.persist),
+            capture_requests=_parse_bool(
+                data.get("capture_requests"), default=defaults.capture_requests
+            ),
+            auto_learn=_parse_bool(data.get("auto_learn"), default=defaults.auto_learn),
+            auto_promote=_parse_bool(data.get("auto_promote"), default=defaults.auto_promote),
+            auto_rollback=_parse_bool(
+                data.get("auto_rollback"), default=defaults.auto_rollback
+            ),
+            max_experiences=_count_value(
+                data.get("max_experiences"), defaults.max_experiences, maximum=5000
+            ),
+            min_support=_count_value(data.get("min_support"), defaults.min_support, maximum=10),
+            min_confidence=_float_setting(
+                data, "min_confidence", defaults.min_confidence
+            ),
+            retention_days=_count_value(
+                data.get("retention_days"), defaults.retention_days, maximum=3650
+            ),
+            benchmark_tasks=_count_value(
+                data.get("benchmark_tasks"), defaults.benchmark_tasks, maximum=12
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CollaborationSettings:
+    """What multi-agent collaboration may do on this machine. Phase 28.
+
+    These are COORDINATION ceilings, not permissions: how many agents may work
+    at once, how many subtasks a plan may hold, how long a subtask may run and
+    whether completed work is persisted. No value here widens a tool grant or
+    bypasses the existing approval layer.
+    """
+
+    enabled: bool = True
+    persist: bool = True
+    capture_learning: bool = True
+    max_concurrency: int = 3
+    max_subtasks: int = 6
+    max_tasks: int = 50
+    max_retries: int = 1
+    default_timeout_seconds: float = 120.0
+    rate_limit_backoff_seconds: float = 0.5
+    rate_limit_backoff_max_seconds: float = 5.0
+    token_budget: int = 0
+    hardware_aware: bool = True
+    sequential_fallback: bool = True
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "persist": self.persist,
+            "capture_learning": self.capture_learning,
+            "max_concurrency": self.max_concurrency,
+            "max_subtasks": self.max_subtasks,
+            "max_tasks": self.max_tasks,
+            "max_retries": self.max_retries,
+            "default_timeout_seconds": self.default_timeout_seconds,
+            "rate_limit_backoff_seconds": self.rate_limit_backoff_seconds,
+            "rate_limit_backoff_max_seconds": self.rate_limit_backoff_max_seconds,
+            "token_budget": self.token_budget,
+            "hardware_aware": self.hardware_aware,
+            "sequential_fallback": self.sequential_fallback,
+        }
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "CollaborationSettings":
+        defaults = cls()
+        return cls(
+            enabled=_parse_bool(data.get("enabled"), default=defaults.enabled),
+            persist=_parse_bool(data.get("persist"), default=defaults.persist),
+            capture_learning=_parse_bool(
+                data.get("capture_learning"), default=defaults.capture_learning
+            ),
+            max_concurrency=_count_value(
+                data.get("max_concurrency"), defaults.max_concurrency, maximum=8
+            ),
+            max_subtasks=_count_value(
+                data.get("max_subtasks"), defaults.max_subtasks, maximum=12
+            ),
+            max_tasks=_count_value(data.get("max_tasks"), defaults.max_tasks, maximum=500),
+            max_retries=_count_value(data.get("max_retries"), defaults.max_retries, maximum=5),
+            default_timeout_seconds=_float_setting(
+                data, "default_timeout_seconds", defaults.default_timeout_seconds
+            ),
+            rate_limit_backoff_seconds=_seconds_setting(
+                data,
+                "rate_limit_backoff_seconds",
+                defaults.rate_limit_backoff_seconds,
+            ),
+            rate_limit_backoff_max_seconds=_seconds_setting(
+                data,
+                "rate_limit_backoff_max_seconds",
+                defaults.rate_limit_backoff_max_seconds,
+            ),
+            token_budget=_count_value(
+                data.get("token_budget"), defaults.token_budget, maximum=10_000_000
+            ),
+            hardware_aware=_parse_bool(
+                data.get("hardware_aware"), default=defaults.hardware_aware
+            ),
+            sequential_fallback=_parse_bool(
+                data.get("sequential_fallback"), default=defaults.sequential_fallback
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class NovaControlConfig:
     app: AppSettings = field(default_factory=AppSettings)
     database: DatabaseSettings = field(default_factory=DatabaseSettings)
@@ -1572,6 +1727,16 @@ class NovaControlConfig:
     generalization: GeneralizationSettings = field(
         default_factory=GeneralizationSettings
     )
+    # Phase 27: what continual learning retains and when a strategy may be
+    # promoted. Its own section because it answers a question no neighbour does:
+    # what evidence outlives the request that produced it, and what may be
+    # recommended because of it. Nothing here can widen a permission or edit code.
+    continual: ContinualLearningSettings = field(default_factory=ContinualLearningSettings)
+    # Phase 28: how many agents may collaborate, under what ceilings, and
+    # whether the task graph is persisted. Its own section because it answers a
+    # coordination question no neighbour does, and nothing here can grant a
+    # permission or bypass an approval.
+    collaboration: CollaborationSettings = field(default_factory=CollaborationSettings)
     models: ModelSettings = field(default_factory=ModelSettings)
     modules: Mapping[str, ModuleSettings] = field(default_factory=dict)
 
@@ -1618,6 +1783,12 @@ class NovaControlConfig:
             embodied=EmbodiedSettings.from_mapping(_mapping(data.get("embodied", {}))),
             generalization=GeneralizationSettings.from_mapping(
                 _mapping(data.get("generalization", {}))
+            ),
+            continual=ContinualLearningSettings.from_mapping(
+                _mapping(data.get("continual", {}))
+            ),
+            collaboration=CollaborationSettings.from_mapping(
+                _mapping(data.get("collaboration", {}))
             ),
             models=ModelSettings.from_mapping(_mapping(data.get("models", {}))),
             modules=modules,
@@ -1744,6 +1915,83 @@ class NovaControlConfig:
                     os.getenv("NOVACONTROL_AUTOMATION_MAX_FAILURES"),
                     base.automation.max_failures,
                     maximum=MAX_AUTOMATION_FAILURES,
+                ),
+            ),
+            # Phase 27: the live switches, read on the same rules as every other
+            # section — an unusable count keeps the default rather than becoming 0.
+            continual=replace(
+                base.continual,
+                enabled=_parse_bool(
+                    os.getenv("NOVACONTROL_CONTINUAL_ENABLED"),
+                    default=base.continual.enabled,
+                ),
+                persist=_parse_bool(
+                    os.getenv("NOVACONTROL_CONTINUAL_PERSIST"),
+                    default=base.continual.persist,
+                ),
+                capture_requests=_parse_bool(
+                    os.getenv("NOVACONTROL_CONTINUAL_CAPTURE"),
+                    default=base.continual.capture_requests,
+                ),
+                max_experiences=_count_value(
+                    os.getenv("NOVACONTROL_CONTINUAL_MAX_EXPERIENCES"),
+                    base.continual.max_experiences,
+                    maximum=5000,
+                ),
+                min_support=_count_value(
+                    os.getenv("NOVACONTROL_CONTINUAL_MIN_SUPPORT"),
+                    base.continual.min_support,
+                    maximum=10,
+                ),
+            ),
+            # Phase 28: the coordination switches. An unusable count keeps the
+            # default rather than becoming a zero-agent plan.
+            collaboration=replace(
+                base.collaboration,
+                enabled=_parse_bool(
+                    os.getenv("NOVACONTROL_COLLABORATION_ENABLED"),
+                    default=base.collaboration.enabled,
+                ),
+                persist=_parse_bool(
+                    os.getenv("NOVACONTROL_COLLABORATION_PERSIST"),
+                    default=base.collaboration.persist,
+                ),
+                capture_learning=_parse_bool(
+                    os.getenv("NOVACONTROL_COLLABORATION_CAPTURE_LEARNING"),
+                    default=base.collaboration.capture_learning,
+                ),
+                max_concurrency=_count_value(
+                    os.getenv("NOVACONTROL_COLLABORATION_MAX_CONCURRENCY"),
+                    base.collaboration.max_concurrency,
+                    maximum=8,
+                ),
+                max_subtasks=_count_value(
+                    os.getenv("NOVACONTROL_COLLABORATION_MAX_SUBTASKS"),
+                    base.collaboration.max_subtasks,
+                    maximum=12,
+                ),
+                max_tasks=_count_value(
+                    os.getenv("NOVACONTROL_COLLABORATION_MAX_TASKS"),
+                    base.collaboration.max_tasks,
+                    maximum=500,
+                ),
+                max_retries=_count_value(
+                    os.getenv("NOVACONTROL_COLLABORATION_MAX_RETRIES"),
+                    base.collaboration.max_retries,
+                    maximum=5,
+                ),
+                rate_limit_backoff_max_seconds=_seconds_value(
+                    os.getenv("NOVACONTROL_COLLABORATION_BACKOFF_MAX_SECONDS"),
+                    base.collaboration.rate_limit_backoff_max_seconds,
+                ),
+                token_budget=_count_value(
+                    os.getenv("NOVACONTROL_COLLABORATION_TOKEN_BUDGET"),
+                    base.collaboration.token_budget,
+                    maximum=10_000_000,
+                ),
+                hardware_aware=_parse_bool(
+                    os.getenv("NOVACONTROL_COLLABORATION_HARDWARE_AWARE"),
+                    default=base.collaboration.hardware_aware,
                 ),
             ),
             models=replace(
@@ -2004,7 +2252,7 @@ _TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
 _FALSE_WORDS = frozenset({"0", "false", "no", "off"})
 
 
-def _parse_bool(value: str | None, *, default: bool) -> bool:
+def _parse_bool(value: object, *, default: bool) -> bool:
     """Read a boolean switch, keeping the current value on unusable input.
 
     An explicitly written value — 1/true/yes/on, or 0/false/no/off — is obeyed.
@@ -2017,7 +2265,9 @@ def _parse_bool(value: str | None, *, default: bool) -> bool:
     """
     if value is None:
         return default
-    text = value.strip().lower()
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
     if text in _TRUE_WORDS:
         return True
     if text in _FALSE_WORDS:
@@ -2152,6 +2402,26 @@ def _float_setting(data: Mapping[str, Any], key: str, default: float) -> float:
     except (TypeError, ValueError):
         return default
     return parsed if 0.0 <= parsed <= 1.0 else default
+
+
+def _seconds_setting(
+    data: Mapping[str, Any], key: str, default: float, *, maximum: float = 300.0
+) -> float:
+    """A non-negative duration, not a 0–1 weight.
+
+    Reusing ``_float_setting`` here silently disabled every value above one
+    second, which is exactly the range a backoff needs.
+    """
+    value = data.get(key)
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed != parsed or parsed in {float("inf"), float("-inf")}:
+        return default
+    return parsed if 0.0 <= parsed <= maximum else default
 
 
 def _days_value(value: str | None, default: int) -> int:

@@ -337,6 +337,18 @@ the boot path.
 | `GET /models` | The measured readout: resident models, free RAM, GPU/NPU, and what would be selected for each kind of work. Also where the `warm` idle window is applied |
 | `GET /intelligence` | The same table plus the lifecycle telemetry, without a runtime probe on the hot path |
 
+## Adaptive routing (Phase 33)
+
+Phase 33 adds selection and execution policy over this same manager. The
+provider/model catalogue, task profile, scoring, fallback, cost cap, hardware
+fit, local acquire/release and reversible learning policy live in
+`models/adaptive.py`; they do not replace any part of the Phase 7/14 stack.
+The router asks the manager for a local model only after selection, uses the
+existing benchmark/cost estimators as evidence, and never invents a price or a
+capability. The full design, API and limitations are in
+[ADAPTIVE_MODELS.md](ADAPTIVE_MODELS.md); the acceptance evidence is in
+[PHASE33_REPORT.md](PHASE33_REPORT.md).
+
 ## Known limitations
 
 - **The GPU is reported, not used for placement.** The runtime loads into system

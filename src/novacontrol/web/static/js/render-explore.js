@@ -290,3 +290,129 @@ function trackExploredTopic(topic) {
   const isFollowup = /^(tell me more|go deeper|continue|elaborate|give me more|what else|more detail)/i.test(topic);
   if (!isFollowup || !state.lastExploredTopic) state.lastExploredTopic = topic;
 }
+
+/* ── Research history ──────────────────────────────────────────
+ *
+ * What the reader actually researched, newest first, in THIS browser's
+ * localStorage (the same local-first pattern as the chat and JARVIS histories).
+ * A row re-runs its search; each row and the whole list can be deleted, and
+ * every mutation rewrites storage so a reload agrees with what is on screen.
+ */
+const EXPLORE_HISTORY_KEY = "novacontrol.exploreHistory";
+const EXPLORE_HISTORY_MAX = 30;
+
+function loadExploreHistory() {
+  let raw = [];
+  try {
+    raw = JSON.parse(localStorage.getItem(EXPLORE_HISTORY_KEY) || "[]");
+  } catch (_) {
+    return []; // unreadable storage is empty history, never a crash
+  }
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((entry) => entry && typeof entry.topic === "string" && entry.topic.trim())
+    .slice(0, EXPLORE_HISTORY_MAX);
+}
+
+function saveExploreHistory(items) {
+  const trimmed = items.slice(0, EXPLORE_HISTORY_MAX);
+  try { localStorage.setItem(EXPLORE_HISTORY_KEY, JSON.stringify(trimmed)); } catch (_) { /* storage unavailable */ }
+  return trimmed;
+}
+
+function recordExploreHistory(topic) {
+  const clean = String(topic || "").trim();
+  const items = loadExploreHistory();
+  if (!clean) return items;
+  // An immediate repeat UPDATES the existing row instead of duplicating it.
+  const withoutRepeat = items.filter((entry) => String(entry.topic).toLowerCase() !== clean.toLowerCase());
+  withoutRepeat.unshift({ topic: clean, at: new Date().toISOString() });
+  const saved = saveExploreHistory(withoutRepeat);
+  renderExploreHistory(saved);
+  return saved;
+}
+
+function deleteExploreHistoryEntry(topic) {
+  const target = String(topic || "").toLowerCase();
+  const saved = saveExploreHistory(loadExploreHistory().filter((entry) => String(entry.topic).toLowerCase() !== target));
+  renderExploreHistory(saved);
+  showToast("Search removed from history");
+  return saved;
+}
+
+function clearExploreHistory() {
+  const saved = saveExploreHistory([]);
+  renderExploreHistory(saved);
+  showToast("Research history cleared");
+  return saved;
+}
+
+function exploreHistoryWhen(iso) {
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return "";
+  const minutes = Math.max(0, Math.round((Date.now() - then) / 60000));
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  return days === 1 ? "yesterday" : `${days}d ago`;
+}
+
+function runExploreFromHistory(topic) {
+  byId("exploreInput").value = topic;
+  byId("exploreButton").click();
+}
+
+function renderExploreHistory(items) {
+  const list = byId("exploreHistoryList");
+  if (!list) return;
+  const entries = Array.isArray(items) ? items : loadExploreHistory();
+  clearNode(list);
+  entries.forEach((entry) => {
+    const row = el("li", "explore-history-row");
+    const main = el("button", "explore-history-main");
+    main.type = "button";
+    main.title = "Research this again";
+    main.appendChild(el("span", "explore-history-text", entry.topic));
+    main.appendChild(el("span", "explore-history-meta", exploreHistoryWhen(entry.at)));
+    main.addEventListener("click", () => runExploreFromHistory(entry.topic));
+    row.appendChild(main);
+    const remove = el("button", "explore-history-delete", "Delete");
+    remove.type = "button";
+    remove.setAttribute("aria-label", `Delete "${entry.topic}" from research history`);
+    remove.addEventListener("click", (event) => {
+      event.stopPropagation();
+      deleteExploreHistoryEntry(entry.topic);
+    });
+    row.appendChild(remove);
+    list.appendChild(row);
+  });
+  const empty = byId("exploreHistoryEmpty");
+  if (empty) empty.hidden = entries.length > 0;
+  const clear = byId("exploreHistoryClearButton");
+  if (clear) clear.disabled = entries.length === 0;
+  const badge = byId("exploreHistoryCount");
+  if (badge) {
+    badge.textContent = String(entries.length);
+    badge.hidden = entries.length === 0;
+  }
+}
+
+function setExploreHistoryOpen(open) {
+  const panel = byId("exploreHistory");
+  const button = byId("exploreHistoryButton");
+  if (!panel) return;
+  panel.hidden = !open;
+  if (button) button.setAttribute("aria-expanded", open ? "true" : "false");
+  if (open) renderExploreHistory();
+}
+
+function setupExploreHistory() {
+  const button = byId("exploreHistoryButton");
+  const panel = byId("exploreHistory");
+  if (!button || !panel) return;
+  button.addEventListener("click", () => setExploreHistoryOpen(panel.hidden));
+  byId("exploreHistoryClearButton").addEventListener("click", clearExploreHistory);
+  renderExploreHistory();
+}

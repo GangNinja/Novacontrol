@@ -88,7 +88,12 @@ class GuidedClickPlaywrightBase(unittest.TestCase):
         self.port = _free_port()
         env = dict(
             os.environ,
-            PYTHONPATH=str(ROOT / "src"),
+            # `tests` has no __init__.py, so importing it as a package depends on
+            # which `tests` Python resolves first (an installed one shadows the
+            # directory and the server dies with "Could not import module"). Put
+            # the tests directory on the path and name the module directly, which
+            # has one unambiguous resolution.
+            PYTHONPATH=os.pathsep.join((str(ROOT / "src"), str(ROOT / "tests"))),
             NOVA_DATA_DIR=str(self.data_dir),
             NOVA_VISION_FRAME_MODE=self.frame_mode,
         )
@@ -96,7 +101,7 @@ class GuidedClickPlaywrightBase(unittest.TestCase):
         # runner writes relative paths) — same as production behavior.
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         self.server = subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", "tests._guided_click_app:create_app",
+            [sys.executable, "-m", "uvicorn", "_guided_click_app:create_app",
              "--factory", "--host", "127.0.0.1", "--port", str(self.port)],
             cwd=str(ROOT), env=env, stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE, creationflags=flags,

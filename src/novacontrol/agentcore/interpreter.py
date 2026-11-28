@@ -9,6 +9,7 @@ so the interpreter works identically offline.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -31,6 +32,10 @@ _RISK_PATTERNS: tuple[tuple[str, str], ...] = (
 )
 
 _CONFIRM_PATTERNS = r"\b(delete|remove|send|post|publish|pay|purchase|submit|install|uninstall)\b"
+
+#: LLM enrichment is optional. A slow or unresponsive model must not turn a
+#: deterministic plan into an indefinitely pending request.
+_ENRICH_TIMEOUT_SECONDS = 8.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,7 +167,10 @@ class TaskInterpreter:
                 "Return one subtask per line, no numbering, maximum 9 lines, nothing else.\n\n"
                 f"Request: {interpreted.goal}"
             )
-            raw = str(await complete([{"role": "user", "content": prompt}]))
+            raw = str(await asyncio.wait_for(
+                complete([{"role": "user", "content": prompt}]),
+                timeout=_ENRICH_TIMEOUT_SECONDS,
+            ))
             lines = tuple(
                 line.strip(" -0123456789.\t")
                 for line in raw.splitlines()

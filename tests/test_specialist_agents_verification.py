@@ -355,7 +355,15 @@ class StageVocabularyTests(unittest.TestCase):
 
         specialists = asyncio.run(installed())
 
-        self.assertEqual([name for name, _ in specialists], ["developer-agent", "research-agent"])
+        self.assertEqual(
+            [name for name, _ in specialists],
+            [
+                "data-analysis-agent",
+                "developer-agent",
+                "research-agent",
+                "verification-agent",
+            ],
+        )
         for name, stages in specialists:
             with self.subTest(agent=name):
                 self.assertEqual(stages, [stage.value for stage in STAGE_ORDER])

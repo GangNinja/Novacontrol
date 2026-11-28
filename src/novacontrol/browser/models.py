@@ -17,9 +17,16 @@ class BrowserActionType(StrEnum):
     TEST_WEB_APP = "test_web_app"
     SCREENSHOT = "screenshot"
     CLICK = "click"
+    TYPE = "type"
+    SCROLL = "scroll"
+    GO_BACK = "go_back"
+    PRESS_KEY = "press_key"
+    UPLOAD = "upload"
+    TAB_NEW = "tab_new"
+    TAB_SWITCH = "tab_switch"
+    TAB_CLOSE = "tab_close"
+    TAB_LIST = "tab_list"
     WAIT_FOR = "wait_for"
-    GET_COOKIES = "get_cookies"
-    SET_COOKIE = "set_cookie"
     EVALUATE_JS = "evaluate_js"
 
 

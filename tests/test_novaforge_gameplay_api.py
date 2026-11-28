@@ -86,12 +86,20 @@ class NovaForgeCapabilityApiTests(_GameplayApiFixture):
             "decision_pipeline"
         ]
         rows = {row["id"]: row for row in pipeline["policies"]}
-        self.assertEqual(set(rows), {"ready", "stages", "fixed"})
+        self.assertEqual(set(rows), {"ready", "stages", "fixed", "model"})
         self.assertEqual(rows["stages"]["policy"], "HarnessStagesPolicy")
         self.assertEqual(rows["stages"]["version"], 1)
         self.assertFalse(rows["stages"]["model_backed"])
         self.assertIn("baseline", rows["fixed"]["kind"])
         self.assertEqual(rows["ready"]["policy"], "HarnessReadyPolicy")
+        # The model policy is the ONE row whose action is a model decision rather
+        # than a rule this build ships. Its ``model_backed`` flag reports whether
+        # such a model is INSTALLED here (model_policy.py: "model_backed":
+        # self.available), so it is asserted as a reported value, not as True:
+        # claiming a live model on a host with none would be the dishonesty this
+        # test exists to prevent.
+        self.assertEqual(rows["model"]["policy"], "ModelDecisionPolicy")
+        self.assertIsInstance(rows["model"]["model_backed"], bool)
 
     def test_unknown_session_is_a_404_on_every_new_route(self) -> None:
         for method, path, payload in (

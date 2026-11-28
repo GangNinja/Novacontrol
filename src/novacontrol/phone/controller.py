@@ -19,6 +19,7 @@ from novacontrol.core.security import (
     PermissionScope,
     RiskLevel,
 )
+from novacontrol.intelligence.messaging import parse_message_request
 from novacontrol.phone.models import (
     PhoneAction,
     PhoneActionResult,
@@ -161,6 +162,22 @@ class AdbPhoneRunner:
                 if resolved:
                     recipient = resolved.replace(" ", "")
             body = str(action.parameters.get("message") or "")
+            channel = str(action.parameters.get("channel") or "").lower()
+            if channel == "whatsapp":
+                digits = re.sub(r"[^\d]", "", recipient)
+                if not digits:
+                    raise RuntimeError(
+                        "WhatsApp needs a phone number for this contact, and the "
+                        "recipient could not be resolved to one."
+                    )
+                return self._run_adb(
+                    (
+                        "shell", "am", "start", "-a", "android.intent.action.VIEW",
+                        "-d", f"https://wa.me/{digits}?text={urllib.parse.quote(body)}",
+                    )
+                )
+            if channel and channel != "sms":
+                raise ValueError(f"Phone messaging supports SMS and WhatsApp, not '{channel}'.")
             return self._run_adb(
                 (
                     "shell", "am", "start", "-a", "android.intent.action.SENDTO",
@@ -438,7 +455,18 @@ class PhoneControlController:
         Deliberately approval-irreversible content: the full message text is in
         the plan so the user reviews exactly what would be sent.
         """
-        recipient, body = _phone_message_parts(message)
+        # The shared grammar reads the channel, recipient and body; the older
+        # splitter stays as the fallback for shapes it deliberately leaves
+        # whole (free text with no separator).
+        request = parse_message_request(message)
+        if request is not None and (request.recipient or request.body):
+            channel = request.app if request.app in ("whatsapp", "sms", "messages") else ""
+            if channel == "sms":
+                channel = ""
+            recipient, body = request.recipient, request.body
+        else:
+            channel, message = _split_message_channel(message)
+            recipient, body = _phone_message_parts(message)
         if not recipient:
             # "text mom good night" — no say/saying/that/: separator. Only split
             # when the leading words are a SAVED contact on the device, so free
@@ -455,7 +483,7 @@ class PhoneControlController:
                     type=PhoneActionType.SEND_TEXT,
                     target=recipient or "messaging",  # the recipient, when known
                     description="Send a text message on the paired phone",
-                    parameters={"recipient": recipient, "message": body},
+                    parameters={"recipient": recipient, "message": body, "channel": channel},
                 ),
             ),
         )
@@ -645,6 +673,22 @@ def _search_uri(query: str, provider: str) -> str:
     if "flipkart" in provider:
         return f"https://www.flipkart.com/search?q={encoded}"
     return f"https://www.google.com/search?q={encoded}"
+
+
+_MESSAGE_CHANNEL = re.compile(
+    r"\b(?:on|via|through|in|using)\s+(whatsapp|telegram|signal|messenger|sms)\b",
+    re.IGNORECASE,
+)
+
+
+def _split_message_channel(message: str) -> tuple[str, str]:
+    """Separate "on whatsapp" from the message spec; blank means plain SMS."""
+    match = _MESSAGE_CHANNEL.search(message)
+    if not match:
+        return "", " ".join(message.split())
+    channel = match.group(1).lower()
+    stripped = f"{message[:match.start()]} {message[match.end():]}"
+    return channel, " ".join(stripped.split())
 
 
 def _phone_message_parts(message: str) -> tuple[str, str]:

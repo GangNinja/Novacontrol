@@ -205,7 +205,7 @@ class AdaptivePlanner:
                 target=self._target_of(fragment),
                 expected="Cited findings with confidence per claim",
             )]
-        if re.search(r"\b(click|type|press|scroll|screenshot|open |close |window|folder|terminal|run )\b", lowered):
+        if re.search(r"\b(click|type|press|scroll|drag|save|screenshot|open |close |window|folder|terminal|run )\b", lowered):
             return [
                 AgentPlanStep(
                     kind=StepKind.DESKTOP,

@@ -231,6 +231,35 @@ class LaunchPlanAndExecuteTests(LibraryApiFixture):
         self.assertEqual(result["execution_results"][0]["status"], "completed")
         self.assertIn("pid", result["game"]["launch"])
 
+    def test_a_verified_launch_is_recorded_as_learning_evidence(self) -> None:
+        plan = self._plan("launch Freedom Fighters")
+        self.assertEqual(
+            self._nova.continual.experiences(task_kind="game.launch")["total"],
+            0,
+            "a plan is not a launch",
+        )
+        result = self._approve(plan)
+        self.assertTrue(result["stages"]["launch_verified"])
+        listing = self._nova.continual.experiences(task_kind="game.launch")
+        self.assertEqual(listing["total"], 1)
+        record = listing["experiences"][0]
+        self.assertEqual(record["goal"], "launch Freedom Fighters")
+        self.assertEqual(record["outcome"], "success")
+        self.assertEqual(record["source"], "execution")
+        self.assertEqual(record["context"]["device"], "desktop")
+        self.assertEqual(record["context"]["game"], "Freedom Fighters")
+        self.assertEqual(record["steps"][0]["kind"], "game_launch")
+        self.assertTrue(record["steps"][0]["verified"])
+
+    def test_an_unverified_launch_is_not_recorded_as_verified_evidence(self) -> None:
+        self.machine.window_after = ""
+        result = self._approve(self._plan("launch Freedom Fighters"))
+        self.assertFalse(result["stages"]["launch_verified"])
+        self.assertEqual(
+            self._nova.continual.experiences(task_kind="game.launch")["total"],
+            0,
+        )
+
     def test_the_token_is_single_use(self) -> None:
         plan = self._plan("launch Freedom Fighters")
         self._approve(plan)

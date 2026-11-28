@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
+from novacontrol.agentcore.targeting import WindowBinding, bind_window, observed_windows
 from novacontrol.agentcore.ui_state import UiElement, UiState
 
 
@@ -44,13 +45,16 @@ class UiPerceptionEngine:
         vision_processor: Any | None = None,
         browser_runner: Any | None = None,
         window_probe: Any | None = None,
+        window_details_probe: Any | None = None,
         completion_provider: Any | None = None,
         screenshot_provider: Any | None = None,
         screen_text_reader: Any | None = None,
+        display_probe: Any | None = None,
     ) -> None:
         self._vision = vision_processor
         self._browser = browser_runner
         self._window_probe = window_probe
+        self._window_details_probe = window_details_probe
         self._provider = completion_provider
         # Where a FRESH screenshot comes from when the caller does not supply
         # one, and how text is read off it. Both are injected callables — the
@@ -61,6 +65,7 @@ class UiPerceptionEngine:
         # says so rather than reporting an unread screen as an empty one.
         self._screenshot_provider = screenshot_provider
         self._screen_text_reader = screen_text_reader
+        self._display_probe = display_probe
 
     async def observe(
         self,
@@ -71,7 +76,15 @@ class UiPerceptionEngine:
         include_desktop: bool = False,
         include_dom: bool = True,
         include_semantic: bool = True,
+        target_window: str = "",
     ) -> UiState:
+        """Observe the machine.
+
+        ``target_window`` is the window the OBJECTIVE names. When it is set, the
+        observed window is that window or nothing: this engine never substitutes
+        the first titled window for a named target, because that substitution is
+        how a typing objective once reached an unrelated application (D12).
+        """
         captured_path, capture_note = await self._resolve_screenshot(
             screenshot_path, include_desktop=include_desktop
         )
@@ -82,6 +95,7 @@ class UiPerceptionEngine:
             capture_note=capture_note,
             include_desktop=include_desktop,
             include_dom=include_dom,
+            target_window=target_window,
         )
         if include_semantic and self._provider is not None and bundle.raw_text:
             bundle = await self._add_semantic_layer(bundle)
@@ -137,25 +151,124 @@ class UiPerceptionEngine:
         capture_note: str,
         include_desktop: bool,
         include_dom: bool,
+        target_window: str = "",
     ) -> _PerceptionBundle:
         elements: list[UiElement] = []
         raw_texts: list[str] = []
         window_title = ""
+        first_title = ""
         resolved_app = application
         source_parts: list[str] = []
         metadata: dict[str, Any] = {}
+        if include_desktop:
+            if self._display_probe is None:
+                metadata["displays"] = "unavailable: no display probe is wired"
+            else:
+                try:
+                    displays = tuple(self._display_probe() or ())
+                    metadata["displays"] = [dict(item) for item in displays]
+                except Exception as exc:
+                    metadata["displays"] = f"unavailable: {type(exc).__name__}: {exc}"
 
-        # Desktop window probe (structured): what windows exist and are visible.
-        # The source is claimed only when the probe actually produced windows.
-        # An available-but-empty probe is recorded as empty rather than reported
-        # as window evidence — reporting it either way is what once made a blind
-        # observation look sourced (the audit's "browser |  | elements=0").
+        # Desktop window probe (structured): what windows exist, where they are,
+        # and whether they are minimised. The richer probe is preferred, with the
+        # historical title-only probe as a fallback. An available-but-empty probe
+        # is recorded as empty rather than reported as window evidence —
+        # reporting it either way is what once made a blind observation look
+        # sourced (the audit's "browser |  | elements=0").
         probe = self._window_probe
+        details_probe = self._window_details_probe
         if not include_desktop:
             metadata["window_probe"] = "not requested for this observation"
-        elif probe is None:
-            metadata["window_probe"] = "unavailable: no probe is wired"
-        else:
+        elif details_probe is not None:
+            try:
+                raw_details = await details_probe()
+                if raw_details is None:
+                    metadata["window_probe"] = "unavailable: the probe could not read windows"
+                else:
+                    titles: list[str] = []
+                    details_payload: list[dict[str, Any]] = []
+                    for index, item in enumerate(raw_details or []):
+                        if not isinstance(item, dict):
+                            continue
+                        title = str(item.get("title", "")).strip()
+                        if not title:
+                            continue
+                        process = str(item.get("process", "")).strip()
+                        bounds = item.get("bounds")
+                        location = None
+                        if isinstance(bounds, (list, tuple)) and len(bounds) == 4:
+                            location = (
+                                (int(bounds[0]) + int(bounds[2])) // 2,
+                                (int(bounds[1]) + int(bounds[3])) // 2,
+                            )
+                        titles.append(title)
+                        first_title = first_title or title
+                        resolved_app = resolved_app or process
+                        details_payload.append({
+                            **item,
+                            "normalized_location": list(location) if location else None,
+                        })
+                        elements.append(UiElement(
+                            id=f"win:{item.get('handle') or process or index}",
+                            type="window",
+                            text=title,
+                            location=location,
+                            enabled=bool(item.get("available", True)),
+                            visible=bool(item.get("visible", True)),
+                            layer="structured",
+                            confidence=0.75 if bounds else 0.55,
+                            attributes={
+                                "process": process,
+                                "handle": item.get("handle"),
+                                "pid": item.get("pid"),
+                                "minimized": item.get("minimized"),
+                                "foreground": item.get("foreground"),
+                                "scale": item.get("scale"),
+                                "responding": item.get("responding"),
+                            },
+                        ))
+                    if titles:
+                        source_parts.append("window_details")
+                        metadata["windows"] = titles
+                        metadata["window_details"] = details_payload[:20]
+                        metadata["foreground_window"] = next(
+                            (item["title"] for item in details_payload if item.get("foreground")), ""
+                        )
+                        unresponsive = [
+                            str(item.get("title", ""))
+                            for item in details_payload
+                            if item.get("responding") is False
+                        ]
+                        metadata["unresponsive_windows"] = unresponsive
+                        if target_window:
+                            binding = bind_window(
+                                target_window, observed_windows(metadata)
+                            )
+                            metadata["target"] = binding.to_dict()
+                            if binding.ok and binding.ref is not None:
+                                window_title = binding.ref.title
+                                resolved_app = binding.ref.process or resolved_app
+                            else:
+                                window_title = ""
+                                metadata["target_refused"] = binding.reason
+                        else:
+                            # No target was named: the probe's first title stays a
+                            # reporting label only. It is NOT an input target —
+                            # every input action requires a bound identity.
+                            window_title = first_title
+                            metadata["target"] = WindowBinding(
+                                status="none_requested",
+                                reason=(
+                                    "the objective names no specific window; "
+                                    "no input target was established"
+                                ),
+                            ).to_dict()
+                    else:
+                        metadata["window_probe"] = "available but reported no windows"
+            except Exception as exc:
+                metadata["window_probe"] = f"unavailable: {type(exc).__name__}"
+        elif probe is not None:
             try:
                 # None means the probe could not read the OS; [] means it read
                 # it and found nothing. Collapsing those two would report an
@@ -164,7 +277,7 @@ class UiPerceptionEngine:
                 lines = [str(line) for line in (raw_lines or []) if str(line).strip()]
                 if raw_lines is None:
                     metadata["window_probe"] = "unavailable: the probe could not read windows"
-                titles: list[str] = []
+                titles = []
                 for line in lines:
                     name, _, title = line.partition("|")
                     window_title = window_title or title.strip()
@@ -185,7 +298,8 @@ class UiPerceptionEngine:
                     metadata["window_probe"] = "available but reported no windows"
             except Exception as exc:
                 metadata["window_probe"] = f"unavailable: {type(exc).__name__}"
-
+        elif probe is None:
+            metadata["window_probe"] = "unavailable: no probe is wired"
         # Browser DOM (structured): interactive elements from the live page.
         browser = self._browser
         if include_dom and browser is not None:
@@ -229,6 +343,29 @@ class UiPerceptionEngine:
                             raw_texts.append(text)
                             source_parts.append("screen_text")
                             metadata["screen_text"] = f"{len(words)} word(s) recognized"
+                            for index, word in enumerate(words or []):
+                                word_text = str(word.get("text", "")).strip()
+                                if not word_text:
+                                    continue
+                                try:
+                                    location = (
+                                        int(word["x"]) + int(word["w"]) // 2,
+                                        int(word["y"]) + int(word["h"]) // 2,
+                                    )
+                                except (KeyError, TypeError, ValueError):
+                                    location = None
+                                elements.append(UiElement(
+                                    id=f"ocr:{int(word.get('line', 0))}:{index}",
+                                    type="text",
+                                    text=word_text[:160],
+                                    location=location,
+                                    layer="visual",
+                                    confidence=0.65 if location else 0.45,
+                                    attributes={
+                                        "line": word.get("line"),
+                                        "bounds": [word.get("x"), word.get("y"), word.get("w"), word.get("h")],
+                                    },
+                                ))
                         else:
                             metadata["screen_text"] = "no text recognized on screen"
                 except Exception as exc:
@@ -256,6 +393,22 @@ class UiPerceptionEngine:
         if not source_parts:
             source_parts.append("none")
         raw_text = "\n".join(part for part in raw_texts if part).strip()
+        metadata.update(_ui_signals(
+            raw_text,
+            metadata.get("windows"),
+            unresponsive=metadata.get("unresponsive_windows", ()),
+        ))
+        if screenshot_path:
+            try:
+                import hashlib
+                from pathlib import Path
+
+                path = Path(screenshot_path)
+                if path.is_file():
+                    metadata["screenshot_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()[:24]
+                    metadata["screenshot_bytes"] = path.stat().st_size
+            except Exception:
+                pass
         # Evidence marker: consumers can tell an observation that carried
         # something verifiable from one that carried nothing, without having to
         # re-derive it from three fields.
@@ -363,6 +516,40 @@ def _words_to_text(words: list[dict[str, Any]]) -> str:
         if text:
             lines.setdefault(index, []).append(text)
     return "\n".join(" ".join(lines[key]) for key in sorted(lines))
+
+
+def _ui_signals(raw_text: str, windows: Any, unresponsive: Any = ()) -> dict[str, Any]:
+    """Cheap, honest surface signals: loading, errors and dialogs.
+
+    These are cues from real text and real window titles, never a guess about
+    pixels. A screen with the word "error" in it is REPORTED as containing
+    error text; that is not the same claim as "the operation failed".
+    """
+    loading_words = ("loading", "please wait", "connecting", "starting up", "initializing")
+    error_words = ("error", "failed", "failure", "exception", "not responding", "unresponsive")
+    dialog_words = ("are you sure", "save changes", "do you want to save", "confirm", "warning", "permission")
+    lines = [" ".join(line.split()) for line in str(raw_text or "").splitlines() if line.strip()]
+    lower_lines = [line.lower() for line in lines]
+    titles = [str(item) for item in (windows or []) if str(item).strip()]
+    loading = any(any(word in line for word in loading_words) for line in lower_lines)
+    error_texts = [line[:200] for line in lines if any(word in line.lower() for word in error_words)][:8]
+    dialogs = [line[:200] for line in lines if any(word in line.lower() for word in dialog_words)][:8]
+    # A top-level window titled "... - Save As" / "Confirm" is a modal surface
+    # even when OCR failed to read its body.
+    for title in titles:
+        lowered = title.lower()
+        if any(word in lowered for word in ("save as", "confirm", "warning", "error", "dialog")) and title not in dialogs:
+            dialogs.append(title[:200])
+    hung = [str(item) for item in (unresponsive or ()) if str(item).strip()]
+    return {
+        "loading": loading,
+        "error_texts": error_texts,
+        "dialogs": dialogs[:10],
+        "has_error_text": bool(error_texts),
+        "has_dialog": bool(dialogs),
+        "unresponsive_windows": hung[:10],
+        "has_unresponsive_window": bool(hung),
+    }
 
 
 def _vision_can_see(processor: Any) -> bool:

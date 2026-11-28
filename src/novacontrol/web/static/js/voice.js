@@ -22,6 +22,8 @@ function setupVoice() {
   state.recognition.onstart = () => {
     state.voiceError = ""; // a successful mic acquisition clears any prior block
     setVoiceStatus("Listening...");
+    if (window.NovaCompanion) window.NovaCompanion.onListening();
+    if (window.NovaActivity) window.NovaActivity.voiceListening();
   };
 
   state.recognition.onresult = (event) => {
@@ -36,6 +38,7 @@ function setupVoice() {
     transcript = transcript.trim();
     if (!transcript) return;
     byId("chatInput").value = transcript;
+    if (window.NovaActivity) window.NovaActivity.voiceProcessing();
     if (state.voiceMode === "conversation") {
       setVoiceStatus("Thinking...");
       submitChat({ speak: true });
@@ -54,6 +57,11 @@ function setupVoice() {
   };
 
   state.recognition.onend = () => {
+    if (window.NovaCompanion) window.NovaCompanion.onListeningEnd();
+    if (window.NovaActivity) {
+      if (state.voiceError) window.NovaActivity.voiceError(voiceGuidance(state.voiceError)[0]);
+      else window.NovaActivity.voiceEnd();
+    }
     // A permission block must not be masked by the normal ready state.
     if (state.voiceError) {
       const [statusText] = voiceGuidance(state.voiceError);
@@ -129,6 +137,9 @@ function setVoiceError(code, persistent = true) {
   const [statusText, noticeText] = voiceGuidance(code);
   setVoiceStatus(statusText);
   renderVoiceNotice(noticeText);
+  // A failed mic is a real interruption, not an idle moment.
+  if (window.NovaCompanion) window.NovaCompanion.onRunError(statusText);
+  if (window.NovaActivity) window.NovaActivity.voiceError(statusText);
 }
 
 function stopVoiceChat() {
@@ -139,6 +150,8 @@ function stopVoiceChat() {
   if (state.recognition) {
     try { state.recognition.abort(); } catch {}
   }
+  if (window.NovaCompanion) window.NovaCompanion.onSpeechEnd();
+  if (window.NovaActivity) window.NovaActivity.voiceEnd();
   setVoiceStatus("Voice stopped");
 }
 
@@ -166,7 +179,15 @@ function speakLast() {
   const text = state.lastText || "No response yet.";
   window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
-  utterance.onstart = () => setVoiceStatus("Speaking...");
-  utterance.onend = () => setVoiceStatus(state.voiceChatActive ? "Voice ready" : "Voice output ready");
+  utterance.onstart = () => {
+    setVoiceStatus("Speaking...");
+    if (window.NovaCompanion) window.NovaCompanion.onSpeechStart();
+    if (window.NovaActivity) window.NovaActivity.voiceSpeaking();
+  };
+  utterance.onend = () => {
+    setVoiceStatus(state.voiceChatActive ? "Voice ready" : "Voice output ready");
+    if (window.NovaCompanion) window.NovaCompanion.onSpeechEnd();
+    if (window.NovaActivity) window.NovaActivity.voiceEnd();
+  };
   window.speechSynthesis.speak(utterance);
 }

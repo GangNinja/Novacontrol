@@ -173,11 +173,21 @@ class RecoveryEngineTests(unittest.TestCase):
         knowledge = ApplicationKnowledgeGraph()
         knowledge.record_workflow("app", "open settings", ("click Integrations",))
         engine = RecoveryEngine(knowledge=knowledge)
-        outcome = RecoveryStrategy.RELOCATE and engine.diagnose(
-            ActionRecord(step_id="s", action="click", target="Integrations", success=False),
+        outcome = engine.diagnose(
+            # The fixture means "the element was not found", which is what makes a
+            # relocation safe: nothing was clicked. An empty detail is now read as
+            # an uncertain delivery, so the reason has to be stated.
+            ActionRecord(
+                step_id="s",
+                action="click",
+                target="Integrations",
+                success=False,
+                detail="no matching element in the current UI state",
+            ),
             current_state=_ui(("Integration center",)),
             application="app",
         )
+        self.assertEqual(outcome.strategy, RecoveryStrategy.RELOCATE)
         engine.record_recovery("app", "Integrations", outcome, succeeded=True)
         # The workflow degraded and gained an alternative.
         stored = knowledge.workflows_for("app")[0]
@@ -382,7 +392,17 @@ class AgenticObservationWiringTests(unittest.IsolatedAsyncioTestCase):
         state = await self._wired().observe(include_desktop=True)
         self.assertIn("window_probe", state.source)
         self.assertIn("screen_text", state.source)
-        self.assertEqual(len(state.elements), 2)
+        # Window geometry elements are real structured evidence, so the
+        # observation carries two windows plus the two OCR words. The old
+        # exact count of two was written before geometry layering existed.
+        self.assertEqual(
+            [element.text for element in state.elements if element.type == "window"],
+            ["NovaMarket UI Decision - Google Chrome", "Downloads"],
+        )
+        self.assertEqual(
+            [element.text for element in state.elements if element.layer == "visual"],
+            ["Calculator", "History"],
+        )
         self.assertIn("Calculator", state.raw_text)
         self.assertEqual(state.window, "NovaMarket UI Decision - Google Chrome")
         self.assertTrue(state.metadata["evidence"])

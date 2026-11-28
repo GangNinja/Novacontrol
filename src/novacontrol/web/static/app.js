@@ -407,6 +407,7 @@ function setupActions() {
       successToast: "Research complete",
       onSuccess: (report) => {
         trackExploredTopic(topic);
+        recordExploreHistory(topic); // a completed search is history; a failed one is not
       },
     });
   });
@@ -508,6 +509,184 @@ function setupActions() {
   byId("systemHealthButton").addEventListener("click", () =>
     run("systemOutput", "health", () => requestJson("/system/health"), "systemHealthButton")
   );
+
+  /* ── Phase 34: self-management controls ─────────────────────── */
+
+  function fillIncidentOptions(incidents) {
+    const select = byId("selfManagementIncident");
+    if (!select) return;
+    const previous = select.value;
+    clearNode(select);
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = incidents.length
+      ? "Choose an open incident"
+      : "No open incidents";
+    select.appendChild(placeholder);
+    incidents.forEach((incident) => {
+      const option = document.createElement("option");
+      option.value = String(incident.id || "");
+      option.textContent = `${incident.component || "component"} — ${incident.title || incident.id} (${incident.severity || "warning"})`;
+      select.appendChild(option);
+    });
+    if (incidents.some((incident) => String(incident.id) === previous)) select.value = previous;
+  }
+
+  function fillActionOptions(actions) {
+    const select = byId("selfManagementAction");
+    if (!select) return;
+    clearNode(select);
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = actions.length ? "Choose an action" : "No registered action";
+    select.appendChild(placeholder);
+    actions.forEach((action) => {
+      const option = document.createElement("option");
+      option.value = String(action.id || "");
+      option.textContent = `${action.title || action.id}${action.approval_required ? " (approval required)" : ""}`;
+      select.appendChild(option);
+    });
+    const first = actions.find((action) => action.available !== false) || actions[0];
+    if (first) select.value = String(first.id || "");
+  }
+
+  async function refreshSelfManagement() {
+    const data = await requestJson("/self-management");
+    render("selfManagementStatus", data, "selfManagement");
+    fillIncidentOptions(data.active_incidents || data.open_incidents || []);
+    if (byId("selfManagementMode") && data.recovery && data.recovery.mode) {
+      byId("selfManagementMode").value = data.recovery.mode;
+    }
+    return data;
+  }
+  window.refreshSelfManagement = refreshSelfManagement;
+
+  byId("selfManagementRefreshButton").addEventListener("click", () =>
+    run("selfManagementStatus", "selfManagement", () => refreshSelfManagement(), "selfManagementRefreshButton")
+  );
+  byId("selfManagementHistoryButton").addEventListener("click", () =>
+    run("selfManagementOutput", "selfManagement", () => requestJson("/self-management/incidents?open_only=false&limit=20"), "selfManagementHistoryButton")
+  );
+  byId("selfManagementHealthButton").addEventListener("click", () =>
+    run(
+      "selfManagementStatus",
+      "selfManagement",
+      async () => {
+        await requestJson("/self-management/health", {});
+        return refreshSelfManagement();
+      },
+      "selfManagementHealthButton",
+      { loadingText: "Probing components…" }
+    )
+  );
+  byId("selfManagementInvestigateButton").addEventListener("click", () => {
+    const incident = byId("selfManagementIncident").value;
+    if (!incident) { showToast("Choose an incident first"); return; }
+    run(
+      "selfManagementOutput",
+      "selfManagement",
+      async () => {
+        const result = await requestJson(`/self-management/incidents/${encodeURIComponent(incident)}/investigate`, {
+          agent: byId("selfManagementAgentAdvisory").checked,
+        });
+        await refreshSelfManagement();
+        return result;
+      },
+      "selfManagementInvestigateButton"
+    );
+  });
+  byId("selfManagementRecommendButton").addEventListener("click", () => {
+    const incident = byId("selfManagementIncident").value;
+    if (!incident) { showToast("Choose an incident first"); return; }
+    run(
+      "selfManagementOutput",
+      "selfManagement",
+      async () => {
+        const data = await requestJson(`/self-management/incidents/${encodeURIComponent(incident)}/recommend`, {});
+        fillActionOptions(data.actions || []);
+        await refreshSelfManagement();
+        return data;
+      },
+      "selfManagementRecommendButton"
+    );
+  });
+  byId("selfManagementRecoverButton").addEventListener("click", () => {
+    const incident = byId("selfManagementIncident").value;
+    const action = byId("selfManagementAction").value;
+    if (!incident) { showToast("Choose an incident first"); return; }
+    if (!action) { showToast("Recommend and choose an action first"); return; }
+    run(
+      "selfManagementOutput",
+      "selfManagement",
+      async () => {
+        const result = await requestJson(`/self-management/incidents/${encodeURIComponent(incident)}/recover`, {
+          action_id: action,
+          approved: byId("selfManagementApproved").checked,
+        });
+        await refreshSelfManagement();
+        return result;
+      },
+      "selfManagementRecoverButton"
+    );
+  });
+  byId("selfManagementModeButton").addEventListener("click", () =>
+    run("selfManagementOutput", "selfManagement", async () => {
+      await requestJson("/self-management/policy", { mode: byId("selfManagementMode").value });
+      return refreshSelfManagement();
+    }, "selfManagementModeButton")
+  );
+  byId("selfManagementPauseButton").addEventListener("click", () =>
+    run("selfManagementOutput", "selfManagement", async () => {
+      await requestJson("/self-management/pause", { reason: "operator pause" });
+      return refreshSelfManagement();
+    }, "selfManagementPauseButton")
+  );
+  byId("selfManagementResumeButton").addEventListener("click", () =>
+    run("selfManagementOutput", "selfManagement", async () => {
+      await requestJson("/self-management/resume", {});
+      return refreshSelfManagement();
+    }, "selfManagementResumeButton")
+  );
+  byId("selfManagementMaintenancePreviewButton").addEventListener("click", () =>
+    run("selfManagementOutput", "selfManagement", async () => {
+      const result = await requestJson("/self-management/maintenance/preview", {});
+      await refreshSelfManagement();
+      return result;
+    }, "selfManagementMaintenancePreviewButton")
+  );
+  byId("selfManagementMaintenanceRunButton").addEventListener("click", () =>
+    run("selfManagementOutput", "selfManagement", async () => {
+      const result = await requestJson("/self-management/maintenance/run", {
+        approved: byId("selfManagementMaintenanceApproved").checked,
+      });
+      await refreshSelfManagement();
+      return result;
+    }, "selfManagementMaintenanceRunButton")
+  );
+  byId("selfManagementConfigSnapshotButton").addEventListener("click", () =>
+    run("selfManagementOutput", "selfManagement", async () => {
+      const result = await requestJson("/self-management/configuration/snapshot", {
+        note: byId("selfManagementConfigNote").value.trim(),
+      });
+      await refreshSelfManagement();
+      return result;
+    }, "selfManagementConfigSnapshotButton")
+  );
+  byId("selfManagementConfigRestoreButton").addEventListener("click", () => {
+    const version = Number(byId("selfManagementConfigVersion").value);
+    if (!Number.isInteger(version) || version < 1) {
+      showToast("Enter a stored configuration version");
+      return;
+    }
+    run("selfManagementOutput", "selfManagement", async () => {
+      const result = await requestJson("/self-management/configuration/restore", {
+        version,
+        approved: byId("selfManagementConfigApproved").checked,
+      });
+      await refreshSelfManagement();
+      return result;
+    }, "selfManagementConfigRestoreButton");
+  });
   byId("hardenButton").addEventListener("click", () =>
     run("systemOutput", "health", () => requestJson("/system/harden"), "hardenButton")
   );
@@ -676,6 +855,7 @@ function renderJarvisHistory() {
 function setupJarvisVoice(jarvisPlan) {
   const button = byId("jarvisVoiceButton");
   if (!button) return;
+  const input = byId("jarvisInput");
   const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!Recognition) {
     button.disabled = true;
@@ -684,43 +864,108 @@ function setupJarvisVoice(jarvisPlan) {
   }
   const recognition = new Recognition();
   recognition.continuous = false;
-  recognition.interimResults = false;
+  // Interim results are what make a failed attempt visible: without them the
+  // input stays empty until the engine commits, and a silent miss looks like
+  // a dead button.
+  recognition.interimResults = true;
   recognition.lang = "en-US";
   let listening = false;
-  const resetButton = () => {
+  let heardFinal = false;
+  let blocked = "";
+  let cancelled = false; // the user pressed Stop: an empty session is not a miss
+
+  const resetButton = (label = "Voice") => {
     listening = false;
     button.classList.remove("listening");
-    button.textContent = "Voice";
+    button.textContent = label;
+    button.setAttribute("aria-pressed", "false");
   };
+
   recognition.onstart = () => {
+    blocked = ""; // a successful mic acquisition clears a prior block
+    heardFinal = false;
     listening = true;
     button.classList.add("listening");
     button.textContent = "Listening...";
+    button.setAttribute("aria-pressed", "true");
   };
-  recognition.onend = resetButton;
+
+  recognition.onresult = (event) => {
+    let finalText = "";
+    for (let index = event.resultIndex; index < event.results.length; index += 1) {
+      const alternative = event.results[index][0];
+      if (event.results[index].isFinal) finalText += alternative.transcript;
+      else if (input) input.value = alternative.transcript.trim();
+    }
+    // Spoken transcripts end in a period; that is sentence punctuation, not
+    // part of the app name or payload.
+    const transcript = finalText.trim().replace(/[.,!?;:]+$/, "");
+    if (!transcript) return;
+    heardFinal = true;
+    if (input) input.value = transcript;
+    jarvisPlan(); // spoken commands follow the exact same plan → approve path
+  };
+
   recognition.onerror = (event) => {
-    resetButton();
     const code = event.error || "unknown";
-    if (code === "aborted" || code === "no-speech") return;
+    if (code === "aborted") return; // abort on the Stop click is intentional
+    // Permission/device failures persist until the user fixes them; transient
+    // ones (no speech, network) only explain this attempt.
+    if (["not-allowed", "service-not-allowed", "security", "audio-capture"].includes(code)) {
+      blocked = code;
+      button.title = "Microphone blocked — allow mic access for this site, then reload";
+    }
     if (code === "not-allowed" || code === "service-not-allowed") {
       showToast("Microphone blocked — allow mic access for this site, then retry");
+    } else if (code === "no-speech") {
+      showToast("No speech heard — press Voice and speak again");
+    } else if (code === "network") {
+      showToast("Speech service unreachable — check your connection and retry");
+    } else if (code === "audio-capture") {
+      showToast("No microphone found — connect one and retry");
     } else {
       showToast(`Voice input failed (${code}). Try again.`);
     }
   };
-  recognition.onresult = (event) => {
-    let transcript = "";
-    for (let index = event.resultIndex; index < event.results.length; index += 1) {
-      if (event.results[index].isFinal) transcript += event.results[index][0].transcript;
-    }
-    transcript = transcript.trim();
-    if (!transcript) return;
-    byId("jarvisInput").value = transcript;
-    jarvisPlan(); // spoken commands follow the exact same plan → approve path
+
+  recognition.onend = () => {
+    const wasBlocked = blocked !== "";
+    const heard = heardFinal;
+    const stopped = cancelled;
+    cancelled = false;
+    resetButton(wasBlocked ? "Mic blocked" : "Voice");
+    if (wasBlocked) return;
+    // A session that ends without a single committed word (a silent miss, a
+    // click on a denied mic, an immediate stop) must say so instead of
+    // returning to "Voice" as if nothing happened.
+    if (!heard && !stopped) showToast("No speech heard — press Voice and speak again");
   };
+
   button.addEventListener("click", () => {
-    if (listening) { recognition.abort(); return; }
-    try { recognition.start(); } catch (_) { /* already started */ }
+    if (listening) {
+      cancelled = true;
+      try { recognition.abort(); } catch (_) { /* already stopped */ }
+      return;
+    }
+    // Starting while the previous session is still closing throws
+    // InvalidStateError, which used to be swallowed — the click did nothing.
+    try { recognition.abort(); } catch (_) { /* nothing running */ }
+    try {
+      recognition.start();
+    } catch (error) {
+      const name = error && error.name ? String(error.name).toLowerCase() : "";
+      if (name === "invalidstateerror") {
+        setTimeout(() => { try { recognition.start(); } catch (_) { /* still closing */ } }, 200);
+        return;
+      }
+      const denied = name === "notallowederror" || /permission/i.test((error && error.message) || "");
+      button.textContent = denied ? "Mic blocked" : "Voice";
+      showToast(
+        denied
+          ? "Microphone blocked — allow mic access for this site, then reload"
+          : "Voice could not start. Allow microphone access and try again."
+      );
+    }
   });
 }
 
@@ -732,15 +977,123 @@ async function refreshStatus() {
     setStatus(`Ready | ${status.app.modules.length} modules`);
     updateMetrics(status);
     renderBrainStatus(status); // always-visible LLM provider/model card on the System panel
+    await refreshModelRouting(); // Phase 33: live provider/model catalogue + controls
+    if (window.refreshSelfManagement) {
+      try { await window.refreshSelfManagement(); } catch (_) { /* card stays empty until opened */ }
+    }
     renderBuildModelHint(status.app.brain); // Build tab: is a coding-capable model live?
     render("homeResult", status, "generic");
     renderActivityFeed();
     renderTaskList(status.app.tasks || []);
+    if (window.NovaActivity) window.NovaActivity.setTasks(status.app.tasks || []);
     await syncBrainSwitch();
     await loadSettings();
   } catch (error) {
     setStatus(String(error.message || error));
   }
+}
+
+/* Phase 33: read the LIVE adaptive-routing catalogue. This is a separate small
+   read from /models/routing (not derived from /status) so provider health and
+   controls reflect the routing layer itself. A failure leaves the card hidden
+   rather than showing invented state. */
+async function refreshModelRouting() {
+  const container = byId("modelRoutingStatus");
+  if (!container) return;
+  try {
+    const status = await requestJson("/models/routing");
+    renderModelRouting(status);
+  } catch (_) {
+    clearNode(container);
+  }
+}
+
+function showRoutingPreview(data) {
+  const out = byId("modelRoutingPreview");
+  if (!out) return;
+  clearNode(out);
+  const card = el("article", "info-card");
+  const route = String((data && data.route) || "none");
+  card.appendChild(el("h4", "", `Routing preview: ${route}`));
+  card.appendChild(
+    el(
+      "p",
+      "",
+      data && data.model
+        ? `${String(data.model)} via ${String(data.provider_id || "provider")}`
+        : "No compatible model is available for this task."
+    )
+  );
+  (Array.isArray(data && data.rationale) ? data.rationale : []).slice(0, 6).forEach((reason) => {
+    card.appendChild(el("p", "muted", String(reason)));
+  });
+  const rejected = (Array.isArray(data && data.candidates) ? data.candidates : [])
+    .filter((candidate) => candidate && candidate.eligible === false)
+    .slice(0, 4);
+  rejected.forEach((candidate) => {
+    const endpoint = candidate.endpoint || {};
+    card.appendChild(
+      el(
+        "p",
+        "muted",
+        `Rejected ${String(endpoint.model || "model")}: ${(candidate.rejected_because || []).join("; ")}`
+      )
+    );
+  });
+  out.appendChild(card);
+}
+
+function setupModelRouting() {
+  const container = byId("modelRoutingStatus");
+  if (!container) return;
+  container.addEventListener("click", async (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    try {
+      if (target.id === "modelRoutingPreviewButton") {
+        const text = byId("modelRoutingPrompt").value.trim();
+        if (!text) { showToast("Enter a task to preview"); return; }
+        const data = await requestJson("/models/routing/route", { text });
+        showRoutingPreview(data);
+        await refreshModelRouting();
+        return;
+      }
+      if (target.id === "modelRoutingApplyButton") {
+        const concurrency = Number(byId("modelRoutingConcurrency").value || 1);
+        const capText = byId("modelRoutingCostCap").value.trim();
+        await requestJson("/models/routing/config", {
+          max_concurrency: concurrency,
+          max_cost_per_request: capText === "" ? null : Number(capText),
+        });
+        showToast("Routing limits applied");
+        await refreshModelRouting();
+        return;
+      }
+      if (target.id === "modelRoutingPolicyActivate") {
+        await requestJson("/models/routing/policy/activate", {});
+        showToast("Learned routing policy activated");
+        await refreshModelRouting();
+        return;
+      }
+      if (target.id === "modelRoutingPolicyRollback") {
+        await requestJson("/models/routing/policy/rollback", {});
+        showToast("Routing policy rolled back");
+        await refreshModelRouting();
+        return;
+      }
+      const providerId = target.dataset ? target.dataset.providerToggle : "";
+      if (providerId) {
+        await requestJson("/models/routing/providers", {
+          provider_id: providerId,
+          enabled: target.dataset.providerEnabled === "true",
+        });
+        showToast("Provider setting applied");
+        await refreshModelRouting();
+      }
+    } catch (error) {
+      showToast(String(error.message || error));
+    }
+  });
 }
 
 /* Build tab model hint: tell the user BEFORE typing whether the coding agent
@@ -1106,13 +1459,36 @@ function setupVision() {
 // The Explore panel's topic chips come from live top-story news (server-fed,
 // rotating hourly, invalidated daily) — never a hardcoded list. The static
 // HTML chips are the offline fallback and stay until real topics arrive.
-async function loadTrendingTopics() {
+//
+// `force` is the panel's Refresh control: it asks the server to bypass its
+// 30-minute cache AND hides the topics already on screen, so pressing it gives
+// a different slice of today's headlines rather than waiting for a relaunch.
+async function loadTrendingTopics(force = false) {
   const holder = byId("trendingChips");
   if (!holder) return;
+  const button = byId("trendingRefreshButton");
+  const shown = Array.from(holder.querySelectorAll(".trending-chip"))
+    .map((chip) => (chip.textContent || "").trim())
+    .filter(Boolean);
+  if (button) {
+    button.disabled = true;
+    button.textContent = force ? "Refreshing…" : "Refresh news";
+  }
   try {
-    const data = await requestJson("/explore/trending?count=6");
+    const params = new URLSearchParams({ count: "6" });
+    if (force) {
+      params.set("refresh", "true");
+      if (shown.length) params.set("exclude", shown.join(","));
+    }
+    const data = await requestJson(`/explore/trending?${params.toString()}`);
     const topics = Array.isArray(data.topics) ? data.topics.filter((t) => typeof t === "string" && t.trim()) : [];
-    if (!topics.length) return; // feed unavailable: keep the static help chips
+    setTrendingStatus(trendingStatusText(data));
+    if (!topics.length) {
+      // Feed unavailable: keep whatever is on screen (static chips on a cold
+      // start) and say why rather than showing an empty card.
+      if (force) showToast("News feed unavailable — keeping the topics on screen");
+      return;
+    }
     clearNode(holder);
     topics.forEach((topic) => {
       const chip = el("button", "example-chip trending-chip", topic);
@@ -1124,21 +1500,307 @@ async function loadTrendingTopics() {
       });
       holder.appendChild(chip);
     });
-  } catch (_) { /* offline or auth-less: static chips remain */ }
+    if (force) showToast("News topics refreshed");
+  } catch (_) {
+    // Offline or auth-less: the chips already on screen remain valid.
+    if (force) {
+      setTrendingStatus("Could not refresh — showing the topics already on screen.");
+      showToast("Could not refresh news topics");
+    }
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "Refresh news";
+    }
+  }
+}
+
+function trendingStatusText(data) {
+  const stamp = Number(data && (data.fetched_at || data.updated_at));
+  if (!Number.isFinite(stamp) || stamp <= 0) return "";
+  const when = new Date(stamp * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return `Headlines fetched at ${when}`;
+}
+
+function setTrendingStatus(text) {
+  const node = byId("trendingStatus");
+  if (node) node.textContent = text || "";
+}
+
+function setupExplorePanel() {
+  setupExploreHistory();
+  const refresh = byId("trendingRefreshButton");
+  if (refresh) refresh.addEventListener("click", () => loadTrendingTopics(true));
+  loadTrendingTopics();
+}
+
+/* ── Phase 35: Business Opportunities workspace ─────────────── */
+
+let businessSelectedId = "";
+
+function businessFilterParams() {
+  const params = new URLSearchParams();
+  const query = byId("businessSearch").value.trim();
+  const stage = byId("businessStageFilter").value;
+  const industry = byId("businessIndustryFilter").value.trim();
+  if (query) params.set("q", query);
+  if (stage) params.set("stage", stage);
+  if (industry) params.set("industry", industry);
+  params.set("limit", "100");
+  return params;
+}
+
+async function refreshBusinessStatus() {
+  const data = await requestJson("/business/status");
+  const limits = data.limits || {};
+  byId("businessStatus").textContent =
+    `${data.opportunities ?? 0} stored opportunit${data.opportunities === 1 ? "y" : "ies"} · ` +
+    `Explore ${data.research_provider_configured ? "configured" : "unavailable"} · ` +
+    `score threshold ${limits.score_threshold ?? "?"} · ` +
+    `research budget ${limits.max_research_runs_per_opportunity ?? "?"} run(s) · ` +
+    `external actions executed: ${data.boundaries?.external_actions_executed ? "yes" : "no"}`;
+  return data;
+}
+
+async function refreshBusinessList() {
+  const data = await requestJson(`/business/opportunities?${businessFilterParams().toString()}`);
+  render("businessList", data, "business");
+  return data;
+}
+
+async function loadBusinessOpportunity(id) {
+  if (!id) return null;
+  businessSelectedId = id;
+  const data = await requestJson(`/business/opportunities/${encodeURIComponent(id)}`);
+  render("businessDetail", data, "business");
+  byId("businessEvidenceCard").hidden = false;
+  byId("businessAssessCard").hidden = false;
+  return data;
+}
+window.loadBusinessOpportunity = (id) =>
+  run("businessDetail", "business", () => loadBusinessOpportunity(id), null, {
+    loadingText: "Loading opportunity evidence…",
+  });
+
+function businessNumberField(id, labelText) {
+  const raw = byId(id).value.trim();
+  if (!raw) return null;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) throw new Error(`${labelText} must be a non-negative number`);
+  return value;
+}
+
+function businessListField(id) {
+  return byId(id).value
+    .split(/[,\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function businessAssessmentPayload() {
+  // Only send fields the operator actually supplied. Sending a full object of
+  // nulls would overwrite the assumptions already stored on the opportunity
+  // when the form is blank, silently turning a complete assessment into a
+  // missing-input one.
+  const financial = {};
+  const financialFields = {
+    price: ["businessPrice", "Price"],
+    units_per_month: ["businessUnits", "Units per month"],
+    variable_cost_per_unit: ["businessVariable", "Variable cost"],
+    fixed_monthly_costs: ["businessFixed", "Fixed monthly costs"],
+    infrastructure_monthly: ["businessInfra", "Infrastructure cost"],
+    marketing_monthly: ["businessMarketing", "Marketing cost"],
+    customer_acquisition_cost: ["businessCac", "Customer acquisition cost"],
+    customer_lifetime_months: ["businessLifetime", "Customer lifetime"],
+    initial_investment: ["businessInitial", "Initial investment"],
+    development_cost: ["businessDevelopment", "Development cost"],
+  };
+  Object.entries(financialFields).forEach(([key, [id, labelText]]) => {
+    const value = businessNumberField(id, labelText);
+    if (value !== null) financial[key] = value;
+  });
+  if (Object.keys(financial).length) financial.currency = byId("businessCurrency").value.trim() || "USD";
+
+  const feasibility = {};
+  const feasibilityFields = {
+    operational_score: ["businessOperational", "Operational score"],
+    legal_score: ["businessLegal", "Legal score"],
+    technical_required_ram_gb: ["businessRequiredRam", "Required RAM"],
+    technical_complexity: ["businessTechnicalComplexity", "Technical complexity"],
+    execution_complexity: ["businessExecutionComplexity", "Execution complexity"],
+  };
+  Object.entries(feasibilityFields).forEach(([key, [id, labelText]]) => {
+    const value = businessNumberField(id, labelText);
+    if (value !== null) feasibility[key] = value;
+  });
+  if (byId("businessRequiresGpu").checked) feasibility.technical_requires_gpu = true;
+  const legalBlockers = businessListField("businessLegalBlockers");
+  const dependencies = businessListField("businessDependencies");
+  if (legalBlockers.length) feasibility.legal_blockers = legalBlockers;
+  if (dependencies.length) feasibility.dependency_risks = dependencies;
+
+  const differentiation = businessNumberField("businessDifferentiation", "Differentiation");
+  const payload = {};
+  if (Object.keys(financial).length) payload.financial_inputs = financial;
+  if (Object.keys(feasibility).length) payload.feasibility_inputs = feasibility;
+  if (differentiation !== null) payload.assessment_inputs = { differentiation };
+  return payload;
+}
+
+async function businessRefreshAfterMutation() {
+  await refreshBusinessList();
+  return requestJson(`/business/opportunities/${encodeURIComponent(businessSelectedId)}`);
+}
+
+window.businessAction = (action, opportunityId, extra = {}) => {
+  if (!opportunityId) { showToast("Select an opportunity first"); return; }
+  businessSelectedId = opportunityId;
+  const reason = byId("businessReason").value.trim();
+  const base = `/business/opportunities/${encodeURIComponent(opportunityId)}`;
+  let path = base;
+  let payload = {};
+  let loadingText = "Updating opportunity…";
+  if (action === "research") { path = `${base}/research`; loadingText = "Running Explore research…"; }
+  else if (action === "assess") {
+    path = `${base}/assess`;
+    try { payload = businessAssessmentPayload(); } catch (error) { showToast(String(error.message || error)); return; }
+    loadingText = "Computing evidence, feasibility and score…";
+  }
+  else if (action === "plan") { path = `${base}/experiments/plan`; loadingText = "Planning validation experiments…"; }
+  else if (action === "evaluate") { path = `${base}/evaluate`; loadingText = "Deriving verdict from recorded evidence…"; }
+  else if (action === "pause") { path = `${base}/pause`; payload = { reason }; }
+  else if (action === "resume") { path = `${base}/resume`; payload = { reason }; }
+  else if (action === "reject") {
+    if (!reason) { showToast("Enter a rejection reason in Lifecycle reason"); return; }
+    path = `${base}/reject`; payload = { reason };
+  }
+  else if (action === "archive") { path = `${base}/archive`; payload = { reason }; }
+  else { showToast("Unknown business action"); return; }
+  run("businessDetail", "business", async () => {
+    await requestJson(path, payload);
+    return businessRefreshAfterMutation();
+  }, null, { loadingText });
+};
+
+window.businessExperiment = (action, opportunityId, extra = {}) => {
+  if (!opportunityId || !extra.experimentId) { showToast("Select an experiment first"); return; }
+  const base = `/business/opportunities/${encodeURIComponent(opportunityId)}/experiments/${encodeURIComponent(extra.experimentId)}`;
+  let path = `${base}/approval`;
+  let payload = { approved: Boolean(extra.approved), note: byId("businessReason").value.trim() };
+  let loadingText = "Recording operator decision…";
+  if (action === "experiment-outcome") {
+    const outcome = window.prompt("What was the observed outcome? Do not record an outcome that was not measured.");
+    if (!outcome) { showToast("Outcome was not recorded"); return; }
+    path = `${base}/outcome`;
+    payload = { outcome, result: { note: byId("businessReason").value.trim() } };
+    loadingText = "Recording measured experiment outcome…";
+  }
+  run("businessDetail", "business", async () => {
+    await requestJson(path, payload);
+    return businessRefreshAfterMutation();
+  }, null, { loadingText });
+};
+
+function setupBusinessOpportunities() {
+  if (!byId("businessRefreshButton")) return;
+  byId("businessRefreshButton").addEventListener("click", () =>
+    run("businessList", "business", async () => {
+      await refreshBusinessStatus();
+      return refreshBusinessList();
+    }, "businessRefreshButton")
+  );
+  byId("businessSearch").addEventListener("input", () => { refreshBusinessList().catch(() => {}); });
+  byId("businessStageFilter").addEventListener("change", () => { refreshBusinessList().catch(() => {}); });
+  byId("businessIndustryFilter").addEventListener("input", () => { refreshBusinessList().catch(() => {}); });
+  byId("businessScanButton").addEventListener("click", () => {
+    const query = byId("businessScanQuery").value.trim();
+    if (!query) { showToast("Enter a discovery query"); return; }
+    run("businessScanResults", "business", () => requestJson("/business/discovery/scan", {
+      query,
+      signal_type: byId("businessScanSignal").value,
+      limit: 6,
+    }), "businessScanButton", { loadingText: "Scanning permitted sources for signals…" });
+  });
+  byId("businessDiscoverButton").addEventListener("click", () => {
+    const title = byId("businessTitle").value.trim();
+    const problem = byId("businessProblem").value.trim();
+    const solution = byId("businessSolution").value.trim();
+    const sourceTitle = byId("businessSourceTitle").value.trim();
+    const sourceUrl = byId("businessSourceUrl").value.trim();
+    const sourceReference = byId("businessSourceReference").value.trim();
+    if (!title || !problem || !solution) { showToast("Title, customer problem and proposed solution are required"); return; }
+    if (!sourceTitle && !sourceUrl && !sourceReference) { showToast("Add a source URL or a named brief/reference"); return; }
+    run("businessDetail", "business", async () => {
+      const detail = await requestJson("/business/opportunities", {
+        title,
+        customer_problem: problem,
+        proposed_solution: solution,
+        target_audience: byId("businessAudience").value.trim(),
+        industry: byId("businessIndustry").value.trim(),
+        category: byId("businessCategory").value.trim(),
+        description: byId("businessDescription").value.trim(),
+        signal_type: byId("businessSignal").value,
+        source_title: sourceTitle,
+        source_url: sourceUrl,
+        source_reference: sourceReference,
+      });
+      businessSelectedId = detail.id;
+      await refreshBusinessList();
+      byId("businessEvidenceCard").hidden = false;
+      byId("businessAssessCard").hidden = false;
+      return detail;
+    }, "businessDiscoverButton", { loadingText: "Recording sourced opportunity…" });
+  });
+  byId("businessEvidenceButton").addEventListener("click", () => {
+    if (!businessSelectedId) { showToast("Select an opportunity first"); return; }
+    let value = {};
+    const rawValue = byId("businessEvidenceValue").value.trim();
+    if (rawValue) {
+      try { value = JSON.parse(rawValue); } catch (_) { showToast("Value must be valid JSON"); return; }
+      if (!value || typeof value !== "object" || Array.isArray(value)) { showToast("Value must be a JSON object"); return; }
+    }
+    const claim = byId("businessEvidenceClaim").value.trim();
+    if (!claim) { showToast("Enter the evidence claim"); return; }
+    run("businessDetail", "business", async () => {
+      await requestJson(`/business/opportunities/${encodeURIComponent(businessSelectedId)}/evidence`, {
+        kind: byId("businessEvidenceKind").value,
+        quality: byId("businessEvidenceQuality").value,
+        claim,
+        source_title: byId("businessEvidenceSourceTitle").value.trim(),
+        source_url: byId("businessEvidenceSourceUrl").value.trim(),
+        source_reference: byId("businessEvidenceSourceReference").value.trim(),
+        supplied_by: byId("businessEvidenceSuppliedBy").value.trim(),
+        confidence: byId("businessEvidenceConfidence").value,
+        value,
+      });
+      return businessRefreshAfterMutation();
+    }, "businessEvidenceButton", { loadingText: "Recording evidence and provenance…" });
+  });
+  byId("businessAssessButton").addEventListener("click", () => window.businessAction("assess", businessSelectedId));
+  byId("businessPlanButton").addEventListener("click", () => window.businessAction("plan", businessSelectedId));
+  byId("businessEvaluateButton").addEventListener("click", () => window.businessAction("evaluate", businessSelectedId));
+  refreshBusinessStatus().catch(() => {});
+  refreshBusinessList().catch(() => {});
 }
 
 setupTabs();
 setupActions();
+setupBusinessOpportunities();
+setupModelRouting(); // Phase 33: real provider/model routing controls
 setupVision();
+setupOperations(); // Phase 30: the persistent board reads real stored state
 watchForStaleBuild(); // a tab left open across an edit is rendering an old build
 setupRoutingExplorer();
 setupNovaForge(); // Forge Mission Control: session polling + real frames
 setupVoice();
+setupCompanion(); // Extra 1: the animated companion, driven by the real events above
+setupAtrium(); // Extra 2: the isometric workspace map, bound before the saved panel is restored
+if (window.NovaOrbs) window.NovaOrbs.mount(); // Extra 4: four orbs, one activity adapter
 restoreActivePanel(); // must run after setupTabs binds the nav clicks
 renderChatHistory();
 connectActivitySource(); // one live activity channel for the whole page
 loadActivityFromServer(); // seed the timeline from the server journal
-loadTrendingTopics(); // Explore chips from today's news (falls back to static chips)
+setupExplorePanel(); // Explore chips from today's news + research history
 refreshStatus();
 setupTelemetrySection(); // Command Center metric cards + NOVA CORE indicator
 startTelemetry(); // one poll loop feeds both, paused while the tab is hidden

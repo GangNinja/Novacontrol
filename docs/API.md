@@ -13,6 +13,218 @@ The Phase 12 API subsystem provides REST and WebSocket entrypoints through FastA
 - `GET /system/telemetry`: Live machine telemetry for the Command Center (CPU, memory, storage, GPU, network, battery, temperature). *(frontend: web panel `renderTelemetry`)*
 - `GET /system/harden`: Release hardening report. *(frontend: web panel `renderHealth`)*
 - `GET /system/package`: Runtime package manifest. *(frontend: web panel `renderGeneric`)*
+- `GET /self-management`: Operational health, incidents, recovery policy, maintenance and configuration state. *(frontend: web panel `renderSelfManagement`)*
+- `POST /self-management/health`: Run the live component health roster and open/update incidents; optional `only` list. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /self-management/diagnose`: Run evidence-backed diagnosis without opening new incidents. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /self-management/incidents`: Incident history, open counts and recurrence groups; query: `open_only`, `component`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /self-management/incidents/{incident_id}`: One incident with evidence, diagnosis and registered recovery recommendations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /self-management/incidents/{incident_id}/investigate`: Re-run the roster and attach an evidence-backed diagnosis to one incident. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /self-management/incidents/{incident_id}/recommend`: List recovery actions and approval requirements for one incident without executing them. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /self-management/incidents/{incident_id}/recover`: Execute one approved recovery action with verification and bounded retry; body: `action_id`, `approved`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /self-management/pause`: Pause autonomous recovery and maintenance execution. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /self-management/resume`: Resume autonomous recovery and maintenance execution. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /self-management/policy`: Set autonomy mode, pause state and recovery-window budget. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /self-management/maintenance`: Maintenance policy, allowlisted roots and last report. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /self-management/maintenance/preview`: Preview maintenance impact without changing files. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /self-management/maintenance/run`: Run maintenance; approval-required items need `approved`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /self-management/configuration`: Configuration validity, checksum, known-good version history and recovery state. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /self-management/configuration/snapshot`: Record a validated configuration snapshot with an optional note. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /self-management/configuration/restore`: Restore a known-good configuration version; body: `version`, `approved`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /business/status`: Business validation service status, limits, evidence rules and measured resource snapshot. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /business/opportunities`: List/filter opportunities; query: `q`, `stage`, `industry`, `limit`, `offset`. *(frontend: web panel `renderBusinessOpportunities`)*
+- `POST /business/discovery/scan`: Run a budgeted Explore scan for source-backed candidate signals; it never invents a problem or solution. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /business/opportunities`: Record a sourced opportunity signal or operator brief with duplicate detection. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /business/opportunities/compare`: Compare 2–5 opportunities by recorded evidence and score; query: `ids` (comma-separated). *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /business/opportunities/{opportunity_id}`: Full opportunity: evidence, market, customer, competitors, feasibility, financials, score, experiments, report and history. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /business/opportunities/{opportunity_id}/research`: Run one budgeted Explore research pass; sources are stored as unclassified secondary references. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /business/opportunities/{opportunity_id}/evidence`: Record a specific sourced claim with its quality, provenance and retrieval time. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /business/opportunities/{opportunity_id}/assess`: Compute market/customer/competitor analysis, feasibility, financial scenarios and explainable score; body: `financial_inputs`, `feasibility_inputs`, `assessment_inputs`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /business/opportunities/{opportunity_id}/experiments/plan`: Generate practical validation experiments from the recorded evidence gaps. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /business/opportunities/{opportunity_id}/evaluate`: Derive the validation verdict and report from recorded evidence; never from an agent recommendation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /business/opportunities/{opportunity_id}/experiments/{experiment_id}/approval`: Record an operator approval or denial for one experiment; body: `approved`, `note`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /business/opportunities/{opportunity_id}/experiments/{experiment_id}/outcome`: Record an approved experiment's outcome and result; no external action is executed. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /business/opportunities/{opportunity_id}/pause`: Pause an opportunity and remember the stage it came from. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /business/opportunities/{opportunity_id}/resume`: Resume a paused opportunity to its remembered stage. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /business/opportunities/{opportunity_id}/reject`: Reject an opportunity with a required reason. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /business/opportunities/{opportunity_id}/archive`: Archive an opportunity; its evidence and history are retained. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /product/status`: Product pipeline status, budgets, workspace root and external-action boundaries. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /product/projects`: List product projects; query: `q`, `state`, `limit`, `offset`. *(frontend: web panel `renderProductProjects`)*
+- `POST /product/projects`: Create one product project from a VALIDATED or approved CONDITIONALLY_VALIDATED Phase 35 opportunity; body: `opportunity_id`, `name`, `approved`, `approval_note`, `environment`, `quality_gates`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /product/projects/{product_id}`: Full product record: opportunity trace, PRD, architecture, plan, tasks, tests, gates, defects, releases, readiness, approvals and history. *(frontend: web panel `renderProductProject`)*
+- `GET /product/projects/{product_id}/history`: Product events, approval history, PRD/architecture revisions and resolved opportunity conditions. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/prd`: Generate a traceable PRD revision; missing information is listed, never invented. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/prd/approval`: Approve or request revision of the current PRD; body: `approved`, `note`, optional `version`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/architecture`: Generate a technical design and ADRs from the approved PRD. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/architecture/approval`: Approve or reject the architecture and its major decisions; body: `approved`, `note`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/plan`: Create a milestone/task plan with dependencies, estimates and a critical path. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/plan/approval`: Approve or reject the development plan; body: `approved`, `note`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/development/start`: Start development after human PRD and architecture approval. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/tasks/run-ready`: Execute dependency-ready tasks through the existing agent registry; body: optional `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/tasks/{task_id}/run`: Execute one dependency-ready task through the existing agent registry or configured executor. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/tasks/{task_id}/result`: Record an externally verified task result with evidence; body: `verified`, `summary`, `evidence`, optional `files`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/tasks/{task_id}/retry`: Retry a failed, blocked, cancelled or needs-review task within its attempt budget. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/environment/validate`: Validate the isolated workspace and runtime; dependencies and builds are separate evidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/workspace/files`: Write a reviewed file inside the isolated product workspace; body: `path`, `content`, optional `expected_sha256`, `overwrite`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/workspace/cleanup`: Delete only this product's isolated workspace; body: `approved`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/build`: Record a real build command result; body: `command`, `exit_code`, `output`, `validated`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/tests`: Record one real test result against a configured quality gate; passing counts must be consistent. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/quality/run`: Run the built-in pytest quality runner for supported gates; unsupported gates remain not run; body: optional `gates`, `timeout_seconds`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/defects`: Open a defect with severity and optional requirement/task/test trace. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/defects/{defect_id}/resolve`: Resolve a defect only with passing test evidence; body: `resolution`, `test_result_ids`, optional `fix_task_id`, `verified`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/defects/{defect_id}/reopen`: Reopen a verified defect with a reason. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/requirements/{requirement_id}/verify`: Record requirement verification or an unmet result with evidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/corrective-tasks`: Create bounded corrective tasks for failing gates, blocking defects and unmet requirements. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/release`: Prepare a versioned source-bundle release with notes, checks, deployment docs, rollback and security checklist; no deployment is performed. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/release/approval`: Approve or reject a prepared release; body: `release_id`, `approved`, `note`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/launch-readiness`: Evaluate launch readiness transparently; this never launches or publishes anything. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/launch/approval`: Record human launch authorization only after a ready, approved release; body: `approved`, `note`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/conditions/resolve`: Resolve one recorded conditional-validation condition with evidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/cancel`: Cancel execution and mark pending/running tasks cancelled; body: `reason`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/resume`: Resume a cancelled product without reviving cancelled tasks automatically. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /product/projects/{product_id}/archive`: Archive a product while retaining its documents, evidence and history. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /customer/status`: Customer-growth status, configured integrations, budgets and external-action boundaries. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /customer/workspaces`: List customer workspaces; query: `limit`, `offset`. *(frontend: web panel `renderCustomerGrowth`)*
+- `POST /customer/workspaces`: Create the workspace for a launch-authorized Phase 36 product; body: `product_id`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /customer/workspaces/{product_id}`: Full customer workspace: product snapshot, segments, ICPs, research, customers, leads, deals, communications, tickets, feedback, onboarding, success, analytics and history. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /customer/workspaces/{product_id}/history`: Workspace events, approvals, communication audit and ticket histories. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/refresh`: Refresh the recorded Phase 36 product snapshot and re-check launch authorization. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /customer/workspaces/{product_id}/analytics`: Acquisition, sales, support and retention analytics; unavailable values are explicit. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/segments`: Record a customer segment with evidence or inferred assumptions; body: `name`, `category`, `needs`, `pain_points`, `evidence`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/icps`: Record an Ideal Customer Profile linked to a segment; body: `name`, `segment_id`, `criteria`, `evidence`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/research`: Record sourced market or customer research with retrieval time, confidence and verification state. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /customer/workspaces/{product_id}/customers`: List customers in one isolated product workspace. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/customers`: Record a customer with lawful contact, consent and segment links. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /customer/workspaces/{product_id}/customers/{customer_id}`: One customer with interactions, deals, tickets, feedback, onboarding and success record. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/customers/{customer_id}/consent`: Record or withdraw customer consent for specific channels; body: `status`, `channels`, `source`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/customers/{customer_id}/success`: Refresh explainable engagement, adoption and churn-risk indicators for one customer. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/customers/{customer_id}/churn`: Record churn with a required reason; body: `reason`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/customers/{customer_id}/erasure`: Erase one customer and directly related records with explicit approval; body: `approved`, `reason`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /customer/workspaces/{product_id}/leads`: List/filter leads; query: `status`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/leads`: Record a lead with a lawful source, consent, segment and optional qualification inputs. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/leads/{lead_id}/consent`: Record or withdraw lead consent for specific channels; body: `status`, `channels`, `source`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/leads/{lead_id}/qualify`: Run explainable deterministic qualification; body: optional criterion `inputs` or `score`/`evidence` values. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/leads/{lead_id}/status`: Move a lead through an allowed lifecycle transition; body: `status`, optional `lost_reason`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/leads/{lead_id}/convert`: Convert a qualified lead into a customer; body: optional `customer_inputs`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/interactions`: Record one real customer interaction against a lead, customer, deal or ticket. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/sales/assist`: Build a traceable sales brief from recorded qualification, research, interactions, objections and proposals; body: `lead_id` or `deal_id`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/deals`: Create a sales deal from a lead or customer; value is recorded as an estimate. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/deals/{deal_id}/stage`: Move a deal through a configured pipeline stage; body: `stage`, optional `lost_reason`, `realized_amount`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/deals/{deal_id}/proposals`: Record a sourced proposal revision without implying a contractual commitment. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/deals/{deal_id}/decisions`: Record a deal decision and its source reference. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/policy`: Configure a narrow communication automation policy; enabling requires a named approval note. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/communications`: Draft one consent-aware customer communication for explicit approval. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/communications/{communication_id}/approval`: Approve, reject or cancel one draft communication; body: `approved`, `note`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/communications/{communication_id}/send`: Attempt delivery through the configured sender; without one the record becomes `not_configured` and nothing is sent. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/knowledge`: Record approved product knowledge for grounded support; body: `title`, `body`, `source`, `approved`, `verified`, optional `steps`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /customer/workspaces/{product_id}/tickets`: List/filter support tickets; query: `status`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/tickets`: Create a support ticket for a recorded customer. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /customer/workspaces/{product_id}/tickets/{ticket_id}`: One ticket with messages, notes, history, escalation and assistance runs. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/tickets/{ticket_id}/triage`: Categorise, prioritise, assign and triage one ticket. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/tickets/{ticket_id}/messages`: Add an internal note or customer-visible response; body: `body`, `internal`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/tickets/{ticket_id}/status`: Transition a ticket; resolution or escalation text is required where applicable. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/tickets/{ticket_id}/assist`: Generate grounded support suggestions from approved, verified knowledge only. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/feedback`: Record feedback linked to product, version, customer, segment and ticket. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/onboarding`: Start an onboarding checklist for one customer. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/onboarding/{onboarding_id}`: Update one onboarding item with evidence and adoption score; body: `item_id`, `status`, `evidence`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /customer/workspaces/{product_id}/costs`: Record actual acquisition cost from a named source; CAC stays unavailable without these records. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /finance/status`: Business-finance service status, configured readers, limits and no-payment boundaries. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /finance/ventures`: List isolated ventures with status, currency, recognized revenue and open alerts; query: `limit`, `offset`, `status`. *(frontend: web panel `renderFinanceList`)*
+- `POST /finance/ventures`: Create one venture with business model, ownership, authorization, reporting currency, fiscal period and product/customer references. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /finance/ventures/{venture_id}`: Venture detail: accounts, operations, revenue, expenses, trial balance, working capital, health and read-only links. *(frontend: web panel `renderFinanceDetail`)*
+- `GET /finance/ventures/{venture_id}/dashboard`: Multi-dimensional dashboard separating actual, estimated, projected and forecast values. *(frontend: web panel `renderFinanceDashboard`)*
+- `POST /finance/ventures/{venture_id}/status`: Change operating status; body: `status`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /finance/ventures/{venture_id}/members`: Assign a venture role; body: `actor`, `role` (viewer, analyst, approver, admin). *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /finance/ventures/{venture_id}/operations`: Operational dashboard: task completion, delays, blocked work, dependencies, utilization, cost and risks. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /finance/ventures/{venture_id}/objectives`: Record an operational objective with owner, due date and linked product. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /finance/ventures/{venture_id}/tasks`: Record an operational task with dependencies, cost, utilization and linked execution. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /finance/ventures/{venture_id}/tasks/{task_id}`: Update a recorded task's status, cost, utilization, delivery evidence or execution link. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /finance/ventures/{venture_id}/milestones`: Record an operational milestone. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /finance/ventures/{venture_id}/workflows`: Record an operational workflow and ordered steps. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /finance/ventures/{venture_id}/risks`: Record an operational risk with severity, likelihood, owner and status. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /finance/ventures/{venture_id}/revenue`: List revenue records with separate booked, invoiced, recognized and collected dates. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /finance/ventures/{venture_id}/revenue/summary`: Revenue intelligence: booked, invoiced, recognized, collected, deferred, outstanding, refunds, tax and concentration. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /finance/ventures/{venture_id}/revenue`: Record revenue with an explicit stage, source and currency; non-reporting currencies require a sourced rate. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /finance/ventures/{venture_id}/revenue/{revenue_id}/advance`: Advance revenue forward through booked, invoiced, recognized and collected, posting the matching journal entries. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /finance/ventures/{venture_id}/revenue/{revenue_id}/refund`: Record a refund with a reason and post a contra-revenue/cash entry; body: `amount`, `reason`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /finance/ventures/{venture_id}/expenses`: List expenses and their actual/estimated/committed/projected status, approval and payment state. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /finance/ventures/{venture_id}/expenses`: Record an expense with category, currency, date, payment state, source, support and recurrence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /finance/ventures/{venture_id}/expenses/{expense_id}/approval`: Approve or reject an expense; only approved actual expenses post to the ledger. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /finance/ventures/{venture_id}/expenses/{expense_id}/payment`: Record payment of an approved actual expense; this records a payment, it never executes one. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /finance/ventures/{venture_id}/journal`: Read append-only journal entries; query: `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /finance/ventures/{venture_id}/journal`: Post a balanced double-entry journal in the venture reporting currency. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /finance/ventures/{venture_id}/journal/{journal_id}/reverse`: Reverse a posted entry with a new balanced entry; body: `reason`, optional `date`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /finance/ventures/{venture_id}/reconciliations`: Reconcile one account against a statement balance without changing ledger history. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /finance/ventures/{venture_id}/periods/close`: Close a financial period and snapshot its statements; later entries in it are refused. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /finance/ventures/{venture_id}/trial-balance`: Trial balance with debit/credit totals and a balanced check; query: `as_of`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /finance/ventures/{venture_id}/statements/income`: Income statement from posted entries; query: `start`, `end`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /finance/ventures/{venture_id}/statements/balance-sheet`: Balance sheet with explicit dividend/retained-earnings treatment; query: `as_of`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /finance/ventures/{venture_id}/statements/cash-flow`: Cash flow statement grouped by operating, investing and financing; query: `start`, `end`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /finance/ventures/{venture_id}/statements/comparison`: Compare two financial periods without asserting causation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /finance/ventures/{venture_id}/cash-flow`: Current-period cash flow and closing cash. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /finance/ventures/{venture_id}/working-capital`: Cash, receivables, payables, inventory, ratios, DSO/DPO/CCC and cash runway; unavailable values are NOT_CALCULABLE. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /finance/ventures/{venture_id}/profitability`: Profitability, margins, CAC/LTV/payback, ARPC, product contribution and break-even; estimates are labelled. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /finance/ventures/{venture_id}/budgets`: List budget drafts, approved versions and revisions. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /finance/ventures/{venture_id}/budgets`: Create a draft annual, quarterly, monthly, venture, department, category or product budget. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /finance/ventures/{venture_id}/budgets/{budget_id}/approval`: Approve or reject a budget with a note; consequential revisions require separate approval. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /finance/ventures/{venture_id}/budgets/{budget_id}/revisions`: Create a new draft revision while retaining the approved budget. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /finance/ventures/{venture_id}/budgets/{budget_id}/report`: Budget versus approved actuals with variance and overrun status. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /finance/ventures/{venture_id}/forecasts`: List stored forecasts with assumptions, sources, method, confidence and limitations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /finance/ventures/{venture_id}/forecasts`: Generate a conservative, base, optimistic or custom forecast; never an actual. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /finance/ventures/{venture_id}/scenarios`: Generate and store four scenario comparisons over the same horizon. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /finance/ventures/{venture_id}/alerts`: List business-health alerts; query: `status`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /finance/ventures/{venture_id}/health/refresh`: Refresh business-health thresholds; missing or stale data produces no alert. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /finance/ventures/{venture_id}/alerts/{alert_id}/resolve`: Resolve an alert with a note. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /finance/ventures/{venture_id}/reports`: List generated management reports. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /finance/ventures/{venture_id}/reports`: Generate a grounded management report with evidence and limitations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /portfolio/status`: Portfolio service status, readers, limits and no-execution boundaries. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /portfolios`: List portfolios visible to the authenticated actor; query: `limit`, `offset`. *(frontend: web panel `renderPortfolioList`)*
+- `POST /portfolios`: Create a portfolio with base currency, objectives, risk preferences and allocation policy. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /portfolios/{portfolio_id}`: Portfolio detail with role, visible ventures, restricted count and boundaries. *(frontend: web panel `renderPortfolioDetail`)*
+- `PATCH /portfolios/{portfolio_id}`: Update portfolio metadata, objectives, reporting period or policies (admin). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /portfolios/{portfolio_id}/status`: Change portfolio status; pause/archive requires explicit approval. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /portfolios/{portfolio_id}/members`: Assign a portfolio role; body: `actor`, `role`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /portfolios/{portfolio_id}/fx-rates`: Record a sourced FX rate used only for explicit consolidated reporting. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /portfolios/{portfolio_id}/monitoring`: Configure monitoring intervals, staleness and alert thresholds. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /portfolios/{portfolio_id}/ventures`: List venture references visible to the actor with lifecycle and drill-down links. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /portfolios/{portfolio_id}/ventures`: Register one existing Phase 38 venture with Phase 35–37 links and optional initial lifecycle. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /portfolios/{portfolio_id}/ventures/{venture_id}`: Portfolio venture detail: lifecycle evidence, metrics, source timestamps and missing data. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /portfolios/{portfolio_id}/ventures/{venture_id}/lifecycle/evidence`: Read the Phase 35–38 evidence used by lifecycle gates. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /portfolios/{portfolio_id}/ventures/{venture_id}/lifecycle`: Transition lifecycle only when source evidence and approvals support it. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /portfolios/{portfolio_id}/analytics`: Consolidated portfolio analytics with currency, completeness and period rules; query: `start`, `end`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /portfolios/{portfolio_id}/comparison`: Compare venture financial and operational rows without ranking missing data. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /portfolios/{portfolio_id}/evaluation-policies`: Define a configurable weighted evaluation policy and minimum coverage. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /portfolios/{portfolio_id}/evaluations`: Evaluate all visible ventures and persist ranked evidence with confidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /portfolios/{portfolio_id}/ranking`: Read the latest persisted ranking or a live evidence-based ranking; query: `policy`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /portfolios/{portfolio_id}/risks`: Read current assessed and manually recorded risks with correlated exposures. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /portfolios/{portfolio_id}/risks`: Record a manual risk with evidence, severity and mitigation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /portfolios/{portfolio_id}/risks/assess`: Assess financial, liquidity, market, operational and execution risks from source data. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /portfolios/{portfolio_id}/risks/{risk_id}/resolve`: Resolve a risk with a note; no source record is changed. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /portfolios/{portfolio_id}/allocations`: Read allocation recommendation batches, shared resources and conflicts. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /portfolios/{portfolio_id}/allocations`: Propose allocations from approved budgets and actual evidence; never executes them. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /portfolios/{portfolio_id}/allocations/{batch_id}/decision`: Approve or reject an allocation recommendation; Phase 38 budget approval remains separate. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /portfolios/{portfolio_id}/resources`: Read shared-resource capacity, allocation and utilization. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /portfolios/{portfolio_id}/resources`: Register a shared resource with a hard capacity and unit. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /portfolios/{portfolio_id}/resources/{resource_id}/allocations`: Allocate shared capacity; over-capacity requests are refused. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /portfolios/{portfolio_id}/scenarios`: List stored simulated scenarios; none is actual performance. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /portfolios/{portfolio_id}/scenarios`: Simulate launch, delay, spend, acquisition, pause, scale or shortfall assumptions. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /portfolios/{portfolio_id}/recommendations`: List advisory strategic recommendation batches. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /portfolios/{portfolio_id}/recommendations`: Generate advisory recommendations from metrics, risks and allocations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /portfolios/{portfolio_id}/decisions`: List proposed, approved and rejected portfolio decisions. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /portfolios/{portfolio_id}/decisions`: Propose a decision with evidence, alternatives and implications; no action is taken. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /portfolios/{portfolio_id}/decisions/{decision_id}/approval`: Approve or reject a proposed decision with a human note. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /portfolios/{portfolio_id}/coordination`: Multi-venture coordination: responsibilities, priorities, dependencies, resources and escalations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /portfolios/{portfolio_id}/coordination/dependencies`: Record a cross-venture dependency and detect cycles. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /portfolios/{portfolio_id}/knowledge`: Read portfolio or venture knowledge with provenance and access filtering. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /portfolios/{portfolio_id}/knowledge`: Record verified facts, observations, interpretations, hypotheses or recommendations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /portfolios/{portfolio_id}/knowledge/{knowledge_id}/promote`: Promote knowledge for cross-venture use with confidentiality authorization. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /portfolios/{portfolio_id}/alerts`: List portfolio alerts; query: `status`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /portfolios/{portfolio_id}/alerts/refresh`: Refresh threshold alerts while suppressing stale source data. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /portfolios/{portfolio_id}/alerts/{alert_id}/resolve`: Resolve a portfolio alert with a note. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /portfolios/{portfolio_id}/reports`: List immutable portfolio report snapshots. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /portfolios/{portfolio_id}/reports`: Generate a 12-section daily, weekly, monthly, quarterly or custom portfolio report. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /portfolios/{portfolio_id}/reports/{report_id}`: Read one frozen report snapshot and its source timestamps. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /portfolios/{portfolio_id}/dashboard`: Portfolio workspace overview, comparison, capital, risk, strategy and coordination. *(frontend: web panel `renderPortfolioDashboard`)*
+- `GET /portfolios/{portfolio_id}/history`: Portfolio events, decisions and report history. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /ask`: Route a natural-language request through NovaControl; an optional `image` path attaches a picture for the vision pipeline to read. *(frontend: web panel `renderChatResult`)*
 - `POST /brain/mode`: Switch the chat brain between auto, llm, scratch, and cloud. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /brain/mode`: Inspect the active brain mode and provider. *(frontend: no web panel - API/CLI or infrastructure)*
@@ -37,6 +249,17 @@ The Phase 12 API subsystem provides REST and WebSocket entrypoints through FastA
 - `POST /knowledge/teach`: Teach: persist a typed fact as durable recallable knowledge. *(frontend: web panel `renderLearning`)*
 - `GET /knowledge`: List taught knowledge, optionally filtered by a query. *(frontend: web panel `renderLearning`)*
 - `POST /knowledge/recall`: Recall taught knowledge matching a query. *(frontend: web panel `renderLearning`)*
+- `GET /memory/personal/status`: Personal knowledge counts, categories, privacy classes and load state. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /memory/personal`: Search structured personal knowledge; query: `query`, `project`, `limit`, `include_*`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /memory/personal`: Acquire one knowledge record with category, kind, source, privacy and validity. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /memory/personal/export`: Export the owner's personal knowledge and relationships as JSON. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /memory/personal/consolidate`: Consolidate equivalent records while preserving provenance and history. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /memory/personal/cleanup`: Apply retention/validity cleanup; expired records remain recoverable. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /memory/personal/{record_id}`: Inspect one knowledge record, its history, provenance and relations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /memory/personal/{record_id}/correct`: Correct content while preserving the previous version in history. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /memory/personal/{record_id}/delete`: Delete one knowledge record and its relations from the shared store. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /memory/personal/{record_id}/resolve`: Resolve a detected contradiction by keeping or withdrawing one record. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /memory/personal/relations`: Create or update a provenance-bearing relationship between records. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /train`: Run bounded autonomous local learning iterations. *(frontend: web panel `renderLearning`)*
 - `POST /brain/decide`: Trace an utterance through the routing gates with a rung preview. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /plan`: Create and optionally execute a plan. *(frontend: web panel `renderBuild`)*
@@ -49,6 +272,15 @@ The Phase 12 API subsystem provides REST and WebSocket entrypoints through FastA
 - `GET /models/status`: What the shared model runtime holds right now, and the memory policy it applies to it. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /models/load`: Load a model, unloading whatever must go first to make room for it. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /models/unload`: Release one resident model, or every resident model when none is named. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /models/routing`: Phase 33 provider/model catalogue, health, routing controls and the last selection. *(frontend: web panel `renderModelRouting`)*
+- `POST /models/routing/route`: Select the most appropriate model for a task, with eligible and rejected reasons. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /models/routing/complete`: Execute one routed completion through the selected adapter with bounded fallback. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /models/routing/config`: Set adaptive-routing cost, latency, concurrency and preference controls. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /models/routing/providers`: Enable or disable one provider for automatic selection. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /models/routing/history`: Recent routing decisions and measured provider/model observations. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /models/routing/policy`: The learned routing proposal, active policy and supporting evidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /models/routing/policy/activate`: Activate a validated learned routing policy (previous policy retained). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /models/routing/policy/rollback`: Roll back to the routing policy active before the last activation. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /command/plan`: Plan a natural desktop or phone command. *(frontend: web panel `renderCommand`)*
 - `POST /command/execute`: Execute an approved natural desktop or phone command. *(frontend: web panel `renderCommand`)*
 - `POST /desktop/plan`: Plan an approval-gated desktop action. *(frontend: web panel `renderCommand`)*
@@ -247,6 +479,21 @@ The Phase 12 API subsystem provides REST and WebSocket entrypoints through FastA
 - `POST /automation/disable`: Disarm an automation without cancelling it. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /automation/run`: Run a stored automation now, under the same permission gate as a due run. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /automation/run-due`: Run every automation that is due (the scheduler's own tick). *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /operations`: Persistent operations board: objectives, task counts, monitoring conclusions and notification posture. *(frontend: web panel `renderOperations`)*
+- `GET /objectives`: Every stored objective with its milestones, tasks, progress and checkpoints. *(frontend: web panel `renderOperations`)*
+- `POST /objectives`: Create an ongoing objective with an intended outcome and autonomy level. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /objectives/update`: Edit an objective's title, outcome, priority, deadline, autonomy or criteria. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /objectives/delete`: Delete one objective and its stored work. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /objectives/control`: Pause, resume, cancel, prioritize, re-deadline or re-level an objective. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /objectives/tasks`: Add a task (with dependencies, steps, due time or recurrence) to an objective. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /objectives/milestones`: Add a milestone over a set of tasks. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /objectives/run`: Run the ready work of one objective under its autonomy and the permission layer. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /objectives/tasks/decide`: Approve, reject, retry or cancel one objective task. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /operations/notifications`: Stored operations notifications, newest first, with preferences. *(frontend: web panel `renderOperations`)*
+- `POST /operations/notifications/read`: Acknowledge one notification, or all of them. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /operations/notifications/clear`: Delete stored notifications. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /operations/notifications/preferences`: Choose which notification kinds are delivered and how long duplicates are suppressed. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /operations/tick`: Run one monitoring/execution pass (the background loop's body). *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /audit`: Operational audit trail status: records, retention, local-only storage, redactions. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /audit/entries`: Recent audit records (redacted), oldest first. *(frontend: no web panel - API/CLI or infrastructure)*
 - `POST /audit/prune`: Apply the retention policy and report what was removed. *(frontend: no web panel - API/CLI or infrastructure)*
@@ -378,6 +625,53 @@ The Phase 12 API subsystem provides REST and WebSocket entrypoints through FastA
 - `POST /rlvr/runs/evaluate`: Compare base, SFT and preference models against the RLVR candidate. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /rlvr/runs/{run_id}/checkpoints`: An RLVR run's checkpoints with their validity and loadability. *(frontend: no web panel - API/CLI or infrastructure)*
 - `GET /rlvr/runs/{run_id}`: One RLVR run: configuration, metrics and verifier snapshot. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /continual/status`: Continual learning state: evidence counts, active strategy versions, policy, boundaries and restore report. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /continual/overview`: What Phase 27 ships, its honest limits and its live policy. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /continual/experiences`: Recorded executions, newest first, filtered by task kind and outcome. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /continual/experiences/{experience_id}`: One execution record with steps, verification and outcome reasons. *(frontend: no web panel - API/CLI or infrastructure)*
+- `DELETE /continual/experiences/{experience_id}`: Forget one recorded execution and recompute derived signals. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /continual/feedback`: Record a person's positive or negative verdict on an execution. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /continual/signals`: Signals derived from evidence, with support and provenance. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /continual/strategies`: Strategy versions with status, provenance and measured performance. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /continual/proposals`: Strategy proposals, separated from validated and promoted work. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /continual/proposals`: Propose a template from distinct verified successes. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /continual/proposals/{proposal_id}/validate`: Validate a proposal against executed evidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /continual/proposals/{proposal_id}/promote`: Promote a validated proposal, retaining the replaced version. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /continual/strategies/{strategy_id}/rollback`: Restore the previous version of a strategy. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /continual/recommend`: Advisory recommendation for a goal, with evidence ids and confidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /continual/benchmark`: Run the isolated baseline, learn, compare benchmark. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /computer/status`: Live device/capability registry, supervisor state, focused loop and operation-history counts. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /computer/devices`: What this machine can actually operate, what is connected and what is unsupported. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /computer/observe`: Read-only screen/window/OCR/DOM observation with element coordinates and state signals. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /computer/plan`: Plan a computer objective, classify its risk and mint a single-use token. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /computer/run`: Execute a planned computer objective through the closed observe/verify/recover loop. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /computer/stop`: Emergency stop: cancel before the next action and release all held input. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /computer/history`: Redacted persisted execution history; no screenshots or secrets. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /computer/history/clear`: Delete the persisted computer-operation history. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /computer/reference`: Resolve a contextual reference against the current observation or history. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /collaboration/status`: Multi-agent coordination state: policy, roles, task counts, limits and restore report. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /collaboration/overview`: What Phase 28 ships, its architecture and its honest limits. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /collaboration/plan`: Decide whether an objective benefits from multiple agents and return its dependency graph. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /collaboration/run`: Execute a collaboration plan, with per-subtask verification and aggregation. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /collaboration/tasks`: Persisted collaboration tasks, newest first, filtered by status. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /collaboration/tasks/{task_id}`: One collaboration task with its subtasks, messages, conflicts and verdict. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /collaboration/tasks/{task_id}/cancel`: Stop scheduling a collaboration; safe in-flight work is cancelled. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /collaboration/tasks/{task_id}/resume`: Resume pending subtasks, preserving every completed result. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /skills`: Skill library state: lifecycle counts, evidence, executions and adaptation failures. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /skills/catalog`: Every stored skill version with its contract, reliability, provenance and evidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /skills/search`: Retrieve and rank skills for a goal. Query parameters: `query` (required), `environment`, `include_incompatible`, `limit`. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /skills/evidence`: Execution evidence and failed adaptations, newest bounded. *(frontend: no web panel - API/CLI or infrastructure)*
+- `GET /skills/{skill_id}`: One skill's contract, its versions and its recent executions (optional `version`). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /skills/acquire`: Acquire a reusable skill from repeated verified execution evidence (one success is refused). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /skills/validate`: Validate a skill from its own verified execution evidence (explicit, never automatic). *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /skills/adapt`: Create an independently validatable adapted version for a new goal, inputs or environment. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /skills/compose`: Check dependencies, ordering, inputs and tools for a multi-skill workflow. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /skills/compose/execute`: Execute an ordered multi-skill workflow, binding declared outputs and stopping on the first unverified step; client approval flags are refused. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /skills/execute`: Execute a validated or adapted skill through the existing pipeline; client approval flags are refused and sensitive steps use the objective/task approval path. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /skills/resume`: Resume a parked skill execution from its verified checkpoint; client approval flags are refused. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /skills/promote`: Make an independently validated skill version the active one. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /skills/deprecate`: Deprecate a skill version without deleting its evidence. *(frontend: no web panel - API/CLI or infrastructure)*
+- `POST /skills/rollback`: Restore an earlier validated version and deprecate the replaced one. *(frontend: no web panel - API/CLI or infrastructure)*
 
 <!-- END GENERATED: api-reference -->
 

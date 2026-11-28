@@ -72,6 +72,43 @@ while True:
 # A host whose FIRST kind of request is slow enough to be cancelled mid-flight:
 # the reply still lands on the pipe afterwards, which is exactly how a naive
 # exchange reads someone else's answer.
+#: A host that prints its banner LATE, so a cancellation reliably lands inside
+#: the startup handshake (the case that used to leave an unread banner behind).
+_LATE_BANNER_HOST = r'''
+import os, sys, time
+time.sleep(0.8)
+sys.stdout.write("ready 800x600\n")
+sys.stdout.flush()
+while True:
+    line = sys.stdin.readline()
+    if not line:
+        break
+    line = line.strip()
+    if not line:
+        continue
+    if line == "exit":
+        break
+    with open(line, "wb") as handle:
+        handle.write(b"\x89PNG\r\n\x1a\nAFTER")
+    sys.stdout.write("ok 7 %d 800x600\n" % os.path.getsize(line))
+    sys.stdout.flush()
+'''
+
+#: A host that answers every command with its own banner: the reply-shape case.
+_JUNK_REPLY_HOST = r'''
+import sys
+sys.stdout.write("ready 800x600\n")
+sys.stdout.flush()
+while True:
+    line = sys.stdin.readline()
+    if not line:
+        break
+    if line.strip() == "exit":
+        break
+    sys.stdout.write("ready 800x600\n")
+    sys.stdout.flush()
+'''
+
 _SLOW_CAPTURE_HOST = r'''
 import os, sys, time
 out = sys.stdout
@@ -529,21 +566,28 @@ class ProcessIdentityProbeTests(unittest.IsolatedAsyncioTestCase):
 class ProbingRunner(LocalDesktopRunner):
     """LocalDesktopRunner with the OS probes stubbed so tests never touch the desktop."""
 
-    def __init__(self, window_lines=None, type_verification=None):
+    def __init__(self, window_lines=None, type_verification=None, after_launch_lines=None):
         super().__init__(windows_type_paste=True)
         self._probe_lines = window_lines
         self._type_verification = type_verification
+        self._after_launch_lines = after_launch_lines
         self.launched = False
         self.pasted = None
 
+    def appear(self, lines):
+        """Simulate a window becoming visible after a launch."""
+        self._probe_lines = list(lines)
+
     async def _launch_open(self, target: str) -> int:
         self.launched = True
+        if self._after_launch_lines is not None:
+            self._probe_lines = list(self._after_launch_lines)
         return 1234
 
     async def _window_lines(self):
         return self._probe_lines
 
-    async def _stage_and_paste_windows(self, text: str) -> None:
+    async def _stage_and_paste_windows(self, text: str, *, bound=None) -> None:
         self.pasted = text
 
     async def _verify_type_windows(self, text: str):
@@ -594,12 +638,24 @@ class DesktopVerificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(resolve("web browser").startswith("http://"))
 
     async def test_open_reports_verified_when_window_appears(self) -> None:
-        runner = ProbingRunner(window_lines=["Notepad|Untitled - Notepad"])
+        runner = ProbingRunner(
+            window_lines=[], after_launch_lines=["Notepad|Untitled - Notepad"]
+        )
         output = await runner._open_application("notepad")
         self.assertTrue(runner.launched)
         self.assertTrue(output["verified"])
         self.assertEqual(output["window"], "Untitled - Notepad")
         self.assertIn("Window appeared", output["verification"])
+
+    async def test_open_does_not_reuse_a_preexisting_window(self) -> None:
+        """A launch is not verified by an unrelated document already on screen.
+
+        This is the live defect that typed into an existing Notepad document:
+        the old verifier matched any window whose title contained the app name.
+        """
+        runner = ProbingRunner(window_lines=["Notepad|start.bat - Notepad"])
+        with self.assertRaisesRegex(Exception, "no window appeared"):
+            await runner._open_application("notepad")
 
     async def test_open_fails_when_no_window_appears(self) -> None:
         runner = ProbingRunner(window_lines=[])
@@ -647,6 +703,135 @@ class DesktopVerificationTests(unittest.IsolatedAsyncioTestCase):
         results = await controller.execute_workflow(controller.plan_open_application("notepad"))
         self.assertEqual(results[0].status, DesktopActionStatus.FAILED)
         self.assertIn("no window appeared", results[0].error)
+
+
+class WhatsAppMessageTests(unittest.TestCase):
+    """"open whatsapp and text 'mom' 'running late'" must be a real draft plan."""
+
+    def test_quoted_chain_opens_whatsapp_then_drafts(self) -> None:
+        steps = parse_desktop_command("open whatsapp and text 'mom' 'running late'")
+        self.assertEqual(
+            [(step.kind, step.target) for step in steps],
+            [("open", "whatsapp"), ("message", "mom")],
+        )
+        self.assertEqual(steps[1].text, "running late")
+
+    def test_saying_form_and_implicit_open(self) -> None:
+        steps = parse_desktop_command("text mom saying running late")
+        self.assertEqual([step.kind for step in steps], ["open", "message"])
+        self.assertEqual(steps[0].target, "whatsapp")
+        self.assertEqual((steps[1].target, steps[1].text), ("mom", "running late"))
+
+    def test_send_a_message_to_phrasing(self) -> None:
+        steps = parse_desktop_command("open whatsapp and send a message to ravi kumar saying on my way")
+        self.assertEqual(steps[-1].kind, "message")
+        self.assertEqual(steps[-1].target, "ravi kumar")
+        self.assertEqual(steps[-1].text, "on my way")
+
+    def test_phone_anchored_text_stays_on_the_phone_path(self) -> None:
+        steps = parse_desktop_command("text mom on my phone saying hi")
+        self.assertFalse(any(step.kind == "message" for step in steps))
+
+    def test_another_app_drafts_in_that_app_not_whatsapp(self) -> None:
+        steps = parse_desktop_command("open telegram and text mom hi")
+        self.assertEqual([step.target for step in steps if step.kind == "open"], ["telegram"])
+        self.assertEqual((steps[-1].kind, steps[-1].app), ("message", "telegram"))
+
+    def test_plan_never_sends_and_shows_the_draft_step(self) -> None:
+        controller = DesktopAutomationController(runner=RecordingRunner())
+        workflow, descriptions, _ = controller.plan_command("open whatsapp and text 'mom' 'running late'")
+        self.assertEqual(
+            [action.type for action in workflow.actions],
+            [DesktopActionType.OPEN_APPLICATION, DesktopActionType.COMPOSE_MESSAGE],
+        )
+        draft = workflow.actions[1]
+        self.assertEqual(draft.target, "mom")
+        self.assertEqual(draft.parameters["message"], "running late")
+        self.assertEqual(draft.parameters["app"], "whatsapp")
+        self.assertIn("sends immediately", descriptions[1])
+
+    def test_a_number_addresses_the_exact_chat(self) -> None:
+        self.assertEqual(LocalDesktopRunner._whatsapp_number("+91 70131 73263"), "917013173263")
+        self.assertEqual(LocalDesktopRunner._whatsapp_number("mom"), "")
+        uri = LocalDesktopRunner._whatsapp_send_uri("917013173263", "running late!")
+        self.assertTrue(uri.startswith("whatsapp://send?phone=917013173263&text="))
+        self.assertIn("running%20late%21", uri)
+
+
+    def test_a_subject_is_carried_into_a_mail_draft(self) -> None:
+        steps = parse_desktop_command("open gmail and mail hi using subject testing to bob@example.com")
+        self.assertEqual(steps[0].target, "gmail")
+        self.assertEqual(steps[-1].kind, "message")
+        self.assertEqual(steps[-1].target, "bob@example.com")
+        self.assertEqual(steps[-1].text, "hi")
+        self.assertEqual(steps[-1].subject, "testing")
+        self.assertEqual(steps[-1].app, "gmail")
+
+    def test_a_subject_reaches_the_mailto_link(self) -> None:
+        self.assertEqual(
+            LocalDesktopRunner._compose_uri("mail", "bob@example.com", "hi", "testing"),
+            "mailto:bob%40example.com?subject=testing&body=hi",
+        )
+
+    def test_gmail_composes_on_the_web_page_not_a_mailto_chooser(self) -> None:
+        uri = LocalDesktopRunner._compose_uri("gmail", "bob@example.com", "hi", "testing")
+        self.assertTrue(uri.startswith("https://mail.google.com/mail/?view=cm"))
+        self.assertIn("to=bob%40example.com", uri)
+        self.assertIn("su=testing", uri)
+        self.assertIn("body=hi", uri)
+        self.assertNotIn("mailto:", uri)
+
+
+class ComposeAcrossAppsTests(unittest.TestCase):
+    """Compose is app-generic and punctuation-tolerant, not WhatsApp-only."""
+
+    def test_trailing_sentence_punctuation_is_not_part_of_a_target(self) -> None:
+        steps = parse_desktop_command("open chrome.")
+        self.assertEqual([(step.kind, step.target) for step in steps], [("open", "chrome")])
+        steps = parse_desktop_command("open chrome. and take a screenshot.")
+        self.assertEqual(steps[0].target, "chrome")
+        self.assertEqual(steps[-1].kind, "screenshot")
+
+    def test_voice_style_punctuation_still_opens_the_app(self) -> None:
+        for phrase in ("open chrome.", "Open Chrome.", "open chrome!", "open chrome, please."):
+            with self.subTest(phrase=phrase):
+                steps = parse_desktop_command(phrase)
+                self.assertEqual(steps[0].kind, "open")
+                self.assertEqual(steps[0].target, "chrome")
+
+    def test_compose_in_gmail_uses_that_app(self) -> None:
+        steps = parse_desktop_command("open gmail and compose an email to bob saying hello")
+        self.assertEqual(steps[0].kind, "open")
+        self.assertEqual(steps[0].target, "gmail")
+        self.assertEqual((steps[-1].kind, steps[-1].target, steps[-1].text), ("message", "bob", "hello"))
+        self.assertEqual(steps[-1].app, "gmail")
+
+    def test_a_named_app_overrides_the_default(self) -> None:
+        steps = parse_desktop_command("text mom on telegram saying running late")
+        self.assertEqual(steps[-1].app, "telegram")
+        self.assertEqual((steps[-1].target, steps[-1].text), ("mom", "running late"))
+
+    def test_plan_keeps_the_app_and_never_sends(self) -> None:
+        controller = DesktopAutomationController(runner=RecordingRunner())
+        workflow, descriptions, _ = controller.plan_command("open gmail and compose an email to bob saying hello")
+        self.assertEqual(
+            [action.type for action in workflow.actions],
+            [DesktopActionType.OPEN_APPLICATION, DesktopActionType.COMPOSE_MESSAGE],
+        )
+        self.assertEqual(workflow.actions[1].parameters["app"], "gmail")
+        self.assertEqual(workflow.actions[1].parameters["message"], "hello")
+        self.assertIn("gmail", descriptions[1].lower())
+
+    def test_a_compose_link_is_declared_data_not_a_code_branch(self) -> None:
+        self.assertEqual(
+            LocalDesktopRunner._compose_uri("mail", "bob@example.com", "hello there"),
+            "mailto:bob%40example.com?body=hello%20there",
+        )
+        self.assertIn(
+            "whatsapp://send?phone=917013173263",
+            LocalDesktopRunner._compose_uri("whatsapp", "917013173263", "hi"),
+        )
+        self.assertEqual(LocalDesktopRunner._compose_uri("slack", "bob", "hi"), "")
 
 
 if __name__ == "__main__":
@@ -1157,6 +1342,56 @@ class CaptureWorkerProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(b"AFTER", written, "the next command read the cancelled request's reply")
         self.assertEqual(worker.spawns, 2, "a desynchronised worker must be restarted")
 
+    async def test_a_cancelled_startup_cannot_answer_the_next_command(self) -> None:
+        """Cancelled mid-handshake, the host's banner is still unread on the pipe.
+
+        Live shape of the failure: a capture cancelled during startup left the
+        worker running with ``ready 800x600`` unread, and the next capture read
+        that banner as its own reply -- ``ValueError: invalid literal for
+        int() with base 10: '800x600'`` from the frame parser, which failed that
+        capture and every observation after it.
+        """
+        worker = PersistentScreenCapture(
+            program=sys.executable,
+            arguments=("-u", "-c", _LATE_BANNER_HOST),
+            startup_timeout=5.0,
+            frame_timeout=5.0,
+            shutdown_grace=0.2,
+        )
+        self.addCleanup(worker.aclose)
+        in_flight = asyncio.create_task(worker.capture(str(self.directory / "startup.png")))
+        # Wait for the host to EXIST before cancelling, so the cancellation is
+        # always inside the startup handshake and never before the spawn.
+        for _ in range(1000):
+            if worker.spawns:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(worker.spawns, 1, "the host never started")
+        in_flight.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await in_flight
+        following = await worker.capture(str(self.directory / "following.png"))
+        self.assertTrue(following.ok, following.error)
+        self.assertIn(b"AFTER", (self.directory / "following.png").read_bytes())
+        self.assertEqual(
+            worker.spawns, 2, "a half-started host must be replaced, never reused"
+        )
+
+    async def test_a_reply_that_is_not_a_frame_fails_closed(self) -> None:
+        """A desynchronised pipe is a FAILED frame, never a zero-sized success."""
+        worker = PersistentScreenCapture(
+            program=sys.executable,
+            arguments=("-u", "-c", _JUNK_REPLY_HOST),
+            startup_timeout=5.0,
+            frame_timeout=5.0,
+            shutdown_grace=0.2,
+        )
+        self.addCleanup(worker.aclose)
+        result = await worker.capture(str(self.directory / "junk.png"))
+        self.assertFalse(result.ok, "a banner read as a frame must not be a frame")
+        self.assertIn("unexpected reply", result.error)
+        self.assertFalse((self.directory / "junk.png").exists())
+
     async def test_stats_report_the_hosts_own_resource_use(self) -> None:
         worker = _fake_worker()
         self.addCleanup(worker.aclose)
@@ -1375,3 +1610,105 @@ class ScreenshotEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(capture.closed, 2)
         self.assertEqual(capture.requests, [], "closing must not capture anything")
 
+
+
+class FocusGuardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_compose_refuses_to_type_when_the_app_cannot_be_focused(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        from novacontrol.desktop.controller import LocalDesktopRunner, VerificationError
+
+        runner = LocalDesktopRunner()
+        with patch.object(runner, "_focus_window", new=AsyncMock(return_value={"focused": False})):
+            with self.assertRaises(VerificationError):
+                await runner._compose_message("whatsapp", "saran", "mg")
+
+
+class InAppSearchTests(unittest.TestCase):
+    def test_search_after_an_open_stays_inside_that_app(self) -> None:
+        steps = parse_desktop_command("open discord and search gta online server")
+        self.assertEqual(
+            [(step.kind, step.target) for step in steps],
+            [("open", "discord"), ("app_search", "discord")],
+        )
+        self.assertEqual(steps[-1].text, "gta online server")
+
+    def test_open_it_selects_the_first_result_instead_of_typing(self) -> None:
+        steps = parse_desktop_command("open discord and search gta online server and open it")
+        self.assertEqual([step.kind for step in steps], ["open", "app_search", "press"])
+        self.assertEqual(steps[-1].text, "enter")
+
+    def test_a_search_without_an_app_still_opens_the_browser(self) -> None:
+        steps = parse_desktop_command("search gta online server")
+        self.assertEqual([step.kind for step in steps], ["search"])
+
+    def test_the_plan_carries_the_app_query_and_shortcut(self) -> None:
+        from novacontrol.desktop.models import DesktopActionType
+
+        controller = DesktopAutomationController(runner=RecordingRunner())
+        workflow, descriptions, _ = controller.plan_command(
+            "open discord and search gta online server"
+        )
+        self.assertEqual(
+            [action.type for action in workflow.actions],
+            [DesktopActionType.OPEN_APPLICATION, DesktopActionType.SEARCH_IN_APP],
+        )
+        search = workflow.actions[-1]
+        self.assertEqual(search.parameters["app"], "discord")
+        self.assertEqual(search.parameters["query"], "gta online server")
+        self.assertEqual(search.parameters["shortcut"], "ctrl+f")
+        self.assertIn("gta online server", descriptions[-1])
+
+
+class SendAfterDraftTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_compose_presses_the_declared_send_key(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        runner = LocalDesktopRunner()
+        keys: list[str] = []
+
+        async def fake_shortcut(shortcut: str):
+            keys.append(shortcut)
+            return {"shortcut": shortcut}
+
+        async def fake_type(text: str, *, delay_ms: int = 30, expect: str = ""):
+            return {"text": text, "verified": True}
+
+        with patch.object(runner, "_focus_window", new=AsyncMock(return_value={"focused": True})), \
+                patch.object(runner, "_keyboard_shortcut", new=fake_shortcut), \
+                patch.object(runner, "_type_text", new=fake_type), \
+                patch("novacontrol.desktop.controller._foreground_title", return_value="WhatsApp"):
+            output = await runner._compose_message("whatsapp", "tejas classmate", "mg")
+
+        self.assertTrue(output["sent"])
+        self.assertEqual(keys[-1], "enter")
+
+    async def test_gmail_sends_with_ctrl_enter(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        runner = LocalDesktopRunner()
+        keys: list[str] = []
+
+        async def fake_shortcut(shortcut: str):
+            keys.append(shortcut)
+            return {"shortcut": shortcut}
+
+        with patch("novacontrol.desktop.controller.os.startfile", create=True), \
+                patch.object(runner, "_focus_window", new=AsyncMock(return_value={"focused": True})), \
+                patch.object(runner, "_keyboard_shortcut", new=fake_shortcut):
+            output = await runner._compose_message("gmail", "bob@example.com", "hi", "testing")
+
+        self.assertTrue(output["sent"])
+        self.assertEqual(keys[-1], "ctrl+enter")
+
+    async def test_no_send_without_a_confirmed_foreground_window(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        runner = LocalDesktopRunner()
+        with patch.object(runner, "_focus_window", new=AsyncMock(return_value={"focused": False})), \
+                patch.object(runner, "_keyboard_shortcut", new=AsyncMock()) as shortcut:
+            sent, note = await runner._send_draft("whatsapp")
+
+        self.assertFalse(sent)
+        self.assertIn("nothing was sent", note)
+        shortcut.assert_not_awaited()

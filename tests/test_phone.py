@@ -187,6 +187,43 @@ class PhoneAuditTests(unittest.IsolatedAsyncioTestCase):
         datetime.fromisoformat(entries[0].recorded_at)
 
 
+class PhoneMessageRoutingTests(unittest.TestCase):
+    def test_send_and_msg_verbs_route_to_the_text_planner(self) -> None:
+        from novacontrol.application_helpers import parse_phone_command
+
+        for command in ("send a hi msg to mom on whatsapp", "msg mom saying hi"):
+            self.assertEqual(parse_phone_command(command)[0], "text")
+
+    def test_a_phone_message_carries_recipient_body_and_channel(self) -> None:
+        from novacontrol.phone.controller import NoopPhoneRunner, PhoneControlController
+
+        workflow = PhoneControlController(runner=NoopPhoneRunner()).plan_send_text(
+            "send a hi msg to mom on whatsapp"
+        )
+        parameters = workflow.actions[-1].parameters
+        self.assertEqual(
+            (parameters["recipient"], parameters["message"], parameters["channel"]),
+            ("mom", "hi", "whatsapp"),
+        )
+
+
+class PhoneMessageChannelTests(unittest.TestCase):
+    """\"on whatsapp\" is a channel, not part of the recipient's name."""
+
+    def test_channel_is_split_out_of_the_message_spec(self) -> None:
+        controller = PhoneControlController(runner=NoopPhoneRunner())
+        action = controller.plan_send_text("mom on whatsapp saying running late").actions[0]
+        self.assertEqual(action.parameters["channel"], "whatsapp")
+        self.assertEqual(action.parameters["recipient"], "mom")
+        self.assertEqual(action.parameters["message"], "running late")
+
+    def test_plain_text_stays_on_sms(self) -> None:
+        controller = PhoneControlController(runner=NoopPhoneRunner())
+        action = controller.plan_send_text("to mom say running late").actions[0]
+        self.assertEqual(action.parameters["channel"], "")
+        self.assertEqual(action.parameters["recipient"], "mom")
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -5,6 +5,366 @@ Work record from the routing-explorer + phone-control checkpoint (`580ae07`,
 anchored to the commit that carries it. For feature-level docs see the rest of
 `docs/`; this file is the "what changed, when, and why" record.
 
+## Group 1 — Phases 27–31 audit and remediation (uncommitted work tree, 2026-11-26)
+
+Audited the five phases the repository calls 27 Continual Learning, 28 Multi-Agent
+Collaboration, 29 Universal Computer & Device Operator, 30 Persistent Autonomy and
+31 Transfer Learning & General-Purpose Skills. The request's assumed titles for 28,
+30 and 31 did not match the repository; the recovered map and the absence of a
+canonical Phase 27–31 specification are recorded in the group report.
+
+One real integration defect was found and fixed. `src/novacontrol/agents/`
+contained no reference to skills at all, so Phase 28's specialists could never
+select a Phase 31 skill even though the library, its API and the Phase 30
+`skill:<id>` dispatch all worked. `agents/pipeline.py` now exposes a `SKILL_TOOL`
+capability behind an optional `SkillProvider`; selection happens in the planner
+stage only when the agent has no plan of its own (or the task names a skill), the
+step is authorized by the existing `PermissionManager`, executed by the one
+`SkillService` (wired in `application.py` through `_PipelineSkillProvider`), and
+verified from the library's own verified verdict rather than "the call returned".
+An existing plan is never replaced, an unvalidated or incompatible skill is never
+selected, and a skill parked for approval is a DENIED step rather than a success.
+Eleven regression tests cover those cases, including an application-level test
+that runs a real validated `machine_facts` skill through the real pipeline.
+
+Verification: the five phase suites pass (207 baseline, Phase 31 now 42); the
+agents/collaboration/operations/computer/continual group passes 181; the phases'
+own live harnesses reproduce their documented results on today's tree (Phase 31
+32/32, Phase 30 45/45); a new resilience harness adds 14/14 for an unexpected
+Win32 dialog, a forced crash between planning and acting, and an unclean
+`os._exit(9)`. Agents and skills mypy is clean across 22 files; the API reference
+stays in sync at 666 routes. The group is **NOT CLOSED**: hardware and
+environment-dependent Phase 29/31 requirements remain, and an OS reboot and a
+multi-hour soak were not performed.
+
+
+### Second pass: live browser transfer, two more defects (2026-11-26)
+
+The browser half of Phase 31 #6 is now live-verified. A local HTTP server on
+127.0.0.1 logged every request; the application's own `PlaywrightBrowserRunner`
+launched Chromium 156.0.8078.4 twice, the library acquired a browser step from
+those two verified navigations, validation followed from that evidence, the real
+`verification-agent` selected the skill inside its pipeline, the step parked for
+approval, the approved resume drove a third real navigation, and the library
+recorded the verdict. **32/32** checks in
+`tmp/group1/verify_browser_transfer.py`; every negative path (unvalidated skill,
+incompatible environment, missing input, approval-pending scope, unreachable
+target, replayed token, interrupted navigation) behaves honestly.
+
+Two defects were found by running it, and fixed:
+
+* an explicitly named skill was ignored by every shipped specialist — the
+  library was consulted only when the agent's plan was empty, so the documented
+  explicit-selection behaviour did not exist. The planner now consults the
+  library first when a task names a skill; a plan nobody asked to replace is
+  still kept.
+* a refused (approval-pending) skill step was verified as a failure and retried,
+  starting a second execution and a second approval checkpoint for one step. A
+  refusal is now "refused, not retried".
+
+Three regression tests cover both. The five phase suites are 221 passed (Phase
+31 now 45); mypy (agents + skills) and ruff are clean; `git diff --check` is
+clean; the API reference is in sync at 666 routes. The environment-dependent rows
+(second monitor, resolution change, sleep/resume, multi-hour soak, development
+workflow, mid-action crash, OS reboot) remain outstanding and are registered as
+DF-1…DF-8 in the group report.
+
+
+### Third pass: mid-action crash, and the defect it exposed (2026-11-26)
+
+DF-6 was driven through the real operator path (`plan_computer_task` →
+single-use token → `execute_computer_task`) against a disposable window that dies
+on the first key of a paste. It did not crash, because the operator never
+targeted that window: perception picks the first titled window the OS probe
+returns, so the objective "type ... into the NovaGroup1MidAction window" was
+grounded on the unrelated, live `Realtek Audio Console`, the paste was delivered
+while it was in front, and the step was recorded `verified: true`. Only the final
+goal verification failed. That is **D12**, unresolved: fixing it is a grounding
+policy decision (goal-named window vs foreground-only vs refuse-and-clarify), and
+it also blocks the operator-loop variant of DF-6, because repeating it would send
+more stray input.
+
+The mid-action crash itself was then verified deterministically on the same
+input-delivery code, through the token-gated desktop action path with the target
+confirmed in the foreground first: the probe received the paste's `Control_L`,
+wrote its marker, exited with code 3, and the action failed with
+`VerificationError: ... no window is focused — the paste had nowhere to land.`,
+claiming no success and leaving one failed audit entry. 8/8 checks in
+`tmp/group1/verify_midaction_controller.py`.
+
+DF-8 (`ComputerOperator` as a skill step kind) was analysed, not implemented: the
+capability already exists through `desktop`/`browser` skill steps and the Phase 30
+`skill:<id>` dispatch, no canonical Phase 31 brief defines what the step would
+mean, and a `COMPUTER` kind would nest the operator loop inside the skill executor
+and inherit D12. No source file changed this pass; 221 phase-suite tests still
+pass and mypy is clean across agents/skills/computer.
+
+## Phase 39 — Portfolio Manager for Multiple AI-Run Ventures (uncommitted work tree, 2026-11-24)
+
+Added `novacontrol.portfolio` as one portfolio-level package over the existing
+Phase 35/36/37 readers, Phase 38 `FinOpsService`, JSON state store, event bus,
+audit, memory, knowledge, agent registry, capability runtime and FastAPI/static-
+web seams. Multiple portfolios persist in one versioned `portfolio_management`
+document. A portfolio stores venture references only (Phase 38 id plus Phase
+35/36/37 links); a venture can bind to one portfolio, and no ledger, customer or
+product record is copied.
+
+Lifecycle transitions read actual Phase 35 validation, Phase 36 release/readiness,
+Phase 37 launch authorization and Phase 38 activity. Consequential transitions
+require explicit approval; archived is terminal. Consolidated analytics require
+sourced explicit FX rates, keep currency buckets for excluded ventures, use
+periods and source timestamps, and never treat a forecast or scenario as an
+actual. Evaluation exposes component methods, evidence, confidence and missing
+inputs and multiplies the weighted score by coverage, so sparse ventures are
+unranked. Risks, allocations, scenarios, recommendations and decisions are
+advisory records; approving an allocation changes no Phase 38 budget, and an
+approved decision records `applied=false`.
+
+49 authenticated `/portfolio*` method/path pairs bring `docs/API.md` to 666
+routes. The Portfolio workspace covers portfolio creation, venture registration,
+evaluation, risk, allocation, scenarios, alerts, advice, reports and Phase 38
+drill-down. Verification: 28 Phase 39 tests (20 service + 8 HTTP), 284 relevant
+regression tests with 1,559 subtests, portfolio mypy clean, JS/API-reference
+checks pass, a real loopback workflow passed 19/19 checks, and the browser loaded
+three portfolios and a dashboard. No full suite, live financial provider, live
+Phase 35/36/37 data, commit or push. Reports:
+[PHASE39_IMPLEMENTATION_AND_VERIFICATION_REPORT.md](PHASE39_IMPLEMENTATION_AND_VERIFICATION_REPORT.md),
+[PHASE39_PORTFOLIO_MANAGER_MULTIPLE_AI_VENTURES.md](PHASE39_PORTFOLIO_MANAGER_MULTIPLE_AI_VENTURES.md)
+and [NOVACONTROL_PHASE1_39_COMPLETION_AND_READINESS_REPORT.md](NOVACONTROL_PHASE1_39_COMPLETION_AND_READINESS_REPORT.md).
+
+## Phase 38 — Business Operations & Financial Intelligence (uncommitted work tree, 2026-11-24)
+
+Added `novacontrol.finops` as one operations/accounting package over the existing
+JSON state store, event bus, audit, memory, knowledge, agent registry, capability
+runtime and FastAPI/static-web seams. A venture owns one durable document with a
+reporting currency, chart of accounts, append-only journal, revenue/expense
+records, operations, periods, budgets, forecasts, health and reports. No second
+ledger, database, orchestrator or NovaMarket data import was added.
+
+Revenue is separated into booked, invoiced, recognized and collected. Only
+approved actual expenses post; estimates/commitments/projections stay labelled
+and out of actuals, actuals default to unpaid, and payment is a recorded
+observation rather than a transfer. Corrections are reversals, closed periods
+refuse postings, and statements derive from posted entries. The audit repaired
+duplicate postings on revenue advance, invented paid expenses, non-idempotent
+refund/payment retries, stale approval flags after a failed post, false health
+alerts from missing/stale or unassigned-customer data, absent statement cards,
+and incomplete management-report sections.
+
+49 authenticated `/finance*` method/path pairs bring `docs/API.md` to 617
+routes. The Finance workspace lists/opens ventures and covers revenue, expenses,
+approval/payment, journal/reversal, period close, budgets, forecasts, health and
+reports, refreshing structured views after every mutation. Verification: 29
+Phase 38 tests, 82 dependency/application/reference/route tests with 722
+subtests, 123 web/API tests with 735 subtests; finops mypy clean; JS/compile and
+API-reference checks pass; a live loopback workspace created a venture and
+recorded recognized revenue. No full suite, live financial provider or live
+Phase 35/36/37 records were used, and nothing was committed or pushed.
+
+## Phase 37 — Customer Acquisition, Sales & Support (uncommitted work tree, 2026-11-24)
+
+Added `novacontrol.customer` as one lifecycle package over the existing Phase 36
+product detail, `JsonStateStore`, `EventBus`, `AuditLogger`, `MemoryManager`,
+`KnowledgeManager`, AgentRegistry, capability runtime and FastAPI/static-web
+seams. No second CRM, orchestrator, database or design system was created.
+
+A workspace exists only for a product whose Phase 36 state is
+`APPROVED_FOR_LAUNCH` with a true launch approval. Its snapshot reads product
+identity/version, description, target segments, approved value proposition,
+existing pricing assumptions, documented features, exclusions and release
+references. Phase 36 has no approved-marketing-claims field, so none are
+inferred. Segments and multiple ICPs keep evidence separate from assumptions;
+research retains source, retrieval time, confidence and verification state, and
+public research is never called direct validation.
+
+Leads require a permitted source and consent, plus a lawful basis for directory,
+import and integration sources. Qualification is deterministic and explainable:
+weighted criteria, evidence, missing information, required-evidence gating and a
+recommendation. A score is not verified purchase intent; intent needs its own
+evidence and verification. Lead, deal and ticket transitions are checked; lost
+leads/deals require reasons; deal values are estimates and realized revenue uses
+only explicit realized amounts. The sales brief derives fit, research, meeting
+prep, discovery questions, objection analysis, a draft proposal, follow-ups,
+competitor context and conversation summaries from records, with discounts and
+contract terms explicitly unauthorized.
+
+Communication remains drafts with channel consent checked at draft, approval and
+send. Customer and lead consent can be updated or withdrawn through dedicated
+routes; approval and send re-read the current record so a withdrawal blocks an
+older approved draft and a later grant cannot be used without approval or an
+enabled narrow policy. Approval needs a named approver and note; a narrow policy
+can enable consenting single-recipient sends but never bulk messaging. No provider
+is wired by default, so a send is honestly `not_configured` rather than claimed
+delivered. Support assistance reads only approved and verified knowledge, cites
+sources, reports missing grounding, never claims an action ran, and requires human
+review for account, billing, refund, legal, contractual and high/critical-priority
+matters. Ticket creation classifies uncategorised requests; a customer message on
+a resolved ticket reopens it. Feedback, onboarding with evidence, success/risk
+reasons, churn reasons and approved erasure complete the lifecycle. Analytics
+return explicit unavailable blocks for missing CAC, revenue, sales-cycle,
+satisfaction and adoption data, and refuse to sum mixed currencies.
+
+The acceptance audit repaired consent updates/rechecks, stale launch revocation,
+manual qualification bypass, deal linkage, ticket reopening/classification,
+erasure cleanup, mixed-currency analytics and the ticket UI controls. Verification:
+Phase 37 24 passed (17 service + 7 HTTP); dependency group (Phase 36,
+application/lifecycle, API and reference) 101 passed with 583 subtests; API/web/
+reference/capability/event/audit/persistence 255 passed with 1,357 subtests;
+customer mypy clean; the composition root retains only the pre-existing
+`VisionProvider.see(..., structured=True)` error; JS syntax clean; API reference
+in sync at 568 routes. No full repository run, live browser click-through, live
+research or live communication was performed. No commit, push, deployment or
+Phase 38 work. Report: `PHASE37_IMPLEMENTATION_AND_VERIFICATION_REPORT.md`; guide:
+`PHASE37_CUSTOMER_ACQUISITION_SALES_SUPPORT.md`.
+
+## Phase 36 — Product Development & Launch Pipeline (uncommitted work tree, 2026-11-24)
+
+Added `novacontrol.product` as one lifecycle package over the existing Phase 35
+`BusinessOpportunityService.detail()`, `AgentRegistry`/`AgentTask`,
+`JsonStateStore`, `EventBus`, `AuditLogger`, `MemoryManager`, `KnowledgeManager`,
+`HardwareMonitor`, runtime capability registry and FastAPI/static-web seams. It
+adds no second orchestrator, agent registry, database, microservice or design
+system.
+
+Intake accepts only a stored `VALIDATED` opportunity or an operator-approved
+`CONDITIONALLY_VALIDATED` one with retained conditions; insufficient, not-viable,
+research-needed and unknown states are refused. Each project keeps the
+opportunity id, validation report reference/version, sources, conditions and
+approval. The PRD is traceable and reports missing information rather than
+inventing requirements; it has revision history, human approval and evidence-bound
+requirement verification. Planning decomposes implementation and verification
+tasks, validates dependency cycles and references, labels estimates as estimates,
+and records critical path, milestones, measured hardware and parallelism.
+Architecture records components, contracts, data/security/deployment/observability
+design and ADRs, with a human approval gate before development.
+
+Development dispatches through the existing registry and refuses to treat an
+agent response as completion without verified evidence. Generated files stay in
+the path-safe, secret-scanned, non-destructive product workspace. Parallel-safe
+tasks run in bounded batches; retry, cancellation, state persistence and restart
+recovery are bounded. Quality gates retain real build/test/coverage/failure data;
+the built-in runner supports workspace pytest only, while security, dependency,
+static and performance evidence must be recorded honestly. Defects resolve only
+with passing test evidence; corrective tasks are capped. Release preparation
+requires passing gates and a validated build, writes a hashed source bundle and
+deployment/rollback/security docs, and requires human approval. Launch readiness
+exposes every check, blocker and warning; `APPROVED_FOR_LAUNCH` requires ready
+status, approved release, passing gates and named human authorization, and a later
+failure invalidates the approval. No deployment, external launch, campaign,
+commercial commitment, commit or push is executed.
+
+The application wires project-memory snapshots, approved-PRD knowledge ingestion,
+`product.*` events, audit entries, the hardware snapshot and one advisory
+`product-pipeline-agent`; the `product` runtime module reports the boundary. There
+are 35 authenticated `/product*` routes and a Products workspace covering
+portfolio, intake, PRD, architecture, plan/tasks, build/test/QA, defects, release,
+readiness and history. `docs/API.md` is in sync at **523 routes**.
+
+Verification on this machine after the acceptance audit: Phase 36 **35 passed**
+(29 service + 6 HTTP); focused web/API/reference group **152 passed, 1,254
+subtests**; application/Phase 30/34/35/agent neighbours **348 passed, 89
+subtests**; product/API mypy clean; API reference in sync; JS syntax and
+static-shell IDs checked. The audit repaired 16 defects, including unverified
+requirement counting, stale PRD/architecture/plan reuse, launch bypass, artifact
+tampering and pre-development task completion. The composition root retains the
+pre-existing `VisionProvider.see(..., structured=True)` error.
+The deterministic create→build/quality path measured **10.17 ms** with 23,382
+bytes of state. Not run: full repository suite, visual browser click-through, live
+agent code generation, any deployment. Nothing was committed or pushed.
+
+## Phase 35 — Business Opportunity & Validation Engine (uncommitted work tree, 2026-11-24)
+
+Added `novacontrol.business` as an evidence-first package over the existing
+Explore service, KnowledgeManager, JSON state store, EventBus, AuditLogger,
+HardwareMonitor and AgentRegistry. The package owns the domain models, financial
+arithmetic, feasibility assessment, explainable scoring, market/customer/
+competitor analysis, experiment planning, verdict/report generation and the
+stateful opportunity service. It adds no second research stack, agent registry or
+microservice.
+
+Discovery is deliberately source-backed: an Explore scan returns candidate
+signals only, and a record becomes an opportunity only after a sourced brief
+states the customer problem and proposed solution. Duplicate discovery is
+refused. Measured evidence requires a source and retrieval timestamp; primary
+customer evidence must name its supplier; assumptions never count as measured
+validation.
+
+Financial scenarios expose their formulas, assumptions, missing inputs and cash
+requirements. Feasibility uses supplied judgements plus the live hardware
+monitor, with missing dimensions reported unavailable. Scoring exposes weights,
+coverage, missing dimensions and disqualifiers. `VALIDATED` requires current
+primary customer evidence, current market evidence, a sourced competitor, a
+calculated base scenario, complete feasibility and sufficient coverage; stale
+sources and assumptions cannot satisfy it. Every lifecycle move is validated and
+recorded; validated, not-viable, rejected and archived records are immutable,
+while conditional/insufficient records remain open to more evidence.
+
+The process never executes an external action. Experiments are planned with
+hypothesis, objective, audience, resources, cost, duration, success/failure
+criteria, measurement, approval requirement and expected evidence; approval only
+records an operator decision. A read-only `business-validation-agent` is
+registered in the existing AgentRegistry, with no authority to validate or
+authorize.
+
+Seventeen authenticated routes bring the generated API reference to 488 routes.
+The Business workspace adds discovery/filter/detail/evidence/assessment/
+experiment/lifecycle controls and distinguishes measured evidence, estimates,
+assumptions, stale sources and unavailable information. Phase 35 has 55 passing
+tests after an acceptance audit repaired 13 defects (terminal-state guards,
+stale/estimate/assumption gates, post-lock rechecks, malformed-value handling,
+partial financial-input merging, analysis invalidation/report versions and UI
+controls); targeted web/API (152 tests, 1,184 subtests) and
+application/Phase 30–34/agent (278 tests, 15 subtests) regressions pass; package
+mypy, JS syntax and API-reference checks pass. No commit or push.
+
+## Phase 34 — Trustworthy Self-Management (uncommitted work tree, 2026-11-24)
+
+Added `novacontrol.self_management` as a coordinator over the existing
+`DiagnosticManager`, permission layer, audit logger, JSON state store, Phase 30
+operations/notifications, Phase 27 learning, Phase 32 memory and Phase 33 model
+router. It adds no second health registry or recovery engine.
+
+The roster now answers 34 live components, including a real event-bus publish
+round trip, API startup state, static assets, agents, memory index, background
+tickers, workflows, computer supervisor and resource governor. Diagnoses label
+`confirmed`/`probable`/`possible`/`unknown`, retain evidence, correlate recent
+failure events and do not open incidents for optional GPU/NPU readings that a
+CPU-only host cannot provide.
+
+Recovery is restricted to registered actions and bounded by timeout, attempts,
+cooldown and a window budget; each is permission-checked, approval-gated where
+needed, verified by the same live probe and written to the audit trail. Failed
+attempts escalate, refusals are audited, and no command is derived from incident
+text. Maintenance is confined to the application's temp/cache/log roots and
+never deletes protected files; configuration snapshots are validated,
+checksummed, versioned and restored through the application's real settings
+seams while preserving the previous version.
+
+The acceptance audit then repaired the operational gaps that the first pass
+missed: escalated incidents are updated instead of reopened on every pass;
+self-healed incidents close without an unnecessary recovery action; recovery
+refuses resolved/escalated incidents; policy changes, pause denials, maintenance
+denials and configuration refusals/successes are audited; configuration restore
+is refused in observe/recommend modes and while paused; autonomy, pause and the
+window budget persist across restarts; a component with a current diagnosis is
+not closed by a healthy generic probe; the Phase 28 specialist is invoked through
+its real `handle_task` protocol; the maintenance configuration callback passes a
+mapping (it had been silently disabled); stale-process detection no longer
+matches the user's project paths or the live server's parent shells; and
+configuration maintenance items are routed to the real restore control instead
+of being reported as changed.
+
+Seventeen authenticated routes bring the generated API reference to 471 routes;
+the Self-Management panel exposes the real controls and renders each action's
+result. Phase 34 tests after the audit: 45 passed; web/API regressions: 152
+passed / 1,150 subtests; neighbouring regressions: 228 passed / 15 subtests;
+live A–H 8/8. Measurements from the final run: provider detection 42.3 ms /
+recovery 9.3 ms, scheduler detection 125.1 ms / recovery 6.8 ms, resource health
+36.6 ms, `/status` 62.7 ms, config restore 22.2 ms, maintenance 148.3 ms,
+self-diagnosis 40.6 ms, refusal 3.1 ms; total 3.365 s. No commit or push. Report:
+[PHASE34_REPORT.md](PHASE34_REPORT.md); guide:
+[SELF_MANAGEMENT.md](SELF_MANAGEMENT.md).
+
 ## Timeline at a glance
 
 | Commit | Date | Intent |
@@ -5771,47 +6131,825 @@ timeline **340 / 121**; route contract + API reference + benchmark/evaluation/ex
 **60 / 413**; both mypy views clean over **433 files**; `docs/API.md` in sync (323 routes);
 `node --check` clean. The full repository suite was not run in one pass. Verdict unchanged:
 **PASS WITH LIMITATIONS** — the limitations remain the sample size, one deterministic environment,
-process-local trial history, and the absence of any live model-chosen decision.
-
-
-## 76. The docs were two audits behind the tree, and the first Linux run found what Windows could not (2026-10-28)
-
-The NF-08…NF-26 work was finished but never packaged, and its front matter had stopped tracking it. The
-README's NovaForge table ended at **NF-09** while the tree shipped **NF-26**; its headline suite size still
-read **3,325 passed / 12 skipped / 2,102 subtests / 108 files** against a tree that reports **5,963 / 1 /
-3,847 / 148**; `docs/STATUS.md` stopped at NF-15 and its "Next Work" section still described the decision
-pipeline as the missing link, four phases after it shipped. All of that now matches the tree, and every
-added row carries the phase's own honest verdict rather than a uniform tick — NF-13A stays *partially
-verified*, NF-23…NF-26 stay **PARTIAL PASS** with **B-01/B-02** spelled out, and the limitations list says
-plainly that no real game has been played, that embedding is refused rather than forced, that graphical HUD
-features are unsupported by construction, and that capture is Windows-only. `docs/NOVAFORGE_VERIFICATION.md`
-keeps its NF-01…NF-06 audit text standing and was only extended (Appendices A–E), because rewriting a
-historical report to look better is the failure mode these documents exist to prevent.
-
-Packaging it meant running the CI jobs where CI runs them. Both mypy views had been reported clean —
-because both had been run **on Windows**, where typeshed declares `ctypes.windll` and `ctypes.WINFUNCTYPE`.
-From Linux, the native view reported **5 errors in 3 files** (`gui/theme.py`, `novaforge/embedding.py`,
-`novaforge/launcher.py`): every one a Windows-only attribute behind a guard a type checker cannot narrow —
-`try/except`, an `os.name == "nt"` test, and the injectable `platform_supported` property. The fix is the
-codebase's own documented idiom: `telemetry/hardware.py` already explains that only a literal `sys.platform`
-comparison lets the checker narrow both views, so `theme.py` and `launcher.py` now guard that way (an early
-return each, identical behaviour — both already answered `True` off Windows). `Win32WindowApi` keeps its
-injectable platform, which `sys.platform` cannot express, so its three reads go through one documented
-`_windll()` helper and a `getattr(ctypes, "WINFUNCTYPE")`. **No `# type: ignore` and no widened override**;
-a suppression would have hidden the next Windows-only read in the same file.
-
-The first complete Linux run then had exactly one failure, and it was worth having: the approved-command
-planner test ran `python -c print(42)`, and a stock Ubuntu image has no `python`, only `python3`, so the
-step failed and the test asserted `COMPLETED` against `FAILED`. The product was fine; the test was not
-hermetic — it was asserting that the host has a python alias rather than that an approved step runs and its
-stdout is captured. Both it and its refusal sibling now build the command from `sys.executable`, with the
-assertions untouched.
-
-**Measured on the Linux tree** (Ubuntu, Python 3.12, editable `.[dev]` install — the `test` job's
-environment): full suite **5,722 passed / 242 skipped / 3,791 subtests / 0 failed** in **961.45 s**; before
-the test fix it was **1 failed / 5,721 passed / 242 skipped**, that single failure being the one above.
-`mypy src` and `mypy src --platform win32` both clean over **454 files** from Linux,
-`docs/API.md` in sync, `test_planner_phase4.py` **67 passed / 5 subtests** on both platforms. The 242
-Linux skips are the Windows-only desktop/browser E2E modules — the same tree reports 1 skip on Windows. No
-game was launched and no gameplay input was sent; the NF-23…NF-26 verdicts did not move, because packaging
-cannot clear a live-game blocker.
+process-local trial history, and the absence of any live model-chosen decision.
+
+
+## 76. The docs were two audits behind the tree, and the first Linux run found what Windows could not (2026-10-28)
+
+The NF-08…NF-26 work was finished but never packaged, and its front matter had stopped tracking it. The
+README's NovaForge table ended at **NF-09** while the tree shipped **NF-26**; its headline suite size still
+read **3,325 passed / 12 skipped / 2,102 subtests / 108 files** against a tree that reports **5,963 / 1 /
+3,847 / 148**; `docs/STATUS.md` stopped at NF-15 and its "Next Work" section still described the decision
+pipeline as the missing link, four phases after it shipped. All of that now matches the tree, and every
+added row carries the phase's own honest verdict rather than a uniform tick — NF-13A stays *partially
+verified*, NF-23…NF-26 stay **PARTIAL PASS** with **B-01/B-02** spelled out, and the limitations list says
+plainly that no real game has been played, that embedding is refused rather than forced, that graphical HUD
+features are unsupported by construction, and that capture is Windows-only. `docs/NOVAFORGE_VERIFICATION.md`
+keeps its NF-01…NF-06 audit text standing and was only extended (Appendices A–E), because rewriting a
+historical report to look better is the failure mode these documents exist to prevent.
+
+Packaging it meant running the CI jobs where CI runs them. Both mypy views had been reported clean —
+because both had been run **on Windows**, where typeshed declares `ctypes.windll` and `ctypes.WINFUNCTYPE`.
+From Linux, the native view reported **5 errors in 3 files** (`gui/theme.py`, `novaforge/embedding.py`,
+`novaforge/launcher.py`): every one a Windows-only attribute behind a guard a type checker cannot narrow —
+`try/except`, an `os.name == "nt"` test, and the injectable `platform_supported` property. The fix is the
+codebase's own documented idiom: `telemetry/hardware.py` already explains that only a literal `sys.platform`
+comparison lets the checker narrow both views, so `theme.py` and `launcher.py` now guard that way (an early
+return each, identical behaviour — both already answered `True` off Windows). `Win32WindowApi` keeps its
+injectable platform, which `sys.platform` cannot express, so its three reads go through one documented
+`_windll()` helper and a `getattr(ctypes, "WINFUNCTYPE")`. **No `# type: ignore` and no widened override**;
+a suppression would have hidden the next Windows-only read in the same file.
+
+The first complete Linux run then had exactly one failure, and it was worth having: the approved-command
+planner test ran `python -c print(42)`, and a stock Ubuntu image has no `python`, only `python3`, so the
+step failed and the test asserted `COMPLETED` against `FAILED`. The product was fine; the test was not
+hermetic — it was asserting that the host has a python alias rather than that an approved step runs and its
+stdout is captured. Both it and its refusal sibling now build the command from `sys.executable`, with the
+assertions untouched.
+
+**Measured on the Linux tree** (Ubuntu, Python 3.12, editable `.[dev]` install — the `test` job's
+environment): full suite **5,722 passed / 242 skipped / 3,791 subtests / 0 failed** in **961.45 s**; before
+the test fix it was **1 failed / 5,721 passed / 242 skipped**, that single failure being the one above.
+`mypy src` and `mypy src --platform win32` both clean over **454 files** from Linux,
+`docs/API.md` in sync, `test_planner_phase4.py` **67 passed / 5 subtests** on both platforms. The 242
+Linux skips are the Windows-only desktop/browser E2E modules — the same tree reports 1 skip on Windows. No
+game was launched and no gameplay input was sent; the NF-23…NF-26 verdicts did not move, because packaging
+cannot clear a live-game blocker.
+
+## Phase 27 — continual learning and self-improvement
+
+There was no Phase 27 specification to recover. `ROADMAP.md` stops at Phase 20, `docs/PHASES.md` stops at
+Phase 15, and `docs/PHASE21_26_VERIFICATION.md` says "Phase 27 was not started." The phase brief supplied with
+the request was therefore treated as the specification, and that gap is stated in the report rather than
+papered over with a reconstructed roadmap entry.
+
+The implementation is one package, `src/novacontrol/continual/`: structured evidence captured from an
+execution that already happened, an evaluator that decides the outcome from that evidence, derived signals, a
+versioned strategy book, lexical retrieval with a hard device/app/task-kind gate, and a bounded JSON corpus in
+the existing state store. It plans nothing, executes nothing, verifies nothing on its own and calls no model.
+The application captures after shaping a response and inside a guard, so a learning defect costs learning and
+never the request. Twelve `/continual/*` routes were added through the five required places (handler, surface,
+consumer, regenerated `docs/API.md` — now 387 routes — and tests).
+
+Two correctness traps found while building it are now pinned by tests. A step that reported its own write as
+`verified` was being treated as independent confirmation; the evaluator now accepts only a `verify`/`check`
+step or an explicit verification mapping, so a self-confirming write is `partial`, not `success`. A positive
+feedback NOTE was making commented successes `user_corrected`; only a negative verdict reclassifies now.
+Unverified work can never support a proposal, validation or promotion, and strategy statistics are recomputed
+from evidence rather than accumulated, so deleting an execution changes the version's measured success rate.
+
+Verified against a running server on port 8002 (disposable data dir, real `create_app()`): two `/ask` math
+answers returned 51 and were recorded as `unverified` (chat has no steps and no verifier); positive feedback
+upgraded one to `success`; `POST /continual/benchmark` measured verified completion **0.0 → 1.0** and retries
+**3 → 0** while the live corpus stayed **2 → 2**; killing and restarting the process restored both records
+(`success` + `unverified`) with an empty skip list. The benchmark's four-task family was run twice with
+identical deltas — baseline **0/4 verified with 4 retries**, learned **4/4 verified with 0 retries**, unrelated
+family **1.0 → 1.0** — at a measured latency COST of **+1.7 / +2.5 ms** per task, because the learned path adds
+the read-back the baseline never performed. That cost is reported, not hidden.
+
+Overhead on this machine: `capture` **0.026 ms** mean, `evaluate` **0.005 ms**, `record` **2.724 ms** (it
+re-derives signals and stats over the corpus), `recommend` **2.074 ms** over 300 records; 300 records cost
+**132.8 KiB** traced memory and **554 KiB** on disk. `tests/test_continual_learning.py` adds **45 tests**; the
+regression groups (`test_application`, `test_web_api`, `test_web_platform`, `test_route_shape_contract`) all
+passed, and both mypy views report **no error in `continual/`**. The overall mypy run still fails on 8 errors in
+4 files, all of them in the pre-existing untracked NovaForge working tree (`pilot.py`, `overlay.py`, …), which
+this phase did not touch. A full-suite run (6,128 tests) was started after those groups; the session interrupted
+it at 44% before pytest printed its summary (`exit=127`), so it is not claimed as a pass — the files around its
+four `F` markers that are not NovaForge (`test_embodied`, `test_evaluation`, `test_goal_planning`) reproduced no
+failure when re-run, with `test_goal_planning` at 90 passed.
+
+The post-implementation audit found the real gap: only chat requests were captured. `/desktop/execute`,
+`/browser/execute` and `/phone/execute` recorded nothing, so the phase could learn from conversation but not
+from the device workflows it exists to improve. Capture now happens in `_execute_planned_command`, the ONE
+executor all three device families share, so `/command/execute`'s re-dispatch cannot double-record; the steps,
+`verified` flags, `attempts` (now counted as retries) and durations are read from the controller's results, and
+a run is only verified when every executed step says it was. Device plans also carry a compatible
+recommendation under `plan["continual"]`, advisory only, with the planned workflow untouched. The phase suite
+is now 48 tests (device capture, attempts→retries, plan suggestion) and `test_web_api` + `test_application`
+re-ran clean at 109 passed / 90 subtests with no new mypy errors. `/agent/run`, game launches and `/explore`
+remain uncaptured and are reported as remaining integration work rather than claimed.
+
+Known limits: a chat answer supplies no steps, so even after a person confirms it there is no plan for
+`recommend` to offer (`source: none`) — actionable adaptation is demonstrated by the benchmark's filesystem
+family, not by chat; retrieval is lexical, so a paraphrase with no shared tokens is not recognised; the
+benchmark family is synthetic and small. Nothing was committed or pushed.
+
+## Phase 28 — multi-agent collaboration
+
+There was no Phase 28 specification to recover: `ROADMAP.md` stops at Phase 20,
+`docs/PHASES.md` stops at Phase 15, and the Phase 27 report recorded the same gap.
+The supplied brief is the acceptance contract; no roadmap entry or Phase 29 work
+was invented.
+
+The implementation is one coordination layer above the existing agent registry
+and specialist pipeline, not a second framework. `CollaborationPlanner` assesses
+whether an objective names separable work, then decomposes it into a validated
+DAG. `CollaborationEngine` selects registered agents by role and verified learning
+history, bounds concurrency with a semaphore, gathers independent ready units,
+orders dependents, passes only declared upstream public views, retries only
+idempotent work, reports timeout/cancellation honestly, aggregates only verified
+results, and persists under `collaboration` schema `phase28.1`. Four real
+specialists are installed: research, developer, data analysis and verification.
+Scripted agents are test harnesses only.
+
+Three correctness defects were found by probes and fixed. All same-role subtasks
+initially chose the first candidate, so the second agent never participated and
+conflicts could not surface; assignment now rotates by subtask position and retry
+moves to the next candidate. The coding plan passed the whole objective to the
+coder, including "run the tests", so `DeveloperAgent` routed to its test path and
+wrote nothing while the collaboration reported success; the coder now receives
+`apply the change: <change request>` and the verifier owns the test clause. The
+data agent parsed `in data` as a column name from "analyze every column in
+data.csv"; the column grammar now rejects stop words in the bare form.
+
+A final audit then found and fixed six gaps: resume now requires fresh
+`authorize=True` for write/execute plans and fails a non-idempotent unit cancelled
+after it started instead of replaying it; unavailable agents are probed live,
+reported with a reason and never scheduled; a non-COMPLETED response is a failed
+subtask; agent-reported numeric usage is aggregated; an authorized agent without
+a clone hook fails honestly; and flush reports the persisted row count. A
+rate-limited idempotent failure uses bounded exponential backoff before retry.
+
+Evidence: **46 Phase 28 tests passed**. Real research through the live Explore
+provider: COMPLETED, 2/2 verified, 9 claims, 3 sources. Real CSV: 4/4 verified,
+including independent recomputation. Disposable coding project: real file write
+plus real pytest, verified by a different agent. Failure, timeout, retry,
+cancellation, resume, conflict-unresolved and conflict-resolved paths are pinned.
+Relevant regressions: **245 passed / 561 subtests** across config, application,
+web API, continual learning, API-reference and specialist-verification files;
+**121 passed / 13 subtests** in the agent dependency group. `docs/API.md`
+regenerated to **395 routes**. Targeted mypy leaves one pre-existing vision-call
+error at `application.py:5159`, outside Phase 28.
+
+Benchmark on this machine (20,000 rows, 3 columns): single agent 135.79 ms
+(verified); four-way collaboration median 572.43 ms, engine wall 568.50 ms,
+summed subtask time 845.32 ms, measured parallelism 1.49, 4/4 verified; serial
+collaboration median 592.00 ms; parallel-vs-serial 1.03×; peak traced memory
+21,969 KiB. The coordination path is slower than one agent on this dataset because
+it adds independent recomputation; that cost is reported, not hidden.
+
+Verdict: **PARTIAL**. Core collaboration is implemented and demonstrated, and
+post-audit fixes cover resume authorization, availability, non-completed
+responses, usage aggregation, clone failure, flush counts and rate-limit
+backoff. Still missing: a central token budget/billing reconciliation,
+hardware-aware scheduling, provider quota discovery/capability preflight and a
+web panel; the coding scenario used a disposable project; the full repository
+suite was not completed. Nothing was committed or pushed.
+
+## Phase 29 — Universal Computer & Device Operator (2026-11-10)
+
+Phase 28 was closed PASS before this work; there was again no canonical Phase 29
+document (`ROADMAP.md` stops at Phase 20, `docs/PHASES.md` at Phase 15), so the
+supplied brief was the acceptance contract and no roadmap entry or Phase 30 work
+was invented.
+
+The implementation is one coordination layer, `novacontrol/computer/`, over the
+existing agentcore, desktop, browser, vision, reliability, permission, audit,
+model, event and persistence systems — never a second agent loop. It adds a
+one-task `ComputerOperator`, live device discovery, contextual reference
+resolution, redacted bounded history, nine `/computer/*` routes and a
+server-minted single-use token for every run. Desktop perception gained real
+window/dialog enumeration, OCR coordinates, loading/error signals, screenshot
+hashes and structured diffs; the semantic action engine gained scroll, drag,
+focus/minimize/maximize, back, clipboard, screenshot, Save As, file operations
+and browser type/scroll/back/key/upload/download. Playwright download dispatch
+was implemented after the audit found the declared action unreachable, and two
+unimplemented cookie action declarations were deleted instead of left as dead
+code.
+
+Live evidence and integration review found and fixed several real defects.
+`VisionController` capture and guided click replaced the desktop controller's
+approval gateway and reset an approved operator run to deny-by-default; the
+controller now accepts a per-action approval override, pinned by
+`ApprovalIsolationTests`. More seriously, `ActionEngine` accepted only a raw
+`browser_runner`, so every browser action from the closed loop bypassed
+`BrowserAutomationController`'s approval and audit layers; it now takes a
+`browser_controller`, routes every browser action through it, and the operator
+swaps/restores both gateways. A denied browser action can no longer reach the
+raw Playwright runner. The orchestrator's finalization also no longer falls back
+to "all actions succeeded" as completion: plan exhaustion must pass final
+verification or the task fails. An orchestrator exception is persisted as a
+failed history record, and optional LLM enrichment is bounded at 8 s so a hung
+model cannot block `/computer/plan`. History redaction now covers
+`Authorization`/`Cookie`/Bearer values.
+
+Real Windows evidence: a new Notepad window appeared; 45 bytes were typed and
+read back; a fresh 4,631,166-byte screenshot was captured; Ctrl+S saved
+`tmp/phase29/phase29_work.txt` with matching content; the Save As dialog was
+detected and dismissed; Calculator opened; focus/minimize/maximize succeeded.
+Real browser evidence on a local HTTP page: navigation, form submission,
+upload (`phase29_upload.txt` read back), download (38-byte
+`phase29_download.txt` with the expected payload) and a disposable
+cookie-protected login/session (`Welcome phase29-session`) and live tab
+open/list/switch/close. Window responsiveness (`IsHungAppWindow`) and live
+display geometry were added to perception; a disposable native Win32 window
+with no message loop was then observed live through production
+`ComputerOperator.observe` as `responding: false` / `has_unresponsive_window:
+true` and cleared after cleanup. A token-gated `open settings` workflow
+completed with 5 observations and final verification PASS. Real closed loop:
+objective `open calculator`, 5 observations, action success only after
+`Window appeared: Calculator`, final verification PASS, history restored after
+restart. Real cancellation: emergency stop, 0 actions, input released, no
+Calculator. Real file workflow: 3 files, two `.txt` files moved into `archive`
+with SHA-256 preserved, `keep.md` untouched.
+
+Performance on this machine: capture median 575.0 ms, OCR 1,242.5 ms,
+observation 2,287.2 ms, verification 0.0707 ms, Calculator launch 2,773.9 ms,
+RSS 105.4 MB, system CPU sample 42.8% during OCR.
+
+A bounded soak ran 30 live observations over 83.37 s with 0 failures, a
+2,268.7 ms median and flat RSS (101.4 MB start, 104.1 MB peak). Final focused
+verification: **298 passed, 473 subtests passed, 19 warnings** across Phase 29,
+agentcore, desktop, browser, web-platform and LLM-integration groups; the
+Phase 29 suite itself collects **22 tests**. Targeted mypy is clean for the 15
+changed source files; full mypy still reports 7 pre-existing errors in NovaForge
+(6) and `application.py:5568` (1). `docs/API.md` is in sync at 405 routes and
+`git diff --check` is clean after line-ending normalization.
+
+Verdict: **PARTIAL** under the updated universal acceptance policy; the phase
+remains open. The core operator, browser tabs, live unresponsive-window/display
+perception, a live token-gated Settings workflow, safety, cancellation and
+persistence are implemented and verified. Still unverified: macOS/Linux desktop
+sessions, a second physical monitor and a live resolution/scaling change, a
+forced live application crash, OS sleep/resume, a genuinely unexpected
+interrupting dialog, a live development-environment workflow, a multi-hour
+soak, external auth providers and the full repository suite. Nothing was
+committed or pushed.
+
+## Phase 30 — persistent autonomy and personal operations (2026-11-10, uncommitted)
+
+Phase 30 adds `src/novacontrol/operations/` as a durable objective and
+continuity layer. It deliberately reuses the existing `Schedule` parser,
+`TaskCenter`, `PermissionManager`, `JsonStateStore`, `EventBus` and the
+application's `handle_request` pipeline; there is no second scheduler, task
+manager, planner or agent loop. The application injects its execution
+callable, so an operation task travels the same planner/tool/permission path as
+a normal request, and `agent: "research"` / `agent: "developer"` delegate
+through the Phase 28 pipelines.
+
+The model holds objectives (outcome, kind, status, priority, autonomy,
+deadline, derived progress), dependency-aware tasks (steps, pending/completed
+steps, evidence, attempts, checkpoints, approval, recurrence), milestones and
+notifications. Completion requires `verified=True`; an unverified run is
+FAILED. FAILED, BLOCKED and WAITING_APPROVAL are sticky, cycles are refused,
+duplicate completion raises, and a recurring task spawns exactly one successor
+computed from the tick's clock. Resume keeps verified checkpoints, flags
+interrupted tasks for reassessment and executes only pending steps.
+
+`OperationsMonitor` derives deadline/overdue/stalled/approval/failure/blocked/
+completed/actionable/no_change signals from stored state; `NotificationCenter`
+deduplicates within six hours, honours mute and enabled kinds, and keeps a
+bounded history. Autonomy is a ceiling, never a grant: even `execute` parks
+sensitive tasks until a recorded per-task approval, and `PermissionManager` may
+tighten but not loosen that decision.
+
+Fifteen routes were added and the API reference regenerated to 419 routes. The
+Operations panel renders objectives, milestones, task rows, notifications and
+the Phase 27 learning summary, and posts every control to the route that
+performs it before re-reading the board.
+
+Verification on this machine: Phase 30 suite **37 passed**; web-platform
+contract suite **46 passed, 462 subtests passed**; live scenarios A–F
+**41/41 checks** against the real application — restart/resume preserved
+completed work and did not re-execute it, recurrence ran once and scheduled
+one successor, simulated deadline/overdue ticks produced deduplicated
+notifications, a verified checkpoint resumed with its file written exactly
+once, approval executed once while rejection executed nothing, and a two-agent
+objective recovered a failed workstream without duplicate delegation.
+Benchmark (100 objectives, 400 tasks): create 14.59 ms, snapshot 354,406 bytes,
+serialise 5.61 ms, restore 8.10 ms, monitor scan 0.65 ms, notification
+0.006 ms, retrieve-all 0.024 ms, RSS 80.2 MB. The served dashboard created an
+objective through its own form and rendered the real card with no console
+errors. Targeted mypy is clean for the new package; the one remaining error is
+the pre-existing Phase 29 `VisionProvider.see(..., structured=True)` call.
+
+Verdict: **PARTIAL**. Persistent objectives, continuity, scheduling,
+monitoring, approvals, the dashboard and the Phase 27/28/29 hooks are
+implemented and verified, but an OS-level restart, a multi-hour soak and a live
+external-application objective through an operation task were not performed.
+Nothing was committed or pushed.
+
+### Phase 30 verification pass 2 (2026-11-10, uncommitted)
+
+A requirement-by-requirement audit followed by targeted tests found and fixed
+six real defects, all now covered by regression tests:
+
+1. A stored RUNNING task was stranded after a restart; an ACTIVE objective
+   never ran it again. `OperationsManager.from_dict` now recovers RUNNING to
+   READY + `resume_required` (verified checkpoints kept), and
+   `resume_objective` reports those already-recovered tasks for review.
+2. Approve/reject could revive a cancelled, completed or queued non-sensitive
+   task, and block/wait/fail could rewrite a closed task. Terminal-state guards
+   now enforce the state machine; rejection still works for a queued sensitive
+   task.
+3. A missing permission layer parked a task for approval that could never
+   satisfy the gate. It now blocks with the real reason; an already-approved
+   task the layer still refuses is blocked instead of re-parked forever.
+4. An approved desktop/browser objective dead-ended on the token-bearing plan
+   it had just minted. `_run_approved_operation_plan` now consumes that token
+   through the public `execute_desktop_command`/`execute_browser_command` only
+   when the TASK is approved, and requires every action to report completed.
+5. Monitoring described every ready task as "authorized" even for observe and
+   recommend objectives; the signal now says a person must start it.
+6. The architecture doc's stall threshold (30 min) disagreed with the code
+   (24 h); the doc now matches.
+
+Verification: Phase 30 **43 passed**; phase + web platform **89 passed, 462
+subtests passed**; targeted API/web regression **169 passed, 537 subtests**
+with only FastAPI/Starlette deprecation warnings. Live Scenarios A–G **45/45**
+passed; Scenario G created an execute-level objective whose task planned
+`open calculator`, parked for approval, then executed the plan through the real
+desktop controller after the recorded approval. The controller verified the
+action (window appeared), the task carried that evidence, and the objective
+reached progress 1.0. Calculator was opened on the host desktop as the
+verification side effect. Targeted mypy is clean for the operations package;
+the sole `application.py` error is the pre-existing Phase 29
+`VisionProvider.see(..., structured=True)` call. `docs/API.md` remains in sync
+at 419 routes; `node --check` and `git diff --check` are clean.
+
+Verdict remains **PARTIAL**: an OS-level restart, a multi-hour soak, live
+Phase 28 agents from an objective, and automatic learning-driven scheduling
+were not verified/implemented. Nothing was committed or pushed.
+
+## Phase 31 — transfer learning and general-purpose skills (2026-11-13, uncommitted)
+
+Phase 31 extends the existing `src/novacontrol/skills/` package rather than
+adding a parallel registry. The original callable `FunctionSkill` /
+`SkillRegistry` remains; the new library adds immutable versioned `Skill`
+values, a token-indexed catalog, evidence-based acquisition, compatibility and
+adaptation, composition checks, execution checkpoints and lifecycle events.
+`SkillService` owns no executor: `_execute_skill_step` in `application.py` routes
+each step to the existing `ToolExecutor`, `handle_request`, token-gated
+desktop/browser executors, or the research/developer pipelines. Persistence uses
+the shared `skills` state-store namespace; Phase 30 tasks can name
+`agent="skill:<id>"` and supply inputs/version/environment in task metadata.
+
+Acquisition needs two independent verified observations (or a demonstration
+plus a verified execution); one success is refused. Validation is separate,
+per version, from its own verified runs. Adapted versions start `ADAPTED` with
+empty reliability and never inherit the source's validation; the source is
+preserved and must itself be `VALIDATED` before adaptation. Adaptation rewrites
+target words, tools, environment and the input contract in one pass and records
+each change. Composition checks dependencies, cycles, inputs, duplicate outputs,
+tools and permissions, binds outputs produced by earlier skills, and stops on
+the first non-completed step. Required inputs are not defaulted from their
+examples; a missing required input blocks execution.
+
+Phase 27 recommendations now re-rank retrieval (preferred tools gain, avoided
+tools lose, strategy/evidence ids named) without granting authority. Phase 30
+approval retries resume the parked skill execution instead of replaying its
+verified steps.
+
+Verification on this machine: Phase 31 suite **31 passed** in 1.00 s; HTTP skill
+routes **2 passed**; targeted regression **171 passed / 552 subtests** in 77.53 s
+(**202 / 552** including the phase suite); live scenarios A–F **32 passed, 0
+failed, 0 unverified** (33 entries, one informational latency) against the real
+application. Live A acquired and reused a real `machine_facts` skill; B
+transferred it to `installed_applications`; C acquired “Open Control Panel”
+from two real desktop runs (closing the window between them so a new one was
+verified), adapted it to “open character map”, and opened Character Map through
+the token-gated controller; D composed two validated skills in dependency
+order; E refused `plan9` and preserved the original; F restored a paused Phase
+30 objective in a fresh application instance, completed its skill task, and
+resumed a two-step skill without repeating the verified first step. Retrieval
+measured 0.312 ms, version lookup 0.0015 ms, adaptation 14.983 ms, stored state
+60,170 bytes and process RSS 89.2 MB on the small catalog. `docs/API.md` is in
+sync at **434 routes**; `git diff --check` and `node --check` are clean;
+targeted mypy is clean for the new package and the only app error is the
+pre-existing Phase 29 `VisionProvider.see(..., structured=True)` call.
+
+A verification pass found and fixed defects the first report had overstated:
+examples were accepted as execution defaults, duplicate rejection left a
+phantom catalog entry, deprecation could activate an unvalidated adaptation,
+rollback accepted non-validated targets, composition did not bind outputs or
+recognize inputs produced by earlier skills, adapted skills could be created
+from non-validated sources, arbitrary target-map entries could pose as OS
+adapters, and `/skills/execute`, `/skills/resume` and `/skills/compose/execute`
+accepted a client-supplied `approved` flag. All are covered by the 31-test phase
+suite and the HTTP skill tests; the final live run is 32/0/0.
+
+Verdict: **PARTIAL**. Cross-OS and browser skill transfer were not run; Phase 28
+has no in-pipeline skill tool; Phase 29's `ComputerOperator` is not a skill step
+type; Phase 27 informs retrieval but does not auto-deprecate or auto-adapt; there
+is no Skills UI; performance is small-catalog only. Nothing was committed or
+pushed.
+
+## Phase 32 — Long-Term Memory & Personal Knowledge Model (2026-11-13, uncommitted)
+
+Phase 32 extends the Phase 3 memory subsystem rather than adding a second
+memory system. `PersonalKnowledgeService` (`src/novacontrol/memory/personal.py`)
+stores structured records as JSON `MemoryRecord`s in the shared `long_term`
+namespace under `pk:<id>` and relations under `pkr:<id>`, through the same
+`MemoryManager` and `SqliteMemoryStore` used by conversation/project memory.
+The repository gained literal-prefix `list_records` and `delete_record`; the
+service's in-process index is rebuilt from durable rows at startup and is never
+the source of truth.
+
+The record model carries category, kind, status, content, subject/predicate,
+project, entities, source/provenance, confidence, verified flag, created/updated/
+last-verified timestamps, validity, retention, privacy, version, immutable
+history and supersession/merge lineage. Evidence-bearing sources (user,
+correction, document, application, execution, task) can be verified;
+conversation/agent contributions remain unverified, and inference/assumption is
+capped and never promoted by omission. Explicit chat `remember:` notes and
+authenticated API writes are the acquisition paths; ordinary conversation turns
+are not saved permanently.
+
+Duplicate identity is `(subject, predicate, category)` when a predicate exists;
+a blank predicate compares exact normalized content so unrelated facts about one
+user do not falsely conflict. Corrections and explicit supersession preserve
+history; unresolved verified contradictions keep both sides and require explicit
+resolution; consolidation merges only records with the same identity and
+normalized content while retaining a recoverable batch; validity/retention
+cleanup retains expired/archived records. Retrieval combines exact content,
+subject/entity overlap, project scope, status, confidence, recency, validity and
+relation expansion, and uses a multiword gate so a generic term cannot retrieve
+an unrelated project. Owner and agent access share one visibility check; agents
+never receive private or sensitive records and are project-scoped.
+
+Application seams: chat context and explicit remember/recall; agent task metadata
+merged into the shared `SpecialistPipeline` context; Phase 29 plan/run context;
+Phase 30's ordinary request path; and Phase 31 skill retrieval accompanied by
+personal context. Existing approval tokens, permissions and audit remain the
+execution authority. Eleven `/memory/personal*` routes bring `docs/API.md` to
+445 routes and are marked `no-render` because no personal-memory panel exists.
+
+Verification on this machine: Phase 32 **37 passed** (32 memory + 5 HTTP);
+memory/Phase 31 **37 passed**; API contract/reference **11 passed, 445 subtests**;
+Phase 29/30 **65 passed**; agent pipelines **139 passed, 89 subtests**; filtered
+web API **2 passed, 75 deselected**; live A–G **48 checks, 0 failed** against the
+real application, real temporary SQLite stores and fresh application instances.
+Live evidence covers explicit provenance, restart persistence, project
+continuity, supersession/history, contradiction resolution, relevance filtering,
+correction/deletion surviving restart, and agent/skill privacy scoping. Benchmark:
+write mean 8.048 ms (max 10.111), retrieval mean 0.505 ms (max 0.940), graph
+0.027 ms, SQLite 73,728 bytes, RSS 93,978,624 bytes. The post-implementation
+audit fixed chat context not reaching the Brain message builder, project scope
+missing from record identity, relation endpoints leaking a hidden target, a
+withdrawn conflict side leaving the opposing record contradicted, unsafe
+timestamp/field validation, owner control of sensitive records by explicit id,
+context-budget overflow, and agent access to project records without a project;
+the phase suite is now 37 tests. Targeted mypy is clean for
+the memory package and API/agent modules; the only checked application error is
+the pre-existing Phase 29 `VisionProvider.see(..., structured=True)` call.
+`git diff --check` is clean; the API reference is in sync.
+
+Verdict: **PASS**. Limitations stated rather than hidden: retrieval is
+deterministic lexical/entity/graph scoring, not embedding-based synonym matching;
+connected-app/document ingestion is an explicit source API, not a new connector;
+consolidation is unit-verified on real SQLite rows (the public duplicate door
+normally prevents duplicate pairs); live restarts are application-process
+restarts, not an OS reboot or multi-hour soak; no personal-memory UI exists; and
+Phase 28/29/30 integration is verified at the real application seam and
+regression level rather than by a new live multi-agent/computer-operation
+workflow. Nothing was committed or pushed.
+
+## Phase 33 — Adaptive model and compute intelligence (2026-11-24, uncommitted)
+
+Added `models/adaptive.py` as a selection/execution policy layer over the
+existing Phase 7/14 model manager, capability profiles, hardware monitor, cost
+estimator, benchmarks, Phase 27 learning and configured providers. The new
+pieces are a provider registry with measured health and cooldowns, truthful
+model endpoints, a task-profile adapter, evidence-scored routing with explicit
+eligibility reasons, provider-diverse compatible fallback, bounded concurrency,
+exact-zero local cost with unknown cloud prices left unknown, and a policy that
+requires multiple measured models/runs before activation and snapshots the
+previous policy for rollback.
+
+The application registers live local models without a second loader, exposes
+nine authenticated `/models/routing*` routes, adds a System-panel routing card,
+lets `NovaBrain` use the router on its optional `auto`/`llm` path with the old
+provider as fallback, and gives Phase 28 subtasks model assignments. Existing
+privacy, approval, permission, memory, skill and vision gates were preserved.
+
+Verification on this machine after the audit: 40 Phase 33 tests; 282 targeted
+model/lifecycle/optimization/Phase 28 regression tests with 33 subtests; 72
+API-reference/web-platform/brain-mode tests with 951 subtests; 8 filtered web
+API tests with 15 subtests; API reference in sync at 454 routes; JS syntax
+clean; new routing/integration mypy clean; only the pre-existing
+`VisionProvider.see(..., structured=True)` error remains. Live A–H were run
+against the real application and the installed `qwen3:8b`/`qwen3-vl:4b`:
+deterministic RAM question, real reasoning answer, generated Python executed
+correctly, real image read (`NOVA-42`), real connection refusal then fallback,
+oversized endpoint rejected against measured RAM, local-only cloud rejection,
+and genuine observations producing an activated and rolled-back policy.
+Evidence is in `tmp/phase33/evidence.json`; the report is
+[PHASE33_REPORT.md](PHASE33_REPORT.md) and the guide is
+[ADAPTIVE_MODELS.md](ADAPTIVE_MODELS.md). Cloud completion was not live-tested
+because no paid provider was authorized. Nothing was committed or pushed.
+
+The post-implementation audit fixed twelve defects: the completion route ignored
+`local_only`; deterministic completion reported an answer it did not produce;
+provider re-registration reset the user's enable switch; cloud sync removed and
+re-added the same provider (erasing health); scratch/lazy-local upgrades did not
+reattach the router; policy bonuses merged same-named models across providers;
+uninstalled local models stayed selectable; the route-consumer map said the
+routing status had no panel; two accuracy/metadata issues (context wording and inferred provenance/modality),
+the cloud model being registered as local in cloud mode, and a configured
+latency budget that was not enforced. Each fix has a regression test, and the
+Phase suite plus the live A–H run were repeated.
+
+## 2026-11-26 — Group 1 D12: objective-bound window targeting
+
+Closed the High-severity safety defect found by the DF-6 operator-loop attempt: a
+computer-operation objective that named one window was grounded on the first titled
+window the OS probe returned, and the paste verification compared against that same
+wrong title — so the run reported `success: true, verified: true` while the text sat
+in `Realtek Audio Console`.
+
+Added `agentcore/targeting.py` (pure extraction/binding/revalidation). Perception now
+binds a named target from `window_details` or reports nothing; the orchestrator
+extracts the objective's window once, refuses any input step whose target is
+absent/ambiguous/title-only/identity-changed, and passes the bound `(handle, pid)` into
+`TYPE_TEXT`. The desktop paste probe now returns the foreground handle and pid, and
+`_type_text` fails on any mismatch. `Expectation.target_identity` makes the verifier
+require the same window after the action, and the final verdict no longer overwrites
+per-step evidence: an input step whose effect was not observed makes the run fail.
+
+Verification: 28 new focused tests (every mandated negative path, Realtek as a
+fixture-only regression), 175 tests across the agentcore/Phase 29/30/31 suites, mypy
+clean on 23 files, new files ruff-clean, `git diff --check` clean. Two live runs on an
+isolated disposable window: an absent target is refused with zero input, and a verified
+`NovaD12Target` window received the text with a matching delivery-time identity while
+no other application was targeted (18/18). The DF-6 operator-loop mid-action crash now
+passes 16/16 with no false success and one durable record. Evidence in `tmp/group1/`;
+report §J. Nothing was committed, pushed or deployed, and no permissions or approvals
+were weakened.
+
+## 2026-11-26 — Group 1 DF-8 requirement resolution and final acceptance planning
+
+No source code changed. Revalidated the D12 and DF-6 evidence against the current tree:
+the objective-bound targeting guards are present in perception/orchestrator/actions/
+controller/verifier, the 28 focused tests and 175-test run pass, the isolated live run is
+intact (18/18, with the target's own buffer readback and delivery identity match), and
+the DF-6 operator loop is intact (16/16: marker `keysym=Control_L`, exit 3, failed run,
+durable record, no token replay, one execution). Recorded two historical evidence files
+that are superseded rather than current.
+
+Investigated Phase 31 #13: the original brief is not in the repository, so only the
+phase report and `docs/SKILLS.md` define it. Reading A (desktop/browser skill steps use
+the real controllers and token path) is implemented and live-verified; reading B (a
+skill step invokes the whole `ComputerOperator` workflow) is not implemented and would
+be a new feature; a distinct unspecified reading has no evidence. A `COMPUTER` step
+would call the existing `plan_computer_task`/`execute_computer_task` entry points and
+inherit D12 targeting, the operator preflight, durable history, Phase 27 capture and
+independent verification — a one-branch design was written down, not applied.
+
+Also wrote the DF-1…DF-7 environmental acceptance plan (criterion, hardware,
+authorization, precautions, procedure, evidence, cleanup) and recorded the two retained
+limitations: typing objectives cannot observe their effect (verdicts stay failed, by
+design), and `RecoveryEngine._find_relocation` reports a present target as "gone but a
+similar element exists" when the element text equals the target. Reports §K and the
+Phase 31 addendum; Group 1 remains NOT CLOSED.
+
+## 2026-11-26 — Group 1 LIM-2: safe recovery after an unverified input action
+
+Remediated LIM-2. `RecoveryEngine._find_relocation` matched interactive elements by word
+overlap over `"{text} {selector}"`, so a target whose text equalled the failed target was
+offered as its own "similar" replacement; `_recover` then replanned a click on it. A
+delivered-but-unverified click could therefore be re-issued, and a retried type step
+degraded into a click. Duplicate input was theoretical in the shipped orchestrator
+(`_next_step` retires plan ids already in `state.actions`, and `replan` reused the failed
+id, so retries never re-dispatched), but the diagnosis was false and the path was one id
+change — or any other dispatcher of the replanned plan — away from a replay.
+
+Added `RecoveryStrategy.RECHECK`, `input_delivery_state()` with an explicit
+non-idempotent action set, `_ground_target()` (present-unchanged / present-changed /
+absent / ambiguous / unknown, from the observation's binding plus the objective's bound
+identity), and an orchestrator `_recheck` that re-observes and re-verifies without
+dispatching or appending an action record. `_find_relocation` now excludes the failed
+target's own text/selector; a changed or ambiguous identity aborts; a retry of input that
+provably did not reach the target keeps the original step (no click degradation), gets a
+fresh attempt id, and still passes D12 and the engine's permission/approval gates.
+
+Verification: `tests/test_lim2_recovery.py` (new, 21 tests) plus D12 / AgentCore / Phase
+29–31 → **196 passed**, exit 0; mypy clean over agentcore+desktop (23 files); new test file
+ruff-clean; `git diff --check` clean. D12 live 18/18 and DF-6 16/16 evidence untouched.
+LIM-1 unchanged. No live desktop run, no commit. Reports: Group report §L, Phase 29 §17,
+STATUS. Group 1 remains NOT CLOSED.
+
+## 2026-11-26 — Group 1 DF-8 adopted (interpretation A), LIM-2 retry audit, live preflight
+
+Adopted interpretation A for Phase 31 criterion #13: skills performing computer operations
+through the existing desktop/browser controllers satisfy the intended capability. No
+`COMPUTER` step kind was implemented and none is planned. Verified the basis in the
+repository rather than assuming it: `_execute_skill_step` routes desktop/browser skill steps
+through `plan_*_command` → single-use token → `execute_*_command` → the real controllers,
+with `PermissionManager` authorization, per-action verification and D12 objective-bound
+targeting; Live C and the browser transfer run (32/32) are the live evidence. No canonical
+Phase 31 brief exists (`ROADMAP.md` ends at Phase 20, `docs/PHASES.md` at Phase 15), so this
+is recorded as an adopted interpretation, not a recovered requirement; a `COMPUTER` search
+across the docs found only the fifth-pass analysis, no conflicting requirement. Updated
+Phase 31 row #13 to PASS with the adopted definition, added report §14, made `docs/SKILLS.md`
+state the same definition, and closed DF-8 in the Group 1 report §M.
+
+LIM-1 is untouched: no edit to the typing path this pass; an unobservable typing effect
+still fails the run, and no readback/OCR was added. It remains a documented functional
+limitation, not an acceptance criterion.
+
+LIM-2 retry classification was audited against every action label the agentcore engine can
+record, and one fail-open gap was closed: an unclassified kind used to be returned as "not
+input" and was therefore eligible for automatic retry. `input_delivery_state` now uses an
+explicit retry-safe allowlist (`IDEMPOTENT_ACTIONS`); every other kind — including one added
+later — is treated as input (delivered / uncertain / not-delivered), so it can never be
+replayed. `go_back` and the position/state-moving desktop kinds (`mouse_*`, `key_down/up`,
+`execute_script`, `write_file`, `organize_files`, `stop_app`, `app_navigate`, `search_*`,
+`vision_click`) are now explicitly non-idempotent. Four tests were added: unclassified fails
+closed, unclassified is rechecked not retried, `go_back` is not retry-safe, the full label
+inventory is classified, plus an assertion that the retry attempt carries its own step id
+while the original record keeps its own. LIM-2 suite: **25 passed**.
+
+Ruff was re-measured against HEAD per file: `recovery.py` 8 → 7 findings (one removed, none
+added); `orchestrator.py` 32 → 36, of which LIM-2's single new finding (`I001`) was fixed and
+the four remaining are `E501` in the earlier uncommitted D12 code, not in the LIM-2 hunks;
+the new test file is clean. Nothing suppressed, no unrelated formatting.
+
+Prepared the live operator-loop acceptance run without executing it: added three checks to
+`tmp/group1/verify_midaction_crash.py` (at most one typing attempt, recorded input identity
+equals the bound target, recovery never selects retry/relocate), which compiles but has not
+run. The run command, isolation rules, expected observations, emergency stop and cleanup are
+in report §M.9; the run awaits explicit authorization, and Group 1 stays NOT CLOSED pending
+it and the environmental rows.
+
+DF-6 operator-loop was re-run on the current tree, once, attended, with the authorized
+command. It did not clear the acceptance bar, and the earlier pass that said it had was
+wrong — both for the same reason.
+
+The run itself is sound where it mattered most. The disposable `NovaGroup1MidAction` window
+took the paste's first key (`event_type=2`, `keysym=Control_L`, pid 33624) and exited 3
+mid-delivery; the run and its durable record are `failed`; no action claimed success; the
+final verdict is `fail`; exactly one typing attempt was recorded; recovery classified the
+delivery `uncertain` and chose `recheck`, re-observing instead of replaying; the dead window
+vanished from the next observation; a fresh instance restored the failed record; the
+objective was recorded once; the token was refused on replay. That is the live confirmation
+of LIM-2 the previous pass could only promise — and it is a real improvement, because the
+2026-11-26 run of the same scenario selected `retry`.
+
+The failure is in containment. On Windows the typing path pastes with
+`SendKeys::SendWait('^v')`, a four-event chord. The target died on the first event, so
+Windows delivered the rest (V, V-up, Ctrl-up) to the window that inherited the foreground —
+pid 4192, Freebuff — and the controller's post-paste identity check, which runs after the
+chord, saw `[15729620, 4192]` where it expected `[7670084, 33624]`. It refused the success
+and its final verdict states the truth plainly: the target is absent and "the input cannot
+be attributed to the intended application". Two mandated assertions therefore do not hold —
+consistent observed delivery identity, and no unrelated application receiving input. Nothing
+in the controller can recall a synthetic chord already in flight; recorded as **DF-6-L1**, a
+structural limitation with three operator options (decoy focus window in the harness,
+per-window injection, or accept-and-document) and no code change made.
+
+The correction matters as much as the finding: the 2026-11-26 evidence contains the same
+unrelated foreground, and its recovery was `retry`. That PASS was recorded because the
+harness check meant to catch it, M2.8, read `output["verification"]` — a field a failed
+typing record does not have — and passed by finding nothing. M2.8 now parses the identity
+pair from the failure message too and fails when an input action carries no identity
+evidence at all. It was not re-run, so the corrected check is not evidence for any run yet;
+a corrected M2.8 reports FAIL for this scenario, which is why DF-6's operator-loop row is
+now PARTIAL in the Group 1 report (§N), in `PHASE29_REPORT` §18 and in `STATUS.md`, and why
+Group 1 remains NOT CLOSED.
+
+Checks after the live test: LIM-2, D12, AgentCore and Phase 29/30/31 — **200 passed**, exit
+0; `mypy src/novacontrol/agentcore src/novacontrol/desktop` clean (23 files);
+`git diff --check` clean. Cleanup confirmed: the probe exited, no test process remains, and
+the run's data directory and evidence JSON were retained, with the preceding data directory
+copied aside before the run so no earlier artefact was lost.
+
+Investigated DF-6-L1 offline: why the 27 November run's paste tail reached Freebuff, what
+Windows can and cannot promise about synthetic keyboard input, and what containment would
+cost. No live interaction, no input, no harness run; the failed evidence is untouched.
+
+The root cause is three properties meeting. Windows chooses a synthetic event's destination
+at dispatch time from the foreground window's keyboard focus — `SendKeys` has no target
+parameter at all, and `SendInput` inserts events "serially into the input stream". Nothing
+can be recalled: there is no cancellation, rollback or commit point for an event already
+inserted. And NovaControl's identity gate for `type` runs after the paste, so it can refuse
+success but cannot stop the V-down/V-up/Ctrl-up that follow the target's death. D12 and LIM-2
+both did their jobs; the gap is between the first event and the rest.
+
+Research settled the options more sharply than expected. Hidden desktops are not an input
+isolation route: `SendInput` first checks that the calling thread is on the input desktop and
+otherwise fails with ERROR_ACCESS_DENIED, so a hidden-desktop worker cannot type at all, and
+`SwitchDesktop` would hide the user's own desktop. `PostMessage`/`SendMessage` keyboard
+messages are not real input — they bypass the input queue, `WH_KEYBOARD` and `GetKeyState`,
+which is exactly why Microsoft's own guidance says use UI Automation or `SendInput`, and
+their automation CLI checks the foreground immediately before injecting and fails
+`foreground_not_target` rather than typing into the wrong window. Batch atomicity does not
+exist: a `SendInput` array is non-interleaved but every event still dispatches, and a
+destroyed target does not stop the rest. And no supported API guarantees which window takes
+focus after a target dies, so a decoy can bias the outcome but cannot promise it.
+
+Recommendation, therefore, narrows the claim instead of widening it: guaranteed containment
+exists only for UI Automation pattern operations (no synthetic events to leak) and for
+execution inside a dedicated Windows session or VM (the user's desktop cannot receive the
+input). For the current interactive-session keyboard path the honest label is best-effort,
+with a pre-send foreground gate, per-edge gating of the `^v` chord, aborting the remaining
+events on any identity change, and a pre-send refusal for higher-integrity targets (UIPI
+drops input silently). That reduces the exposure from four events to at most the one in
+flight — it does not remove it, so DF-6 stays PARTIAL.
+
+Wrote §O of the Group 1 report: incident trace, root cause, the documented guarantees table,
+every approach evaluated (per-window messages, isolated desktop/session/VM, decoy, batching,
+existing repository capabilities), the ranking, a twelve-scenario offline acceptance
+specification built on a per-event dispatch ledger rather than on the controller's own
+report, the remaining limitations (UIA coverage, UIPI, clipboard residue, no event
+cancellation), and the five operator decisions. No production source changed.
+
+Also corrected the harness assertion the run exposed: M2.8 read `output["verification"]`,
+which a failed typing record does not carry, so it passed by finding nothing. It is now three
+assertions — the objective must have bound an identity; every attempted input action must
+record a `(destination, bound target)` pair from either the structured verification or the
+failure message; and the recorded destination must equal the objective-bound identity. The
+logic lives in a pure `_identity_audit()` so it can be evaluated against preserved evidence
+without driving the desktop: on the 27 November evidence M2.8c fails with expected
+`[7670084, 33624]` vs observed `[15729620, 4192]`, a record with no evidence fails M2.8b, and
+a self-consistent pair naming a different window fails M2.8c. `py_compile` clean; the harness
+itself was not executed.
+
+**DF-6 containment (2026-11-27, offline — no input, no harness run).** `SendKeys('^v')` was
+four events dispatched by the OS with the identity check only afterwards, so the tail of the
+27 November run landed in Freebuff's window and nothing could recall it. `TYPE_TEXT` now
+stages the text and then dispatches `ctrl_down / v_down / v_up / ctrl_up` one edge at a time
+through `desktop/containment.py::GatedChord`, each after its own foreground identity check
+read from the DPI-aware worker; a mismatch withholds the remainder. Two edge classes are
+treated differently on abort: a lost non-modifier key-down is withheld and recorded as a
+stuck-key risk (releasing it would be an event aimed at a foreign window), while a held
+modifier is released because it carries no text and would otherwise modify the user's next
+keystrokes — recorded as `unbound_releases`, never presented as gated. Every attempt now
+carries `containment: best_effort`, `bound_identity`, `destination_identity`,
+`events_after_last_identity_check`, `stuck_keys`, the UIPI verdict and the clipboard result;
+`PasteContainmentError` is both a `VerificationError` and a `ContainmentError`, so
+`AgenticOrchestrator._dispatch` copies its `dispatch_record` into `ActionOutcome.output` —
+the evidence M2.8b was failing on (a failed typing record used to carry only
+`{status, approval_id}`). Clipboard: the previous text is snapshotted with its sequence
+number and restored on success **and** failure unless another application changed the
+clipboard (their value is kept and the residue recorded); a non-text clipboard is reported
+as lost rather than "restored"; because the clipboard is restored, the clipboard evidence is
+now the STAGING result, checked before dispatch. UIPI: a higher-integrity target is refused
+before injection, an unreadable level is refused by the guaranteed profiles and recorded in
+best-effort. New `desktop/uia.py` drives a control through its own pattern
+(`SetValue`/`Invoke`/`SelectionItem`/`Toggle`) with ownership, ambiguity, staleness,
+enabled/offscreen and pattern checks and `keyboard_events: 0`; refusals never fall back to
+typing. The comtypes transport is marked `verified_live = False` because no live UIA
+interaction was performed. New `computer/session.py` is the dedicated-session/VM boundary
+(lifecycle, identity, dispatch accounting, emergency stop, idempotent teardown, audit) and
+reports `no_session_transport` on this host instead of relabelling the interactive session as
+isolated. Verified by 43 new tests in `tests/test_df6_dispatch_ledger.py` — the twelve §O.6
+scenarios on an independent per-event ledger (destination read from the simulator at dispatch
+time, never from the controller's message), plus UIA, session, clipboard and integrity
+suites — and **399 passed** across the DF-6/desktop/DF-6-input/D12/LIM-2/AgentCore/Phase
+29/30/31 suites; mypy clean on the six modules, ruff clean on the four new modules and the new
+test module, `git diff --check` clean. The whole `tests/` directory was NOT completed (`pytest
+tests` is dominated by network-bound LLM/API tests and `tests/test_remaining_modules.py`
+fails collection on a pre-existing `SkillInvocation` import drift unrelated to this change),
+so that is reported as unexecuted rather than passed. Re-evaluated the corrected M2.8 offline (`tmp/group1/audit_m28_offline.py`): the
+preserved evidence still fails M2.8c (expected `[7670084, 33624]`, observed
+`[15729620, 4192]`) with its sha256 unchanged, and a new-style refusal record now satisfies
+M2.8b while M2.8c still fails when the destination was foreign — the audit did not become
+vacuous again. No live input, no harness run, no commit. The interactive keyboard profile
+stays BEST_EFFORT, DF-6 stays PARTIAL, Group 1 stays NOT CLOSED; the remaining gate is a
+separately authorised live run inside a guaranteed profile (UIA against a real control, or an
+isolated session/VM).
+
+## 2026-11-27 — DF-6 live-UIA preparation, test-suite recovery, closure readiness
+
+Second DF-6 pass, still with **no live desktop input**: the UIA live run was prepared and the
+suite was recovered, and running it found a real defect.
+
+* **Live-UIA harness prepared (not executed).** `tmp/group1/uia_probe_app.ps1` is a disposable
+  WinForms probe owned by the harness: a text box (`ValuePattern`), an Apply button
+  (`InvokePattern`), a panel with no automation pattern, a disabled button, and two controls
+  sharing one AutomationId. `tmp/group1/verify_uia_live.py` implements the fourteen required
+  checks against the REAL `ComtypesUiaBackend`, verifies the result through the probe's own
+  JSONL state file and `GetWindowText` (never through UIA), proves zero keyboard events with
+  `GetLastInputInfo` plus a probe-side `KeyDown` counter, and runs ONLY with
+  `--authorize-live`; its default mode prints the plan and creates nothing.
+* **The transport was measured, not assumed.** A read-only probe returns `S_OK` for
+  `CLSID_CUIAutomation`, and the production backend constructs with
+  `available: true, verified_live: false`. The first version of that probe reported
+  `REGDB_E_CLASSNOTREG` — a bug in the probe (GUID packed big-endian), not the host; corrected
+  and recorded, because it was one measurement from becoming a false blocker.
+* **Collection fixed at its cause.** `tests/test_remaining_modules.py` failed on
+  `SkillInvocation`; the symbol lives in `skills/models.py` (whose docstring says that API is
+  preserved) and baseline `7862de7` re-exported it from `skills/__init__.py` — the Phase 31
+  rewrite dropped four re-exports. Restoring them (no alias, no test rewrite) plus two facade
+  contract tests brings the suite to **6,712 collected, zero errors**.
+* **A real defect found by staged verification.** `test_desktop.py::CaptureWorkerProtocolTests`
+  failed intermittently under load with `ValueError: int('800x600')`. Root cause: a cancellation
+  during the capture worker's STARTUP left the host's `ready 800x600` banner unread, and the
+  next exchange read that banner as its frame reply. Fixed at the cause (`_start_host` marks the
+  worker desynchronised and drops the half-started host on `CancelledError`, via a synchronous
+  `_abandon_process`) plus a fail-closed frame-reply parser (`_parse_frame_reply`) that reports
+  "unexpected reply" instead of crashing. Two new regression tests; mutation-checked (removing
+  the cancellation handler fails both the new test AND the pre-existing one; removing the shape
+  check fails its own), and `test_desktop.py` is 108 passed.
+* **Three pre-existing failures of other phases repaired** while running the suite: the node
+  harness in `test_event_correlation.py` had no `window` global (the real `render-utils.js`
+  probes `window.NovaCompanion`), the retention test anchored on a fixed calendar date that
+  real time had passed, and two focus-ring CSS contracts were violated (a `:focus-visible` tint
+  sharing a hover rule with no ring; no rule at all for `.source-link` and bare `<a>`). The
+  remaining UI-wide keyboard-walk assertion still fails on nine `.cyber-input` elements whose
+  computed outline is `none 3px`; that is reported as outstanding, not silenced.
+* **Statuses unchanged:** interactive keyboard **BEST_EFFORT**, UIA **not live-verified**,
+  isolated session **BLOCKED** (`no_session_transport`, requirements now written down in
+  `docs/DF6_SESSION_TRANSPORT_READINESS.md`), DF-6 **PARTIAL**, Group 1 **NOT CLOSED**. The
+  preserved failed evidence is byte-identical (sha256
+  `2dfb0a4e18ecf0c50916e107e75fd91c8d3c47bb2d46413719f2e58d0e31cf34`). No commit, no push.

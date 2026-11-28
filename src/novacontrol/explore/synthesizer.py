@@ -15,6 +15,7 @@ question's wording is never echoed back as a framing line.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 import logging
 import re
 
@@ -25,7 +26,7 @@ from novacontrol.explore.evidence import (  # noqa: F401  (Sentence re-exported 
     join_sentences,
     page_text_of,
 )
-from novacontrol.explore.planner import usable_provider
+from novacontrol.explore.planner import local_model_budget_seconds, usable_provider
 from novacontrol.explore.query import QueryFrame
 from novacontrol.explore.models import ResearchSource
 
@@ -44,6 +45,26 @@ logger = logging.getLogger(__name__)
 # with real content keeps the content.
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+
+# A local model pays for every visible token with this machine's time, so the
+# synthesis ceiling is a latency budget as much as a length one. 512 tokens is
+# a full, concise research answer (~380 words) while still ending a runaway
+# reply; cloud providers keep their own defaults because their tokens are not
+# generated here. Reference point: qwen3:8b on CPU emits ~5.7 tokens/second, so
+# an uncapped 1024-token answer alone is a three-minute wait.
+_LOCAL_SYNTHESIS_MAX_TOKENS = 512
+
+
+# The wall-clock a local model is allowed to spend writing one answer before
+# Explore stops waiting for it (shared with planning; see planner.py). Every
+# token is generated here, so this is what separates "a little slower than
+# cloud" from "the whole request is minutes": measured on this machine, a
+# 2,271-token evidence block costs 135s to prefill alone, and a 512-token
+# answer at 2.5-5.7 tokens/s costs another 90-200s. The local evidence answer
+# is ranked from the same sources and is already built, so a synthesis that
+# cannot fit the budget is skipped WITH A REASON rather than blocking the
+# request. Raise the budget to wait for the model.
 
 _CHROME_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(pattern, re.IGNORECASE)
@@ -430,6 +451,63 @@ _LLM_SYSTEM_PROMPTS: dict[str, str] = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class SynthesisOutcome:
+    """What the model path produced — or why it was deliberately not run.
+
+    ``skipped_reason`` is not a failure: it says the model *could* write the
+    answer but this machine cannot do it inside the latency budget, so the
+    caller should use the ranked evidence answer and show the reason. A silent
+    skip would make a slow machine look like a broken model.
+    """
+
+    answer: str | None = None
+    skipped_reason: str = ""
+
+
+def local_synthesis_skip_reason(
+    provider: object | None,
+    system_prompt: str,
+    prompt: str,
+    max_tokens: int,
+) -> str:
+    """Why a LOCAL synthesis should not be attempted, or '' when it should.
+
+    The estimate uses the provider's own last measured timings — prefill tokens
+    per second and decode tokens per second — rather than a model name or a
+    hardware guess, so the same code lets a GPU-accelerated model write the
+    answer and skips the wait on a CPU-resident one. A provider that reported
+    no timings (cloud, a stub) is never gated.
+    """
+    if not getattr(provider, "ollama_url", ""):
+        return ""
+    budget = local_model_budget_seconds()
+    if budget <= 0:
+        return ""
+    timings = getattr(provider, "last_timings", None)
+    if not isinstance(timings, Mapping):
+        return ""
+    decode_rate = float(timings.get("tokens_per_second") or 0.0)
+    prompt_rate = float(timings.get("prompt_tokens_per_second") or 0.0)
+    if decode_rate <= 0 or prompt_rate <= 0:
+        return ""
+    # ~4 characters per token is the conservative English estimate; the prompt
+    # is mostly prose and source text, so a slight overestimate is the safe side.
+    prompt_tokens = max(1, (len(system_prompt) + len(prompt)) // 4)
+    estimate = prompt_tokens / prompt_rate + max_tokens / decode_rate
+    if estimate <= budget:
+        return ""
+    model = str(getattr(provider, "model", "") or getattr(provider, "name", ""))
+    return (
+        f"The local brain ({model}) generates about {decode_rate:.1f} tokens/s and "
+        f"reading this evidence takes about {prompt_tokens / prompt_rate:.0f}s here, "
+        f"so a written answer would need roughly {estimate:.0f}s — beyond the "
+        f"{budget:.0f}s Explore budget. This answer is assembled from the ranked "
+        "source evidence instead. Connect a faster (GPU or cloud) brain, or raise "
+        "NOVACONTROL_EXPLORE_MODEL_BUDGET_SECONDS to wait for the local model."
+    )
+
+
 async def try_llm_synthesis(
     provider: object | None,
     topic: str,
@@ -439,8 +517,8 @@ async def try_llm_synthesis(
     *,
     question: str = "",
     focus: str = "",
-) -> str | None:
-    """Attempt LLM-powered answer synthesis. Returns None if unavailable.
+) -> SynthesisOutcome:
+    """Attempt LLM-powered answer synthesis.
 
     QUESTION-FIRST by construction: the model is handed the user's own words
     and asked to ANSWER them from the research, not to describe the topic. It
@@ -449,16 +527,20 @@ async def try_llm_synthesis(
     non-answer this path exists to replace. When the research does not answer
     the question, the model is told to say so rather than pad — an honest gap
     is worth more than another blurb.
+
+    A local model whose own measured speed cannot produce the answer inside
+    the latency budget is not called at all: the outcome carries the reason,
+    and the caller uses the evidence answer (see local_synthesis_skip_reason).
     """
     if provider is None or not usable_provider(provider):
-        return None
+        return SynthesisOutcome()
     complete = getattr(provider, "complete", None)
     if complete is None:
-        return None
+        return SynthesisOutcome()
 
     facts = extract_facts(sources)
     if not facts:
-        return None
+        return SynthesisOutcome()
 
     source_list = _research_block(sources)
     facts_text = "\n".join(f"{i+1}. {f}" for i, f in enumerate(facts))
@@ -500,16 +582,27 @@ async def try_llm_synthesis(
     if frame.items:
         prompt += f"\nItems to compare: {', '.join(frame.items)}"
 
+    messages: list[Mapping[str, str]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": prompt},
+    ]
+    local = bool(getattr(provider, "ollama_url", ""))
+    # Bound a LOCAL model's answer; cloud defaults are left alone.
+    budget: dict[str, object] = (
+        {"max_tokens": _LOCAL_SYNTHESIS_MAX_TOKENS} if local else {}
+    )
+    if local:
+        skip = local_synthesis_skip_reason(
+            provider, system_prompt, prompt, _LOCAL_SYNTHESIS_MAX_TOKENS
+        )
+        if skip:
+            return SynthesisOutcome(skipped_reason=skip)
     try:
-        messages: list[Mapping[str, str]] = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt},
-        ]
-        result = str(await complete(messages)).strip()
+        result = str(await complete(messages, **budget)).strip()
     except Exception as exc:
         logger.debug("LLM synthesis failed: %s", exc)
-        return None
+        return SynthesisOutcome()
     # A one-liner is a refusal or a stray token, not an answer; anything longer
     # is used verbatim. (The old gate also rejected answers whose first line
     # mentioned the word "topic" — a heuristic that discarded real answers.)
-    return result if len(result) >= 40 else None
+    return SynthesisOutcome(answer=result if len(result) >= 40 else None)
